@@ -37,6 +37,8 @@ ConditionPathExists=/usr/local/bin/ozbox
 # (Yama), so the channel's keys, its state and its audit chain are out of an agent's reach; it can only use the agent socket.
 [Service]
 Type=simple
+# the router refuses to start unless its program and every directory above it belong to root and nobody else can write them
+Environment=OZBOX_TASKS_REQUIRE_ROOT_PROGRAM=1
 User=ozbox-mesh
 Group=ozbox-mesh
 ExecStart=/usr/local/bin/ozbox tasks serve --dir /var/lib/ozbox-mesh --agent-socket /run/ozbox-mesh/agent/agent.sock --relay-socket /run/ozbox-mesh/relay/relay.sock --admin-socket /run/ozbox-mesh/admin/admin.sock

@@ -304,6 +304,8 @@ impl State {
             // the same keys at a new epoch (or a new via): what was in flight stays, the window starts over
             link.out_seq = o.out_seq;
             link.outbox = o.outbox.clone();
+            link.out_chain = o.out_chain.clone();
+            link.acked_chain = o.acked_chain.clone();
         }
         let before_via = self.vias.get(name).cloned().unwrap_or_default();
         if let Some(v) = via {
@@ -317,6 +319,11 @@ impl State {
             via_changed: before_via != after_via,
             via: after_via,
         };
+        if old.is_some() && !same_keys {
+            // a task this end sent to the old keys was never delivered to these ones, and the numbers start again: it is failed, so
+            // it is sent again on purpose and never settled by a later message that happens to reuse its number
+            self.fail_held_for(now, name, "peer-replaced");
+        }
         self.core.pin(link);
         self.note(
             now,
@@ -347,6 +354,19 @@ impl State {
             }
         }
         self.recent.clear();
+    }
+
+    /// Fail every task this end sent to `peer` that is still waiting for its first delivery.
+    fn fail_held_for(&mut self, now: u64, peer: &str, why: &str) {
+        let me = self.core.me.clone();
+        for t in self.tasks.values_mut() {
+            if t.from == me && t.to == peer && t.state == TState::Held {
+                t.state = TState::Failed;
+                t.reason = Some(why.to_string());
+                t.sent_seq = None;
+                t.updated_ms = now;
+            }
+        }
     }
 
     /// Find a task by `<sender>/<id>`, or by its id alone when that is unambiguous.
@@ -654,6 +674,8 @@ impl State {
     /// to tombstones so the cap measures what is open.
     pub fn tick(&mut self, now: u64) {
         self.core.tick(now);
+        // the byte count is measured from what is held, so it can never drift from the data (it is a running figure between ticks)
+        self.bytes = self.tasks.values().map(task_bytes).sum();
         let due: Vec<String> = self
             .tasks
             .iter()
@@ -873,32 +895,41 @@ impl State {
         if self.tasks.contains_key(key) || self.tombs.contains_key(key) {
             return;
         }
-        self.tasks.insert(
-            key.to_string(),
-            Task {
-                id: id.to_string(),
-                from: from.to_string(),
-                to: self.core.me.clone(),
-                // the body is gone, so the kind it asked for is not known; this is a placeholder, and the state says why
-                kind: TaskKind::Note,
-                title: "[refused]".into(),
-                state: TState::Rejected,
-                reason: Some(c.to_string()),
-                context_id: None,
-                parent: None,
-                deadline_ms: now,
-                created_ms: now,
-                updated_ms: now,
-                messages: Vec::new(),
-                artifacts: Vec::new(),
-                act: None,
-                approval_ref: None,
-                sent_seq: None,
-                unread: true,
-                hash: hash.to_string(),
-                cancel_requested: false,
-            },
-        );
+        // a stub is a task like any other for the caps: a peer cannot fill the store with refusals
+        if self.tasks.len() >= MAX_TASKS || !self.rate_ok(from, now, true) {
+            self.note(
+                now,
+                "mesh.task.refused",
+                Some(id),
+                format!("from={from} kind=task code={}", code::RATE),
+            );
+            return;
+        }
+        let stub = Task {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: self.core.me.clone(),
+            // the body is gone, so the kind it asked for is not known; this is a placeholder, and the state says why
+            kind: TaskKind::Note,
+            title: "[refused]".into(),
+            state: TState::Rejected,
+            reason: Some(c.to_string()),
+            context_id: None,
+            parent: None,
+            deadline_ms: now,
+            created_ms: now,
+            updated_ms: now,
+            messages: Vec::new(),
+            artifacts: Vec::new(),
+            act: None,
+            approval_ref: None,
+            sent_seq: None,
+            unread: true,
+            hash: hash.to_string(),
+            cancel_requested: false,
+        };
+        self.bytes = self.bytes.saturating_add(task_bytes(&stub));
+        self.tasks.insert(key.to_string(), stub);
         self.note(
             now,
             "mesh.task.refused",
@@ -1027,8 +1058,9 @@ impl State {
         } else if t.deadline_ms <= now {
             Some(code::EXPIRED)
         } else if self
-            .add_bytes(t.message.parts.iter().map(Part::size).sum::<usize>() as u64 + 256)
-            .is_err()
+            .bytes
+            .saturating_add(t.message.parts.iter().map(Part::size).sum::<usize>() as u64 + 256)
+            > MAX_STATE_BYTES
         {
             Some(code::JOURNAL_FULL)
         } else {
@@ -1079,6 +1111,8 @@ impl State {
             hash: hash.to_string(),
             cancel_requested: false,
         };
+        // charged for what is kept (a refused task keeps almost nothing), by the one formula that is also used to release it
+        self.bytes = self.bytes.saturating_add(task_bytes(&task));
         self.tasks.insert(key.to_string(), task);
         match &reason {
             Some(c) => {

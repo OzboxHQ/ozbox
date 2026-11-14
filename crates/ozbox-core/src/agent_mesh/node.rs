@@ -8,7 +8,7 @@
 use super::model::{Part, State as TState};
 use super::state::{NewTask, State};
 use super::{Screen, PROFILE};
-use crate::channel::audit::{change, change_if, drain, guard, AuditSink, JournalError};
+use crate::channel::audit::{change, change_if, drain, guard, restore, AuditSink, JournalError};
 use crate::channel::flow::seal_drafts;
 use crate::channel::session::DraftOpts;
 use crate::channel::store::{Store, StoreError};
@@ -103,6 +103,14 @@ impl Node<'_> {
     pub fn cancel(&self, task_id: &str) -> Result<(), NodeError> {
         self.change(|s, now| s.cancel(now, task_id))?
             .map_err(|c| NodeError(format!("refused: {c}")))
+    }
+
+    /// Acknowledge that the store was restored from a backup: under one lock, the audit log is brought up to date, the old numbering's
+    /// pending events are dropped, and a new epoch begins. This is the one operation the rollback guard lets through.
+    pub fn restore(&self) -> Result<(), NodeError> {
+        let now = self.now();
+        restore(self.store, self.audit, |s: &mut State| s.restored(now))?;
+        self.drain_audit()
     }
 
     /// Housekeeping, only when it would change something.

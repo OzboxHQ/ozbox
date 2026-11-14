@@ -118,7 +118,8 @@ fn map_err(e: &str) -> Error {
     }
 }
 
-const MAX_REPLY: usize = 8 * 1024 * 1024;
+/// What one round's reply may be: the channel's transport cap (a sender's round is cut at half of it, `ROUND_BYTES`).
+const MAX_REPLY: usize = ozbox_core::channel::wire::TRANSPORT_CAP;
 /// How long a transport command may take before it is stopped. A starting value (ADR 0044 open question 7); a test may shorten it.
 fn transport_timeout() -> Duration {
     std::env::var("OZBOX_TASKS_TRANSPORT_TIMEOUT_MS")
@@ -741,7 +742,7 @@ fn offer_json(o: &Offer) -> Value {
 fn read_big_stdin() -> Result<String> {
     let mut s = String::new();
     std::io::stdin()
-        .take(8 * 1024 * 1024 + 1)
+        .take(ozbox_core::channel::wire::TRANSPORT_CAP as u64 + 1)
         .read_to_string(&mut s)?;
     Ok(s)
 }

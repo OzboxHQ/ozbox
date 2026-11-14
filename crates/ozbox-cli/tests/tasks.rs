@@ -407,3 +407,58 @@ fn watch_every_zero_is_refused() -> TestResult {
     assert!(e.contains("at least 1"), "{e}");
     Ok(())
 }
+
+#[test]
+fn a_store_restored_from_a_backup_is_refused_until_it_is_acknowledged_and_then_works() -> TestResult
+{
+    // through the real binary: the rollback guard refuses every command, but never the one that acknowledges the restore
+    let (laptop, _boxx) = pair()?;
+    let send = |n: u32| -> TestResult {
+        laptop.ok(&[
+            "tasks",
+            "send",
+            "--to",
+            "main",
+            "--title",
+            &format!("t{n}"),
+            "--text",
+            "x",
+        ])?;
+        Ok(())
+    };
+    send(1)?;
+    send(2)?;
+    let state = laptop.dir.join("state.json");
+    let backup = std::fs::read(&state)?;
+    send(3)?;
+    send(4)?;
+    // the disk comes back from the backup, the audit log is kept
+    std::fs::write(&state, backup)?;
+    let refused = laptop.fails(&["tasks", "inbox"])?;
+    assert!(
+        refused.contains("restored from a backup"),
+        "the guard names the problem: {refused}"
+    );
+    // the way out, which the guard's own message names, is not refused
+    let ok = laptop.ok(&["--yes", "tasks", "restored"])?;
+    assert!(!ok.trim().is_empty());
+    laptop.ok(&["tasks", "inbox"])?;
+    // and the audit log holds every source record once
+    let log = std::fs::read_to_string(laptop.dir.join("state.audit.jsonl")).or_else(|_| {
+        std::fs::read_dir(&laptop.dir)?
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".audit.jsonl"))
+            .map(|e| std::fs::read_to_string(e.path()))
+            .unwrap_or_else(|| Err(std::io::Error::other("no audit log")))
+    })?;
+    let mut srcs: Vec<String> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["src"].as_str().map(str::to_string))
+        .collect();
+    let n = srcs.len();
+    srcs.sort();
+    srcs.dedup();
+    assert_eq!(n, srcs.len(), "a source record was chained twice");
+    Ok(())
+}

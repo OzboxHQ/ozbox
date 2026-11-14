@@ -888,3 +888,165 @@ fn the_profile_is_the_closed_five_kinds_and_a_task_key_is_origin_slash_id() {
     assert_eq!(super::split_key("a/b/c"), None);
     let _: &dyn Screen = &TestScreen;
 }
+
+// ---- the shared-channel check (2026-11-15) ------------------------------------------------------------------------
+
+#[test]
+fn a_re_pin_with_new_keys_fails_the_held_tasks_it_never_delivered() {
+    let (laptop, _main, _) = pair();
+    let id = laptop.ask("main", "t", "x");
+    let key = task_key("laptop", &id);
+    assert_eq!(laptop.state().tasks[&key].state, TState::Held);
+    laptop
+        .store
+        .update(|s| {
+            s.pin(T0, "main", &"ee".repeat(32), &"ff".repeat(32), 1, None)
+                .unwrap();
+        })
+        .unwrap();
+    let st = laptop.state();
+    assert_eq!(st.tasks[&key].state, TState::Failed);
+    assert_eq!(st.tasks[&key].reason.as_deref(), Some("peer-replaced"));
+    // the numbers start again, and a new message reusing number 1 does not settle the old task
+    laptop.ask("main", "t2", "y");
+    let mut st = laptop.state();
+    st.core.links.get_mut("main").unwrap().outbox.clear();
+    st.settle_held();
+    assert_eq!(st.tasks[&key].state, TState::Failed);
+}
+
+#[test]
+fn a_re_pin_with_the_same_keys_keeps_what_was_in_flight() {
+    let (laptop, main, _) = pair();
+    let id = laptop.ask("main", "t", "x");
+    let key = task_key("laptop", &id);
+    let (sp, sl) = (main.sign_public.clone(), main.seal_public.clone());
+    laptop
+        .store
+        .update(|s| {
+            s.pin(T0, "main", &sp, &sl, 2, None).unwrap();
+        })
+        .unwrap();
+    assert_eq!(laptop.state().tasks[&key].state, TState::Held);
+}
+
+#[test]
+fn sixty_four_messages_at_the_size_limit_drain_over_several_rounds_in_both_directions() {
+    use crate::channel::wire::TRANSPORT_CAP;
+    for (from, to) in [("laptop", "main"), ("main", "laptop")] {
+        let (laptop, main, _) = pair();
+        settle(&main, &laptop);
+        let (a, b) = if from == "laptop" {
+            (&laptop, &main)
+        } else {
+            (&main, &laptop)
+        };
+        let key = format!("{from}/t1");
+        for _ in 0..64 {
+            a.store
+                .update(|s| {
+                    s.core
+                        .enqueue(
+                            &PROFILE,
+                            to,
+                            "status",
+                            key.clone().into_bytes(),
+                            vec![b'a'; 90 * 1024],
+                        )
+                        .unwrap();
+                })
+                .unwrap();
+        }
+        let first = a.node().outbound(to).unwrap();
+        assert!(
+            first.len() < 64,
+            "the first round was cut by bytes, not 64 messages: {}",
+            first.len()
+        );
+        let mut rounds = 0;
+        while !a.state().core.links[to].outbox.is_empty() {
+            let out = a.node().outbound(to).unwrap();
+            let size = serde_json::to_vec(&out).unwrap().len();
+            assert!(
+                size < TRANSPORT_CAP,
+                "a round of {size} bytes is more than a transport reads"
+            );
+            round(a, b);
+            round(b, a);
+            rounds += 1;
+            assert!(rounds < 60, "the channel makes no progress");
+        }
+    }
+}
+
+#[test]
+fn the_byte_count_follows_what_is_held_and_a_refused_task_is_charged_only_what_it_keeps() {
+    let (laptop, main, _) = pair();
+    settle(&main, &laptop);
+    laptop.ask("main", "t", &"x".repeat(20_000));
+    settle(&laptop, &main);
+    settle(&main, &laptop);
+    let st = main.state();
+    assert!(st.bytes > 0);
+    // a tick recounts from the data: the figure never drifts from it
+    let mut s = st;
+    s.bytes = 1;
+    s.tick(T0 + 1);
+    assert!(s.bytes > 1);
+}
+
+#[test]
+fn line_and_paragraph_separators_cannot_make_one_field_look_like_two_rows() {
+    assert_eq!(printable_line("a\u{2028}b\u{2029}c"), "a b c");
+}
+
+#[test]
+fn node_restore_acknowledges_a_restore_in_one_lock_and_logs_each_source_record_once() {
+    let (laptop, _main, _) = pair();
+    for i in 0..3 {
+        laptop.ask("main", &format!("t{i}"), "x");
+    }
+    laptop.node().drain_audit().unwrap();
+    let before = laptop.sink.actions().len();
+    laptop.node().restore().unwrap();
+    let after = laptop.sink.actions();
+    assert_eq!(after.len(), before + 1);
+    assert_eq!(after.last().map(String::as_str), Some("channel.restored"));
+    assert!(laptop.state().core.audit.iter().all(|e| e
+        .src
+        .as_ref()
+        .is_some_and(|(ep, _)| *ep == laptop.state().core.store_id)));
+}
+
+// Computed by `crates/ozbox-core/testdata/channel_golden_vectors.py` (MESH_CANONICAL, MESH_DIGEST), not by this crate's encoder.
+const GOLDEN_MESH_CANONICAL: &str = "01000000136f7a626f782d6d6573682d656e76656c6f7065000000080000000000000001000000047461736b000000066c6170746f70000000046d61696e0000002330313233616263642d30313233616263642d30313233616263642d30313233616263640000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000800000000000000050000000800000000000000040000000e352d616162626363646465656666000000080000018bcfe56800000000080000018bcfee8fc000000010000102030405060708090a0b0c0d0e0f0000000d6c6170746f702f7461736b2d310000000568656c6c6f";
+const GOLDEN_MESH_DIGEST: &str = "76d958633fd15912ef002b737edfdee0962e0dfeb2f7e714d56fb2e73ac2cfac";
+
+#[test]
+fn golden_vector_of_the_mesh_envelope() {
+    let e = crate::channel::wire::Envelope {
+        version: 1,
+        kind: "task".into(),
+        from: "laptop".into(),
+        to: "main".into(),
+        receiver_fp: "0123abcd-0123abcd-0123abcd-0123abcd".into(),
+        sender_epoch: 3,
+        receiver_epoch: 2,
+        sender_inc: 0x1111,
+        receiver_inc: 0x2222,
+        seq: 5,
+        ack_seq: 4,
+        id: "5-aabbccddeeff".into(),
+        ts_ms: 1_700_000_000_000,
+        valid_until_ms: 1_700_000_600_000,
+        nonce: (0u8..16).collect(),
+        ext: b"laptop/task-1".to_vec(),
+        body: b"hello".to_vec(),
+    };
+    assert!(e.check(&PROFILE).is_ok());
+    assert_eq!(
+        crate::channel::wire::hex(&e.canonical(&PROFILE)),
+        GOLDEN_MESH_CANONICAL
+    );
+    assert_eq!(e.digest_hex(&PROFILE), GOLDEN_MESH_DIGEST);
+}

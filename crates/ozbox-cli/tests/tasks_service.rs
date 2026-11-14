@@ -110,7 +110,54 @@ fn the_sockets_split_the_powers_and_the_key_stays_with_the_service() -> TestResu
         .args(["tasks", "exchange", "--peer", "laptop"])
         .write_stdin("[]")
         .output()?;
-    let _ = r;
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&r.stdout),
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(
+        !said.contains("sign_pkcs8") && !said.contains("seal_secret"),
+        "{said}"
+    );
     assert!(!s.root.path().join("identity.json").exists());
+    Ok(())
+}
+
+#[test]
+fn the_router_refuses_to_start_when_its_program_could_be_replaced_by_someone_else() -> TestResult {
+    use std::os::unix::fs::MetadataExt;
+    let exe = env!("CARGO_BIN_EXE_ozbox");
+    if std::fs::metadata(exe)?.uid() == 0 {
+        return Ok(()); // a root-owned build tree cannot show the refusal
+    }
+    let root = tempfile::tempdir()?;
+    let mut child = std::process::Command::new(exe)
+        .args(["tasks", "serve", "--dir"])
+        .arg(root.path().join("state"))
+        .arg("--agent-socket")
+        .arg(root.path().join("agent/agent.sock"))
+        .arg("--relay-socket")
+        .arg(root.path().join("relay/relay.sock"))
+        .arg("--admin-socket")
+        .arg(root.path().join("admin/admin.sock"))
+        .env("OZBOX_SECRET_STORE", "memory")
+        .env("OZBOX_TASKS_REQUIRE_ROOT_PROGRAM", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut status = None;
+    for _ in 0..200 {
+        if let Some(s) = child.try_wait()? {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the router started although its program is not root's".into());
+    };
+    assert!(!status.success());
+    assert!(!root.path().join("agent/agent.sock").exists());
     Ok(())
 }

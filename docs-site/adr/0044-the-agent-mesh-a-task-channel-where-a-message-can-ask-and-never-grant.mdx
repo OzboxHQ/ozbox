@@ -133,6 +133,24 @@ disk has not been measured.
   keyless relay a laptop's `ssh` reaches, and an admin socket for root (`init`, `pin`, `restored`). Where that service is absent the keys
   sit where the box user can read them; `tasks init` says so and every JSON task carries `store_writable_by_agents: true`. **Proven on a
   real box: not yet**, so the channel is not recommended on `main` and has no approval path until it is.
+- **The relay can capture and replay, not only drop or delay.** The process that reaches the relay socket sees the sealed envelopes of
+  each round, so it can keep them and push them back later. The channel refuses a replay (stale, or a nonce already seen) and counts
+  the refusals once per round per peer, with no state write per envelope; the relay socket takes one round at a time and 120 a minute,
+  so a replay costs at most one audit entry per round and cannot become a flood. It still cannot forge, read or change anything.
+- **Rounds are cut by bytes.** A round carries at most 4 MiB as the wire counts it (and at least one message); the transports read up
+  to 8 MiB, so 64 large messages drain over several rounds. A single message that could never fit is refused when it is sent.
+- **The program the router runs must be root's.** The unit sets `OZBOX_TASKS_REQUIRE_ROOT_PROGRAM`, and `tasks serve` then refuses to
+  start unless the program and every directory above it are owned by root and writable by no one else.
+- **Rollback and restore.** `tasks restored` is the one command the rollback guard lets through. It brings the audit log up to date under
+  the store's lock, drops the old numbering's pending events and only then starts the new epoch; the log de-duplicates by source epoch
+  and number. A sequence number reused below the 64-number window is caught by a running digest every `hello` and `ack` carries.
+- **Re-pinning a peer with new keys** fails the tasks still waiting for their first delivery to it (`peer-replaced`), so a task never
+  settles as delivered by a later message that reuses its number.
+- **Residual, recorded and not built:** the signing-key fingerprint reuses the `ozbox-seal-key/1` tag (a nit: different bytes, one
+  format); a setgid socket directory would give the socket its group without `CAP_CHOWN`; on a store over NFS, Linux `flock` is per
+  process, so two threads of one process would not exclude each other (a box's `/var/lib` is local, and a filesystem without lock
+  support fails closed); a hello refused for naming the wrong receiver incarnation still sets the incarnation the next hello names
+  (benign, the next hello is the peer's own).
 - **A restore that does not call `ozbox tasks restored`** leaves the epoch unchanged. Captured envelopes then stay valid for their
   validity window (ten minutes) at most, and tombstones still de-duplicate.
 - **A peer whose clock steps back** past its last `hello` cannot open a new session until the clock catches up (`stale-hello`).

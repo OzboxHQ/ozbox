@@ -262,7 +262,7 @@ pub fn task_view(st: &State, t: &Task, for_model: bool, writable_by_agents: bool
     let fence = random_fence();
     let peer_text = |s: &str, from_peer: bool| -> String {
         if for_model && from_peer {
-            fenced("PEER TEXT", &fence, s)
+            fenced("PEER TEXT", &fence, &printable(s))
         } else {
             printable(s)
         }
@@ -280,7 +280,7 @@ pub fn task_view(st: &State, t: &Task, for_model: bool, writable_by_agents: bool
                     Part::Data { schema, json: j } => json!({
                         "type": "data",
                         "schema": printable_line(schema),
-                        "json": if for_model && m.untrusted { Value::String(fenced("PEER TEXT", &fence, &j.to_string())) } else { j.clone() },
+                        "json": if for_model && m.untrusted { Value::String(fenced("PEER TEXT", &fence, &printable(&j.to_string()))) } else { j.clone() },
                     }),
                 })
                 .collect();
@@ -303,13 +303,13 @@ pub fn task_view(st: &State, t: &Task, for_model: bool, writable_by_agents: bool
         "kind": t.kind.name(),
         "state": t.state.name(),
         "reason": t.reason.as_deref().map(|r| peer_text(&printable_line(r), from_peer || t.state != TState::Held)),
-        "title": if for_model && from_peer { Value::String(fenced("PEER TEXT", &fence, &t.title)) } else { Value::String(printable_line(&t.title)) },
+        "title": if for_model && from_peer { Value::String(fenced("PEER TEXT", &fence, &printable_line(&t.title))) } else { Value::String(printable_line(&t.title)) },
         "unread": t.unread,
         "cancel_requested": t.cancel_requested,
         "created_ms": t.created_ms,
         "updated_ms": t.updated_ms,
         "messages": msgs,
-        "artifacts": t.artifacts.iter().map(|a| json!({"name": printable_line(&a.name), "hash": a.hash})).collect::<Vec<_>>(),
+        "artifacts": t.artifacts.iter().map(|a| json!({"name": if for_model { Value::String(fenced("PEER TEXT", &fence, &printable_line(&a.name))) } else { Value::String(printable_line(&a.name)) }, "hash": a.hash})).collect::<Vec<_>>(),
         // While the store sits where an agent's own user can write it, this says so: nothing in a task can then be told apart from
         // something an agent wrote straight into the file. A box runs the channel as a service user and this is false.
         "store_writable_by_agents": writable_by_agents,
@@ -341,16 +341,25 @@ pub fn dispatch(
     writable_by_agents: bool,
 ) -> Result<Value, String> {
     let op = need(req, "op")?;
+    // What each socket may do is a list of what it MAY, so an operation added later is closed to agents until someone opens it.
     let allowed = match (policy, op) {
+        (Policy::Admin, _) => true,
         (Policy::Relay, "exchange") => true,
         (Policy::Relay, _) => false,
-        (Policy::Agent, "init" | "pin" | "restored" | "exchange") => false,
-        _ => true,
+        (
+            Policy::Agent,
+            "identity" | "peers" | "inbox" | "task" | "send" | "push_ref" | "reply" | "cancel"
+            | "why",
+        ) => true,
+        (Policy::Agent, _) => false,
     };
     if !allowed {
         return Err(err("not-allowed-here"));
     }
-    ends.guard()?;
+    // the guard refuses everything once the store looks restored from a backup, except the one thing that acknowledges it
+    if op != "restored" {
+        ends.guard()?;
+    }
     let node = ends.node();
     match op {
         "identity" => {
@@ -539,11 +548,7 @@ pub fn dispatch(
             }))
         }
         "restored" => {
-            let now = now_ms();
-            ends.store()
-                .update(|s| s.restored(now))
-                .map_err(|e| e.to_string())?;
-            node.drain_audit().map_err(|e| e.to_string())?;
+            node.restore().map_err(|e| e.to_string())?;
             Ok(json!({"epoch": ends.state()?.epoch()}))
         }
         _ => Err(err("unknown-op")),

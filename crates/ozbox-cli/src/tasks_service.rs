@@ -8,7 +8,9 @@
 //! * the **agent socket** (the box user may connect): submit, reply, inbox, status, why, cancel and the public identity.
 //! * the **relay socket** (the box user may connect): one operation, `exchange`, that carries the opaque envelope bytes the laptop's
 //!   `ssh` command hands in and returns what this end has for it. The process that connects holds no key and sees ciphertext only, so a
-//!   replaced `ozbox` on the box user's `PATH` can drop or delay an exchange and can do nothing else.
+//!   replaced `ozbox` on the box user's `PATH` can drop, delay, **or record and replay** an exchange, and can do nothing else. A replay
+//!   is refused by the channel (stale or already seen) and costs one audit entry a round; the socket takes one round at a time and a
+//!   bounded number a minute, so replaying cannot become a flood.
 //! * the **admin socket** (root and `ozbox-mesh` only): everything, including `init`, `pin` and `restored`.
 //!
 //! A request is one JSON line and so is the answer.
@@ -23,7 +25,8 @@ use serde_json::{json, Value};
 use crate::tasks_ops::{dispatch, init, Ends, Policy};
 
 /// The most a request may carry: the relay's holds a whole round of sealed envelopes, JSON-escaped inside a JSON line.
-const MAX_RELAY_REQUEST: u64 = 12 * 1024 * 1024;
+/// (the channel's transport cap, and half as much again for the JSON escaping around it).
+const MAX_RELAY_REQUEST: u64 = ozbox_core::channel::wire::TRANSPORT_CAP as u64 * 3 / 2;
 const MAX_REQUEST: u64 = 256 * 1024;
 const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -74,6 +77,69 @@ fn answer(dir: &Path, policy: Policy, line: &str) -> Value {
     }
 }
 
+/// How many connections a socket admits. The relay carries whole rounds and anything on the box can reach it, so it takes one at a
+/// time and a bounded number a minute; the other two are the service's own callers and are not limited here.
+struct Gate {
+    busy: std::sync::atomic::AtomicUsize,
+    max_busy: usize,
+    recent: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    per_minute: usize,
+}
+
+/// Held while a connection is served.
+struct Permit(std::sync::Arc<Gate>);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0
+            .busy
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The relay's limits: one round in flight, and a round every half second on average (a sync makes at most three exchanges and a
+/// `watch` one every few seconds, so honest use never meets the limit).
+const RELAY_PER_MINUTE: usize = 120;
+
+impl Gate {
+    fn new(policy: Policy) -> std::sync::Arc<Gate> {
+        let (max_busy, per_minute) = if policy == Policy::Relay {
+            (1, RELAY_PER_MINUTE)
+        } else {
+            (usize::MAX, usize::MAX)
+        };
+        std::sync::Arc::new(Gate {
+            busy: std::sync::atomic::AtomicUsize::new(0),
+            max_busy,
+            recent: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            per_minute,
+        })
+    }
+
+    fn enter(self: &std::sync::Arc<Gate>) -> Option<Permit> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = std::time::Instant::now();
+        {
+            let mut r = self.recent.lock().ok()?;
+            while r
+                .front()
+                .is_some_and(|t| now.duration_since(*t) >= std::time::Duration::from_secs(60))
+            {
+                r.pop_front();
+            }
+            if r.len() >= self.per_minute {
+                return None;
+            }
+            if self.busy.fetch_add(1, SeqCst) >= self.max_busy {
+                self.busy.fetch_sub(1, SeqCst);
+                return None;
+            }
+            r.push_back(now);
+        }
+        Some(Permit(std::sync::Arc::clone(self)))
+    }
+}
+
 /// The three sockets and the state directory.
 pub struct Paths {
     pub dir: PathBuf,
@@ -82,8 +148,31 @@ pub struct Paths {
     pub admin: PathBuf,
 }
 
+/// The router runs a program the box user must not be able to replace. When `OZBOX_TASKS_REQUIRE_ROOT_PROGRAM` is set (the box's unit
+/// sets it), refuse to start unless this program and every directory above it belong to root and are writable by no one else.
+fn require_root_owned_program() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if std::env::var_os("OZBOX_TASKS_REQUIRE_ROOT_PROGRAM").is_none() {
+        return Ok(());
+    }
+    let exe = std::fs::canonicalize(std::env::current_exe()?)?;
+    let mut at: Option<&Path> = Some(exe.as_path());
+    while let Some(p) = at {
+        let m = std::fs::metadata(p)?;
+        if m.uid() != 0 || m.mode() & 0o022 != 0 {
+            return Err(Error::Config(format!(
+                "the task router will not start: {} is not owned by root or can be written by someone else, so the program could be replaced",
+                p.display()
+            )));
+        }
+        at = p.parent();
+    }
+    Ok(())
+}
+
 /// Serve until the process is stopped. One thread per socket, one short-lived thread per connection.
 pub fn serve(p: &Paths) -> Result<()> {
+    require_root_owned_program()?;
     let sockets = [
         (&p.agent, 0o750, Policy::Agent),
         (&p.relay, 0o750, Policy::Relay),
@@ -93,10 +182,24 @@ pub fn serve(p: &Paths) -> Result<()> {
     for (path, mode, policy) in sockets {
         let l: UnixListener = crate::secrets_service::listen(path, mode).map_err(Error::Io)?;
         let dir = p.dir.clone();
+        let gate = Gate::new(policy);
         handles.push(std::thread::spawn(move || {
             for c in l.incoming().flatten() {
                 let dir = dir.clone();
-                std::thread::spawn(move || handle(&dir, policy, c));
+                match gate.enter() {
+                    Some(permit) => {
+                        std::thread::spawn(move || {
+                            handle(&dir, policy, c);
+                            drop(permit);
+                        });
+                    }
+                    None => {
+                        // told at once, without reading anything: a busy relay costs the caller one line
+                        let _ = c.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                        let mut out = c;
+                        let _ = writeln!(out, "{}", json!({"ok": false, "error": "busy"}));
+                    }
+                }
             }
         }));
     }
@@ -133,3 +236,33 @@ pub fn call(sock: &Path, req: &Value, max_reply: u64) -> std::result::Result<Val
 }
 
 pub const MAX_REPLY: u64 = MAX_RELAY_REQUEST;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_relay_takes_one_round_at_a_time_and_a_bounded_number_a_minute() {
+        let g = Gate::new(Policy::Relay);
+        let first = g.enter().expect("the first round is taken");
+        assert!(g.enter().is_none(), "a second round at once is refused");
+        drop(first);
+        let mut taken = 1;
+        while let Some(p) = g.enter() {
+            taken += 1;
+            drop(p);
+            assert!(taken <= RELAY_PER_MINUTE, "the limit never applied");
+        }
+        assert_eq!(taken, RELAY_PER_MINUTE, "a bounded number a minute");
+    }
+
+    #[test]
+    fn the_agent_and_admin_sockets_are_not_gated() {
+        for p in [Policy::Agent, Policy::Admin] {
+            let g = Gate::new(p);
+            let held: Vec<_> = (0..500).map(|_| g.enter().expect("not gated")).collect();
+            assert_eq!(held.len(), 500);
+        }
+    }
+}

@@ -79,6 +79,13 @@ pub fn printable(text: &str) -> String {
 pub fn printable_line(text: &str) -> String {
     text.chars()
         .filter(|c| !is_format(*c))
-        .map(|c| if c.is_control() { ' ' } else { c })
+        // U+2028 and U+2029 are line and paragraph separators that are neither control nor format characters
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }

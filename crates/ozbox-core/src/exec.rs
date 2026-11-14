@@ -188,11 +188,13 @@ impl CommandRunner for SystemRunner {
             }
             std::thread::sleep(Duration::from_millis(15));
         };
+        // never wait forever for the pipes: a descendant of the program (an `ssh` master that kept a descriptor) can hold them open
+        // after the program itself is gone or killed. What has not finished within the wait is detached and its output is empty.
         if let Some(w) = writer {
-            let _ = w.join();
+            let _ = join_within(w, PIPE_WAIT);
         }
-        let stdout = out_t.join().unwrap_or_default();
-        let stderr = err_t.join().unwrap_or_default();
+        let stdout = join_within(out_t, PIPE_WAIT).unwrap_or_default();
+        let stderr = join_within(err_t, PIPE_WAIT).unwrap_or_default();
         if stdout.len() > max_stdout {
             return Err(Error::Config(format!(
                 "`{}` wrote more than {max_stdout} bytes; the answer was not taken",
@@ -239,6 +241,22 @@ impl SystemRunner {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+    }
+}
+
+/// How long to wait for a reader thread once the program is gone.
+const PIPE_WAIT: Duration = Duration::from_secs(2);
+
+/// Join a thread, but only if it ends within `wait`; otherwise leave it running and return `None`.
+fn join_within<T>(h: std::thread::JoinHandle<T>, wait: Duration) -> Option<T> {
+    let until = std::time::Instant::now() + wait;
+    while !h.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if h.is_finished() {
+        h.join().ok()
+    } else {
+        None
     }
 }
 
@@ -323,5 +341,22 @@ mod tests {
         // env is never serialized either
         let json = serde_json::to_string(&r.calls()[0]).unwrap_or_default();
         assert!(!json.contains("s3cr3t"));
+    }
+
+    /// A descendant of the program keeps its output open after the program is gone (the way an `ssh` master can): the call still
+    /// returns, because the readers are not waited for forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_the_pipe_cannot_hang_a_limited_run() {
+        let cmd = CommandSpec::new("sh")
+            .arg("-c")
+            .arg("sleep 6 & echo hello; exit 0");
+        let t = std::time::Instant::now();
+        let r = SystemRunner.run_limited(&cmd, Duration::from_secs(30), 1024);
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "it waited for the descendant"
+        );
+        assert_eq!(r.unwrap().status, Some(0));
     }
 }
