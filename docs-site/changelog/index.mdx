@@ -8,6 +8,17 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Main as the hub (Preview)">
+  ## `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
+
+  Until now `main` reached a worker through your computer's connection. This release adds the first part of a route that does not: `task_start` takes `transport: hub`, the task goes to the worker as a signed, sealed message, and `task_status` shows what the worker reported. **Preview:** built and tested with fake boxes only; no box has a hub yet, and it has not run on a real cloud box.
+
+  - **On a box with no hub, `transport: hub` is refused by name** and the default `ssh` route works exactly as before.
+  - **A worker is never given a Production key.** The hub refuses it, the worker refuses it again, and the off-box issuer refuses a worker. No setting turns this off; it comes back later, approved at your computer.
+  - **A task never names keys.** A conductor that tries is refused, and the attempt is recorded.
+  - Every hand-off and refusal is in the audit record by name, never by value.
+  - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
+
 <Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security", "Platform"]} description="0.2.0-beta.0: the first public Beta">
   ## Oz Box 0.2.0-beta.0: the first public Beta
 
