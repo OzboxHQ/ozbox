@@ -1,0 +1,1094 @@
+# 0042 — Main as the hub: workers reached over a sealed channel, keys sent only by name, test suites split across boxes, and every approval comes back to main
+
+**Status.** Proposed (design only, 2026-11-12). **Nothing here is built.** It builds on ADR 0020 (orchestration, built with
+fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
+0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
+and **ADR 0020** (§4, §7). The changes it asked of ADR 0041 are applied in 0041's revision (§8 lists them). It does not change how
+ADR 0029 releases a Production value; it uses that path unchanged (§5).
+
+**Revised after the security review (2026-11-12).** The review (`reviews/2026-11-12-adr-0042-main-as-hub-review.md`) accepted the
+design with changes: one Critical, five High, twelve Medium, seven Low. The body below is the design with every one answered, not a
+list of patches. Where each landed:
+
+| Finding | Where it is answered |
+|---|---|
+| **C1** a worker's key reached the sealers only through `main` | §2 "Identity and attestation": the key is attested off `main` (AWS: the bound pool role registers it with the claim service or the issuer; Hetzner: a creation secret planted by the laptop's apply, never readable from state). Every sealer checks the attestation |
+| **H1** Production on a worker lost ADR 0029's binding | §5 "Production": a Production use is an ADR 0029 use, per use, bound to the run, at most 900 seconds, no tmpfs store. **Refused in this release** (decision D2) |
+| **H2** Production touches ran on an origin `main` serves | §8: every Production-tier approval on a worker is decided only with a laptop key with user presence until an approval origin `main` does not serve exists (decision D1) |
+| **H3** the laptop had no route to a worker | §8 "Where the pins come from": Hetzner is pinned at the laptop's apply; every later laptop-to-worker exchange is sealed end to end and `main` only relays; the AWS direct route is named |
+| **H4** a worker learned its declarations on `main`'s word | §5 "Declarations": a worker verifies the owner's approval evidence for each declaration's hash |
+| **H5** a worker could push to another's branch | §5 "Code": `main` pushes from bundles the worker sends; the queue merges the exact SHA the worker reported |
+| **M1 to M12, L1 to L7** | M1 §1; M2 §1; M3 §8; M4 §4; M5 §2 and §4; M6 §2; M7 §4; M8 §5; M9 §9; M10 §7; M11 §5; M12 §13. L1 §8 and §5; L2 §8; L3 §1; L4 §3 and §14; L5 §7; L6 §8; L7 §8 and §9. The table at the end of §9 lists each with its answer |
+
+**Decisions made for this revision (owner asleep; "pick the recommended path and ask Fable for advice").** They bind this text.
+- **D1.** Every Production-tier approval on a worker (a Production value and a production-tagged action) is decided **only with
+  a laptop key with user presence**, until an approval origin `main` does not serve exists. This is **provisional**. It is
+  reversed by adding that origin later (§8), after which a passkey asserted on it may also decide. **Amendment 1 (2026-11-13) makes one
+  narrow exception:** a Production act that a box asks the laptop to run, decided by a passkey on `main` plus presence at the laptop.
+- **D2.** G6 ships with **"Production to a worker" refused.** It is designed here to the post-review shape, tested with fakes, and
+  enabled in a later release after its own review (phase H3b, §12). The refusal is **hard-coded on the worker and on the issuer
+  side, with negative tests**: never a flag, never a setting `main` or a config can flip. The owner's decision Q4 ("may, with a
+  per-request approval") **stands**. What changes, said plainly: a release is **per use, at most 900 seconds, not one hour**; the
+  surface is **the laptop**; and it comes **after G6**.
+- The review's answers to its four open items and its three additions are accepted (§3, §5, §9, §14, §12).
+
+**Decisions made after the consistency check of ADRs 0040 to 0042 (2026-11-12; delegated, owner asleep, Fable agreed; the owner can
+change them).**
+- **N1.** The laptop root key had no presence class. **A path-delivered set is trusted by its route; a relayed set needs a
+  presence root signature** (§8 "Where the pins come from").
+- **N2.** A Secure Enclave key counts as a software key until a named, checkable proof and verifier exist (ADR 0041 §3). §8 reads
+  "presence" through that definition only.
+- **R1.** A batch window is scoped to the orchestration's template, not plain (§4).
+- **P.** A software key never decides Production, with no opt-in (§8). The owner confirms this one, because it narrows an option
+  ADR 0029 Amendment 6 §9 once allowed.
+
+**Owner's goal (2026-11-12, release gate G6).** "Design and ship in this release", "excellently well architected in a first class
+manner", for every open-source user: "for instance this browser test, main agent should be able to pass it to another box or
+boxes to run multiple tests, which can be a clone of main or another new box in the fleet, and the main box agent should be
+able to communicate with the other box seamlessly e2e, but main remains the boss for approval."
+
+## What exists today, and the gap
+
+ADR 0020 is built, tested with fake boxes and a simulated agent: the MCP tools (18 for the conductor, 6 for a worker, HMAC run
+tokens), the orchestration object in the task store, worker clones, a mailbox, claims and contracts, a merge queue, rules files
+and the Orchestrations page. What it does not have is a way for a real worker to talk to main. Three things block it:
+
+1. **The route is the person's computer.** Today `ozbox serve` runs on the laptop (or on a box's dashboard) and reaches a box
+   over the person's SSH or Session Manager, with the broker and the MCP server reverse-forwarded on a loopback port (ADR 0019).
+   A conductor on `main` has no such route to another box. ADR 0040 decision 5 says `main` gets **no shell** on other boxes.
+2. **A clone may carry too much.** `ozbox clone` copies a box. Nothing says it must not copy a secrets store, a box id or a
+   service key.
+3. **Approvals stop at the box that files them.** ADR 0041's table lets a box's own dashboard decide with the supervisor's
+   word (v1 trust: the supervisor verifies the assertion). On a worker that would make `main` the approver by attestation: a
+   compromised `main` could approve on every worker. So cross-box decisions are verified by the worker's own service (§8).
+
+The browser suite makes it concrete. The project's own browser suite runs today on an EC2 fleet (Playwright's blob reporter,
+`--retries=1`, about 2.5 hours for the full run, plan §8). With G5 a declared command can run on `main`. G6 is how `main` runs it
+on many boxes at once and gets one answer.
+
+## Decision
+
+1. **The hub is two parts on `main`.** The **hub logic** (orchestrations, mailboxes, the merge queue, the fleet inbox, the lane
+   splitter) is in `ozbox serve`, as `ozbox-supervisor`, and keeps its state in the task store (ADR 0020 item 3). The **channel
+   listener**, `ozbox-hubd`, is a small separate process under its own user. It faces the network; the dashboard does not. It
+   holds **one** private operation, a handshake signature, and never opens a message body (§1).
+2. **One channel protocol, and the network is not trusted.** Every message is signed by the sender's secrets service and the
+   body is sealed (HPKE, as ADR 0029 A9) to the receiver's key. The transport only carries bytes. A worker **dials out**. No box is
+   opened to the internet, and nothing runs through a box user's shell.
+3. **A worker is a new box, never a copy of main's identity, and its key is vouched for by something `main` cannot write.** A
+   "clone" means the same image, profile and repositories from their remotes; never `main`'s secrets store, service key, box id,
+   store id, pins or request store. Every party that seals to a worker accepts its key only with an **attestation made off
+   `main`** (§2, finding C1). Keys reach a worker **by name, from a declaration whose owner approval the worker itself verifies**
+   (§5).
+4. **Test lanes.** The hub splits a declared suite across N workers honouring resource keys; each runs its part with declared
+   commands (G5); artifacts come back as data; reports are merged on `main` from the base commit's toolchain; a failure is retried
+   once; a flaky record is kept (§7).
+5. **Approvals come back to `main`, and are verified on the worker.** A worker files its request in its own service. `main`'s
+   inbox shows it. The person decides once. The worker's own service checks a passkey assertion or a laptop signature bound to
+   the request digest. `main`'s word is never enough. The conductor decides only what a laptop-signed delegation lists (§8).
+6. **Production to a worker is designed and refused.** The design is ADR 0029's per-use release, sealed to the worker's attested
+   key, verified by the issuer alone, decided only with a laptop presence key (D1). This release hard-codes the refusal (D2, §5).
+7. **Nested hubs are allowed, to a depth of two, built after the G6 proof.** The top `main` stays the one place where limits, spend,
+   creation and every approval are decided; a sub-hub relays and never approves. The schema fields are frozen now; the phase is
+   built later under its own review (§14).
+
+## 1. The hub: what it is, what it holds, how it survives
+
+| Part | Process and user | Holds | Never |
+|---|---|---|---|
+| Hub logic | `ozbox serve`, `ozbox-supervisor` | the orchestration objects, per-worker mailboxes and outbox, the merge queue, the lane plans and history, the fleet inbox view, the roster; **opens and signs message bodies by asking the service** | a key, an approval store, a decision it can sign alone |
+| Channel listener | `ozbox-hubd`, user `ozbox-hub` | open connections, per-worker sequence counters, a spool of **sealed** messages, the peers' public keys, **one private operation: a handshake signature** under its own domain tag (`ozbox-hub-handshake-v1`) | any operation that opens a body or signs one; a plaintext body; a service key |
+| Secrets service | `ozbox-secrets` (ADR 0028) | the hub's keys (below), the key-release requests (§5), main's own request store | |
+
+**Key purposes are separate keys, not separate labels (review M1).** A service holds a distinct X25519 or Ed25519 key for each
+purpose: **channel** (message bodies, the supervisor's operations), **key delivery** (values for a worker's task), **ingress**
+(ADR 0029 A9's route from the laptop) and **handshake** (hubd's signature). Each operation fixes its HPKE `info` string; the
+caller cannot pass one. A ciphertext made for one purpose therefore does not open under another, as a property of the keys and not
+of a convention. A parser fault in the one process the network reaches yields bytes, never a plaintext.
+
+**On a worker, `keys.deliver` is an inner ciphertext.** The hub agent hands it to a `store_delivery` operation of the worker's
+service and cannot open it. The agent's `open` operation refuses a delivery ciphertext (a test).
+
+**State is in the task store, not in memory.** A message is written to the store, **with fsync**, before it is acknowledged. ADR
+0020's orchestration object is the source of truth, so a restart of the supervisor loses nothing.
+
+**Surviving main's restart and upgrade (ADR 0038).** `ozbox-hubd` has a socket unit, as `ozboxd` does, so a restart queues
+connections instead of dropping them. A worker that loses its connection reconnects with backoff (1 s to 30 s) and resumes from
+its last acknowledged sequence number. Runs are units of their own (ADR 0038 phase 2), so a conductor run survives the
+supervisor's restart. A live update changes none of the keys.
+
+**A blue-green replace of main changes the hub's identity**, because a replaced system disk starts a new secrets store (ADR 0029
+A8). There is **one** way to move workers to a new hub key (review M2):
+- **`ozbox hub repin`** from the laptop, or a succession statement the old hub signs **and the laptop countersigns**. `ozbox
+  upgrade` does it as one step, so the person does not see two commands. A succession signed by the hub alone is **never
+  accepted**: a taken-over hub could sign "my successor is K" at any time and strand the workers on a key it chose.
+- For lane workers it is simpler still: drain and destroy them before a replace.
+
+Requests pending in the old store die with it (ADR 0041 review M4, the store's epoch), and the inbox says so.
+
+**Canonical encoding (review L3, ADR 0041 review M1).** The envelope, every `via` hop, the `worker-keys` subject and the
+attestation records use ADR 0041's canonical encoding: **one version byte, the domain tag, then length-prefixed fields (4-byte
+big-endian length) in a fixed order**, never a delimiter join and never a printed digest. The domain tag **includes the receiver's
+key fingerprint and the hub's epoch**. A sequence number restarts only with a new enrolment or a repin. The encoding, the message
+kinds and the `level` and `via` fields are **frozen in phase H1 with golden vectors in both crates**.
+
+## 2. The worker channel
+
+### What must hold
+
+- No box has an open port to the internet (ADR 0005). The one exception is §3.
+- Nothing travels through a box user's shell. Today's route is a reverse forward over the operator's SSH (ADR 0019), and ADR
+  0030's tailnet client runs as the box user. Neither fits as is.
+- A compromised worker reaches only its own tasks. Never another worker's data, never main's secrets.
+- A network that is hostile or shared does not change the answer.
+- **A key a party seals to was vouched for by something `main` cannot write** (C1).
+
+### The four options
+
+| Option | For | Against |
+|---|---|---|
+| (a) A worker dials `main`'s hub port over the provider's private network, with the sealed protocol above | One protocol for every provider. Streaming, backpressure, low latency. One listener, on `main`. Works with no cloud API on the path | One inbound rule on `main` (ADR 0005 amendment, §3). Needs a private network |
+| (b) The tailnet of ADR 0030 (Headscale) | Works between providers and on own machines. Nothing public | Only as good as the person's Headscale. ADR 0030's client runs as the box user, so reach is not a trust boundary and the box user can copy the node key (below). A second system to run |
+| (c) Relay through the provider's own service (SSM, SQS) | SQS: no inbound rule, IAM per queue. SSM: no listener | **SSM Run Command is a root shell by another name**: ADR 0040 decision 5 rules it out. SQS is AWS only, 256 KB a message, no streaming, two queues and a role per box. Hetzner has no equivalent |
+| (d) Through the Cloudflare tunnel with service tokens | One hostname, easy | The hub becomes a public hostname behind a bearer token. A third party sees the traffic. The owner's rule is that no box is open to the internet |
+
+**Chosen.** (a) as the default transport on AWS and Hetzner, (b) as the transport for own machines and for a worker on a
+different provider than `main`. (c) with SQS is kept as a later transport behind the same trait. (d) and SSM are not offered. The
+protocol is the same under every transport.
+
+**The tailnet needs a system client (review M6).** ADR 0030's client runs as the box user, in user space, with its node key in the
+box user's state. For hub traffic Oz Box requires a tailnet client **under a system uid, with the node key unreadable by the box
+user**. Where a box cannot run one, the documents say plainly that **on that box the agent can copy the node key, reach the hub's
+pre-authentication surface from anywhere, and cut the channel**. The sealing keeps confidentiality and integrity; reach and
+availability belong to the agent there. That is stated, not hidden.
+
+### Who terminates each end
+
+- **On `main`:** `ozbox-hubd` as `ozbox-hub` authenticates the peer (the handshake signature), checks sequence and size, and spools
+  **sealed** messages to the supervisor over a socket of its own. The supervisor asks `ozbox-secrets` to open and to sign. Those
+  operations are on a socket only the supervisor's own user may use, tagged for the channel domain, and cannot sign an approval.
+- **On a worker:** `ozbox-hub-agent` as the user `ozbox-hubw`. It has the same operations on its own box's service, plus
+  `store_delivery`. It serves the worker's loopback MCP endpoint (§6) and reaches the daemon's run API over a scoped socket (the
+  pattern of ADR 0040 decision 3). It is not the box user and not a runner user. A box user reaches nothing of it but the loopback
+  MCP port, which checks a run token.
+
+### Identity and attestation, and how a worker joins
+
+Each box's secrets service makes its own **channel identity** (Ed25519 and X25519, with the separate purpose keys of §1) on first
+start. The box user cannot read it or use it.
+
+**The attestation (review C1).** A worker's public keys reach the hub, the issuer, the claim service and the top of a tree only
+with an **attestation**: a record `{instance or machine, box id, orchestration, parent hub key, service-key fingerprint,
+channel-key fingerprint, key-delivery-key fingerprint}` signed by a registrar whose public key the setup identity pinned. **No
+party accepts a worker's key on `main`'s word, and no party seals to a key it was not given an attestation for.** The registrar
+differs by provider, and in each `main` cannot write the record:
+
+- **AWS.** The worker's service, with its **bound pool role**, registers its public keys directly with the claim service (or the
+  issuer under its invoke-only policy). The caller's identity is the role, so the instance (`ec2:SourceInstanceARN`) and the claim
+  table prove "instance i of orchestration O". The registrar signs the attestation. The hub, the issuer and a tree's top verify it.
+- **Hetzner.** The laptop applies every Hetzner worker (ADR 0040 §9). `main` **prepares a proposal** from what it can read (the
+  operation, the module and its variables, ADR 0040 §9). At apply the laptop **plans over the encrypted state**, then generates a
+  **one-time creation secret** and places it in the worker's user data **after that plan**, as one of the two things only the laptop
+  adds (the other is the pins, §8). **The creation secret never reaches state `main` can read.** `main` holds the state bucket's key
+  (ADR 0040 §9), so the state of Hetzner stacks is **encrypted client-side under a laptop-held key** (ADR 0040 §6 allows it), and the
+  secret is passed to the apply as a sensitive variable and never written to a proposal `main` made. (Whether the provider keeps only a hash of `user_data` is to be confirmed
+  on a real project; the design does not depend on it.) Hetzner does not return user data to an API read (ADR 0033). On the box
+  the metadata guard's allow-list decides who may read user data at `169.254.169.254`: the secrets service is on it and the box
+  user is not (confirmed by a first-boot test). At first boot the service consumes the secret and returns a **MAC over its keys**
+  keyed by it. The laptop verifies the MAC (the proof travels through `main`, which cannot forge it) and **registers the key with
+  the issuer and the hub, signed by the laptop**.
+- **Own machines.** The laptop adopts or creates each box (ADR 0033), so the laptop pins its key through the ingress route (A9 §2)
+  and signs the attestation.
+- **Level 2:** the same, so the top seals to a key the claim service or the laptop vouched for, never one a sub-hub reported.
+
+**Enrolment.**
+1. `main` creates the worker through ADR 0040's plan and window (§4). First-boot configuration carries only the hub's address and
+   the **hub's key fingerprint**. A **one-use enrolment token** (24 random bytes, held as a hash by the hub, valid 30 minutes,
+   bound to the worker's name) is **not in user data on AWS**, so it is never in instance attributes or OpenTofu state. The claim
+   service writes it to the new box's **parameter path** at bind, and the worker reads it with its own pool role (ADR 0040 §4).
+   **On Hetzner** there is no claim service or parameter path, so the token goes in user data (**one rule for both providers**, ADR 0040
+   §6): state is encrypted under a laptop-held key, so `main` cannot read it from there. It is tolerable because it is one use, 30
+   minutes and useless without the creation secret, which is not in state either (review M5).
+2. The worker's hub agent dials the hub and presents the token, its public keys **and its attestation**. On AWS the hub also
+   checks that the instance is the one it created; on Hetzner, which has no instance identity document, the hub binds the
+   enrolment to the worker's **private address on the Cloud Network** (which `main`'s read token can list) **and** to the laptop's
+   registration. The hub records the keys in the roster and burns the token.
+3. From then on the worker is known by its attested key. A token cannot be reused. A key cannot be swapped by a second enrolment. A
+   worker that shows a service key or box id equal to another's does not enrol.
+
+**Authorization is by assignment.** The hub keeps a table of `(worker, orchestration, task)`. A worker's message about a task it
+does not hold is dropped and counted. A worker can address only the hub: there is no worker-to-worker message, and the hub never
+forwards one worker's body to another. The worker only accepts commands from the hub key, and only for tasks it has accepted.
+
+**Replay.** A message carries id, per-direction sequence number, sender, receiver and a domain tag, all signed (the encoding of §1).
+The receiver keeps ids for seven days and drops a repeat. A gap above 64 asks for a resync.
+
+**What the network can do.** Nothing the sealed protocol does not allow: drop, delay or replay; none changes an outcome. An
+unauthenticated connection is closed after the handshake fails; the handshake costs the listener one signature check, and the
+listener is rate limited per source.
+
+### What a compromised worker reaches
+
+| It can | It cannot |
+|---|---|
+| Send messages about its own tasks; read what the hub sends it | Address another worker; read another worker's task, keys or artifacts |
+| Offer artifacts and a git bundle of its own task (§5), size-capped | Make `main` open, render or run one; push to any branch |
+| File requests in its own service and show them in `main`'s inbox | Decide one: the box socket has no `decide` (ADR 0041 §3). A request card is derived from the digest's fields |
+| Use the keys the task's declaration named, until the task ends | Read a key not named; obtain a Production value (refused, §5); read `main`'s store |
+| Flood: bounded by the rate limit and a per-worker spool cap, and the worker is **quarantined** by the hub after a threshold (connection closed, tasks paused, the person told) | Make `main`'s other work slower than its share |
+
+**Reach is not trust.** On a tailnet or a private network a hostile box user can open a connection from the worker's address. It
+authenticates as nobody, because the key is in a service it cannot use.
+
+## 3. The network rule, and the amendment to ADR 0005
+
+ADR 0005's tests fail on any inbound rule. This ADR amends that test, not the intent. The new rule is exact:
+
+- **AWS.** One inbound rule on `main`'s security group: the hub port, **source = the workers' security group**, never a CIDR,
+  never `0.0.0.0/0`. Workers have **no** self rule, so a worker cannot reach a worker. The rules are made by the laptop's setup
+  identity at `ozbox init` or `ozbox fleet setup`, **not** by `main`'s change role (the change role cannot edit security groups).
+  A test fails on any other inbound rule.
+- **Hetzner.** Boxes of the fleet join a Cloud Network **of their own in the Oz Box project only** (ADR 0040: the project is the
+  isolation unit). The hub listens on the private address only. Hetzner's Cloud Firewall filters public interfaces, not Cloud
+  Network traffic (to be confirmed on a real project), so **the host rules are the control**: from first boot a worker drops all
+  inbound except replies and `main` accepts the hub port from the private network only. **In addition** every fleet server gets a
+  Cloud Firewall, selected by label, that **drops all public inbound**. `ozbox doctor` and a real-project test confirm both
+  directions: nothing reaches a server from the internet, and a worker cannot reach a worker on the network.
+- **Own machines.** The transport is the tailnet (ADR 0030). The generated rules let each worker reach `main:<hub port>` and
+  nothing else (ADR 0030's rule that a box is never a source unless declared is replaced by this one declared rule, one way). The
+  client is a system client (§2).
+- **A worker on another provider than `main`** uses the tailnet. The same hub port, the same rules.
+
+**Nested hubs add no new rule type, and one group per subtree (review L4).** A sub-hub (§14) listens on the same hub port. Its
+children's group (a security group of its own, **one per subtree**, never one shared by all level-2 boxes) is the only source for
+it. The level-1 group has no rule to a level-2 box, a level-2 group has no rule to `main`, to a level-1 box other than its own
+parent, or to itself. A level-1 box is launched in the group that accepts it. On Hetzner and own machines the host rules and the
+tailnet policy say the same, one way per level. Only the setup identity makes them, at fleet setup. Reach is still not trust.
+
+`ozbox doctor` and the tests check that the hub port answers only on the private address and that nothing else listens.
+
+## 4. Creating and removing workers
+
+**From main.** The conductor's `box_clone` and `box_create` already plan and apply inside the limits (ADR 0020 item 2). This ADR
+changes what they do and who does it:
+
+- **They go through ADR 0040's plan and window.** `main` can only read the fleet by itself. A create, clone, pause, resume or
+  destroy needs a **change window made on the laptop**, a plan-scoped session with a hard expiry, and the credential holder opens
+  it only after the person gives **one WebAuthn assertion bound to that plan** (challenge from the box id, plan id and plan hash,
+  with ADR 0040's own tag, `ozbox-fleet-apply-v1`). There is **no other route**, unless the administrator turned windows off in IAM (ADR 0040 §2), in which case each plan still
+  needs its plan-bound assertion: outside a window the change role trusts only the laptop. A lane or orchestration that needs
+  several workers uses the **batch window** of ADR 0040 §2, **scoped to the orchestration's template, never a plain window**: its
+  tag, the lane's allowed sizes and the pinned image; **no snapshot resource at all** (a hub clone is "same image, same profile",
+  below, never a disk copy); start, stop and terminate only on instances carrying the tag; at most one hour. It is decided once
+  when the orchestration starts, by the assertion `H("ozbox-fleet-apply-v1", box id, "batch", orchestration id, template hash)`,
+  with the session name `orch-<id>`; each plan inside it is checked against the template with no new assertion, and the claim
+  service reserves at most the orchestration's maximum workers. A hub never has a standing change credential. The plan shows the **cost per hour and
+  the cap** (the orchestration's one spend cap, ADR 0020 item 7).
+- **On Hetzner `main` prepares a proposal and the laptop plans and applies** (ADR 0040 §9): a Hetzner token cannot be scoped or
+  expire, so `main` holds none for changes. The laptop's apply **refuses a resource change the proposal did not name**, comparing its
+  plan **before its own additions**, and is also where it **pins the worker** and plants the creation secret (§2, §8).
+- **Limits stay as ADR 0020 sets them**: three workers per orchestration, three sub-agents each, one spend cap. A rules file may
+  only tighten them. A lane (§7) is a worker count inside the same limit. Raising it is the person's. With nested hubs the limits
+  count the whole tree (§14).
+- **The role is one from the pool made in advance** (ADR 0040 §4), each scoped to its own box's secrets and parameter path. `main`
+  does not choose one. The **claim service** reserves a free pool role for this window's session, the launch may pass only that
+  role, and the service **binds** it to the one instance that starts. A role in use cannot be passed. **On release the claim
+  service wipes the per-box items on the role's path** (the enrolment token, any staging value, any state the last box wrote) and
+  writes the new box's token at bind (review M4). The roots and the approver set stay: the setup identity writes those (§8). A
+  test: a box bound to a reused role finds nothing of the last box but the roots and the set. A pool with no free role is a refusal
+  that says so, and the claim's seconds are measured (§13).
+
+**A clone is "same image, same profile", not a copy of disks.** `clone` for a hub worker starts from the same Oz image version as
+`main` (ADR 0036) with `main`'s profile and its repositories **cloned from their remotes**; carries a new box id, a new store id,
+a new service key and channel identity, **empty** request and secrets stores, no approver pins from `main`, no `kek.key`, no
+`/work/secrets` and no engine sign-in; and gets uncommitted or unpushed work of `main` only if the task says so, as a branch
+**pushed to the remote first**. A worker never reads `main`'s working tree. The first test of the first phase checks whether
+today's `ozbox clone` copies the system disk or the secrets store; if it does, that is a defect, and the hub's clone is not that
+command until fixed. A **fresh box from a profile** (`box_create`) is the same without the profile copy.
+
+**Budget and lease, enforced on the box (review M7).** At `task.assign` each box receives an **absolute budget and a lease expiry**,
+signed by the top and relayed byte for byte, and **enforces both locally**: at the budget or at an unrenewed lease it checkpoints
+and stops. A dropped renewal therefore means stop, not run. Live spend is computed from **instance-hours times the price the plan
+used**, not from billing data (provider cost data lags by hours **(recall)**). At the cap the top lowers every active box's own
+budget through the channel; a box that never hears it stops at its lease.
+
+**Pausing and destroying.**
+- A worker the orchestration made is paused when its task ends and merges, and destroyed after the person's number of days unless
+  kept (ADR 0020 item 8). A **lane worker is destroyed when the lane ends** by default, because its disk holds a test session and
+  artifacts (§5, §7). A warm pool of paused workers is opt-in and a labelled benchmark variant. A box the person made is never
+  touched.
+- **AWS lane workers are launched with instance-initiated shutdown set to terminate**, so the worker's own `poweroff` at lane end or
+  at an unrenewed lease ends the cost with no IAM and no window. (To be confirmed for pool-role instances.)
+- **On Hetzner a paused (stopped) server still bills (recall).** Only deletion stops cost, and deletion needs the laptop's apply.
+  The Orchestrations page and the plan say so: "pausing does not stop the bill on Hetzner".
+- **Before destroy**, the worker ships its audit segments to `main` and its **final signed head** to the off-box store, and the
+  destroy waits for the acknowledgement or records that it could not (§9). The hub's **end-of-task** message makes the worker's
+  service delete every key and file it was given (§5) before the box is paused.
+- **Changes after the one-hour batch window** (a replacement, a later lane, the destroy at lane end) wait for a laptop window. They
+  cost money while they wait on Hetzner; on AWS the lease and terminate-on-shutdown end the worker without one.
+
+**Cost is shown** where the change is planned and on the Orchestrations page: per-worker hourly cost, spend so far, the cap and
+what is left.
+
+## 5. How a worker gets what it needs
+
+### Code: `main` pushes, the worker does not (review H5)
+
+The task names a repository and a branch. The worker clones from the remote. A read of a private remote goes through the broker
+path of ADR 0017's pattern: the hub asks for a short-lived **read** token, sealed to the worker. If the remote is local to `main`,
+the conductor pushes a branch first.
+
+**A worker holds no credential to push, anywhere.** Remote push credentials are scoped to repositories, not branches **(recall)**,
+so any worker holding one could move another worker's branch. Instead:
+- The worker returns its work as a **git bundle**, an artifact (untrusted; read by §5's parser rules).
+- `main` checks that the bundle **descends from the assigned base**, touches **only the task's claimed paths**, and carries **no
+  merge of another feature**. Then `main` pushes it to `feature/<task>` (or `wip/<task>`) with its own broker credential.
+- The `result` message carries the **commit SHA**. **The merge queue merges that SHA and nothing else.** A moved branch is a
+  refusal. This also keeps GitHub off a worker's path: the worker dials out only to `main`.
+
+### Tools
+
+The worker's declared commands run through `ozbox env run` (G5), which gives a declared command the plain variables, the
+catalog's tools on its PATH, a pinned script, a long-running declared service on loopback and a browser for the runner user. The
+worker installs tools from the same catalog as `main`, so the toolchain is the same and is not copied. G5's `/work/repos` must be
+readable by the runner user: that is G5's fix.
+
+### Declarations: a worker verifies the owner's approval (review H4)
+
+The key names, the command, its argv and its egress come from a **declaration** in the repository, which the owner approved by its
+hash through G5 (a `policy` approval on `main`). A fresh worker has none, and **it does not take one on `main`'s word**:
+- `task.assign` carries the declaration and its hash. The worker accepts it **only with evidence the owner approved it**: `main`'s
+  `policy` request envelope and its **decision evidence** (ADR 0041 stores the passkey assertion or the laptop signature in the
+  decision). The worker verifies the evidence against its laptop-signed approver set. **It receives the approved policy and its predecessor,
+  recomputes `approval_subject` (ADR 0041 §4, the `policy` row), and accepts only declarations contained in that policy**: the
+  digest the owner approved is the whole policy's, not a separate declaration hash. No new prompt; the owner already decided.
+- The worker **refuses a `shard.assign`, a run or a key delivery for a command whose declaration it did not verify.**
+- So "no tool takes a key name" binds `main` as well as the conductor: `main` cannot install a declaration the owner did not
+  approve. A Production declaration additionally goes through the issuer's binding (below), whatever the worker stored.
+
+### Keys: only the names the declaration lists
+
+**No tool takes a key name.** The conductor says "run declared command `browser-suite` for task T".
+
+1. **A key release is a request on `main`**, a new scope `worker-keys` in ADR 0041's table (§3.1). Because workers do not exist
+   when an orchestration starts, and a replacement or a session renewal rides on the same decision (review M8), it **binds a
+   template, not workers**: `{orchestration, names (canonical encoding), environment, maximum workers, time to live}`. The card
+   says "up to N workers", never worker ids. The environment is **development or staging**; a declaration can never make a request
+   Production. Each **delivery is an audited event under it**: worker, **attested key (C1)**, names. The card lists names, not
+   values.
+2. **Delivery is sealed to the attested key.** `main`'s secrets service reads the values, seals each to the worker's **key-delivery
+   key** (§1) **only after verifying its attestation**, and hands the ciphertext to the hub, which relays it. The hub's process
+   never holds a plaintext value. The worker's service stores them through `store_delivery` in a **run-scoped, in-memory store**:
+   a tmpfs that is **not swappable** (or with swap off on workers), **owned by the secrets user, mode 0700**. `ozbox env run`
+   resolves them for the declared command **through the service, never by path**, as G5 and ADR 0029 describe.
+3. **They end with the task.** On the hub's end-of-task message, on a time to live (default 4 hours), **at once on loss of the
+   hub**, or on quarantine, the service deletes them. The honest limit: **deleting is not recalling**, and **on a compromised
+   worker, deletion is not guaranteed**: keys there live to their time to live. A value a command has read has been read. So only
+   staging and development values go, with a short life, and the audit says which names went to which worker.
+4. **Never** a key the box can use outside a declared command, or by environment variable inherited from `main`. Staging keys on a
+   worker are staging keys; a function that calls an outside service defaults to test mode off Production.
+
+### Production to a worker: designed, refused in this release (owner decision Q4; D1, D2)
+
+**State of this section in this release: refused; planned.** A worker may, by the owner's decision Q4, receive a Production value or
+run a production-tagged action with a per-request approval. The design below is the shape that survives the security review. It is
+**built and tested with fakes in this release and not enabled**, and enabled in a later release (phase H3b) after its own review
+and after the issuer (ADR 0029 A9 phase 2) is deployed.
+
+**The refusal is hard-coded, on both sides.** The worker's service never accepts a delivery or opens a Production request whose
+environment is Production; the issuer's `secret-use` path refuses a delivery target that is a worker. Neither reads a flag, a
+setting or anything `main`, a config or an approval can change. Each has **negative tests**: a worker handed a Production delivery
+refuses it; the issuer asked for a worker-targeted release refuses it; a build with the check removed fails a source guard. A
+declaration that names a Production value on a worker is **refused with a message saying so**.
+
+**The design, for the later release.**
+- **A Production use on a worker is an ADR 0029 use.** The worker's service files a `secret-use` request with the **attested
+  run**, the **immutable copy and its directory digest**, the **commit SHA**, the **exact argv** and the command. These are ADR 0029
+  A6 §5's binding `{box, store, service key, project, env, command, argv, directory digest, commit SHA, stdin digest, key names,
+  request id, run}`, and the card shows them. The worker runs from the immutable copy, with appended argv refused.
+- **The issuer is the only verifier** (review answer 1). Its challenge is the one the person signs. `main` never verifies an
+  assertion over a challenge `main` built. The issuer's challenge names **the worker's key from the issuer's own registration**
+  (C1), the binding above, `main`'s `worker-keys` request id and the window. The issuer returns a **signed approval record**.
+  `main`'s `worker-keys` row is satisfied by verifying the issuer's signature on that record, not by a second assertion. One
+  prompt, no confused deputy, and `main` does not choose the worker key.
+- **Per use, not stored.** The issuer releases the value **per use**, sealed to the worker's attested key, into `mlock`ed memory, **zeroised
+  when the command ends**. **No tmpfs store for Production.** A window is **at most 900 seconds**, the issuer's cap (A9 §4); one
+  command, one release.
+- **Who decides: the laptop with user presence, only (D1).** The owner only. A member, a software laptop key, an authenticator code
+  and Telegram never decide it (Telegram only names it and offers Deny). Until an approval origin `main` does not serve exists, a
+  **passkey asserted on `main`'s origin does not decide a Production-tier request** (§8; the one exception, for an act the laptop
+  itself runs, is Amendment 1). This is provisional and reversed by adding that origin.
+- **One request per worker, per task, per set of names, per use.** Never folded into the orchestration-level request, never
+  covering a second worker, task, use or renewal. **Never to a level-2 worker, never inside a lane** (the splitter refuses a lane
+  that names a Production value; a suite that must touch Production is one declared command on one pinned worker, or on `main`,
+  under ADR 0029).
+- **Only to a worker whose approval roots are pinned and whose key is attested** (§2, §8).
+- **A production-tagged action** (ADR 0022's ask) is a request filed on the worker and decided by the owner **only with a laptop
+  presence key** (D1), per request, one action, never in a delegation, verified by the worker's service. Any Production value it
+  needs is the per-use release above and so is refused in this release. The worker's policy asks rather than denies.
+- **Audit on three boxes.** On `main`: `hub.keys.production.requested`, `.decided`, `.released` (names, worker, task, window; never
+  values). On the worker: the approval chain of ADR 0041 §8 with `scope=secret-use` (Production, filed on the worker; `worker-keys` is development and staging only), then
+  `secrets.production.received` and `.deleted`. On the issuer: its release record. All share the request id and digest prefix.
+- **What changes against the owner's Q4, plainly.** Q4 stands: a worker may, with a per-request approval. A release is **per use,
+  up to 900 seconds, not one hour**. The surface is **the laptop**, not `main`'s dashboard. It arrives **after G6**, not in it.
+
+### The E2E session (a project with an authenticated browser suite)
+
+G5 lets `main` mint the E2E session through a **pinned minter** that holds the Staging service-role key. For lanes:
+
+- `main` mints **one session per worker**. One account's refresh token cannot be shared across parallel workers: rotation would
+  break the others. Each session is delivered as a **file item**, sealed like a key, with a time to live of 90 minutes (a cookie
+  lasts about an hour). A shard that outlasts it asks `main` for a **renewal** over the channel (one worker, one file, under the
+  orchestration-level approval). The service-role key **never leaves the minter**; a worker gets a session, not a key.
+- **A spec that signs out with the global scope revokes every session of the account on every worker** (review M11; a real fleet
+  lost its live sessions to exactly this) and a lane then fails in ways that look like flakiness. So **a spec that signs out
+  carries the account as its resource key** and runs alone, or each worker gets **its own fictional account**.
+- A Playwright trace carries cookies. See artifacts, below.
+- *Worked example (a healthcare app's suite):* the account is one in no two-factor-required clinic, and the sandbox clinics are
+  the resource keys, grouped as that project's fleet groups already are. The ADR keeps this out of the rules.
+
+### Artifacts are untrusted input
+
+A worker is, in the threat model, a place an agent has run. What it sends back is **data, never code**:
+
+- A shard returns an **archive of a fixed shape**: the blob report files, failure traces and screenshots, a result file; a task
+  returns its **git bundle** (above). The hub reads either with a parser that **refuses** absolute paths, `..`, links, device
+  files, names outside an allowed set, more than 20 000 entries, any entry over 200 MB, and a total over 2 GB. It extracts into a
+  directory of its own with no execute bit.
+- **Nothing a worker sends is rendered in the dashboard's origin.** The merged HTML report is served from a separate origin or as a
+  download with `Content-Disposition: attachment` and a sandboxing CSP, never inline. The dashboard escapes every worker string.
+- **Traces carry session cookies.** Traces are kept only for failures (`on-first-retry`), stored encrypted in `main`'s task store,
+  **expire after 7 days**, and are listed as sensitive. A trace larger than the cap returns a summary and says so.
+- A worker's HTML is never opened by the hub, and **the merge never runs the candidate's toolchain on `main`** (§7).
+
+## 6. Communication
+
+### Message kinds
+
+| Kind | From | To | What | Delivery |
+|---|---|---|---|---|
+| `task.assign` | hub | worker | brief, claims, contracts, caps, declared command ids **and the declaration with its hash (§5)**, the worker's run token, **the absolute budget and lease expiry** | at-least-once, acknowledged |
+| `question` | worker | hub | `worker_ask` (ADR 0020) | ack; the worker pauses at a safe point (a `wip/` checkpoint) |
+| `answer` | hub | worker | the conductor's or the person's reply | ack; mid-turn when the run is a conversation, else on resume |
+| `status` | worker | hub | `worker_status`, usage, spend, progress | at-most-once is fine; the latest wins |
+| `blocked` | worker | hub | waiting on a request, a claim, a contract | ack |
+| `contract.changed` | hub | worker | a new contract version | ack |
+| `result` | worker | hub | `worker_done`: **the commit SHA**, summary, test result, a bundle offer | ack, then the merge queue |
+| `approval.request` | worker | hub | the signed envelope of a request filed in the worker's service (§8) | **not relied on**: the hub also pulls the worker's live list on connect and every 30 seconds |
+| `approval.decision` | hub | worker | a signature or assertion for the worker's service. A **Deny of a pending request** is accepted without an assertion (fail safe, ADR 0041 M6: `main` can deny by silence anyway); a **revoke of an approved request** needs its credential | ack; the service decides if it is valid |
+| `keys.deliver`, `keys.revoke` | hub | worker | an **inner** sealed value for `store_delivery`, and its deletion (§5) | ack |
+| `lease.renew` | hub | worker | a renewed lease and budget, signed by the top | ack; no renewal means stop |
+| `pins.set` | hub | worker | a laptop-signed root key, approver set or delegation, relayed (§8). **Accepted only if signed by an attested presence root key**; until one exists a worker refuses `pins.set` and takes a set only by a route `main` cannot write | ack; verified by the worker |
+| `laptop.relay` | laptop via hub | worker | a laptop request sealed end to end (`pins sync`, `approvals show`, a direct decision) and its reply | `main` relays bytes only |
+| `shard.assign`, `shard.result` | hub, worker | | a lane's part (§7) | ack |
+| `artifact.offer`, `artifact.pull` | worker, hub | | an archive's or bundle's name, size and hash; the hub pulls (§5) | the hub pulls; the worker never pushes into `main` |
+| `audit.head`, `audit.segments` | worker, hub | | the box's own signed chain head, and chain segments (§9) | ack |
+| `hello`, `heartbeat`, `bye` | both | | liveness | — |
+
+**Guarantees.** At-least-once with acknowledgement, de-duplicated by message id, **ordered per worker and direction**. A message
+is durable on the sender (the task store on `main`, a file on a worker) until acknowledged. A worker that reconnects after `main`
+was down sends from its last acknowledged number. A worker's outbox is disposable (ADR 0020's invariant, and the repo's offline
+rule): losing it loses only unacknowledged messages, and the hub's `resync` asks the worker for its tasks' state.
+
+**What the person sees.** The Orchestrations page shows each worker's tasks, the messages (kind, time, who answered), the blocked
+ones first, the lane's progress, the fleet inbox (§8) and the spend. Chat `/orch` shows the same in words. A worker that is
+silent for 3 heartbeats (90 seconds) shows as "not answering", never as "working".
+
+**How the conductor reads and answers.** Through its MCP tools, which do not change in number for the conductor (`fleet_boxes`,
+`box_clone`, `box_create`, `box_pause`, `orchestration_start`, `task_start`, `task_status`, `task_message`, `task_stop`,
+`claims_*`, `contract_*`, `approvals_pending`, `approvals_decide`, `merge_queue`, `merge_status`, `budget_status`), plus three:
+`lane_run`, `lane_status`, `lane_report` (§7). `approvals_decide` is limited to the delegation of §8. There is still no tool that
+opens a shell, runs a command or returns a key.
+
+**The automatic MCP connection** (queued item 3, which G6 needs): when the dashboard is installed on a box, box setup writes the
+engine's MCP settings for the box user and gives each run a scoped token over the box's loopback. On `main` the conductor's
+endpoint is the supervisor's loopback route; the dashboard accepts a loopback `Host` for that route only (ADR 0020 item 1 says
+`Origin` is refused). On a worker the endpoint is the **hub agent's loopback port**: it validates the run token locally and turns
+`worker_ask`, `worker_status`, `worker_done`, `claims_*` and `contract_read` into messages. The worker's tool list is the six of ADR
+0020. Nothing new listens beyond loopback.
+
+## 7. Test lanes
+
+A **lane** is a declared suite, split across N workers.
+
+**The declaration** (in the repository, hash-approved by the owner through G5, in `ozbox.toml`, and verified on each worker, §5):
+
+```toml
+[lane.browser]
+command   = "browser-shard"      # a declared command (G5): a fixed argv with typed slots
+list      = "browser-list"       # a declared command that prints the spec files and their resource keys
+split     = "weight"             # "shard" (Playwright --shard=i/N) or "weight"
+report    = "playwright-blob"
+retries   = 1
+size      = "xl"
+max_workers = 3
+```
+
+The command's slots are **typed** (`{shard_index}`, `{shard_total}`, `{specs}`), never a shell. A spec list is data, written to a
+file by the hub and pinned by hash.
+
+**The list comes from the candidate, so it is compared with the base's (review M10).** The `list` command, the resource keys and the
+shard command are code the agent may have changed. The hub runs `list` on the **base branch** as well and **compares**: a spec the
+candidate removed, or a resource key it changed, **appears on the merge card**. A lane never reports a partial run as green, and
+**a green lane is a test result, not a security gate: the person's merge approval is the gate.** The documents say so.
+
+**Splitting.** `shard`: the hub passes `--shard=i/N`. `weight`: the hub keeps each spec's duration from earlier runs (the lane
+history) and assigns specs to N workers longest-first; a spec with no history gets the median.
+
+**Resource keys.** A spec's `list` entry carries a **resource key** (the sandbox account or fixture it writes). The splitter puts
+every spec with the same key on **one worker, in sequence**, so two workers never write to one resource. A key the hub does not
+know is a refusal before anything starts. **This bounds the speed-up** (§13): the lane can be no faster than its heaviest group.
+
+**The run.**
+1. `lane_run` (or `ozbox test-lane run browser`) plans: N workers (up to the limit), cost, the sessions to mint (§5). The plan is
+   an ordinary approval with the `worker-keys` card. A lane that names a Production value is refused (§5).
+2. Workers are created (§4), enrol and are attested (§2), verify the declaration (§5), receive keys and a session, check out the
+   commit and run `shard.assign`.
+3. Each worker runs the declared command through `ozbox env run`, writes a blob report, and returns a `shard.result` and an
+   artifact offer. `main` pulls the archive (§5).
+4. **The merge runs on `main` but never on the candidate's toolchain.** `merge-reports` runs from the **base commit's** pinned
+   toolchain, in an **immutable copy**, as a runner user, **with no keys and no network**, over blobs extracted by the strict
+   reader. (There is no worker-to-worker path, so the merge cannot run on a lane worker.) It writes one report and a small result
+   file.
+5. **A failed spec is retried once, on the same worker** (the project's `--retries=1`). A spec that failed then passed is a
+   **flaky record**: name, times, worker, commit, kept in the lane history.
+6. **A worker lost mid-shard**: its unfinished specs are **re-run on another worker**. **If it held a resource key, the whole
+   resource group re-runs in order on one other worker from a reset fixture** (review L5), so a spec that half-wrote a sandbox does
+   not race its rerun. Specs it finished and returned are kept. A lane that cannot finish says so.
+7. The lane ends: workers are destroyed (§4), keys and sessions deleted, artifacts kept on `main` for their term.
+
+**The merge queue runs the full suite through the lane** on the candidate's **exact SHA** (§5). A lane that fails or cannot finish
+blocks the merge and returns the failing specs to the worker that owns the feature. The approval to merge is unchanged.
+
+**Playwright's merge** (`PLAYWRIGHT_BLOB_OUTPUT_DIR`, `--reporter=blob`, `merge-reports`) exists in the project's Playwright and the
+EC2 fleet already uses the blob reporter. The phase 5 agent checks the flags on the installed version before the declaration is
+written.
+
+**This replaces the EC2 browser fleet only on evidence** (plan §8). G6 proves that a lane works. The retirement gate is not
+changed by this ADR.
+
+## 8. Approvals with main as the boss
+
+### The path
+
+1. A worker's gated request (ADR 0041's scopes, its §3.2 table) or a worker agent's risky action (ADR 0022's asks) is **filed on
+   the worker**, in the worker's own secrets service or supervisor store. The store stays with the gate that spends.
+2. The worker's hub agent reads the live list through a scoped socket (`list`, `get` only) and sends an `approval.request`: the
+   **envelope**, **signed by the worker's service** (the canonical encoding of §1).
+3. `main`'s **fleet inbox** shows it with the worker's name next to the ADR 0041 card. The inbox is a **view**. The card is
+   **derived from the signed fields**, and the dashboard recomputes `approval_subject` from them in the browser and refuses to show
+   a card whose digest does not match (ADR 0041 review H2).
+4. The person decides **once**. Below the Production tier: on `main`'s dashboard with a passkey, or on the laptop with a key.
+5. The decision goes back as `approval.decision` and the **worker's own service verifies it** (below). Only then does the request
+   move to `approved`, and the waiting operation proceeds by the ADR 0041 §6 hand-over.
+
+### What the worker's service verifies
+
+| Decider | What the worker verifies | What it trusts |
+|---|---|---|
+| The person on `main`'s dashboard (below the Production tier) | A **WebAuthn assertion** whose challenge is ADR 0041 §3's: `H("ozbox-approval-decide-v1", box id, store id, request id, subject_digest)`, with **the worker's** box id and store id. The origin is `main`'s dashboard origin, the key is in the **signed approver set** (which lists each credential with its person, **role (owner or member)** and, for a laptop key, its type and attestation: members decide `guard-override` and protected-branch asks here), user verification is required, and the signature counter is checked when non-zero and refused if it goes back. An authenticator code never decides | The owner's passkey public keys, as the laptop signed them |
+| The person on the laptop | The key's own signature format over box id, store id, request id and digest (ADR 0041 §3, §6): Ed25519 for a software key, FIDO2 authenticator data (UP, and UV for owner-only scopes) for a presence key. A key with **no proven user presence** (a software key, which includes a Secure Enclave key, ADR 0041 §3) decides only the member-level scopes | The laptop key pinned at creation |
+| The conductor, inside a delegation | A signature by the hub's decision key, and a **delegation** the laptop signed listing the exact low-risk kinds | The laptop root key |
+| A relayed **Deny of a pending request** | Nothing: it is accepted without an assertion (fail safe, ADR 0041 M6). A **revoke of an approved request** is a decision and needs its credential | — |
+
+**`main` never approves by attestation.** A compromised `main` can relay, delay, hide or deny. It cannot make a worker approve.
+
+**Counters (review L2).** The counter check is per worker, so a cloned authenticator is not caught across boxes. `main` also records
+the last counter it saw per credential and **shows a counter that went back**.
+
+**Below the Production tier, a compromised `main` can redirect one touch.** WebAuthn binds an assertion to an origin, not to what
+the page showed, and `main` serves the page that computes the challenge. A compromised `main` can show card A and ask the
+authenticator to sign request B's challenge, if B exists on a worker (it can steer an agent into filing one). For ordinary asks and
+`guard-override` this is the residual ADR 0041's review accepted for v1: **one touch, not the person's intent.** It is not
+accepted for the Production tier, which is why the next rule exists.
+
+### The Production tier is decided on the laptop only (D1, review H2)
+
+**Every Production-tier approval on a worker, a Production `secret-use` (§5) and a production-tagged action alike, is decided
+only with a laptop key with proven user presence (ADR 0041 §3).** The laptop renders the card itself from the worker's signed envelope (or the issuer's
+challenge for a value, §5) and signs; it does not rely on `main`'s page. A passkey asserted on `main`'s origin does **not** decide
+this tier, and the worker's service refuses one. **One exception, by Amendment 1 at the end of this ADR:** a Production act that a
+box asks the laptop's own receiver to run (ADR 0044), decided by a passkey on `main`'s dashboard **and** presence at the laptop,
+together. It does not reach a worker's service, and it is not built.
+
+This is **provisional**, to be reversed by an **approval origin `main` does not serve**: a small static page in the owner's own
+account (for example an object-store and CDN site the setup identity publishes) with its own relying-party id in the approver set
+and its code pinned by hash. It reads the request from the issuer or the worker (sealed, `main` relaying), shows the card, and
+computes the challenge itself. When it exists, a passkey asserted on it may decide the tier. Nothing in the rest of the design
+changes. The Help page and `ozbox hub status` state the present rule.
+
+### Where the pins come from (what `main` cannot write)
+
+A worker trusts three things for approval: **the laptop root key(s)**, the **approver set** (the owner's passkey public keys, the
+laptop keys, their dashboard origin) and **delegations**. Sets are **signed by the laptop root key** with a higher sequence number.
+A worker is **pinned** when the laptop has put its root key and approver set on it by a route `main` cannot write.
+
+| Provider | The root key reaches the worker through | Residual |
+|---|---|---|
+| AWS | A **parameter path written by the setup identity** and readable by the worker's pool role (ADR 0040 §3, §4): `main`'s change role cannot write it, and the claim service reserves and binds the role. **Pinned automatically.** The daily operator cannot write parameters, so **the administrator re-writes the set at each 7-day expiry** until a presence root key exists (below) | `main` can create the worker inside a laptop-made window, but not choose who may approve on it |
+| Hetzner | **The laptop's apply.** The laptop applies every Hetzner worker, so `ozbox fleet apply` **fills the root key and approver set from the laptop's own state and refuses a resource change the proposal did not name**, and plants the creation secret (§2). The worker is **pinned at creation**, at no extra step. Without a presence root key a set cannot be renewed over the relay, so a Hetzner worker's set lasts its 7 days and then it stops deciding; lane workers are short-lived, so this rarely bites. This makes the optional `hub pin` of Q3 automatic for these workers; it does not remove the option | None beyond the apply screen the person already sees |
+| Own machines | The person adopts or creates each box from the laptop (ADR 0033), so the laptop pins it. A box `main` makes through a provider token is **unpinned** until `ozbox hub pin <worker>` (or `--all`), as Q3 says | As Q3: this protects against a `main` taken over after it made the box, not before |
+
+- **The root key, and what a relayed set needs (N1; delegated, owner to confirm).** **A path-delivered set is trusted by its
+  route; a relayed set needs a presence root signature.** The root key is a **laptop key** (ADR 0041 §3). A set, root key or
+  delegation that arrives by a route `main` cannot write (AWS: the setup identity's parameter path; Hetzner: the laptop's own
+  apply) is trusted by that route. A set or delegation **relayed** over the channel (`pins.set`) is accepted only when it is signed
+  by an **attested presence root key**: FIDO2, attestation verified, UP = 1 and UV = 1 on that signature, the counter rule of ADR
+  0041 §3. **Until such a key exists, a worker accepts a set only by a route `main` cannot write.** Reason: today every laptop key is
+  a software key, so a prompt-injected agent on the laptop could sign a set that adds its own key, or renew one `main` is
+  withholding, and undo D1. An attacker's own FIDO2 key passes attestation, because attestation proves hardware, not ownership; the
+  root key is therefore the one the owner pinned. **Consequences until a presence root key exists:** the administrator re-writes the
+  set at each 7-day expiry (renewal over the relay is not possible yet); the Production tier and production-tagged actions on a
+  worker stay unavailable (they need a presence key anyway, D1). **Condition:** the setup identity's session must be **short-lived
+  and never left signed in on the laptop**, or the route is no stronger than a software key (an agent on the laptop could use that
+  session to write the parameter path). A **FIDO2 security key as the root key is phase 2's first deliverable**, after the release;
+  a platform passkey does not qualify.
+- **The laptop's route to a worker `main` is not on (review H3).** Every later laptop-to-worker exchange (`pins sync`, `approvals
+  show`, a direct decision) is a `laptop.relay` message **sealed end to end** to the worker's attested key and the laptop's key,
+  with `main` relaying bytes. `main` can delay or drop; it cannot read or change. On AWS the laptop also has **Session Manager to
+  the worker's ingress account** as a direct route, and a test confirms `main`'s roles cannot open it. So "the laptop's `ozbox
+  approvals show` is the independent check" is independent of `main`'s **content** everywhere, and of `main`'s **delivery** on AWS
+  only. The documents say which.
+- **Sets expire (review M3).** Each approver set carries an **expiry (7 days, renewed by the laptop)**, and a worker **refuses
+  decisions on an expired set**. On AWS the worker re-reads the parameter path on every decision, or every few minutes, not only at
+  boot. A `main` that withholds a revoking set therefore freezes a worker for at most the expiry, and the worker then stops
+  deciding rather than trusting a revoked key. The renewal writer is the setup identity's parameter path (AWS, administrator), or,
+  with a presence root key, a `pins.set` over the relay (above).
+- **The dashboard marks unpinned workers** in the Orchestrations page, the inbox card and `ozbox hub status`. `hub.worker_pin` is
+  `"creation"` (default) or `"laptop"` (strict: a worker refuses all decisions until pinned). An unpinned worker cannot receive a
+  Production value (§5).
+- **The documents say exactly this and no more:** "A worker you did not pin from your laptop trusts the main box that created it.
+  This protects against a main that is taken over **after** it made the worker. It does not protect against a main that was
+  already taken over when it made it. One command from your laptop pins them all."
+
+### The tiers
+
+| Request on a worker | Decided by | On |
+|---|---|---|
+| An agent action on the ask list (ordinary) | the person, or the conductor **only if the delegation lists it** | `main` passkey; conductor under delegation |
+| An agent action (protected branch, outbound message, spend over the threshold) | the person, owner or member, passkey | `main` passkey or laptop |
+| An agent action tagged production | **owner**, **laptop key with user presence only** (D1), per request, one action. Never in a delegation | the laptop. The worker's service verifies |
+| `guard-override` on a worker commit | owner or member, passkey | `main` passkey or laptop |
+| `import`, `policy`, `tunnel-token`, `box-secrets`, `host-guard`, `signer-enroll` on a worker | **a laptop key with presence, or root**, never `main`'s dashboard (ADR 0041 Delegated decision 2) | laptop |
+| `worker-keys` (development and staging only; on `main`'s own service) | owner, passkey | `main` passkey or laptop |
+| `secret-use` (**Production**) on a worker | **refused in this release** (§5). When enabled: owner, **laptop key with user presence only** (D1), one request per worker, task, names and use, at most 900 seconds, pinned and attested level-1 worker only, the issuer verifying | the laptop |
+
+**A software laptop key never decides the Production tier, whatever `approvals.software_key_scopes` says, and no setting, opt-in or
+approval allows it** (review L1; **delegated, owner to confirm**). ADR 0041 §3, ADR 0029 Amendment 9 §4 and this section now say
+the same: never. A Secure Enclave key is a software key for this purpose (ADR 0041 §3).
+
+**The conductor's delegation** is a small document: the kinds (`git push` to a feature branch, a command on the ask list that the
+person named), a time, an orchestration. It is **signed by the laptop**, expires with the orchestration, and the worker rejects
+any request outside it. Never a second factor, never production, never a protected-branch push, a pull request into one, an
+outbound message or spend above the threshold. The default list is empty (Q6). **The conductor's run token is readable by a
+box-user process on `main`** (ADR 0029 review H2), which could call `approvals_decide` within the delegation; the empty default
+bounds it, and the conductor's run is attested when ADR 0029 §5's run attestation lands (review L6). A sub-hub's conductor is the
+same (§14).
+
+### The options considered
+
+- **A. The laptop key only.** Strong, but the person at `main`'s dashboard cannot approve. Kept as the always available path and,
+  for the Production tier, the only one (D1).
+- **B. A passkey assertion verified by the worker's own service** (chosen below the Production tier). Bound to the request id and
+  digest (ADR 0041 §3). It is ADR 0041's phase 5, pulled into this release for cross-box decisions only.
+- **C. `main`'s attestation.** Rejected: a compromised `main` approves on every worker.
+
+**What changed in ADR 0041, applied in its revision of 2026-11-12:**
+1. **Phase split.** Passkey verification by the service moves into this release for requests from another box (phase H4 here).
+2. **Origin and signed envelope** (0041 §1): `origin` and a `signed_envelope`; the digest binds the worker's box id and store id;
+   a replaced store voids pending requests by its epoch.
+3. **The `worker-keys` scope and the cross-box rows** (0041 §3.1, §3.2). The Production case is carried by reference to this §5, and
+   is now laptop-only and refused in this release.
+4. **The fleet inbox** (0041 §5), with a box name and a "waits on a worker" state.
+5. **The hub as a peer** (0041 §7): the hub agent's socket carries `list`, `get` and the relay of a **signed** decision to `decide`.
+   No `file`, no `spend`, never the box or import socket.
+6. **Audit words** (0041 §8), listed in §9.
+7. **"Compromised main"** (0041 §11) joins "compromised dashboard": it can relay, hide and deny, and redirect one touch below the
+   Production tier; it cannot approve on a worker.
+8. **The fixes this ADR depends on:** the per-request digest-bound passkey check; a card derived from the digest; no codes on a
+   worker (a worker never accepts a code; `OZBOX_GUARD_APPROVAL` and the code path are off); guarded enrolment of a laptop key; per
+   scope operation keys; a presence class on the laptop key, **proved by attestation, never declared**.
+
+## 9. Audit, failure modes, threats
+
+### Audit: one decision, recorded on both, and kept past the worker (review M9)
+
+- On the worker, in its own chain (ADR 0028): `secrets.approval.request.filed`, `.decided` (decider, factor, `via=fleet:<main id>`,
+  assertion counter), `.spent`, as ADR 0041 §8.
+- On `main`: `hub.approval.shown`, `hub.approval.relayed` (request id, worker, digest first 16, who), `hub.keys.released` (names,
+  worker, task, time to live, attested key fingerprint; never values), `hub.worker.enrolled`, `.quarantined`, `.created`,
+  `.destroyed`; for nested hubs the `hub.tree.*` words of §14. The two share the request id and digest prefix, and a decision on
+  `main` and not on the worker is shown as such.
+- **Every box at every level signs its own audit head** and sends it up; a sub-hub **relays its children's heads byte for byte**
+  and never summarises. `main` stores them **and also ships them off `main`** (ADR 0029 §9's Object Lock bucket, or the issuer's
+  record), because `main` can be compromised.
+- **A lane or task worker is destroyed with its disk, so before destroy it ships its chain segments to `main` and its final head
+  off-box**, and the destroy waits for the acknowledgement or records that it could not. The Activity page keeps a worker's
+  segments after the worker is gone. A head without its segments proves a count, not a content, which is why both go.
+
+### Failure modes
+
+| What fails | What happens |
+|---|---|
+| **`main` is down** | A worker finishes its current step, **checkpoints to `wip/`**, and pauses at a safe point. Its requests persist in its service. It reconnects with backoff and resumes. **Every key it holds is deleted at once on loss of the hub (not at the hour).** A lane run is not lost: results wait on the worker, and the lane resumes from the task store. A **local timer, needing no message**, pauses the worker after `hub.orphan_hours` (default 6, and 1 for a level-2 worker). **AWS lane workers terminate on shutdown, so the cost ends. A paused Hetzner server still bills; only deletion stops cost** |
+| **A worker is lost mid-shard** | Its unfinished specs are re-run elsewhere (§7), a resource group whole. Its keys expire by time to live |
+| **A network partition** | The same as `main` down, from the worker's side, and as "not answering" from `main`'s. Neither side acts on the other's silence by deciding something |
+| **A lease or budget is not renewed** | The box checkpoints and stops (§4) |
+| **Two orchestrations** | Each has its own limit, workers and keys. A lane's resource keys are checked **across** orchestrations: two lanes never write to one resource at once, the second waits |
+| **A replaced `main`** | §1: `repin` or a laptop-countersigned succession. Pending requests die and say so |
+| **A sub-hub is lost or quarantined** | As §14 |
+| **The hub port is down** | No worker can reach `main`. Boxes and the dashboard on each box work alone |
+
+### Threats
+
+| Who | What it can do | What stops it |
+|---|---|---|
+| **A compromised worker** | §2's table | Assignment table, sealed messages, no worker-to-worker path, no push credential, quarantine, the artifact rules. On quarantine the service deletes keys **only if the worker obeys**: on a compromised one they live to their time to live |
+| **A compromised `main`** | Create workers (inside the limits), read the staging and development keys it holds, run lanes, **hide, delay or deny** approvals, **redirect one touch below the Production tier**, push bundles it was sent | A worker verifies decisions and the owner's evidence for each declaration. The pins and sets come from the laptop. Workers' keys are attested off `main`. The Production tier is on the laptop. A Deny it relays fails safe |
+| **A compromised `main` that wants a Production value on a worker** | Ask, show a card, relay | **Refused in this release.** When enabled: the issuer is the sole verifier, the key is the issuer's registered one (C1), the use is bound to the run, and the decision is on the laptop |
+| **A compromised conductor agent** | Anything its tools allow | No tool takes a key name, a command or a shell. Limits only tighten. Delegation is laptop-signed, narrow, empty by default |
+| **A hostile box user on `main`** | Read or write `ozbox-hubd`'s sockets | They belong to `ozbox-hub`: peer credentials. hubd holds only a handshake key |
+| **A hostile artifact** | Path tricks, huge files, HTML, a trace with a cookie | §5's rules; the merge runs no candidate code |
+| **A compromised sub-hub** | Hide, delay, deny or mislead its children; spend its share | §14: cannot approve or create, never holds a child's key, children's keys are attested off it |
+| **A hostile worker that tries to become a hub** | Claim `hub.sub` | A worker refuses `hub.sub` until phase H7 ships; then only with a grant (§14) |
+
+### How each Medium and Low was answered
+
+| | Answer | Where |
+|---|---|---|
+| M1 | hubd holds a handshake key only; separate keys per purpose with fixed HPKE info; `keys.deliver` is an inner ciphertext the agent cannot open | §1 |
+| M2 | `repin` or a laptop-countersigned succession only; lane workers drained first | §1 |
+| M3 | approver sets expire in 7 days; AWS re-reads the path per decision | §8 |
+| M4 | the claim service wipes per-box items at release; a reuse test | §4 |
+| M5 | Hetzner token in user data tolerated (one use); creation secret never in state; bound to private address; paused server still bills | §2, §4 |
+| M6 | system-uid tailnet client with the node key unreadable by the box user, or said plainly | §2 |
+| M7 | budget and lease enforced on the box; terminate on shutdown; spend from instance-hours | §4 |
+| M8 | the orchestration request binds a template; each delivery audited; canonical names; "up to N" | §5 |
+| M9 | segments and final head shipped before destroy; Activity keeps them | §4, §9 |
+| M10 | candidate list compared with base's; merge on the base toolchain, no keys, no network; "a green lane is not a security gate" | §7 |
+| M11 | a signing-out spec carries the account as resource key, or one account per worker; text made generic | §5 |
+| M12 | benchmark split, lane bound, shape, p99 with fsync | §13 |
+| L1 | "never" in all three places | §5, §8 |
+| L2 | `main` records counters and shows one that went back | §8 |
+| L3 | canonical encoding, receiver fingerprint and epoch in the tag, golden vectors in H1 | §1 |
+| L4 | one group per subtree | §3, §14 |
+| L5 | a lost resource group re-runs whole, in order, from a reset fixture | §7 |
+| L6 | the conductor's token on `main` is stated; attested when run attestation lands | §8 |
+| L7 | quarantine deletion holds only on an obeying worker; a relayed Deny is accepted without an assertion | §6, §8, §9 |
+
+**None is deferred.** Run attestation of the conductor (L6) waits on ADR 0029 §5's run attestation, which is the review's own
+wording, and is the one item whose full fix is outside this ADR.
+
+## 10. Migration from today's laptop-driven orchestration
+
+- **The tools do not change for the person.** `box_clone`, `task_start` and the rest keep their shapes. Behind them the transport
+  moves from "laptop SSH and reverse-forward" to the hub channel when the orchestration runs on `main`.
+- **The laptop-driven mode stays** for a person with no `main`: the laptop runs `ozbox serve`, and it is the hub. The tailnet is the
+  one transport that works from a laptop; a laptop hub that is not on a tailnet keeps today's SSH route and says that approvals on
+  workers are then decided on the laptop only.
+- **A capability check.** `capabilities` on the hub and the worker says `hub.v1`. A worker without it (an old image) is refused for
+  a lane and shown as "needs an upgrade" (ADR 0036: one version).
+- **Existing orchestration objects** gain `worker.transport` (`ssh` or `hub`). New ones default to `hub` on a box with a hub
+  listener.
+
+## 11. Test plan
+
+- **Unit and property.** The envelope (canonical encoding, signing, sealing, ids, sequence, replay, domain tags with receiver
+  fingerprint and epoch, golden vectors in both crates); the assignment table; the archive reader against every hostile case in §5;
+  the splitter (weights, resource keys, a missing key, a lost group); rules only tighten; the approver-set and delegation parsers.
+- **Key purposes.** A ciphertext for one purpose does not open under another; the hub agent's `open` refuses a `keys.deliver`
+  ciphertext; hubd has no operation that opens or signs a body.
+- **Attestation (C1).** A worker key `main` supplies without an attestation is not sealed to by the key service, the issuer or a
+  tree's top. A `worker-keys` request whose key differs from the registered one is refused. A creation secret is absent from every
+  plan, state and log `main` can read; a wrong MAC is refused by the laptop.
+- **Adversarial, from a hostile worker.** Sends about another task; replays; forges `approval.decision`; floods; offers a `..`
+  archive and a 10 GB one; asks for a key not in the declaration; reuses an enrolment token; enrols with a copied service key; tries
+  to reach another worker; presents a trace with a script; **tries to push to another worker's branch (it has no credential)**;
+  returns a bundle with a merge from another feature or paths outside its claim (refused by `main`).
+- **Adversarial, from a compromised `main`** (a hub test double). Relays a decision signed with the hub key for a passkey scope
+  (refused); replays a real assertion for another digest (refused); writes an approver set not signed by the laptop (refused) or an
+  expired one (decisions refused); relays a `pins.set` that has no presence root signature while no presence root key exists
+  (refused), where a set delivered by the parameter path is accepted; relays an attestation of `none` or a self attestation for a
+  key claiming presence (refused); installs a declaration the owner did not approve, or one whose digest differs from the evidence
+  (refused; no run, no key); asks for Production (refused at the worker and at the issuer, whatever any flag says); asks the worker
+  to run an undeclared command; signs a succession alone (refused); relays a Deny (accepted).
+- **Network.** A partition, a restart of `ozbox-hubd`, a restart of `main`, and a blue-green replace by `repin`, on the simulated
+  fleet. A port scan finds one open port on `main`, on the private address, and none on a worker.
+- **ADR 0005's test** is rewritten to the rule in §3 and fails on any other inbound rule, on every provider module.
+- **Pins.** AWS: the roots come from the parameter path and a reused role finds nothing of the last box. Hetzner-shaped: the apply
+  fills the roots from the laptop and refuses a plan naming others. A box `main` made through a provider token is unpinned and its
+  notice contains the exact sentence of §8.
+- **Lanes.** A fake Playwright with known timings: split correct, resource keys honoured, retry once, a flaky record, a lost
+  worker whose group re-runs whole, a merged report equal to a one-box run's, a removed spec appearing on the merge card, the merge
+  run with no keys and no network.
+- **Browser (dashboard).** The fleet inbox, the Orchestrations page and `/orch` at 390, 820 and 1440.
+- **Real boxes (to call anything "Works").** AWS only for G6: `main` and two lane workers on the 4 vCPU / 8 GiB shape.
+  **Hetzner and own machines are Planned.** Nested hubs and Production to a worker are Planned.
+
+## 12. Build plan
+
+Prerequisites: **G2** (the fleet role, pool roles, the own account), **G4** (ADR 0041, phases 1 to 4 with the review fixes) and
+**G5** (env run for real projects). One agent each, at most three at once. Phase H1 freezes the schemas first.
+
+| # | Phase | Needs | Content |
+|---|---|---|---|
+| H1 | **Core and channel** | G2 | `ozbox_core::hub`: canonical envelope with golden vectors, signing and sealing, **separate purpose keys**, sequence, roster, assignment table, quarantine; `ozbox-hubd` with a **handshake key only** and `ozbox-hub-agent`; the service's channel operations and `store_delivery`; the transport on a private network and the tailnet (system client); enrolment; the ADR 0005 test rewrite; the hostile-worker tests. **Freeze the envelope, the message kinds, and `level` and `via` in the first commit** |
+| H2 | **Workers** | H1 | clone and create through the change role, "same image" clone with the no-copy tests, enrolment from first boot, **the key attestation (claim service registration; the Hetzner creation secret and encrypted state)**, the claim service's wipe of per-box items, pool role path, **bundle push by `main`**, lifecycle, cost, **budget and lease with terminate-on-shutdown**, the worker-side MCP proxy and the automatic connection, the migration of orchestrations to `hub` |
+| H3a | **Keys and sessions (development and staging)** | H1, H2, G5 and the declaration check of H4 | the `worker-keys` template request, sealed delivery to an attested key, the run-scoped noswap store, deletion at end, time to live and hub loss, the pinned minter's per-worker sessions and renewal. **Includes the hard-coded Production refusal on the worker and the issuer side, with its negative tests** |
+| H3b | **Production to a worker** | H3a, the issuer deployed (ADR 0029 A9 phase 2), its own review | the per-use ADR 0029 release bound to the run, sealed to the issuer-registered key, the issuer as sole verifier, the laptop presence decision, the 900-second window. **Designed to this shape and built with fakes in this release; the refusal stays; enabled in a later release after its review** |
+| H4 | **Approvals** | H1, G4 | the fleet inbox, signed envelopes, cross-box rows, service-verified passkey assertions below the Production tier, **the declaration evidence check**, the approver set (expiry) and delegation, `laptop.relay` and the laptop `hub pins`, Hetzner pin at apply, the audit joins, counters shown, the dashboard and Telegram changes, the 0041 change list |
+| H5 | **Test lanes** | H2, H3a, H4, G5 | the declaration, the splitter and history, resource keys and the heaviest-group bound, the shard run, the artifact reader, the **base-list comparison**, the merge on the base toolchain, retry and flaky record, the merge queue by exact SHA through lanes, `ozbox test-lane`, the lane benchmark |
+| H6 | **Surfaces and proof** | H2 to H5 | the Orchestrations page and `/orch`, Help pages and use case, changelog, browser tests, **audit shipping before destroy**, the real-box run on AWS |
+| H7 | **Nested hubs (§14)** | the G6 proof, its own review | built **after** the G6 proof. The sub-hub grant, the group per subtree, tree limits and spend, the relayed approval path, the lease signed under its own tag, the `hub.tree.*` audit words. A worker refuses `hub.sub` until H7 ships |
+
+**Order.** H1, then H2, H3a and H4 together (three agents), then H5, then H6 and the G6 proof. H7 and H3b follow under their own
+reviews. The Opus reviews: this ADR (done), H1 and H4 before H5, H3b before it is turned on, H7 before it ships. H4 may start its
+envelope work before H1 ends if H1's schema is frozen.
+
+## 13. Benchmark (owner rule, 2026-11-12)
+
+The target box is 4 vCPU, 8 GiB, 40 GB. No catalog size matches it yet (S is 4 vCPU / 16 GB); the 4/8 size is added for the
+benchmark (AWS `c7i.xlarge`) and is the default size for a lane worker. **A browser lane for a large application may not fit 8
+GiB** (a build plus browsers). If lanes run on a larger size, that is said, and **those numbers are not published as benchmark
+results.** There are **no baselines in hand**; the numbers below are **targets, to be measured**, never claims.
+
+**Spawn is split into its parts (review M12).** A worker on AWS needs a laptop window (ADR 0040 §2) and on Hetzner a laptop apply,
+which are people. The spawn target is timed **from the window's close (AWS) or the apply's end (Hetzner)**, and the rest is reported
+on lines of its own:
+
+| Path | Metric | Target | How it is measured |
+|---|---|---|---|
+| **human window** | the time a person takes to open the window or run the apply | reported, no target | timed from the plan's presentation to the window opening, shown apart and never added to a spawn figure |
+| **laptop apply** (Hetzner) | the apply's own duration | reported | timed on the laptop |
+| **claim bind** | the claim service reserving and binding a pool role (ADR 0040 decision 12) | reported | timed in the claim service and in the hub |
+| **enrolment** | first boot to the attested key accepted | reported | timed in the hub |
+| **lifecycle: spawn** | window close (or apply end) to the worker's first acknowledged `hello`, **claim bind and enrolment included** | no slower than a plain `ozbox create` of the same size, from the same start, plus 10 s of channel setup | fresh worker, 4/8/40. A warm variant (a resumed paused worker) is reported **separately and labelled** |
+| **lifecycle: teardown** | `bye` to destroyed, including the audit shipping | no worse than `ozbox destroy` today plus the shipping, reported apart | timed around the provider call |
+| **exec over the channel** | round trip of a small message and of a `shard.assign` ack, p50 and p99 | added cost: **under 30 ms p50**, under 100 ms p99 | 1 000 messages, 1 KB, on two boxes of the shape, **on the shape's gp3 volume, because the likely p99 cost is the fsync before acknowledgement**; report p99 with it |
+| **exec: the agent's command path** | a clean `ozbox env run` on a worker | not slower than on `main`, within noise | no gate calls the hub for `exec`; keys arrive before a run |
+| **realworld: lane wall clock** | the browser suite on 1 box against N lanes on the same shape | speed-up judged against the **bound below** | the same commit, fresh boxes, median of 3; report the one-box time, the lane time (**per-worker setup included**: clone, install, browsers, any build) and the merge time |
+| **realworld: the benchmark's own repos** | Mastra, Better-Auth, OpenClaw on one worker | no regression from `main` | the hpc-sandbox-benchmarks harness on a hub-made worker, fresh, not a warm clone |
+| **nested hop** (with H7) | added latency of one more hop | under **30 ms p50** more than one hop | 1 000 messages across the sub-hub, reported with the one-hop figure |
+| **economics** | cost per suite run | shown per run | the plan's hourly sum times the run's wall time |
+
+**The lane's speed-up has a ceiling the splitter cannot lift.** Specs with the same resource key run on one worker in sequence, so
+with `T` the suite's total time and `G` the time of the heaviest resource group, the best achievable speed-up on N workers is
+
+    bound(N) = T / max(G, T / N)
+
+The target is **0.7 × min(N, T / G)** for N up to 3, **not 0.7 × N**. If most specs write to one sandbox, `T / G` is small and N = 3
+cannot reach 2.1×. Before promising any figure the run computes `T` and `G` from the lane history, reports the bound beside the
+measured speed-up, and judges the result against the bound. Missing the bound's 0.7 is a finding; missing 0.7 × N when the bound is
+lower is not.
+
+Rules kept: nothing is cached for the benchmark; a warm pool is a labelled variant kept out of every headline; a result from a
+mismatched shape is never published as comparable; an unsupported or failed cell is disclosed, never zero. Every phase's report
+says which metrics it moves. A regression of the spawn or exec headline beyond noise blocks the phase.
+
+## 14. Nested hubs: a worker that hands work to further boxes (owner decision Q8; built after the G6 proof)
+
+A worker may be a hub for further boxes, to a **depth of two**: `main` (level 0), its workers (level 1), their workers (level
+2). A level-2 box cannot be a hub. The depth limit is `hub.max_depth`, default 2, and a rules file may only lower it. A box
+becomes a sub-hub only when the top `main` **grants** it `hub.sub` for an orchestration, inside the limits below. **This section
+is built in phase H7, after the G6 proof and under its own review**, because nesting repeats the attestation (C1) and the lease
+and budget (M7) one level down. Until H7 ships a worker **refuses `hub.sub`**, and the envelope's `level` and `via` fields are
+already frozen so the phase needs no schema change. G6 does not include it.
+
+**Authority flows to the top and never sideways.**
+- **Approvals.** A level-2 worker files a request in its own service. Its sub-hub carries the signed envelope **upward as it is**
+  (adding a signed `via` hop), and the top `main` shows it with the full path ("worker-b under worker-a"). The person decides **at
+  the top `main`**, with the rule of §8 for the tier. The decision is addressed to the level-2 worker's box id and store id, goes
+  down through the sub-hub **byte for byte**, and is verified by the **level-2 worker's own service**. A sub-hub never approves for
+  its workers; its decision key signs only inside a laptop-signed delegation that names it. A relayed Deny fails safe as in §8.
+- **Pins and attestation.** Every worker at every level trusts **the laptop root key and the approver set**, never its parent. A
+  level-2 box's keys carry **the same attestation as a level-1 box's** (claim service or laptop, §2), so the top seals to a key it
+  did not learn from the sub-hub. A sub-hub holds no pin-signing key and never writes a set.
+- **Creating boxes.** A sub-hub has **no change credential and no plan**. It asks upward; the top plans it, the person opens a
+  laptop window, and the box is created with the sub-hub as its parent hub. So the creation limits are enforced in one place.
+- **Keys.** A `worker-keys` request for a level-2 worker is filed on the top, decided there, **sealed by the top's service to the
+  level-2 worker's attested key**, and relayed through the sub-hub as ciphertext. **The sub-hub never holds a plaintext key for its
+  children.** Production never goes to a level-2 worker.
+- **Claims and contracts, with a signed lease (review answer 4).** The top grants a sub-hub a **lease** of claims (paths,
+  resources). The lease is signed with **the hub's channel key under its own domain tag, `ozbox-hub-lease-v1`**, not the decision
+  key, which must sign only inside a laptop-signed delegation. No laptop signature is needed: a lease is coordination, not
+  authority over keys or approvals. **Children verify the chain**: their lease is a subset of their parent's, and the parent's was
+  signed by the top.
+- **The merge queue.** Level-2 branches reach the remote through the same bundle rule as §5, one level down (the parent sub-hub
+  receives the bundle and the top pushes). Only the top `main`'s queue merges to the protected branch.
+
+**Limits and spend aggregate over the tree.** The limits of §4 count every box under the top orchestration; a worker that
+becomes a sub-hub uses its own slot and each child takes one of the same three. Each box receives an **absolute budget and a lease
+expiry signed by the top**, enforced locally (§4), so a sub-hub that drops a message cannot keep a child running. Live spend is
+computed from instance-hours and the plan's prices. At the cap the top lowers every active box's budget through the channel;
+a box that does not hear it stops at its lease. AWS children terminate on shutdown.
+
+**The channel and the audit chain extend one hop per level.** A sub-hub is a worker to its parent and a hub to its children. The
+sub-hub records `hub.tree.relayed`, `.shown`, `.child.enrolled`, `.child.quarantined`; the top records `hub.tree.subhub.granted`,
+`.revoked`. **Every box signs its own audit head and a sub-hub relays its children's heads byte for byte**, and the top also stores
+them off `main` (§9), with a final head before destroy.
+
+**Quarantine and loss.** Quarantining or losing a sub-hub closes its channel upward. Its children **delete every key at once**,
+and a **local timer needing no message** pauses them after one hour (level-2 `hub.orphan_hours` is 1); AWS children terminate on
+shutdown, and a paused Hetzner server still bills. The top destroys the subtree through a plan and a window and never assumes what
+a child did.
+
+**Threats nesting adds, and what stops them.**
+
+| Threat | Stop |
+|---|---|
+| A sub-hub forges a decision for a child | The child's service verifies the assertion against the laptop-signed approver set and its own box and store ids |
+| A sub-hub reports its own key as the child's | The key is attested by the claim service or the laptop; the top seals only to an attested key |
+| A sub-hub hides, delays or edits a request on the way up | It cannot edit (signed by the child's service, card derived from the digest). It can hide or delay; the laptop route and the "not answering" state are the checks |
+| A sub-hub spends past its share or makes boxes | No change credential; creation is planned at the top; budgets and leases are signed by the top and enforced on each box |
+| A confused deputy: a child's request shown as another worker's | The path is in the signed hop list and the card; the digest binds the child's own ids |
+| Depth bombs, loops, cycles | `hub.max_depth` is checked at creation and at enrolment; a box cannot enrol with its own descendant |
+| A sub-hub reads a child's keys | Keys are sealed to the child's attested key and relayed as ciphertext |
+| A level-2 box probes another subtree | One group per subtree, no rule to `main` or to a sibling (§3) |
+| A sub-hub keeps a child alive past its keys | Keys are deleted at once on hub loss; the lease stops the box; the top destroys the subtree |
+
+**What nesting does not change.** The channel protocol, the sealed delivery, the artifact rules, the lane rules (a sub-hub may run
+a lane for its own task inside its share), the G6 acceptance test, and the rule that `main` is the boss for approval. The
+conductor's tools do not grow: a sub-hub's agent gets the conductor's tool set restricted to its lease and share, and `box_create`
+and `box_clone` become requests upward.
+
+## Owner decisions (2026-11-12, binding) and what the review settled
+
+1. **Q1 Service-verified passkeys for cross-box approvals in this release.** Yes, below the Production tier (§8).
+2. **Q2 One inbound hub port**, from the workers' group only, on a private address; an ADR 0005 amendment (§3).
+3. **Q3 Hetzner and own machines.** Trust at creation, laptop pin optional. **Refined:** on Hetzner the laptop applies every
+   worker, so it pins at apply, automatically; the option remains for boxes `main` makes through a provider token (§8).
+4. **Q4 A worker may receive a Production value or run a production-tagged action with a per-request approval by the owner.**
+   Stands. **Provisional narrowing (D1, D2):** per use, at most 900 seconds, laptop presence key only, after G6; refused in this
+   release (§5).
+5. **Q5 Lane defaults:** size 4/8/40, three workers, destroyed when the lane ends, no warm pool.
+6. **Q6 The delegation's default list is empty.**
+7. **Q7 Trace retention:** 7 days, failures only.
+8. **Q8 Nested hubs are allowed,** to a depth of two. Built after the G6 proof (§14).
+9. **Q9 The retirement of the EC2 fleet** is unchanged and **outside G6**.
+
+**The four open items, settled by the review:**
+- *The one approval for a Production value:* the issuer is the only verifier; `main` verifies the issuer's signed record (§5).
+- *A Production value and a lane:* keep refusing. A suite that touches Production is one command on one pinned worker or on `main`.
+- *Hetzner's Cloud Firewall:* host rules are the control; a Cloud Firewall drops all public inbound by label; a real-project test
+  confirms both directions (§3).
+- *A sub-hub's claim lease:* signed with the hub's channel key under `ozbox-hub-lease-v1`; no laptop signature (§14).
+
+**Facts to confirm on a real project before the parts that rest on them are built:** Hetzner's Cloud Firewall and Cloud Network
+behaviour; a stopped Hetzner server billing; the metadata service and the guard's uid table on Hetzner first boot; that Hetzner's
+API never returns `user_data`, and what the provider keeps in state; that repository push credentials cannot be limited to
+branches; terminate-on-shutdown for pool-role instances; cost data latency; and that the claim service can identify the calling
+instance from a bound role. None carries a Critical or High alone: the design assumes the worse answer for each.
+
+## Consequences and what is not covered
+
+- A new listener and process on `main` and a larger service surface (channel operations, key delivery, assertion verification on
+  every box), reviewed as carefully as the codes were. hubd holds one handshake key.
+- `main` is the hub, so while it is down no new work starts and no cross-box approval can be made. The laptop can decide on a
+  worker through the sealed relay or, on AWS, directly, and a worker pauses itself at a safe point.
+- **Until a presence root key exists** (a FIDO2 security key, phase 2's first deliverable), the administrator re-writes each worker
+  set at its 7-day expiry, and the Production tier on a worker is unavailable. This is stated, not hidden.
+- A key given to a worker cannot be recalled. Only staging and development values, short lives and deletion bound the exposure; on
+  a compromised worker deletion is not guaranteed.
+- **Amendment 1 is a decision recorded ahead of the code.** Nothing it describes is built, and it leaves the residual risk it names.
+- **Production to a worker is not in this release.** It is designed, tested with fakes and refused by a check no setting changes.
+  When enabled it is per use, at most 900 seconds, decided on the laptop, verified by the issuer.
+- A compromised `main` can still mislead a person with a card and, **below the Production tier**, redirect one touch to another
+  pending request. A person who trusts only `main`'s screen is trusting `main`.
+- On own machines with a box-user tailnet client the agent can reach the hub's pre-authentication surface and cut the channel (§2).
+- On Hetzner a paused server still bills; only deletion, which needs the laptop, stops cost.
+- A sub-hub is a worker that can lie to its children. It cannot approve for them, create them or hold their keys. It ships after
+  G6.
+- A box whose service predates the channel operations cannot be a worker.
+- **Proven on AWS only, once the G6 run is done. Hetzner, own machines, nested hubs and Production to a worker are Planned.** Until
+  the run, every part is Planned.
+
+## Acceptance test for release gate G6 (owner, 2026-11-12; negative cases and the leak check added by the review)
+
+G6 is met only when all four hold **on real AWS boxes**, driven by the agent on `main`, with `main` as the boss. **It is proven on
+AWS; Hetzner and own machines are Planned** and are disclosed as such in the docs and the changelog. The benchmark numbers of §13
+are recorded as part of the run, with the lane bound beside the speed-up.
+
+1. **Test lanes.** The project's browser suite is split across two or more worker boxes and one merged report comes back to
+   `main`, with retries and the flaky record working. *Negative:* a spec removed from the candidate's list appears on the merge
+   card; a lost worker's resource group re-runs whole; the merge ran with no keys and no network.
+2. **Feature branches on workers.** Two feature branches are built on two worker boxes (one a clone of `main`, one a new box), each
+   by a coding agent with its own sub-agents inside the limits, and both are merged through `main`'s queue, which runs the tests
+   through the lanes. *Negative:* **worker A cannot move B's branch** (it holds no push credential, and a bundle with another
+   feature's commits or paths outside its claim is refused); **the queue merges the SHA the worker reported**, and a moved branch
+   is refused.
+3. **Main is the boss.** The owner approves a worker's risky step from `main` (dashboard, or the one-time link from Telegram), and
+   the worker's own secrets service verifies that decision. *Negative:* a decision `main` signs with the hub key for a passkey scope
+   is refused on the worker; **an assertion for another request's digest is refused**; an approver set not signed by the laptop, or
+   expired, is refused; a declaration without the owner's evidence is refused (no run, no key); a relayed Deny is accepted;
+   **Production to a worker is refused at the worker and at the issuer**; and **the worker's record of the decision still exists
+   after the worker is destroyed** (segments on `main`, final head off `main`).
+4. **Nothing leaks, and the check is defined.** Plant a **sentinel of each class** in `main`'s stores: the model key, the tunnel
+   token, approver data, the store key, and a **staging value not in the declaration**; deliver one declared staging value as a
+   sentinel too. Then **search for each sentinel** on the worker's **disks, tmpfs, swap, journal, process environments, traces,
+   artifacts, and a capture of the channel** (and on `main`, for the delivered value outside the service's and hub's sealed paths).
+   The pass condition: the undeclared sentinels are in **none** of those places; **while the task runs** the delivered sentinel is
+   only in the service's run store; **after the task ends the run-scoped store is empty and the delivered sentinel is in none of
+   those places**. **A worker's request for a name the declaration does not list is refused.** A worker that loses its hub deletes
+   its keys at once (tested by cutting the channel mid-task).
+
+**First real use after the release: Oz Box built on Oz Box.** The remaining zero-downtime phases (ADR 0038 phases 3, 4, 11 and 5)
+and the review-fix work run on worker boxes with `main` as the hub instead of on the owner's laptop. Their wall clock and cost are
+recorded against the laptop runs, and the result is reported with the benchmark rules (no warm-pool number passed off as cold).
+
+## Amendment 1 (2026-11-13): a Production act the laptop runs for a box may be decided by a passkey on `main` plus presence at the laptop
+
+**Status. A decision recorded ahead of the code. Nothing here is built.** The first thing to build is ADR 0044's laptop receiver.
+
+**What changed.** §8 and decision D1 say a passkey asserted on `main`'s origin never decides the Production tier. That stays the
+rule for everything it covered. This amendment adds **one** case. ADR 0044 lets a box ask the person's laptop, which alone holds the
+Production keys, to run an act from a closed catalogue or a hash-pinned reviewed script. For a Production act of that kind, the
+decision is **a passkey asserted on `main`'s dashboard plus presence at the laptop**, both, every time.
+
+**The owner chose this over the reviewers' advice, and that is said plainly.** The security review and the second opinion recommended
+ADR 0029's own approval at the laptop alone: a laptop key with presence, or an issuer-verified passkey, with no passkey on `main`.
+The owner (2026-11-13, plan §72.14) wants the person to approve a task on the dashboard where they already work, and to be present at
+the laptop when a Production act runs. The reviewers' option is stronger against one threat, a compromised `main` (see the residual
+risk). The owner accepted that difference.
+
+**The exact rule.** A Production act is decided only when all of these hold:
+1. **The act is one the laptop's receiver runs itself.** A built-in act, or a reviewed script, from ADR 0044's catalogue, on the
+   laptop. It is never an act on a worker.
+2. **A passkey assertion from `main`'s dashboard is verified by the laptop**, not by `main` and not by a worker's service. It is a
+   raw WebAuthn assertion with user verification, checked against a credential in an approver set the laptop signed and pinned, with the
+   counter rule of ADR 0041 §3. The challenge binds the request id and a digest **the laptop computes itself** from the act it parsed
+   (for a script, its hash and its declared keys and network hosts). An assertion for a different act, sha or hash is refused.
+3. **The laptop shows its own parsed view of the act, then asks for presence.** The laptop is where the decision completes. It does not
+   use `main`'s card. It renders what it parsed, in its own words, and the person must prove presence at that prompt. For a script, the
+   screen shows the full contents beside the hash and the declaration.
+4. **Presence means a proof, never a typed word.** Until a hardware key is enrolled: the platform biometric through the keychain's
+   access control (Touch ID, Windows Hello). Once an attested hardware key is enrolled: that key (attestation verified, UP = 1 and UV = 1,
+   the counter rule). **A typed confirmation never counts as presence.** A software key never does.
+5. **Neither half decides alone.** A passkey on `main` without presence at the laptop decides nothing. Presence at the laptop without
+   the passkey decides nothing for a task that arrived from a box. Each act needs both, once, and is single use.
+6. **The owner only.** One act per decision, never in a delegation, never batched across Production acts, never from chat.
+
+**What is still refused, unchanged.**
+- **A passkey on `main` alone never decides Production.** D1 stands for every other case.
+- **A worker is still refused Production** (decision D2, G6 v1). Production to a worker, and a Production `secret-use` on a worker, stay
+  hard-coded refusals with their negative tests. This amendment does not touch them, and nothing in it reaches a worker's service.
+- **ADR 0029's release of a Production value is unchanged.** A script or act that needs a Production value uses ADR 0029's path.
+- A member, a software laptop key, an authenticator code and Telegram still never decide it. A laptop key with presence alone is still
+  valid where ADR 0041 and ADR 0029 already allow it.
+
+**Residual risk, stated.** A compromised `main` serves the dashboard page. It can show the owner one act and collect a passkey for
+another, or redirect one touch. This is the weakness D1 was written to close, and the reviewers' option closed it. This amendment
+reopens it for this one case, in a smaller form:
+- The laptop **computes the digest itself**, so a touch collected for another act does not verify for the act the laptop parsed.
+- The laptop **shows its own parsed act and asks for presence**, so the person sees the real act, in the laptop's words, before it runs.
+- What remains: **a person who gives presence at the laptop without reading what it shows**, and a compromised laptop. The passkey on
+  `main` adds a second step but no independent safety, because `main` serves it. The protection that holds against a compromised `main`
+  is the laptop's display and the presence prompt, and it is only as good as the person's reading of that display.
+- An attested hardware key later makes the presence step stronger. It does not change the role of the passkey on `main`.
+
+**What it changes elsewhere.** ADR 0044's §5, §6, open questions 1 to 3 and threat table follow it. The origin `main` does not serve (§8)
+remains the route to a stronger rule, and this amendment does not remove that option. ADR 0041 needs a scope for the combined decision,
+added with the other mesh scopes.
+
+**What is unbuilt.** All of it: the receiver, the pinned approver set, the platform biometric prompt, the attested-key path, and the
+sandbox that holds a script to its declared keys and hosts. The G6 acceptance test does not cover it. It is **Planned**, not Proposed
+as working.

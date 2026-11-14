@@ -136,6 +136,7 @@
               "adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box",
               "adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own",
               "adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on",
+              "adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main",
               "adr/0043-coding-agents-on-a-box-reach-the-oz-box-tools-through-a-socket-of-their-own",
               "adr/0045-box-memory-guard",
               "adr/0049-sessions-come-back-after-a-stop-the-session-not-the-process",
