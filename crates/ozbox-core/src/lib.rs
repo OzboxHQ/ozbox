@@ -39,6 +39,8 @@ pub mod roles;
 pub mod run;
 pub mod secret_shape;
 pub mod size;
+pub mod skill_front;
+pub mod skill_hidden;
 pub mod skill_pack;
 pub mod spec;
 pub mod supervisor;

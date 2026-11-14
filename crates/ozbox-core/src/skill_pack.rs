@@ -13,6 +13,8 @@ use std::path::Path;
 use ring::digest;
 
 use crate::secret_shape::find_secret;
+use crate::skill_front::{self, Asks, Node};
+use crate::skill_hidden::HIDDEN;
 
 pub const MAX_FILES: usize = 50;
 pub const MAX_FILE_BYTES: usize = 128 * 1024;
@@ -26,7 +28,8 @@ const TEXT_EXT: &[&str] = &[
     "md", "txt", "json", "yaml", "yml", "toml", "sh", "py", "js", "ts", "rs", "sql", "html", "css",
     "csv",
 ];
-/// Files an agent may run, not only read. They stay text, are never made executable, and the review marks them.
+/// Files an agent may run, not only read. They stay text and are written without the executable bit, which does not stop an
+/// agent running one (`bash file`); the review marks them so a person reads them as code.
 const SCRIPT_EXT: &[&str] = &["sh", "py", "js", "ts", "rs", "sql"];
 
 pub fn text_extensions() -> &'static [&'static str] {
@@ -84,9 +87,17 @@ pub fn name_ok(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
-/// A skill's name: a folder name with no dot.
+/// A skill's name, as the open Agent Skills format has it: lower-case letters and digits with single hyphens between them
+/// (`pdf-tools`, not `PDF_Tools`), 1 to 64 characters. Lower case only, so that on a disk that does not tell `Demo` from
+/// `demo` two skills can never be one folder.
 pub fn skill_name_ok(s: &str) -> bool {
-    name_ok(s) && !s.contains('.')
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--")
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
 /// A skill's files, in memory. Built from a folder, from files sent over the wire, or from those shipped in the program.
@@ -110,23 +121,15 @@ pub fn spdx_ok(l: &str) -> bool {
         })
 }
 
-/// `key: value` lines between the first two `---` lines of a `SKILL.md`.
-fn front_matter(text: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return out;
+/// A scalar value of the front matter, as text. A list or a map where text belongs is a mistake worth naming.
+fn scalar(pairs: &[(String, Node)], key: &str) -> Result<Option<String>, SkillError> {
+    match pairs.iter().find(|(k, _)| k == key) {
+        None => Ok(None),
+        Some((_, Node::Scalar(v))) => Ok(Some(v.trim().to_string())),
+        Some(_) => Err(SkillError::Invalid(format!(
+            "{key}: in the front matter of SKILL.md must be text"
+        ))),
     }
-    for l in lines {
-        if l.trim() == "---" {
-            break;
-        }
-        if let Some((k, v)) = l.split_once(':') {
-            let v = v.trim().trim_matches(['"', '\'']);
-            out.insert(k.trim().to_string(), v.to_string());
-        }
-    }
-    out
 }
 
 fn path_ok(p: &str) -> bool {
@@ -135,13 +138,23 @@ fn path_ok(p: &str) -> bool {
 }
 
 /// A character a reviewer cannot see or that changes how text reads: control characters (other than newline, return and
-/// tab), zero-width and direction-changing characters, and Unicode tag characters. A skill with one would not say to the
-/// agent what it says to the person who approved it.
-fn hidden(c: char) -> bool {
-    (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{00AD}' | '\u{E0000}'..='\u{E007F}'
-            | '\u{FE00}'..='\u{FE0F}' | '\u{180E}')
+/// tab), every format character (zero-width, direction marks, tags, variation selectors, the Hangul fillers, the combining
+/// grapheme joiner, ...), line and paragraph separators, private-use and unassigned code points. The table is generated from
+/// the Unicode Character Database (`scripts/gen-skill-hidden-chars.py`), and the page checks the same one. A skill with such a
+/// character would not say to the agent what it says to the person who approved it.
+pub fn hidden(c: char) -> bool {
+    let c = c as u32;
+    HIDDEN
+        .binary_search_by(|&(lo, hi)| {
+            if c < lo {
+                std::cmp::Ordering::Greater
+            } else if c > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 impl SkillPack {
@@ -211,28 +224,46 @@ impl SkillPack {
         let main = files
             .get("SKILL.md")
             .ok_or_else(|| SkillError::Invalid("a skill needs a SKILL.md".into()))?;
-        let fm = front_matter(&String::from_utf8_lossy(main));
-        let name = fm.get("name").cloned().ok_or_else(|| {
+        let text = String::from_utf8_lossy(main);
+        let (fm, _) = skill_front::split(&text)
+            .map_err(SkillError::Invalid)?
+            .ok_or_else(|| {
+                SkillError::Invalid("SKILL.md needs front matter (between two --- lines) with a name and a description".into())
+            })?;
+        let pairs = skill_front::parse(fm).map_err(SkillError::Invalid)?;
+        let name = scalar(&pairs, "name")?.ok_or_else(|| {
             SkillError::Invalid("SKILL.md needs a name: line in its front matter".into())
         })?;
         if !skill_name_ok(&name) {
             return Err(SkillError::Invalid(
-                "a skill name is letters, digits, dash and underscore".into(),
+                "a skill name is lower-case letters and digits with single dashes between them (like my-skill), up to 64 characters".into(),
             ));
         }
-        let description = fm.get("description").cloned().unwrap_or_default();
+        let description = scalar(&pairs, "description")?.unwrap_or_default();
         if description.is_empty() || description.chars().count() > 1024 {
             return Err(SkillError::Invalid(
                 "SKILL.md needs a description of 1 to 1024 characters".into(),
             ));
         }
+        let version = scalar(&pairs, "version")?
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "1".into());
         Ok(SkillPack {
             name,
             description,
-            version: fm.get("version").cloned().unwrap_or_else(|| "1".into()),
-            license: fm.get("license").filter(|l| spdx_ok(l)).cloned(),
+            version,
+            license: scalar(&pairs, "license")?.filter(|l| spdx_ok(l)),
             files,
         })
+    }
+
+    /// What this skill's `SKILL.md` asks an agent program to do: the commands it runs and the permissions it widens (each
+    /// needs its own acknowledgement before the skill can be approved) and the other settings it declares.
+    pub fn asks(&self) -> Asks {
+        self.files
+            .get("SKILL.md")
+            .and_then(|b| skill_front::asks_of(&String::from_utf8_lossy(b)).ok())
+            .unwrap_or_default()
     }
 
     /// Read a skill folder. Symbolic links and anything that is not a plain file are refused.
@@ -291,18 +322,64 @@ impl SkillPack {
 }
 
 pub fn hash_files(files: &BTreeMap<String, Vec<u8>>) -> String {
-    let mut ctx = digest::Context::new(&digest::SHA256);
+    let mut h = PackHasher::new();
     for (p, b) in files {
-        ctx.update(&(p.len() as u64).to_be_bytes());
-        ctx.update(p.as_bytes());
-        ctx.update(&(b.len() as u64).to_be_bytes());
-        ctx.update(b);
+        // an in-memory slice always yields exactly its own length
+        let _ = h.add(p, b.len() as u64, &b[..]);
     }
-    ctx.finish()
-        .as_ref()
-        .iter()
-        .map(|x| format!("{x:02x}"))
-        .collect()
+    h.finish()
+}
+
+/// The skill hash, computed one file at a time, so a folder on a disk can be hashed without holding its files in memory.
+/// Files must be added in path order (the order a `BTreeMap<String, _>` iterates). The digest is exactly [`hash_files`]'s.
+pub struct PackHasher(digest::Context);
+
+impl Default for PackHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PackHasher {
+    pub fn new() -> PackHasher {
+        PackHasher(digest::Context::new(&digest::SHA256))
+    }
+
+    /// Add one file whose length is `len`. Returns `Ok(false)` if `r` holds a different number of bytes than `len` (the file
+    /// changed while it was read): the digest is then not the folder's and must be thrown away.
+    pub fn add<R: std::io::Read>(
+        &mut self,
+        path: &str,
+        len: u64,
+        mut r: R,
+    ) -> std::io::Result<bool> {
+        self.0.update(&(path.len() as u64).to_be_bytes());
+        self.0.update(path.as_bytes());
+        self.0.update(&len.to_be_bytes());
+        let mut seen: u64 = 0;
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = r.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            seen += n as u64;
+            if seen > len {
+                return Ok(false);
+            }
+            self.0.update(&buf[..n]);
+        }
+        Ok(seen == len)
+    }
+
+    pub fn finish(self) -> String {
+        self.0
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
+    }
 }
 
 /// A folder a coding agent reads skills from, under the box user's home.
@@ -369,22 +446,239 @@ mod tests {
         assert_ne!(a.hash(), c.hash());
     }
 
+    fn with_md(md: &str) -> Result<SkillPack, SkillError> {
+        let mut m = BTreeMap::new();
+        m.insert("SKILL.md".to_string(), md.as_bytes().to_vec());
+        SkillPack::from_files(m)
+    }
+
+    fn md(front: &str, body: &str) -> String {
+        format!("---\nname: demo\ndescription: Does a thing.\n{front}---\n{body}\n")
+    }
+
     #[test]
     fn hidden_characters_are_refused_so_the_reviewer_sees_what_the_agent_reads() {
-        for bad in [
-            "a\u{202E}b",
-            "a\u{200B}b",
-            "a\u{E0041}b",
-            "a\u{0000}b",
-            "a\u{001B}b",
-            "a\u{FEFF}b",
+        // one of each class: control, format, tag, both variation selector blocks, separators, bidi mark, joiner, fillers,
+        // Mongolian selectors, invisible operators, annotation anchors, musical/shorthand format, private use, unassigned
+        for c in [
+            '\u{202E}',
+            '\u{200B}',
+            '\u{E0041}',
+            '\u{0000}',
+            '\u{001B}',
+            '\u{FEFF}',
+            '\u{00AD}',
+            '\u{FE0F}',
+            '\u{E0100}',
+            '\u{E01EF}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{061C}',
+            '\u{034F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{180B}',
+            '\u{180D}',
+            '\u{180F}',
+            '\u{206A}',
+            '\u{206F}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E000}',
+            '\u{F0000}',
+            '\u{0378}',
+            '\u{FFFF}',
+            '\u{2800}',
+            '\u{0085}',
+            '\u{17B4}',
         ] {
+            let bad = format!("a{c}b");
+            assert!(hidden(c), "U+{:04X} is not in the table", c as u32);
             assert!(
-                SkillPack::from_files(files(&[("n.md", bad)])).is_err(),
-                "{bad:?}"
+                SkillPack::from_files(files(&[("n.md", &bad)])).is_err(),
+                "U+{:04X}",
+                c as u32
             );
         }
-        assert!(SkillPack::from_files(files(&[("n.md", "tabs\tand\r\nlines é 日本")])).is_ok());
+        for ok in [
+            "tabs\tand\r\nlines é 日本 ö",
+            "emoji 😀 and ½ and — and “quotes”",
+            "ASCII ~!@#",
+        ] {
+            assert!(
+                SkillPack::from_files(files(&[("n.md", ok)])).is_ok(),
+                "{ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_streamed_hash_is_the_in_memory_hash() {
+        let p = SkillPack::from_files(files(&[("a/b.md", "bee"), ("z.md", "zed")])).unwrap();
+        let mut h = PackHasher::new();
+        for (path, bytes) in &p.files {
+            assert!(h.add(path, bytes.len() as u64, &bytes[..]).unwrap());
+        }
+        assert_eq!(h.finish(), p.hash());
+        // a file that is not the length it was said to be is reported
+        let mut h = PackHasher::new();
+        assert!(!h.add("x", 2, &b"abc"[..]).unwrap());
+        assert!(!h.add("x", 4, &b"abc"[..]).unwrap());
+    }
+
+    #[test]
+    fn the_hidden_table_is_sorted_and_does_not_overlap() {
+        for w in crate::skill_hidden::HIDDEN.windows(2) {
+            assert!(w[0].0 <= w[0].1 && w[0].1 < w[1].0, "{w:?}");
+        }
+        for ok in ['\t', '\n', '\r', 'a', ' ', 'é'] {
+            assert!(!hidden(ok), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn skill_names_are_lower_case_digits_and_single_hyphens() {
+        for good in ["demo", "pdf-tools", "a1", "x-1-y"] {
+            assert!(skill_name_ok(good), "{good}");
+        }
+        for bad in [
+            "Demo",
+            "my_skill",
+            "a--b",
+            "-a",
+            "a-",
+            "a.b",
+            "",
+            "ünï",
+            &"a".repeat(65),
+        ] {
+            assert!(!skill_name_ok(bad), "{bad}");
+        }
+        let m = "---\nname: Demo\ndescription: x\n---\n";
+        assert!(with_md(m).is_err());
+        let m = "---\nname: my_skill\ndescription: x\n---\n";
+        assert!(with_md(m).is_err());
+    }
+
+    #[test]
+    fn front_matter_is_read_as_yaml() {
+        // quoted, folded and flow forms read the way YAML says
+        let p = with_md("---\nname: \"demo\"\ndescription: >\n  Does a\n  thing.\nversion: 3\nlicense: MIT\n---\nbody\n").unwrap();
+        assert_eq!(
+            (
+                p.name.as_str(),
+                p.description.as_str(),
+                p.version.as_str(),
+                p.license.as_deref()
+            ),
+            ("demo", "Does a thing.", "3", Some("MIT"))
+        );
+        // a nested `name:` is not the skill's name
+        let p = with_md("---\nname: demo\ndescription: x\nmetadata:\n  name: evil\n---\n").unwrap();
+        assert_eq!(p.name, "demo");
+        for bad in [
+            "---\nname: demo\ndescription: x\nname: other\n---\n", // twice
+            "---\nname: demo\ndescription: [a, b]\n---\n",         // a list where text belongs
+            "---\nname: demo\ndescription: x\nx: &a [1]\ny: *a\n---\n", // alias
+            "---\nname: demo\ndescription: x\nx: &a 1\n---\n",     // anchor
+            "---\nname: demo\ndescription: x\nbad: [unclosed\n---\n",
+            "---\nname: demo\ndescription: x\n\tbad: tab\n---\n",
+            "---\nname: demo\ndescription: x\n", // not closed
+            "no front matter\n",
+            "---\n- a\n- b\n---\n",
+        ] {
+            assert!(with_md(bad).is_err(), "{bad:?}");
+        }
+        // an expansion bomb is refused, not expanded
+        let mut bomb = String::from("---\nname: demo\ndescription: x\na0: &a0 [x, x]\n");
+        for i in 1..40 {
+            bomb.push_str(&format!("a{i}: &a{i} [*a{}, *a{}]\n", i - 1, i - 1));
+        }
+        bomb.push_str("---\n");
+        assert!(with_md(&bomb).is_err());
+        let deep = format!("{}x{}", "[".repeat(40), "]".repeat(40));
+        assert!(with_md(&md(&format!("deep: {deep}\n"), "")).is_err());
+        let big = format!("pad: {}\n", "x".repeat(20_000));
+        assert!(with_md(&md(&big, "")).is_err());
+    }
+
+    fn keys(md: &str) -> Vec<&'static str> {
+        with_md(md).unwrap().asks().keys()
+    }
+
+    #[test]
+    fn what_runs_commands_or_widens_permission_must_be_acknowledged() {
+        assert!(keys(&md("", "Plain words.")).is_empty());
+        // each construct on its own
+        assert_eq!(keys(&md("hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./x.sh\n", "")), ["hooks"]);
+        assert_eq!(
+            keys(&md("allowed-tools: Bash(git *) Read\n", "")),
+            ["allowed-tools"]
+        );
+        assert_eq!(
+            keys(&md("allowed-tools:\n  - Bash\n  - Edit\n", "")),
+            ["allowed-tools"]
+        );
+        assert_eq!(keys(&md("shell: powershell\n", "")), ["shell"]);
+        assert_eq!(
+            keys(&md("context: fork\nagent: general-purpose\n", "")),
+            ["agent"]
+        );
+        assert_eq!(keys(&md("", "Diff: !`git diff`")), ["shell-injection"]);
+        assert_eq!(
+            keys(&md("", "```!\nnode --version\n```")),
+            ["shell-injection"]
+        );
+        assert_eq!(keys(&md("", "~~~!\nls\n~~~")), ["shell-injection"]);
+        assert_eq!(keys(&md("", "````!\nls\n````")), ["shell-injection"]);
+        // YAML block, flow and quoted forms of the same key, and a key written in another case
+        assert_eq!(
+            keys(&md(
+                "hooks: {PreToolUse: [{hooks: [{type: command, command: x}]}]}\n",
+                ""
+            )),
+            ["hooks"]
+        );
+        assert_eq!(keys(&md("\"hooks\":\n  Stop: x\n", "")), ["hooks"]);
+        assert_eq!(keys(&md("Allowed-Tools: Bash\n", "")), ["allowed-tools"]);
+        // an indented `allowed-tools:` is not a top-level key, and the file still says so
+        assert!(keys(&md("metadata:\n  allowed-tools: Bash\n", "")).is_empty());
+        // all at once, sorted, each named
+        let all = md(
+            "hooks:\n  Stop: x\nallowed-tools: Bash\nshell: bash\nagent: a\n",
+            "!`ls`",
+        );
+        assert_eq!(
+            keys(&all),
+            [
+                "agent",
+                "allowed-tools",
+                "hooks",
+                "shell",
+                "shell-injection"
+            ]
+        );
+        // an empty value asks for nothing
+        assert!(keys(&md("hooks:\nallowed-tools: ~\nshell: \"\"\n", "")).is_empty());
+    }
+
+    #[test]
+    fn other_settings_are_shown_and_unknown_keys_are_named() {
+        let p = with_md(&md("model: opus\ncontext: fork\ndisable-model-invocation: true\npaths: [\"src/**\"]\nsurprise: 1\n", "")).unwrap();
+        let a = p.asks();
+        assert!(a.acknowledge.is_empty());
+        let shown: Vec<&str> = a.shown.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            shown,
+            ["model", "context", "disable-model-invocation", "paths"]
+        );
+        assert_eq!(a.unknown, ["surprise"]);
     }
 
     #[test]
