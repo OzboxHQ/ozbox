@@ -49,6 +49,10 @@ pub struct BoxPin {
     /// only for what the owner allocated to it.
     #[serde(default)]
     pub allowed: Vec<String>,
+    /// This box is a worker (ADR 0042), enrolled by the fleet's claim service. **A worker is refused Production (decision D2),
+    /// in code**: the field says what the box is, not whether the rule applies, and nothing in the config turns the refusal off.
+    #[serde(default)]
+    pub worker: bool,
 }
 
 impl BoxPin {
@@ -235,6 +239,8 @@ pub enum Error {
     Audit,
     Reader(String),
     Seal,
+    /// Decision D2: a worker box is never given Production in this release.
+    ProductionToWorker,
 }
 
 impl std::fmt::Display for Error {
@@ -271,6 +277,9 @@ impl std::fmt::Display for Error {
             }
             Error::Reader(_) => f.write_str("the secret could not be read"),
             Error::Seal => f.write_str("the release could not be sealed to the box"),
+            Error::ProductionToWorker => f.write_str(
+                "a worker box is never given a Production value in this release: run the step on `main` with its own approval",
+            ),
         }
     }
 }
@@ -372,6 +381,17 @@ impl Issuer<'_> {
             .boxes
             .get(&scope.box_id)
             .ok_or(Error::UnknownBox)?;
+        if pin.worker {
+            self.audit(
+                "refused-worker",
+                "-",
+                &format!(
+                    "box={} secret={} run={}",
+                    scope.box_id, scope.secret, scope.run_id
+                ),
+            )?;
+            return Err(Error::ProductionToWorker);
+        }
         if pin.store_id != scope.store_id {
             return Err(Error::StoreMismatch);
         }
@@ -626,6 +646,15 @@ impl Issuer<'_> {
             .boxes
             .get(&scope.box_id)
             .ok_or(Error::UnknownBox)?;
+        if pin.worker {
+            // an approval filed before the box was marked a worker is not honoured for it either
+            self.audit(
+                "refused-worker",
+                request_id,
+                &format!("box={} secret={}", scope.box_id, scope.secret),
+            )?;
+            return Err(Error::ProductionToWorker);
+        }
         let use_no = used + 1;
         self.audit(
             "release",
@@ -764,6 +793,7 @@ mod tests {
                 service_key: key.public(),
                 caller: CALLER.into(),
                 allowed: vec!["prod/*".into()],
+                worker: false,
             },
         );
         cfg.approvers = vec![
@@ -1384,6 +1414,50 @@ mod tests {
         w3.cfg.boxes.get_mut("dev").unwrap().allowed = vec!["prod/db-url".into()];
         let r3 = w3.rand();
         assert!(w3.issuer(&r3).request(w3.scope(), CALLER, NOW).is_ok());
+    }
+
+    #[test]
+    fn a_worker_box_is_refused_production_on_a_request_and_on_a_release_and_it_is_audited() {
+        // decision D2 (ADR 0042): hard-coded, no setting. The pin says what the box is; the refusal does not depend on anything else.
+        let mut w = world();
+        // an approval made while the box was an ordinary box...
+        let request_id = {
+            let r = w.rand();
+            let i = w.issuer(&r);
+            let ch = i.request(w.scope(), CALLER, NOW).unwrap();
+            i.approve(
+                &ch.request_id,
+                "mac",
+                Proof::Signature(w.laptop.sign(&ch.message).as_ref()),
+                NOW + 1,
+            )
+            .unwrap();
+            ch.request_id
+        };
+        // ...is not honoured once the box is enrolled as a worker
+        w.cfg.boxes.get_mut("dev").unwrap().worker = true;
+        let r = w.rand();
+        let i = w.issuer(&r);
+        assert_eq!(
+            i.release(&request_id, CALLER, NOW + 2),
+            Err(Error::ProductionToWorker)
+        );
+        assert_eq!(
+            i.request(w.scope(), CALLER, NOW + 3),
+            Err(Error::ProductionToWorker)
+        );
+        let log = w.log.lines.borrow();
+        assert_eq!(
+            log.iter()
+                .filter(|l| l.starts_with("refused-worker"))
+                .count(),
+            2
+        );
+        assert!(
+            !log.iter().any(|l| l.starts_with("release ")),
+            "nothing was released"
+        );
+        assert!(w.reader.calls.borrow().is_empty(), "no value was read");
     }
 
     #[test]
