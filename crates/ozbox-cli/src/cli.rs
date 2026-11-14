@@ -561,6 +561,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
+    /// Tasks between two endpoints (a laptop and a box, or two boxes): typed, signed, ordered, with a state and an audit record.
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
     /// Orchestrations: one agent hands features to worker boxes. Start, follow, answer, merge.
     Orch {
         #[command(subcommand)]
@@ -2055,6 +2060,110 @@ pub enum PolicyCommand {
         #[arg(long)]
         project: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TasksCommand {
+    /// Create this endpoint's keys and name. Run once on each side.
+    Init {
+        #[arg(long)]
+        name: String,
+    },
+    /// Print this endpoint's public identity, to hand to the other side by a way you trust.
+    Identity,
+    /// Pin the other side's identity (shows fingerprints first). `--via` is the command that reaches its `ozbox`, for example
+    /// `"ssh my-box ozbox"`; it is run as an argument list, never through a shell.
+    Pin {
+        /// A file from `ozbox tasks identity`, or `-` for standard input.
+        file: std::path::PathBuf,
+        #[arg(long)]
+        via: Option<String>,
+        /// Change an existing pin (a new epoch after a restore, or new keys). Compare the fingerprints first.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Start a task for a pinned peer. It is held here and delivered on the next sync.
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// Read the text from standard input.
+        #[arg(long)]
+        stdin: bool,
+        /// A note: nothing is asked, nothing is expected back.
+        #[arg(long)]
+        note: bool,
+        /// Give up after this many minutes (default 1440).
+        #[arg(long)]
+        minutes: Option<u64>,
+    },
+    /// Ask the peer to push one commit to one branch. Acts that need an approval are refused until the passkey approval path
+    /// exists, and a Production act is refused outright.
+    PushRef {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        remote: String,
+        #[arg(long = "ref")]
+        r#ref: String,
+        #[arg(long)]
+        sha: String,
+        /// The environment the push is for (for example staging). Anything not known to be non-Production counts as Production.
+        #[arg(long)]
+        env: String,
+    },
+    /// What is waiting for you: tasks you received that are not finished, and anything with news.
+    Inbox {
+        #[arg(long)]
+        all: bool,
+    },
+    /// One task with its messages, or (with no id) the pinned peers and what waits to be sent.
+    Status { id: Option<String> },
+    /// Answer a task, and optionally move its state (only the side that received it may).
+    Reply {
+        id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        /// working, input-required, completed or failed.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Ask for a task to stop. A cancel is a request: the other side decides.
+    Cancel { id: String },
+    /// Why a task is where it is, and who acts next.
+    Why { id: String },
+    /// Send what is waiting and take what the peer has, once.
+    Sync {
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Keep syncing every few seconds and print what is new. It runs only while you keep it open.
+    Watch {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        every: u64,
+        #[arg(long, hide = true)]
+        rounds: Option<u64>,
+    },
+    /// The answering side of a sync (run by the other side through its `--via` command). Not for people.
+    #[command(hide = true)]
+    Exchange {
+        #[arg(long)]
+        peer: String,
+    },
+    /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
+    /// accepted; every peer must pin the new epoch.
+    Restored,
 }
 
 #[derive(Debug, Subcommand)]

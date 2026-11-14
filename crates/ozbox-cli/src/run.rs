@@ -137,6 +137,14 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             return crate::runs_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
         }
+        Command::Tasks { command } => {
+            let f = crate::runs_cli::Flags {
+                json,
+                dry_run: cli.dry_run,
+                yes: cli.yes,
+            };
+            return crate::tasks_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
+        }
         Command::Orch { command } => {
             let f = crate::runs_cli::Flags {
                 json,
@@ -445,6 +453,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Cost { .. }
         | Command::Run { .. }
         | Command::Orch { .. }
+        | Command::Tasks { .. }
         | Command::Adopt { .. }
         | Command::State { .. }
         | Command::HostGuard { .. }
