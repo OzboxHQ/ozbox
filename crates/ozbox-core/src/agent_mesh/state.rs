@@ -1,9 +1,12 @@
-//! The durable state of one endpoint and the pure logic that changes it (ADR 0044 sections 2.3, 2.4, 3 and 4).
+//! The task state of one endpoint and the logic that applies what the channel delivers (ADR 0044 sections 2.3, 2.4, 3 and 4).
 //!
-//! Every function here takes the state and a clock and does no I/O: the [`super::store::Store`] persists the result **before**
-//! anything is acknowledged, and [`super::node::Node`] does the signing, sealing and moving. That is what keeps a send from
-//! holding the store's lock and what makes a crash safe (the outbox is part of the state, written in the same write as the
-//! task it carries).
+//! Every function here takes the state and a clock and does no I/O: the channel's store persists the result **before** anything is
+//! acknowledged, and [`super::node::Node`] does the signing, sealing and moving. The sessions, the order, the replay set and the
+//! outbox are the channel's [`Core`]; this file holds the tasks, the tombstones, the per-peer rate window and the transport commands.
+//!
+//! Tasks are stored under `<sender>/<id>` ([`super::task_key`]), so an id chosen by a peer can never replace a task this end sent or
+//! another peer's. A finished task is kept for [`RETAIN_MS`] and then reduced to a tombstone of its key and hash, so a replay or a
+//! reused id is still recognised while the cap counts only what is open.
 
 use std::collections::BTreeMap;
 
@@ -13,95 +16,36 @@ use super::model::{
     code, may_move, new_id, Act, Artifact, Body, Label, Message, Part, Side, State as TState, Task,
     TaskKind, MAX_INLINE, MAX_TITLE,
 };
-use super::wire::{Envelope, Kind, Sealed, Sealer, Verifier, ENVELOPE_VERSION, SKEW_MS};
-use super::{crypto, Screen};
+use super::{split_key, task_key, Screen, PROFILE};
 use crate::approval_subject::{to_hex, Encoder};
-use crate::audit::NewEvent;
+use crate::channel::audit::HasCore;
+use crate::channel::flow::{receive_round, RoundReport};
+use crate::channel::session::{Core, Delivery, Link};
+use crate::channel::wire::{fingerprint, normalize_hex, unhex, Crypto};
 
-pub const STATE_VERSION: u32 = 1;
-/// How many sequence numbers ahead of the next expected one are buffered. Past it the receiver asks for a resync.
-pub const WINDOW: u64 = 64;
+pub const STATE_VERSION: u32 = 2;
 /// Starting values, tuned later (ADR 0044 section 2.4).
-pub const MAX_OUTBOX: usize = 200;
 pub const MAX_OPEN_TASKS: usize = 50;
+/// The most tasks held at once (open and recently finished). Finished ones leave after [`RETAIN_MS`], so this is a cap on what is
+/// happening, not on what ever happened.
 pub const MAX_TASKS: usize = 2000;
+pub const MAX_MESSAGES_PER_TASK: usize = 200;
+pub const MAX_ARTIFACTS_PER_TASK: usize = 50;
+/// The most inline text and artifact bytes the whole state holds.
+pub const MAX_STATE_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_TOMBS: usize = 20_000;
 pub const NEW_TASKS_PER_MIN: usize = 20;
 pub const MESSAGES_PER_MIN: usize = 120;
-pub const SEEN_TASK_KEEP_MS: u64 = 7 * 24 * 3600 * 1000;
+/// A finished task stays whole this long, then becomes a tombstone.
+pub const RETAIN_MS: u64 = 30 * 24 * 3600 * 1000;
 pub const DEFAULT_DEADLINE_MS: u64 = 24 * 3600 * 1000;
-const MAX_REASON: usize = 120;
+pub const MAX_REASON: usize = 120;
+/// The most deliveries of tasks one cancel-requested reason keeps.
+const MAX_ID: usize = 64;
 
+/// What is left of a finished task: its key and the hash of the body that created it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Outgoing {
-    pub seq: u64,
-    pub kind: Kind,
-    pub task_id: String,
-    pub body: Body,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Held {
-    pub task_id: String,
-    pub body: Body,
-    pub hash: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Peer {
-    pub name: String,
-    pub sign_public: String,
-    pub seal_public: String,
-    /// The epoch pinned for the peer. A peer that restores changes epoch, and the owner pins the new one.
-    pub epoch: u64,
-    /// The command that reaches the peer's `exchange` (an argv, never a shell string). Empty on the answering side.
-    #[serde(default)]
-    pub via: Vec<String>,
-    pub out_seq: u64,
-    pub outbox: Vec<Outgoing>,
-    pub peer_incarnation: u64,
-    pub last_hello_ms: u64,
-    pub next_in: u64,
-    pub held_in: BTreeMap<u64, Held>,
-    pub recent: Vec<(u64, bool)>,
-    pub resync_wanted: bool,
-    pub dups: u64,
-    pub last_seen_ms: u64,
-}
-
-impl Peer {
-    pub fn new(
-        name: &str,
-        sign_public: &str,
-        seal_public: &str,
-        epoch: u64,
-        via: Vec<String>,
-    ) -> Peer {
-        Peer {
-            name: name.to_string(),
-            sign_public: sign_public.to_string(),
-            seal_public: seal_public.to_string(),
-            epoch,
-            via,
-            out_seq: 0,
-            outbox: Vec::new(),
-            peer_incarnation: 0,
-            last_hello_ms: 0,
-            next_in: 1,
-            held_in: BTreeMap::new(),
-            recent: Vec::new(),
-            resync_wanted: false,
-            dups: 0,
-            last_seen_ms: 0,
-        }
-    }
-
-    pub fn seal_fingerprint(&self) -> String {
-        crypto::fingerprint(&self.seal_public)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Seen {
+pub struct Tomb {
     pub hash: String,
     pub ts_ms: u64,
 }
@@ -109,28 +53,27 @@ pub struct Seen {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
     pub version: u32,
-    pub me: String,
-    pub store_id: String,
-    pub epoch: u64,
-    pub incarnation: u64,
-    pub sign_public: String,
-    pub seal_public: String,
-    pub peers: BTreeMap<String, Peer>,
+    pub core: Core,
+    /// The command that reaches a peer's `exchange` (an argv, never a shell string), per peer. Empty on the answering side.
+    #[serde(default)]
+    pub vias: BTreeMap<String, Vec<String>>,
     pub tasks: BTreeMap<String, Task>,
-    pub seen_tasks: BTreeMap<String, Seen>,
-    pub nonces: BTreeMap<String, u64>,
-    /// Audit events not yet handed to the audit log. Written in the same write as the change they describe.
-    pub audit: Vec<NewEvent>,
-    pub audit_n: u64,
+    pub tombs: BTreeMap<String, Tomb>,
+    /// Inline text and artifact bytes held in `tasks`.
+    #[serde(default)]
+    pub bytes: u64,
+    /// The recent receive times per peer, for the rate limits.
+    #[serde(default)]
+    pub recent: BTreeMap<String, Vec<(u64, bool)>>,
 }
 
-/// What a receive did, for the caller (a count and a log line, never text).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
-    Applied,
-    Buffered,
-    Duplicate,
-    Refused(String),
+impl HasCore for State {
+    fn core(&self) -> &Core {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
 }
 
 /// What a person asks for when they start a task.
@@ -145,63 +88,288 @@ pub struct NewTask {
     pub deadline_ms: Option<u64>,
 }
 
+/// What a person sees of a peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PeerView {
+    pub name: String,
+    pub epoch: u64,
+    pub outbox: usize,
+    pub sign_fingerprint: String,
+    pub seal_fingerprint: String,
+    pub last_seen_ms: u64,
+    pub halted: Option<String>,
+    pub via: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindError {
+    NoSuchTask,
+    /// Two tasks have this id (one from each end, say): name it as `<sender>/<id>`.
+    Ambiguous(Vec<String>),
+}
+
 fn hash_body(b: &Body) -> String {
     let mut e = Encoder::new("ozbox-mesh-body");
     e.text(&serde_json::to_string(b).unwrap_or_default());
     to_hex(&e.digest())
 }
 
+fn task_bytes(t: &Task) -> u64 {
+    let msgs: usize = t
+        .messages
+        .iter()
+        .map(|m| m.parts.iter().map(Part::size).sum::<usize>() + 64)
+        .sum();
+    let arts: usize = t
+        .artifacts
+        .iter()
+        .map(|a| a.parts.iter().map(Part::size).sum::<usize>() + 128)
+        .sum();
+    (msgs + arts + t.title.len() + 256) as u64
+}
+
+/// The shape and content checks every inbound body must pass **before it is held or applied**: ids are names, sizes are bounded,
+/// and no string in it looks like a key. A body that fails is never written down.
+pub fn check_body(screen: &dyn Screen, body: &Body) -> Result<(), &'static str> {
+    let id_ok = |s: &str| word_ok_len(s);
+    let opt_ok = |o: &Option<String>| o.as_deref().map_or(true, word_ok_len);
+    match body {
+        Body::Task {
+            title,
+            context_id,
+            parent,
+            message,
+            approval_ref,
+            act,
+            ..
+        } => {
+            if title.len() > MAX_TITLE
+                || message.parts.iter().map(Part::size).sum::<usize>() > MAX_INLINE
+            {
+                return Err(code::TOO_BIG);
+            }
+            if !(id_ok(&message.id)
+                && id_ok(&message.from)
+                && opt_ok(context_id)
+                && opt_ok(parent)
+                && opt_ok(approval_ref))
+            {
+                return Err("bad-id");
+            }
+            if let Some(a) = act {
+                // an act's fields are names and an object id: shaped, never free text, so nothing key-like is held for one
+                a.valid()?;
+            }
+        }
+        Body::Message { message } => {
+            if message.parts.iter().map(Part::size).sum::<usize>() > MAX_INLINE {
+                return Err(code::TOO_BIG);
+            }
+            if !(id_ok(&message.id) && id_ok(&message.from)) {
+                return Err("bad-id");
+            }
+        }
+        Body::Status { reason, .. } => {
+            if reason.as_deref().is_some_and(|r| r.len() > MAX_REASON) {
+                return Err(code::TOO_BIG);
+            }
+        }
+        Body::Artifact { artifact } => {
+            if artifact.name.len() > MAX_TITLE
+                || artifact.parts.iter().map(Part::size).sum::<usize>() > MAX_INLINE
+            {
+                return Err(code::TOO_BIG);
+            }
+            if !id_ok(&artifact.id) {
+                return Err("bad-id");
+            }
+        }
+        Body::Cancel => {}
+    }
+    if body.strings().iter().any(|s| screen.find(s).is_some()) {
+        return Err(code::KEY_SHAPED);
+    }
+    Ok(())
+}
+
+fn word_ok_len(s: &str) -> bool {
+    s.len() <= MAX_ID && super::word_ok(s)
+}
+
+/// The channel's admission screen for the mesh: the body parses, is the right shape for its kind, and passes [`check_body`].
+pub fn admit(
+    screen: &dyn Screen,
+    kind: &str,
+    _ext: &[u8],
+    plain: &[u8],
+) -> Result<(), &'static str> {
+    let body: Body = serde_json::from_slice(plain).map_err(|_| "malformed")?;
+    if body.kind_name() != kind {
+        return Err("kind-mismatch");
+    }
+    check_body(screen, &body)
+}
+
 impl State {
-    pub fn new(me: &str, sign_public: &str, seal_public: &str, now: u64) -> State {
+    pub fn new(me: &str, sign_public: &str, seal_public: &str) -> State {
+        let seal_fp = unhex(seal_public)
+            .map(|b| fingerprint(&b))
+            .unwrap_or_default();
         State {
             version: STATE_VERSION,
-            me: me.to_string(),
-            store_id: new_id(now),
-            epoch: 1,
-            incarnation: now.max(1),
-            sign_public: sign_public.to_string(),
-            seal_public: seal_public.to_string(),
-            peers: BTreeMap::new(),
+            core: Core::new(me, sign_public, seal_public, &seal_fp, 1),
+            vias: BTreeMap::new(),
             tasks: BTreeMap::new(),
-            seen_tasks: BTreeMap::new(),
-            nonces: BTreeMap::new(),
-            audit: Vec::new(),
-            audit_n: 0,
+            tombs: BTreeMap::new(),
+            bytes: 0,
+            recent: BTreeMap::new(),
         }
     }
 
-    pub fn seal_fingerprint(&self) -> String {
-        crypto::fingerprint(&self.seal_public)
+    pub fn me(&self) -> &str {
+        &self.core.me
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.core.epoch
+    }
+
+    pub fn sign_public(&self) -> &str {
+        &self.core.sign_public
+    }
+
+    pub fn seal_public(&self) -> &str {
+        &self.core.seal_public
     }
 
     pub fn note(&mut self, now: u64, action: &str, subject: Option<&str>, detail: String) {
-        self.audit_n += 1;
-        let ev = NewEvent {
-            ts_ms: now,
-            actor: format!("mesh:{}", self.me),
-            action: action.to_string(),
-            subject: subject.map(str::to_string),
-            detail: detail.chars().take(150).collect(),
-            src: Some((self.store_id.clone(), self.audit_n)),
-        };
-        self.audit.push(ev);
+        self.core.note(now, action, subject, detail);
     }
 
-    /// After a restore from a backup: a new epoch and a new incarnation, so envelopes captured before it no longer verify, and
-    /// the peer is told to pin the new epoch. Nothing sent before is replayable, and nothing in flight survives.
-    pub fn restored(&mut self, now: u64) {
-        self.epoch += 1;
-        self.incarnation = now.max(self.incarnation + 1);
-        self.nonces.clear();
-        for p in self.peers.values_mut() {
-            p.out_seq = 0;
-            p.outbox.clear();
-            p.peer_incarnation = 0;
-            p.last_hello_ms = 0;
-            p.next_in = 1;
-            p.held_in.clear();
+    /// The fingerprint of this end's sealing key (the one function over the key bytes).
+    pub fn seal_fingerprint(&self) -> String {
+        self.core.seal_fp.clone()
+    }
+
+    /// The fingerprint of this end's signing key (over the key bytes).
+    pub fn sign_fingerprint(&self) -> String {
+        unhex(&self.core.sign_public)
+            .map(|b| fingerprint(&b))
+            .unwrap_or_default()
+    }
+
+    pub fn peers(&self) -> Vec<PeerView> {
+        self.core
+            .links
+            .values()
+            .map(|l| PeerView {
+                name: l.name.clone(),
+                epoch: l.epoch,
+                outbox: l.outbox.len(),
+                sign_fingerprint: unhex(&l.sign_key)
+                    .map(|b| fingerprint(&b))
+                    .unwrap_or_default(),
+                seal_fingerprint: l.seal_fp.clone(),
+                last_seen_ms: l.last_seen_ms,
+                halted: l.halted.clone(),
+                via: self.vias.get(&l.name).cloned().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    pub fn via(&self, peer: &str) -> Vec<String> {
+        self.vias.get(peer).cloned().unwrap_or_default()
+    }
+
+    /// Pin a peer (keys are stored in one form, lower-case hex). The same keys at a new epoch keep what was in flight; other keys
+    /// start clean. `via` replaces the transport command when given.
+    pub fn pin(
+        &mut self,
+        now: u64,
+        name: &str,
+        sign_public: &str,
+        seal_public: &str,
+        epoch: u64,
+        via: Option<Vec<String>>,
+    ) -> Result<PinChange, &'static str> {
+        let sign = normalize_hex(sign_public).ok_or("bad-key")?;
+        let seal = normalize_hex(seal_public).ok_or("bad-key")?;
+        let seal_fp = unhex(&seal).map(|b| fingerprint(&b)).ok_or("bad-key")?;
+        let old = self.core.links.get(name).cloned();
+        let mut link = Link::new(name, &sign, &seal, &seal_fp, epoch);
+        let same_keys = old
+            .as_ref()
+            .is_some_and(|o| o.sign_key == sign && o.seal_key == seal);
+        if let (Some(o), true) = (&old, same_keys) {
+            // the same keys at a new epoch (or a new via): what was in flight stays, the window starts over
+            link.out_seq = o.out_seq;
+            link.outbox = o.outbox.clone();
         }
-        self.note(now, "mesh.restored", None, format!("epoch={}", self.epoch));
+        let before_via = self.vias.get(name).cloned().unwrap_or_default();
+        if let Some(v) = via {
+            self.vias.insert(name.to_string(), v);
+        }
+        let after_via = self.vias.get(name).cloned().unwrap_or_default();
+        let change = PinChange {
+            new: old.is_none(),
+            keys_changed: old.as_ref().is_some_and(|_| !same_keys),
+            epoch_changed: old.as_ref().is_some_and(|o| o.epoch != epoch),
+            via_changed: before_via != after_via,
+            via: after_via,
+        };
+        self.core.pin(link);
+        self.note(
+            now,
+            "mesh.peer.pinned",
+            None,
+            format!(
+                "peer={name} epoch={epoch} keys_changed={} via_changed={} sign={} seal={}",
+                change.keys_changed,
+                change.via_changed,
+                unhex(&sign).map(|b| fingerprint(&b)).unwrap_or_default(),
+                seal_fp
+            ),
+        );
+        Ok(change)
+    }
+
+    /// After a restore from a backup: the channel starts a new epoch, incarnation and audit source epoch, and a task that was still
+    /// waiting for its first delivery (its envelope is gone with the outbox) is failed, so the person sends it again.
+    pub fn restored(&mut self, now: u64) {
+        self.core.restored(now);
+        let me = self.core.me.clone();
+        for t in self.tasks.values_mut() {
+            if t.from == me && t.state == TState::Held {
+                t.state = TState::Failed;
+                t.reason = Some("store-restored".into());
+                t.sent_seq = None;
+                t.updated_ms = now;
+            }
+        }
+        self.recent.clear();
+    }
+
+    /// Find a task by `<sender>/<id>`, or by its id alone when that is unambiguous.
+    pub fn find(&self, id: &str) -> Result<&Task, FindError> {
+        if let Some(t) = self.tasks.get(id) {
+            return Ok(t);
+        }
+        let mut hits: Vec<&Task> = self.tasks.values().filter(|t| t.id == id).collect();
+        match hits.len() {
+            0 => Err(FindError::NoSuchTask),
+            1 => Ok(hits.remove(0)),
+            _ => Err(FindError::Ambiguous(
+                hits.iter().map(|t| task_key(&t.from, &t.id)).collect(),
+            )),
+        }
+    }
+
+    fn key_of(&self, id: &str) -> Result<String, &'static str> {
+        match self.find(id) {
+            Ok(t) => Ok(task_key(&t.from, &t.id)),
+            Err(FindError::NoSuchTask) => Err("unknown-task"),
+            Err(FindError::Ambiguous(_)) => Err("ambiguous-id"),
+        }
     }
 
     // ---- sending ------------------------------------------------------------------------------------------------
@@ -209,34 +377,20 @@ impl State {
     fn enqueue(
         &mut self,
         peer: &str,
-        kind: Kind,
-        task_id: &str,
-        body: Body,
+        kind: &str,
+        key: &str,
+        body: &Body,
     ) -> Result<u64, &'static str> {
-        let p = self.peers.get_mut(peer).ok_or("unknown-peer")?;
-        if p.outbox.len() >= MAX_OUTBOX {
-            return Err(code::RATE);
-        }
-        p.out_seq += 1;
-        let seq = p.out_seq;
-        p.outbox.push(Outgoing {
-            seq,
-            kind,
-            task_id: task_id.to_string(),
-            body,
-        });
-        Ok(seq)
+        let plain = serde_json::to_vec(body).map_err(|_| "malformed")?;
+        self.core
+            .enqueue(&PROFILE, peer, kind, key.as_bytes().to_vec(), plain)
     }
 
-    fn check_parts(screen: &dyn Screen, title: &str, parts: &[Part]) -> Result<(), &'static str> {
-        if title.len() > MAX_TITLE || parts.iter().map(Part::size).sum::<usize>() > MAX_INLINE {
-            return Err(code::TOO_BIG);
+    fn add_bytes(&mut self, n: u64) -> Result<(), &'static str> {
+        if self.bytes.saturating_add(n) > MAX_STATE_BYTES {
+            return Err(code::JOURNAL_FULL);
         }
-        let mut all: Vec<String> = vec![title.to_string()];
-        all.extend(parts.iter().flat_map(Part::strings));
-        if all.iter().any(|s| screen.find(s).is_some()) {
-            return Err(code::KEY_SHAPED);
-        }
+        self.bytes += n;
         Ok(())
     }
 
@@ -247,13 +401,12 @@ impl State {
         now: u64,
         n: NewTask,
     ) -> Result<String, &'static str> {
-        if !self.peers.contains_key(&n.to) {
+        if !self.core.links.contains_key(&n.to) {
             return Err("unknown-peer");
         }
         if n.title.trim().is_empty() {
             return Err("title-missing");
         }
-        Self::check_parts(screen, &n.title, &n.parts)?;
         match (&n.kind, &n.act) {
             (TaskKind::LaptopAct, Some(a)) => {
                 a.valid()?;
@@ -269,14 +422,20 @@ impl State {
         if self.tasks.len() >= MAX_TASKS {
             return Err(code::JOURNAL_FULL);
         }
+        let me = self.core.me.clone();
         let id = new_id(now);
-        let deadline = n.deadline_ms.unwrap_or(now + DEFAULT_DEADLINE_MS);
+        let deadline = n
+            .deadline_ms
+            .unwrap_or(now.saturating_add(DEFAULT_DEADLINE_MS));
         let message = Message {
             id: format!("{id}-0"),
-            from: self.me.clone(),
+            from: me.clone(),
             ts_ms: now,
-            label: n.label,
+            // an end never claims a person wrote it: "who wrote this" is the receiver's judgement, not the sender's say-so
+            label: Label::Fleet,
             parts: n.parts,
+            provenance: "self".into(),
+            untrusted: false,
         };
         let body = Body::Task {
             kind: n.kind,
@@ -288,30 +447,42 @@ impl State {
             approval_ref: None,
             message: message.clone(),
         };
-        let seq = self.enqueue(&n.to, Kind::Task, &id, body)?;
-        self.tasks.insert(
-            id.clone(),
-            Task {
-                id: id.clone(),
-                from: self.me.clone(),
-                to: n.to.clone(),
-                kind: n.kind,
-                title: n.title,
-                state: TState::Held,
-                reason: None,
-                context_id: None,
-                parent: n.parent,
-                deadline_ms: deadline,
-                created_ms: now,
-                updated_ms: now,
-                messages: vec![message],
-                artifacts: Vec::new(),
-                act: n.act,
-                approval_ref: None,
-                sent_seq: Some(seq),
-                unread: false,
-            },
-        );
+        check_body(screen, &body)?;
+        let key = task_key(&me, &id);
+        let hash = hash_body(&body);
+        let task = Task {
+            id: id.clone(),
+            from: me,
+            to: n.to.clone(),
+            kind: n.kind,
+            title: n.title,
+            state: TState::Held,
+            reason: None,
+            context_id: None,
+            parent: n.parent,
+            deadline_ms: deadline,
+            created_ms: now,
+            updated_ms: now,
+            messages: vec![message],
+            artifacts: Vec::new(),
+            act: n.act,
+            approval_ref: None,
+            sent_seq: None,
+            unread: false,
+            hash,
+            cancel_requested: false,
+        };
+        self.add_bytes(task_bytes(&task))?;
+        let seq = match self.enqueue(&n.to, "task", &key, &body) {
+            Ok(s) => s,
+            Err(c) => {
+                self.bytes = self.bytes.saturating_sub(task_bytes(&task));
+                return Err(c);
+            }
+        };
+        let mut task = task;
+        task.sent_seq = Some(seq);
+        self.tasks.insert(key, task);
         self.note(
             now,
             "mesh.task.sent",
@@ -322,7 +493,7 @@ impl State {
     }
 
     fn side_of(&self, t: &Task) -> Side {
-        if t.from == self.me {
+        if t.from == self.core.me {
             Side::Sender
         } else {
             Side::Receiver
@@ -330,7 +501,7 @@ impl State {
     }
 
     fn other(&self, t: &Task) -> String {
-        if t.from == self.me {
+        if t.from == self.core.me {
             t.to.clone()
         } else {
             t.from.clone()
@@ -344,457 +515,314 @@ impl State {
         now: u64,
         task_id: &str,
         parts: Vec<Part>,
-        label: Label,
         to_state: Option<(TState, Option<String>)>,
     ) -> Result<(), &'static str> {
-        let t = self.tasks.get(task_id).ok_or("unknown-task")?.clone();
+        let key = self.key_of(task_id)?;
+        let t = self.tasks.get(&key).ok_or("unknown-task")?.clone();
         let peer = self.other(&t);
         if t.state.terminal() {
             return Err("task-finished");
         }
-        if !parts.is_empty() {
-            Self::check_parts(screen, "", &parts)?;
+        if t.messages.len() >= MAX_MESSAGES_PER_TASK && !parts.is_empty() {
+            return Err(code::RATE);
         }
         if let Some((s, r)) = &to_state {
             if self.side_of(&t) != Side::Receiver || !may_move(t.state, *s, Side::Receiver) {
                 return Err("state-not-yours-to-move");
             }
-            if let Some(r) = r {
-                Self::check_parts(screen, r, &[])?;
-                if r.len() > MAX_REASON {
-                    return Err(code::TOO_BIG);
-                }
+            if r.as_deref().is_some_and(|r| r.len() > MAX_REASON) {
+                return Err(code::TOO_BIG);
             }
         }
-        if !parts.is_empty() {
-            let message = Message {
-                id: new_id(now),
-                from: self.me.clone(),
-                ts_ms: now,
-                label,
-                parts,
-            };
-            self.enqueue(
-                &peer,
-                Kind::Message,
-                task_id,
-                Body::Message {
-                    message: message.clone(),
-                },
-            )?;
-            if let Some(tt) = self.tasks.get_mut(task_id) {
-                tt.messages.push(message);
+        let me = self.core.me.clone();
+        let message = (!parts.is_empty()).then(|| Message {
+            id: new_id(now),
+            from: me,
+            ts_ms: now,
+            label: Label::Fleet,
+            parts,
+            provenance: "self".into(),
+            untrusted: false,
+        });
+        let msg_body = message
+            .as_ref()
+            .map(|m| Body::Message { message: m.clone() });
+        let st_body = to_state.as_ref().map(|(s, r)| Body::Status {
+            state: *s,
+            reason: r.clone(),
+        });
+        for b in msg_body.iter().chain(st_body.iter()) {
+            check_body(screen, b)?;
+        }
+        if let Some(m) = &message {
+            let n: u64 = m.parts.iter().map(Part::size).sum::<usize>() as u64 + 64;
+            self.add_bytes(n)?;
+        }
+        if let Some(b) = &msg_body {
+            self.enqueue(&peer, "message", &key, b)?;
+        }
+        if let Some(b) = &st_body {
+            self.enqueue(&peer, "status", &key, b)?;
+        }
+        if let Some(tt) = self.tasks.get_mut(&key) {
+            if let Some(m) = message {
+                tt.messages.push(m);
+                tt.updated_ms = now;
+            }
+            tt.unread = false;
+            if let Some((s, r)) = &to_state {
+                tt.state = *s;
+                tt.reason = r.clone();
                 tt.updated_ms = now;
             }
         }
-        if let Some((s, r)) = to_state {
-            self.enqueue(
-                &peer,
-                Kind::Status,
-                task_id,
-                Body::Status {
-                    state: s,
-                    reason: r.clone(),
-                },
-            )?;
-            if let Some(tt) = self.tasks.get_mut(task_id) {
-                tt.state = s;
-                tt.reason = r;
-                tt.updated_ms = now;
-                tt.unread = false;
-            }
+        if let Some((s, _)) = to_state {
             self.note(
                 now,
                 "mesh.task.state",
-                Some(task_id),
+                Some(&t.id),
                 format!("state={}", s.name()),
             );
-        } else if let Some(tt) = self.tasks.get_mut(task_id) {
-            tt.unread = false;
         }
         Ok(())
     }
 
-    /// Ask the other side to stop. A cancel is a request: the receiver decides. A task still `held` is canceled here at once.
+    /// Ask the other side to stop. The sender's cancel is a **request**: the receiver decides (it may answer with a state, or not).
+    /// A task still `held` was never delivered and is canceled here at once. The receiver ending its own copy is its own authority.
     pub fn cancel(&mut self, now: u64, task_id: &str) -> Result<(), &'static str> {
-        let t = self.tasks.get(task_id).ok_or("unknown-task")?.clone();
+        let key = self.key_of(task_id)?;
+        let t = self.tasks.get(&key).ok_or("unknown-task")?.clone();
         if t.state.terminal() {
             return Err("task-finished");
         }
         let peer = self.other(&t);
         if self.side_of(&t) == Side::Receiver {
-            // the receiver ends its own copy and says so
             self.enqueue(
                 &peer,
-                Kind::Status,
-                task_id,
-                Body::Status {
+                "status",
+                &key,
+                &Body::Status {
                     state: TState::Canceled,
                     reason: None,
                 },
             )?;
-            if let Some(tt) = self.tasks.get_mut(task_id) {
+            if let Some(tt) = self.tasks.get_mut(&key) {
                 tt.state = TState::Canceled;
                 tt.updated_ms = now;
             }
         } else {
-            self.enqueue(&peer, Kind::Cancel, task_id, Body::Cancel)?;
-            if t.state == TState::Held {
-                if let Some(tt) = self.tasks.get_mut(task_id) {
+            self.enqueue(&peer, "cancel", &key, &Body::Cancel)?;
+            if let Some(tt) = self.tasks.get_mut(&key) {
+                tt.cancel_requested = true;
+                if t.state == TState::Held {
                     tt.state = TState::Canceled;
-                    tt.updated_ms = now;
                 }
+                tt.updated_ms = now;
             }
         }
-        self.note(now, "mesh.task.cancel", Some(task_id), String::new());
+        self.note(now, "mesh.task.cancel", Some(&t.id), String::new());
         Ok(())
     }
 
     /// Mark a task read.
     pub fn mark_read(&mut self, task_id: &str) {
-        if let Some(t) = self.tasks.get_mut(task_id) {
-            t.unread = false;
+        if let Ok(key) = self.key_of(task_id) {
+            if let Some(t) = self.tasks.get_mut(&key) {
+                t.unread = false;
+            }
         }
     }
 
-    /// Housekeeping: expire what is past its deadline (each side only what it owns) and forget old nonces and task ids.
-    pub fn tick(&mut self, now: u64) {
-        self.nonces.retain(|_, v| *v >= now);
-        self.seen_tasks
-            .retain(|_, s| s.ts_ms + SEEN_TASK_KEEP_MS >= now);
-        let due: Vec<(String, Side)> = self
-            .tasks
-            .values()
-            .filter(|t| !t.state.terminal() && t.deadline_ms <= now)
-            .map(|t| (t.id.clone(), self.side_of(t)))
-            .filter(|(id, side)| {
-                let st = self.tasks.get(id).map(|t| t.state);
-                matches!(
-                    (side, st),
-                    (Side::Sender, Some(TState::Held)) | (Side::Receiver, Some(_))
-                )
+    /// Whether [`State::tick`] would change anything at `now`. Lets a caller skip the write when it would not.
+    pub fn tick_needed(&self, now: u64) -> bool {
+        self.core.nonces.values().any(|v| *v < now)
+            || self.tasks.values().any(|t| {
+                (!t.state.terminal() && t.deadline_ms <= now && self.expirable(t))
+                    || (t.state.terminal() && t.updated_ms.saturating_add(RETAIN_MS) <= now)
             })
+            || self.tombs.len() > MAX_TOMBS
+    }
+
+    fn expirable(&self, t: &Task) -> bool {
+        matches!(
+            (self.side_of(t), t.state),
+            (Side::Sender, TState::Held) | (Side::Receiver, _)
+        )
+    }
+
+    /// Housekeeping: expire what is past its deadline (each side only what it owns), forget old nonces, and reduce long-finished tasks
+    /// to tombstones so the cap measures what is open.
+    pub fn tick(&mut self, now: u64) {
+        self.core.tick(now);
+        let due: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|(_, t)| !t.state.terminal() && t.deadline_ms <= now && self.expirable(t))
+            .map(|(k, _)| k.clone())
             .collect();
-        for (id, side) in due {
-            let peer = self
-                .tasks
-                .get(&id)
-                .map(|t| self.other(t))
-                .unwrap_or_default();
-            if let Some(t) = self.tasks.get_mut(&id) {
-                t.state = TState::Failed;
-                t.reason = Some(code::EXPIRED.to_string());
-                t.updated_ms = now;
+        for key in due {
+            let Some(t) = self.tasks.get(&key).cloned() else {
+                continue;
+            };
+            let side = self.side_of(&t);
+            let peer = self.other(&t);
+            if let Some(tt) = self.tasks.get_mut(&key) {
+                tt.state = TState::Failed;
+                tt.reason = Some(code::EXPIRED.to_string());
+                tt.updated_ms = now;
             }
             if side == Side::Receiver {
                 let _ = self.enqueue(
                     &peer,
-                    Kind::Status,
-                    &id,
-                    Body::Status {
+                    "status",
+                    &key,
+                    &Body::Status {
                         state: TState::Failed,
                         reason: Some(code::EXPIRED.into()),
                     },
                 );
             }
-            self.note(now, "mesh.task.expired", Some(&id), String::new());
+            self.note(now, "mesh.task.expired", Some(&t.id), String::new());
         }
+        let old: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|(_, t)| t.state.terminal() && t.updated_ms.saturating_add(RETAIN_MS) <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in old {
+            if let Some(t) = self.tasks.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(task_bytes(&t));
+                self.tombs.insert(
+                    key,
+                    Tomb {
+                        hash: t.hash,
+                        ts_ms: now,
+                    },
+                );
+            }
+        }
+        while self.tombs.len() > MAX_TOMBS {
+            let oldest = self
+                .tombs
+                .iter()
+                .min_by_key(|(_, t)| t.ts_ms)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => {
+                    self.tombs.remove(&k);
+                }
+                None => break,
+            }
+        }
+        self.settle_held();
     }
 
-    // ---- what to send -------------------------------------------------------------------------------------------
-
-    /// The envelopes to send to a peer now, unsigned, with plain bodies: a Hello first (it carries the acknowledgement and the
-    /// lowest sequence number still available), then a Resync if one is wanted, then the oldest unacknowledged messages, at
-    /// most a window's worth, oldest first. Read-only: the node signs them fresh on every attempt.
-    pub fn drafts(&self, peer: &str, now: u64) -> Vec<(Envelope, Vec<u8>)> {
-        let Some(p) = self.peers.get(peer) else {
-            return Vec::new();
-        };
-        let ack = p.next_in.saturating_sub(1);
-        let mk = |kind: Kind, seq: u64, task_id: &str, id: String, body: &Body| {
-            let plain = serde_json::to_vec(body).unwrap_or_default();
-            let mut nonce = [0u8; 16];
-            let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce);
-            (
-                Envelope {
-                    version: ENVELOPE_VERSION,
-                    kind,
-                    from: self.me.clone(),
-                    to: p.name.clone(),
-                    receiver_fp: p.seal_fingerprint(),
-                    sender_epoch: self.epoch,
-                    receiver_epoch: p.epoch,
-                    incarnation: self.incarnation,
-                    seq,
-                    ack_seq: ack,
-                    id,
-                    task_id: task_id.to_string(),
-                    ts_ms: now,
-                    valid_until_ms: now + 5 * 60 * 1000,
-                    nonce: nonce.to_vec(),
-                    body: Vec::new(),
-                },
-                plain,
-            )
-        };
-        let floor = p.outbox.first().map_or(p.out_seq + 1, |o| o.seq);
-        let mut out = vec![mk(
-            Kind::Hello,
-            0,
-            "",
-            format!("h-{}", new_id(now)),
-            &Body::Hello { out_floor: floor },
-        )];
-        if p.resync_wanted {
-            out.push(mk(
-                Kind::Resync,
-                0,
-                "",
-                format!("r-{}", new_id(now)),
-                &Body::Resync {
-                    have: p.next_in.saturating_sub(1),
-                },
-            ));
+    /// A task this end sent is `submitted` once the peer has acknowledged its envelope (it has left the outbox).
+    pub fn settle_held(&mut self) {
+        let me = self.core.me.clone();
+        let delivered: Vec<String> =
+            self.tasks
+                .iter()
+                .filter(|(_, t)| t.from == me && t.state == TState::Held)
+                .filter(|(_, t)| {
+                    let Some(seq) = t.sent_seq else { return false };
+                    self.core.links.get(&t.to).is_some_and(|l| {
+                        l.halted.is_none() && !l.outbox.iter().any(|o| o.seq == seq)
+                    })
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+        for k in delivered {
+            if let Some(t) = self.tasks.get_mut(&k) {
+                t.state = TState::Submitted;
+                t.sent_seq = None;
+            }
         }
-        for o in p.outbox.iter().take(WINDOW as usize) {
-            out.push(mk(
-                o.kind,
-                o.seq,
-                &o.task_id,
-                format!("{}-{}-{}", self.me, self.incarnation, o.seq),
-                &o.body,
-            ));
-        }
-        out
     }
 
     // ---- receiving ----------------------------------------------------------------------------------------------
 
-    fn refuse(&mut self, now: u64, from: &str, e: &Envelope, why: &str) -> Verdict {
-        self.note(
+    /// Take a batch from a peer through the channel's fixed checks and apply what is deliverable, in one pass. The caller writes the
+    /// result once.
+    pub fn receive_round(
+        &mut self,
+        cx: &Crypto<'_>,
+        screen: &dyn Screen,
+        now: u64,
+        msgs: &[crate::channel::wire::Sealed],
+    ) -> RoundReport {
+        let r = receive_round(
+            &mut self.core,
+            &PROFILE,
+            cx,
+            &|k: &str, e: &[u8], p: &[u8]| admit(screen, k, e, p),
             now,
-            "mesh.refused",
-            if e.task_id.is_empty() {
-                None
-            } else {
-                Some(&e.task_id)
-            },
-            format!("from={from} kind={} code={why}", e.kind.name()),
+            msgs,
         );
-        Verdict::Refused(why.to_string())
-    }
-
-    /// Check an envelope and, when every check passes, apply it. The order is fixed and nothing is acted on until all pass:
-    /// shape and version, addressing, the signature (against the pinned key), epochs, validity (this clock), the seal, the nonce,
-    /// the incarnation, the acknowledgement, then the sequence window and the effect.
-    pub fn receive(
-        &mut self,
-        verifier: &dyn Verifier,
-        sealer: &dyn Sealer,
-        screen: &dyn Screen,
-        now: u64,
-        msg: &Sealed,
-    ) -> Verdict {
-        let e = &msg.envelope;
-        if let Err(x) = e.check() {
-            return self.refuse(now, "?", e, &x.to_string());
+        let mut r = r;
+        let deliveries = std::mem::take(&mut r.deliveries);
+        for d in &deliveries {
+            self.apply(now, d);
         }
-        if e.to != self.me {
-            return self.refuse(now, "?", e, "not-for-me");
-        }
-        let from = e.from.clone();
-        let Some(peer) = self.peers.get(&from) else {
-            return self.refuse(now, &from, e, "unknown-sender");
-        };
-        if e.receiver_fp != self.seal_fingerprint() {
-            return self.refuse(now, &from, e, "wrong-receiver");
-        }
-        if !verifier.verify(&peer.sign_public, &e.canonical(), &msg.signature) {
-            return self.refuse(now, &from, e, "bad-signature");
-        }
-        if e.receiver_epoch != self.epoch || e.sender_epoch != peer.epoch {
-            return self.refuse(now, &from, e, "epoch");
-        }
-        if e.valid_until_ms < now {
-            return self.refuse(now, &from, e, "envelope-expired");
-        }
-        if e.ts_ms > now + SKEW_MS {
-            return self.refuse(now, &from, e, "from-the-future");
-        }
-        let nonce_hex = to_hex(&e.nonce);
-        if self.nonces.contains_key(&nonce_hex) {
-            return Verdict::Duplicate;
-        }
-        let Ok(plain) = sealer.open(&e.aad(), &e.body) else {
-            return self.refuse(now, &from, e, "unopenable");
-        };
-        let Ok(body) = serde_json::from_slice::<Body>(&plain) else {
-            return self.refuse(now, &from, e, "malformed");
-        };
-        let kind_ok = matches!(
-            (&body, e.kind),
-            (Body::Hello { .. }, Kind::Hello)
-                | (Body::Task { .. }, Kind::Task)
-                | (Body::Message { .. }, Kind::Message)
-                | (Body::Status { .. }, Kind::Status)
-                | (Body::Artifact { .. }, Kind::Artifact)
-                | (Body::Cancel, Kind::Cancel)
-                | (Body::Resync { .. }, Kind::Resync)
-        );
-        if !kind_ok {
-            return self.refuse(now, &from, e, "kind-mismatch");
-        }
-        // incarnation: a lower one is a replay of an older life; a higher one is accepted only through a Hello
-        let cur = self.peers.get(&from).map_or(0, |p| p.peer_incarnation);
-        if e.incarnation < cur {
-            return self.refuse(now, &from, e, "stale-incarnation");
-        }
-        if e.incarnation > cur && e.kind != Kind::Hello {
-            return self.refuse(now, &from, e, "hello-needed");
-        }
-        if let Body::Hello { .. } = &body {
-            let last = self.peers.get(&from).map_or(0, |p| p.last_hello_ms);
-            if e.ts_ms < last {
-                return self.refuse(now, &from, e, "stale-hello");
-            }
-        }
-        let out_seq = self.peers.get(&from).map_or(0, |p| p.out_seq);
-        if e.ack_seq > out_seq {
-            return self.refuse(now, &from, e, "ack-ahead");
-        }
-        // every check passed
-        self.nonces.insert(nonce_hex, e.valid_until_ms);
-        self.apply_ack(&from, e.ack_seq, now);
-        if let Some(p) = self.peers.get_mut(&from) {
-            p.last_seen_ms = now;
-            if e.incarnation > p.peer_incarnation {
-                p.peer_incarnation = e.incarnation;
-                p.held_in.clear();
-                p.next_in = 1;
-            }
-        }
-        match body {
-            Body::Hello { out_floor } => {
-                if let Some(p) = self.peers.get_mut(&from) {
-                    p.last_hello_ms = e.ts_ms;
-                    // a sender that has nothing below this number: what we have not applied by then is gone (state loss)
-                    if out_floor > p.next_in
-                        && e.incarnation == p.peer_incarnation
-                        && p.held_in.is_empty()
-                        && p.next_in == 1
-                    {
-                        p.next_in = out_floor;
-                    }
-                }
-                Verdict::Applied
-            }
-            Body::Resync { have } => {
-                self.note(now, "mesh.resync", None, format!("from={from} have={have}"));
-                Verdict::Applied
-            }
-            seqd => self.sequenced(screen, now, &from, e, seqd),
-        }
-    }
-
-    fn apply_ack(&mut self, from: &str, ack: u64, _now: u64) {
-        let mut delivered: Vec<String> = Vec::new();
-        if let Some(p) = self.peers.get_mut(from) {
-            p.outbox.retain(|o| {
-                let gone = o.seq <= ack;
-                if gone && o.kind == Kind::Task {
-                    delivered.push(o.task_id.clone());
-                }
-                !gone
-            });
-        }
-        for id in delivered {
-            if let Some(t) = self.tasks.get_mut(&id) {
-                if t.state == TState::Held && t.from == self.me {
-                    t.state = TState::Submitted;
-                    t.sent_seq = None;
-                }
-            }
-        }
-    }
-
-    fn sequenced(
-        &mut self,
-        screen: &dyn Screen,
-        now: u64,
-        from: &str,
-        e: &Envelope,
-        body: Body,
-    ) -> Verdict {
-        let hash = hash_body(&body);
-        let Some(p) = self.peers.get_mut(from) else {
-            return Verdict::Refused("unknown-sender".into());
-        };
-        if e.seq < p.next_in {
-            p.dups += 1;
-            return Verdict::Duplicate;
-        }
-        if e.seq >= p.next_in + WINDOW {
-            p.resync_wanted = true;
-            return self.refuse(now, from, e, "gap-beyond-window");
-        }
-        if let Some(h) = p.held_in.get(&e.seq) {
-            if h.hash == hash {
-                p.dups += 1;
-                return Verdict::Duplicate;
-            }
-            return self.refuse(now, from, e, "seq-conflict");
-        }
-        p.held_in.insert(
-            e.seq,
-            Held {
-                task_id: e.task_id.clone(),
-                body,
-                hash,
-            },
-        );
-        p.resync_wanted = false;
-        let mut applied = 0;
-        loop {
-            let next = self.peers.get(from).map_or(0, |p| p.next_in);
-            let Some(h) = self
-                .peers
-                .get_mut(from)
-                .and_then(|p| p.held_in.remove(&next))
-            else {
-                break;
-            };
-            if let Some(p) = self.peers.get_mut(from) {
-                p.next_in += 1;
-            }
-            self.apply(screen, now, from, &h);
-            applied += 1;
-        }
-        if applied > 0 {
-            Verdict::Applied
-        } else {
-            Verdict::Buffered
-        }
+        self.settle_held();
+        r.deliveries = deliveries;
+        r
     }
 
     fn rate_ok(&mut self, from: &str, now: u64, is_task: bool) -> bool {
-        let Some(p) = self.peers.get_mut(from) else {
-            return false;
-        };
-        p.recent.retain(|(t, _)| *t + 60_000 > now);
-        let (tasks, all) = (p.recent.iter().filter(|(_, k)| *k).count(), p.recent.len());
+        let recent = self.recent.entry(from.to_string()).or_default();
+        recent.retain(|(t, _)| t.saturating_add(60_000) > now);
+        let (tasks, all) = (recent.iter().filter(|(_, k)| *k).count(), recent.len());
         if (is_task && tasks >= NEW_TASKS_PER_MIN) || all >= MESSAGES_PER_MIN {
             return false;
         }
-        p.recent.push((now, is_task));
+        recent.push((now, is_task));
         true
     }
 
-    fn tell_status(&mut self, peer: &str, task_id: &str, state: TState, reason: Option<String>) {
-        let _ = self.enqueue(peer, Kind::Status, task_id, Body::Status { state, reason });
+    fn tell_status(&mut self, peer: &str, key: &str, state: TState, reason: Option<String>) {
+        let _ = self.enqueue(peer, "status", key, &Body::Status { state, reason });
     }
 
-    fn apply(&mut self, screen: &dyn Screen, now: u64, from: &str, h: &Held) {
-        match &h.body {
+    /// Stamp a message a peer sent: this end decides what it is, never the sender. A peer's text is untrusted data whatever it says
+    /// it is; the sender's word is kept only as what it claimed.
+    fn stamp(m: &Message, from: &str) -> Message {
+        Message {
+            provenance: format!("peer:{from}"),
+            untrusted: true,
+            ..m.clone()
+        }
+    }
+
+    fn apply(&mut self, now: u64, d: &Delivery) {
+        let Some(ext) = std::str::from_utf8(&d.ext).ok().and_then(split_key) else {
+            return;
+        };
+        let (origin, id) = (ext.0.to_string(), ext.1.to_string());
+        let key = task_key(&origin, &id);
+        let from = d.from.clone();
+        let plain = match &d.body {
+            Ok(p) => p,
+            Err(c) => {
+                // refused by the admission screen: nothing but the key, the kind and the code is kept
+                if d.kind == "task" && origin == from {
+                    self.reject_stub(now, &from, &key, &id, &d.hash, c);
+                } else {
+                    self.note(
+                        now,
+                        "mesh.message.refused",
+                        Some(&id),
+                        format!("from={from} kind={} code={c}", d.kind),
+                    );
+                }
+                return;
+            }
+        };
+        let Ok(body) = serde_json::from_slice::<Body>(plain) else {
+            return;
+        };
+        match body {
             Body::Task {
                 kind,
                 title,
@@ -802,155 +830,187 @@ impl State {
                 parent,
                 deadline_ms,
                 act,
-                approval_ref,
                 message,
-            } => self.apply_task(
-                screen,
-                now,
-                from,
-                &h.task_id,
-                &h.hash,
-                (
-                    *kind,
-                    title,
-                    context_id,
-                    parent,
-                    *deadline_ms,
-                    act,
-                    approval_ref,
-                    message,
-                ),
-            ),
-            Body::Message { message } => {
-                let ok = self.tasks.get(&h.task_id).is_some_and(|t| {
-                    !t.state.terminal()
-                        && (t.from == from || t.to == from)
-                        && !t.messages.iter().any(|m| m.id == message.id)
-                });
-                if !ok {
+                ..
+            } => {
+                if origin != from {
                     self.note(
                         now,
-                        "mesh.message.dropped",
-                        Some(&h.task_id),
-                        format!("from={from}"),
+                        "mesh.task.refused",
+                        Some(&id),
+                        format!("from={from} code=sender-mismatch"),
                     );
                     return;
                 }
-                let refusal = if !self.rate_ok(from, now, false) {
-                    Some(code::RATE)
-                } else if message.from != from {
-                    Some("sender-mismatch")
-                } else {
-                    Self::check_parts(screen, "", &message.parts).err()
-                };
-                if let Some(c) = refusal {
-                    self.note(
-                        now,
-                        "mesh.message.refused",
-                        Some(&h.task_id),
-                        format!("from={from} code={c}"),
-                    );
-                    let st = self
-                        .tasks
-                        .get(&h.task_id)
-                        .map_or(TState::Working, |t| t.state);
-                    self.tell_status(from, &h.task_id, st, Some(c.to_string()));
-                    return;
-                }
-                if let Some(t) = self.tasks.get_mut(&h.task_id) {
-                    t.messages.push(message.clone());
-                    t.updated_ms = now;
-                    t.unread = true;
-                }
+                self.apply_task(
+                    now,
+                    &from,
+                    &key,
+                    &id,
+                    &d.hash,
+                    TaskIn {
+                        kind,
+                        title,
+                        context_id,
+                        parent,
+                        deadline_ms,
+                        act,
+                        message,
+                    },
+                );
             }
+            Body::Message { message } => self.apply_message(now, &from, &key, &id, &message),
             Body::Status { state, reason } => {
-                self.apply_status(screen, now, from, &h.task_id, *state, reason.clone())
+                self.apply_status(now, &from, &key, &id, state, reason)
             }
-            Body::Artifact { artifact } => {
-                let ok = self
-                    .tasks
-                    .get(&h.task_id)
-                    .is_some_and(|t| t.from == self.me && t.to == from);
-                let bad = Self::check_parts(screen, &artifact.name, &artifact.parts).is_err()
-                    || *artifact
-                        != Artifact::new(&artifact.id, &artifact.name, artifact.parts.clone());
-                if !ok || bad {
-                    self.note(
-                        now,
-                        "mesh.artifact.refused",
-                        Some(&h.task_id),
-                        format!("from={from}"),
-                    );
-                    return;
-                }
-                if let Some(t) = self.tasks.get_mut(&h.task_id) {
-                    if !t.artifacts.iter().any(|a| a.id == artifact.id) {
-                        t.artifacts.push(artifact.clone());
-                    }
-                    t.updated_ms = now;
-                    t.unread = true;
-                }
-            }
-            Body::Cancel => {
-                let Some(t) = self.tasks.get(&h.task_id).cloned() else {
-                    return;
-                };
-                if t.to != self.me || t.from != from {
-                    return;
-                }
-                if t.state.terminal() {
-                    self.tell_status(from, &h.task_id, t.state, Some("too-late".into()));
-                } else {
-                    if let Some(tt) = self.tasks.get_mut(&h.task_id) {
-                        tt.state = TState::Canceled;
-                        tt.updated_ms = now;
-                        tt.unread = true;
-                    }
-                    self.tell_status(from, &h.task_id, TState::Canceled, None);
-                    self.note(
-                        now,
-                        "mesh.task.state",
-                        Some(&h.task_id),
-                        "state=canceled".into(),
-                    );
-                }
-            }
-            Body::Hello { .. } | Body::Resync { .. } => {}
+            Body::Artifact { artifact } => self.apply_artifact(now, &from, &key, &id, &artifact),
+            Body::Cancel => self.apply_cancel(now, &from, &key, &id),
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn apply_task(
-        &mut self,
-        screen: &dyn Screen,
-        now: u64,
-        from: &str,
-        task_id: &str,
-        hash: &str,
-        t: (
-            TaskKind,
-            &String,
-            &Option<String>,
-            &Option<String>,
-            u64,
-            &Option<Act>,
-            &Option<String>,
-            &Message,
-        ),
-    ) {
-        let (kind, title, context_id, parent, deadline, act, approval_ref, message) = t;
-        let key = format!("{from}/{task_id}");
-        if let Some(seen) = self.seen_tasks.get(&key) {
-            if seen.hash == hash {
-                return;
-            }
-            // the same id with other content: refused, and an alert (no box may squat another's task id)
+    /// A task refused for what it said: the id, the kind and the code, and nothing it said.
+    fn reject_stub(&mut self, now: u64, from: &str, key: &str, id: &str, hash: &str, c: &str) {
+        if self.tasks.contains_key(key) || self.tombs.contains_key(key) {
+            return;
+        }
+        self.tasks.insert(
+            key.to_string(),
+            Task {
+                id: id.to_string(),
+                from: from.to_string(),
+                to: self.core.me.clone(),
+                // the body is gone, so the kind it asked for is not known; this is a placeholder, and the state says why
+                kind: TaskKind::Note,
+                title: "[refused]".into(),
+                state: TState::Rejected,
+                reason: Some(c.to_string()),
+                context_id: None,
+                parent: None,
+                deadline_ms: now,
+                created_ms: now,
+                updated_ms: now,
+                messages: Vec::new(),
+                artifacts: Vec::new(),
+                act: None,
+                approval_ref: None,
+                sent_seq: None,
+                unread: true,
+                hash: hash.to_string(),
+                cancel_requested: false,
+            },
+        );
+        self.note(
+            now,
+            "mesh.task.refused",
+            Some(id),
+            format!("from={from} kind=task code={c}"),
+        );
+        self.tell_status(from, key, TState::Rejected, Some(c.to_string()));
+    }
+
+    fn apply_message(&mut self, now: u64, from: &str, key: &str, id: &str, message: &Message) {
+        let ok = self.tasks.get(key).is_some_and(|t| {
+            !t.state.terminal()
+                && (t.from == from || t.to == from)
+                && !t.messages.iter().any(|m| m.id == message.id)
+                && t.messages.len() < MAX_MESSAGES_PER_TASK
+        });
+        if !ok {
             self.note(
                 now,
-                "mesh.task.conflict",
-                Some(task_id),
+                "mesh.message.dropped",
+                Some(id),
                 format!("from={from}"),
             );
+            return;
+        }
+        let refusal = if !self.rate_ok(from, now, false) {
+            Some(code::RATE)
+        } else if message.from != from {
+            Some("sender-mismatch")
+        } else {
+            let n = message.parts.iter().map(Part::size).sum::<usize>() as u64 + 64;
+            self.add_bytes(n).err()
+        };
+        if let Some(c) = refusal {
+            self.note(
+                now,
+                "mesh.message.refused",
+                Some(id),
+                format!("from={from} code={c}"),
+            );
+            let st = self.tasks.get(key).map_or(TState::Working, |t| t.state);
+            self.tell_status(from, key, st, Some(c.to_string()));
+            return;
+        }
+        if let Some(t) = self.tasks.get_mut(key) {
+            t.messages.push(Self::stamp(message, from));
+            t.updated_ms = now;
+            t.unread = true;
+        }
+    }
+
+    fn apply_artifact(&mut self, now: u64, from: &str, key: &str, id: &str, artifact: &Artifact) {
+        let ok = self.tasks.get(key).is_some_and(|t| {
+            t.from == self.core.me && t.to == from && t.artifacts.len() < MAX_ARTIFACTS_PER_TASK
+        });
+        let bad = *artifact != Artifact::new(&artifact.id, &artifact.name, artifact.parts.clone());
+        let n = artifact.parts.iter().map(Part::size).sum::<usize>() as u64 + 128;
+        if !ok || bad || self.add_bytes(n).is_err() {
+            self.note(
+                now,
+                "mesh.artifact.refused",
+                Some(id),
+                format!("from={from}"),
+            );
+            return;
+        }
+        if let Some(t) = self.tasks.get_mut(key) {
+            if !t.artifacts.iter().any(|a| a.id == artifact.id) {
+                t.artifacts.push(artifact.clone());
+            }
+            t.updated_ms = now;
+            t.unread = true;
+        }
+    }
+
+    /// A cancel is a request. The receiver records it and tells the sender it arrived; the task ends only when the receiver moves it.
+    fn apply_cancel(&mut self, now: u64, from: &str, key: &str, id: &str) {
+        let Some(t) = self.tasks.get(key).cloned() else {
+            return;
+        };
+        if t.to != self.core.me || t.from != from {
+            return;
+        }
+        if t.state.terminal() {
+            self.tell_status(from, key, t.state, Some("too-late".into()));
+            return;
+        }
+        if let Some(tt) = self.tasks.get_mut(key) {
+            tt.cancel_requested = true;
+            tt.updated_ms = now;
+            tt.unread = true;
+        }
+        self.tell_status(from, key, t.state, Some("cancel-requested".into()));
+        self.note(
+            now,
+            "mesh.task.cancel-requested",
+            Some(id),
+            format!("from={from}"),
+        );
+    }
+
+    fn apply_task(&mut self, now: u64, from: &str, key: &str, id: &str, hash: &str, t: TaskIn) {
+        if let Some(existing) = self
+            .tasks
+            .get(key)
+            .map(|x| x.hash.clone())
+            .or_else(|| self.tombs.get(key).map(|x| x.hash.clone()))
+        {
+            if existing != hash {
+                // the same key with other content: refused, and an alert (no end may squat a task id)
+                self.note(now, "mesh.task.conflict", Some(id), format!("from={from}"));
+            }
             return;
         }
         let open = self
@@ -962,14 +1022,17 @@ impl State {
             Some(code::JOURNAL_FULL)
         } else if open >= MAX_OPEN_TASKS || !self.rate_ok(from, now, true) {
             Some(code::RATE)
-        } else if message.from != from {
+        } else if t.message.from != from {
             Some("sender-mismatch")
-        } else if let Err(c) = Self::check_parts(screen, title, &message.parts) {
-            Some(c)
-        } else if deadline <= now {
+        } else if t.deadline_ms <= now {
             Some(code::EXPIRED)
+        } else if self
+            .add_bytes(t.message.parts.iter().map(Part::size).sum::<usize>() as u64 + 256)
+            .is_err()
+        {
+            Some(code::JOURNAL_FULL)
         } else {
-            match (kind, act) {
+            match (t.kind, &t.act) {
                 (TaskKind::LaptopAct, Some(a)) => match a.valid() {
                     Err(c) => Some(c),
                     Ok(()) if a.is_production() => Some(code::PRODUCTION),
@@ -981,117 +1044,85 @@ impl State {
                 _ => None,
             }
         };
-        self.seen_tasks.insert(
-            key,
-            Seen {
-                hash: hash.to_string(),
-                ts_ms: now,
-            },
-        );
-        if reject == Some(code::JOURNAL_FULL) {
-            self.note(
-                now,
-                "mesh.task.refused",
-                Some(task_id),
-                format!("from={from} code={}", code::JOURNAL_FULL),
-            );
-            self.tell_status(
-                from,
-                task_id,
-                TState::Rejected,
-                Some(code::JOURNAL_FULL.into()),
-            );
-            return;
-        }
-        let refused_for_content =
-            matches!(reject, Some(c) if c == code::KEY_SHAPED || c == code::TOO_BIG);
         let (state, reason) = match reject {
             Some(c) => (TState::Rejected, Some(c.to_string())),
             None => (TState::Submitted, None),
         };
-        self.tasks.insert(
-            task_id.to_string(),
-            Task {
-                id: task_id.to_string(),
-                from: from.to_string(),
-                to: self.me.clone(),
-                kind,
-                // refused content is never stored
-                title: if refused_for_content {
-                    "[refused]".into()
-                } else {
-                    title.clone()
-                },
-                state,
-                reason: reason.clone(),
-                context_id: context_id.clone(),
-                parent: parent.clone(),
-                deadline_ms: deadline,
-                created_ms: now,
-                updated_ms: now,
-                messages: if reject.is_some() {
-                    Vec::new()
-                } else {
-                    vec![message.clone()]
-                },
-                artifacts: Vec::new(),
-                act: if reject.is_some() { None } else { act.clone() },
-                approval_ref: None,
-                sent_seq: None,
-                unread: true,
+        // a refused task keeps nothing the sender said beyond its id and the code
+        let task = Task {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: self.core.me.clone(),
+            kind: t.kind,
+            title: if reject.is_some() {
+                "[refused]".into()
+            } else {
+                t.title
             },
-        );
-        let _ = approval_ref;
+            state,
+            reason: reason.clone(),
+            context_id: if reject.is_some() { None } else { t.context_id },
+            parent: if reject.is_some() { None } else { t.parent },
+            deadline_ms: t.deadline_ms,
+            created_ms: now,
+            updated_ms: now,
+            messages: if reject.is_some() {
+                Vec::new()
+            } else {
+                vec![Self::stamp(&t.message, from)]
+            },
+            artifacts: Vec::new(),
+            act: if reject.is_some() { None } else { t.act },
+            approval_ref: None,
+            sent_seq: None,
+            unread: true,
+            hash: hash.to_string(),
+            cancel_requested: false,
+        };
+        self.tasks.insert(key.to_string(), task);
         match &reason {
             Some(c) => {
                 self.note(
                     now,
                     "mesh.task.refused",
-                    Some(task_id),
-                    format!("from={from} kind={} code={c}", kind.name()),
+                    Some(id),
+                    format!("from={from} kind={} code={c}", t.kind.name()),
                 );
-                self.tell_status(from, task_id, TState::Rejected, reason);
+                self.tell_status(from, key, TState::Rejected, reason);
             }
             None => self.note(
                 now,
                 "mesh.task.received",
-                Some(task_id),
-                format!("from={from} kind={}", kind.name()),
+                Some(id),
+                format!("from={from} kind={}", t.kind.name()),
             ),
         }
     }
 
     fn apply_status(
         &mut self,
-        screen: &dyn Screen,
         now: u64,
         from: &str,
-        task_id: &str,
+        key: &str,
+        id: &str,
         state: TState,
         reason: Option<String>,
     ) {
-        let Some(t) = self.tasks.get(task_id).cloned() else {
+        let Some(t) = self.tasks.get(key).cloned() else {
             return;
         };
         // only the receiver of a task reports its state
-        if t.from != self.me || t.to != from {
-            self.note(
-                now,
-                "mesh.status.refused",
-                Some(task_id),
-                format!("from={from}"),
-            );
+        if t.from != self.core.me || t.to != from {
+            self.note(now, "mesh.status.refused", Some(id), format!("from={from}"));
             return;
         }
-        let reason = reason
-            .filter(|r| r.len() <= MAX_REASON && screen.find(r).is_none())
-            .map(|r| super::printable(&r));
+        let reason = reason.map(|r| super::printable_line(&r));
         let mut cur = t.state;
         if cur == TState::Held {
             cur = TState::Submitted;
         }
         if state == cur {
-            if let Some(tt) = self.tasks.get_mut(task_id) {
+            if let Some(tt) = self.tasks.get_mut(key) {
                 tt.state = cur;
                 tt.reason = reason;
                 tt.unread = true;
@@ -1102,12 +1133,12 @@ impl State {
             self.note(
                 now,
                 "mesh.status.refused",
-                Some(task_id),
+                Some(id),
                 format!("from={from} to={}", state.name()),
             );
             return;
         }
-        if let Some(tt) = self.tasks.get_mut(task_id) {
+        if let Some(tt) = self.tasks.get_mut(key) {
             tt.state = state;
             tt.reason = reason;
             tt.sent_seq = None;
@@ -1117,7 +1148,7 @@ impl State {
         self.note(
             now,
             "mesh.task.state",
-            Some(task_id),
+            Some(id),
             format!("state={}", state.name()),
         );
     }
@@ -1126,10 +1157,17 @@ impl State {
 
     /// Why a task is where it is, in a few plain sentences that name the next actor.
     pub fn why(&self, task_id: &str, now: u64) -> Vec<String> {
-        let Some(t) = self.tasks.get(task_id) else {
-            return vec!["There is no such task.".into()];
+        let t = match self.find(task_id) {
+            Ok(t) => t,
+            Err(FindError::NoSuchTask) => return vec!["There is no such task.".into()],
+            Err(FindError::Ambiguous(keys)) => {
+                return vec![format!(
+                    "More than one task has that id: name it as one of {}.",
+                    keys.join(", ")
+                )]
+            }
         };
-        let me_sender = t.from == self.me;
+        let me_sender = t.from == self.core.me;
         let peer = if me_sender { &t.to } else { &t.from };
         let mut out = vec![format!(
             "Task {} is {}. It was {} {}.",
@@ -1140,15 +1178,25 @@ impl State {
             } else {
                 "received from"
             },
-            peer
+            super::printable_line(peer)
         )];
         if let Some(r) = &t.reason {
-            out.push(format!("Reason: {r}."));
+            out.push(format!("Reason: {}.", super::printable_line(r)));
         }
-        let unsent = self
-            .peers
+        let unsent = self.core.links.get(peer).map_or(0, |l| {
+            l.outbox
+                .iter()
+                .filter(|o| o.ext == task_key(&t.from, &t.id).as_bytes())
+                .count()
+        });
+        if self
+            .core
+            .links
             .get(peer)
-            .map_or(0, |p| p.outbox.iter().filter(|o| o.task_id == t.id).count());
+            .is_some_and(|l| l.halted.is_some())
+        {
+            out.push("The channel to this peer is halted: a store looks restored from a backup. Run `ozbox tasks restored` on the end that was restored.".into());
+        }
         match t.state {
             TState::Held => out.push(format!(
                 "It has not been acknowledged by {peer} yet ({unsent} message(s) waiting to be delivered). Next: run `ozbox tasks sync` while {peer} is reachable."
@@ -1161,7 +1209,7 @@ impl State {
             TState::Working | TState::InputRequired => out.push(if t.state == TState::InputRequired {
                 "It is waiting for an answer.".into()
             } else {
-                format!("{} is working on it.", if me_sender { peer } else { "You are" })
+                format!("{} is working on it.", if me_sender { peer.as_str() } else { "You are" })
             }),
             TState::ApprovalRequired => out.push("It waits for an approval decided by a passkey; no approval path to this endpoint exists in this release.".into()),
             TState::Rejected => out.push(match t.reason.as_deref() {
@@ -1172,6 +1220,13 @@ impl State {
             }),
             _ => {}
         }
+        if t.cancel_requested && !t.state.terminal() {
+            out.push(if me_sender {
+                format!("You asked {peer} to stop. A cancel is a request: it stops when {peer} says so.")
+            } else {
+                format!("{peer} asked you to stop. Answer with `ozbox tasks reply --state canceled` to stop, or carry on.")
+            });
+        }
         if !t.state.terminal() && t.deadline_ms > now {
             out.push(format!(
                 "It expires in about {} minute(s).",
@@ -1180,4 +1235,24 @@ impl State {
         }
         out
     }
+}
+
+/// What changed when a peer was pinned, for the audit line and the person's screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinChange {
+    pub new: bool,
+    pub keys_changed: bool,
+    pub epoch_changed: bool,
+    pub via_changed: bool,
+    pub via: Vec<String>,
+}
+
+struct TaskIn {
+    kind: TaskKind,
+    title: String,
+    context_id: Option<String>,
+    parent: Option<String>,
+    deadline_ms: u64,
+    act: Option<Act>,
+    message: Message,
 }

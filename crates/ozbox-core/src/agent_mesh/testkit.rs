@@ -1,72 +1,20 @@
-//! Test doubles: a fake sealer (reversible, checks the receiver), a screen, an audit sink, and a network that can drop,
-//! duplicate and reorder. Signatures are real Ed25519.
+//! Test doubles for the mesh: an endpoint with its own temp store and keys on a shared clock, a screen, and a network that can drop,
+//! duplicate and reorder. Signatures are real Ed25519; the sealer is the channel's fake unless a test asks for the real one.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::sync::Mutex;
 
 use ring::digest::{digest, SHA256};
 
-use super::crypto::{self, RingSigner, RingVerifier};
-use super::model::{Label, Part};
-use super::node::Node;
+use super::model::{Label, Part, TaskKind};
+use super::node::{Node, Transport};
 use super::state::{NewTask, State};
-use super::store::Store;
-use super::wire::{Sealed, Sealer, Transport};
-use super::{AuditSink, Screen};
-use crate::audit::NewEvent;
-
-pub struct FakeSealer {
-    pub me: String,
-}
-
-fn pad(aad: &[u8], n: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut c = 0u32;
-    while out.len() < n {
-        let mut v = aad.to_vec();
-        v.extend_from_slice(&c.to_be_bytes());
-        out.extend_from_slice(digest(&SHA256, &v).as_ref());
-        c += 1;
-    }
-    out.truncate(n);
-    out
-}
-
-fn mac(aad: &[u8], plain: &[u8]) -> Vec<u8> {
-    let mut v = aad.to_vec();
-    v.extend_from_slice(plain);
-    digest(&SHA256, &v).as_ref().to_vec()
-}
-
-impl Sealer for FakeSealer {
-    fn seal(&self, receiver: &str, aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, String> {
-        let mut out = vec![u8::try_from(receiver.len()).unwrap_or(255)];
-        out.extend_from_slice(receiver.as_bytes());
-        out.extend_from_slice(&mac(aad, plain));
-        out.extend(plain.iter().zip(pad(aad, plain.len())).map(|(a, b)| a ^ b));
-        Ok(out)
-    }
-
-    fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String> {
-        let n = usize::from(*sealed.first().ok_or("short")?);
-        if sealed.get(1..=n) != Some(self.me.as_bytes()) {
-            return Err("not for this end".into());
-        }
-        let rest = sealed.get(n + 1..).ok_or("short")?;
-        let (tag, rest) = rest.split_at_checked(32).ok_or("short")?;
-        let plain: Vec<u8> = rest
-            .iter()
-            .zip(pad(aad, rest.len()))
-            .map(|(a, b)| a ^ b)
-            .collect();
-        if mac(aad, &plain) != tag {
-            return Err("not authentic".into());
-        }
-        Ok(plain)
-    }
-}
+use super::Screen;
+use crate::channel::ring_crypto::{generate, RingSigner, RingVerifier};
+use crate::channel::store::Store;
+use crate::channel::testkit::{FakeSealer, VecSink};
+use crate::channel::wire::{hex, Crypto, Sealed, Sealer};
 
 pub struct TestScreen;
 
@@ -88,64 +36,16 @@ impl Screen for NoScreen {
     }
 }
 
-#[derive(Default)]
-pub struct VecSink {
-    pub events: Mutex<Vec<NewEvent>>,
-    seen: Mutex<BTreeSet<(String, u64)>>,
-}
+pub const T0: u64 = 1_800_000_000_000;
 
-impl AuditSink for VecSink {
-    fn record(&self, ev: NewEvent) -> std::io::Result<()> {
-        if let Some(src) = &ev.src {
-            if let Ok(mut s) = self.seen.lock() {
-                if !s.insert(src.clone()) {
-                    return Ok(());
-                }
-            }
-        }
-        if let Ok(mut e) = self.events.lock() {
-            e.push(ev);
-        }
-        Ok(())
-    }
-}
-
-impl VecSink {
-    pub fn actions(&self) -> Vec<String> {
-        self.events
-            .lock()
-            .map(|e| e.iter().map(|x| x.action.clone()).collect())
-            .unwrap_or_default()
-    }
-
-    pub fn details(&self) -> String {
-        self.events
-            .lock()
-            .map(|e| {
-                e.iter()
-                    .map(|x| {
-                        format!(
-                            "{} {} {}",
-                            x.action,
-                            x.subject.clone().unwrap_or_default(),
-                            x.detail
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
-    }
-}
-
-/// One endpoint in a test: a temp dir, a store, keys, a shared clock.
+/// One endpoint in a test.
 pub struct End {
     pub name: String,
     pub dir: tempfile::TempDir,
-    pub store: Store,
+    pub store: Store<State>,
     pub signer: RingSigner,
     pub verifier: RingVerifier,
-    pub sealer: FakeSealer,
+    pub sealer: Box<dyn Sealer>,
     pub screen: Box<dyn Screen>,
     pub sink: VecSink,
     pub clock: Rc<Cell<u64>>,
@@ -154,16 +54,14 @@ pub struct End {
     tick: Box<dyn Fn() -> u64>,
 }
 
-pub const T0: u64 = 1_800_000_000_000;
-
 impl End {
     pub fn new(name: &str, clock: &Rc<Cell<u64>>) -> End {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (pkcs8, sign_public) = crypto::generate().expect("key");
-        let seal_public = crypto::to_hex(digest(&SHA256, name.as_bytes()).as_ref());
+        let (pkcs8, sign_public) = generate().expect("key");
+        let seal_public = hex(digest(&SHA256, name.as_bytes()).as_ref());
         let store = Store::new(dir.path().join("mesh"));
         store
-            .create(&State::new(name, &sign_public, &seal_public, clock.get()))
+            .create(&State::new(name, &sign_public, &seal_public))
             .expect("create");
         let c = Rc::clone(clock);
         End {
@@ -172,9 +70,9 @@ impl End {
             store,
             signer: RingSigner::from_pkcs8(&pkcs8).expect("signer"),
             verifier: RingVerifier,
-            sealer: FakeSealer {
+            sealer: Box::new(FakeSealer {
                 me: seal_public.clone(),
-            },
+            }),
             screen: Box::new(TestScreen),
             sink: VecSink::default(),
             clock: Rc::clone(clock),
@@ -187,9 +85,11 @@ impl End {
     pub fn node(&self) -> Node<'_> {
         Node {
             store: &self.store,
-            signer: &self.signer,
-            verifier: &self.verifier,
-            sealer: &self.sealer,
+            crypto: Crypto {
+                signer: &self.signer,
+                verifier: &self.verifier,
+                sealer: self.sealer.as_ref(),
+            },
             screen: self.screen.as_ref(),
             audit: &self.sink,
             clock: &*self.tick,
@@ -202,13 +102,10 @@ impl End {
             other.seal_public.clone(),
             other.name.clone(),
         );
+        let now = self.clock.get();
         self.store
             .update(|s| {
-                let epoch = 1;
-                s.peers.insert(
-                    n.clone(),
-                    super::state::Peer::new(&n, &sp, &sl, epoch, Vec::new()),
-                );
+                s.pin(now, &n, &sp, &sl, 1, None).expect("pin");
             })
             .expect("pin");
     }
@@ -221,12 +118,12 @@ impl End {
         self.node()
             .submit(NewTask {
                 to: to.to_string(),
-                kind: super::model::TaskKind::Question,
+                kind: TaskKind::Question,
                 title: title.to_string(),
                 parts: vec![Part::Text {
                     text: text.to_string(),
                 }],
-                label: Label::Person,
+                label: Label::Fleet,
                 act: None,
                 parent: None,
                 deadline_ms: None,
@@ -254,7 +151,7 @@ pub struct Faults {
     pub fail: bool,
 }
 
-/// A network between `from` (the caller) and `to` (the answerer), carrying sealed messages through `faults`.
+/// A network between the caller and `to` (the answerer), carrying sealed messages through `faults`.
 pub struct Net<'a> {
     pub to: &'a End,
     pub caller_name: String,
@@ -307,40 +204,5 @@ impl Transport for Net<'_> {
         } else {
             shape(back, f)
         })
-    }
-}
-
-impl End {
-    /// The first draft of a kind for a peer, edited by `f`, then sealed and signed as this endpoint: a sender that is honest in
-    /// every way except the field the test changed.
-    pub fn forge(
-        &self,
-        peer: &str,
-        kind: super::wire::Kind,
-        f: impl FnOnce(&mut super::wire::Envelope),
-    ) -> Sealed {
-        use super::wire::Signer;
-        let st = self.state();
-        let (mut e, plain) = st
-            .drafts(peer, self.clock.get())
-            .into_iter()
-            .find(|(e, _)| e.kind == kind)
-            .expect("draft");
-        f(&mut e);
-        e.body = Vec::new();
-        e.body = self.sealer_to(&st.peers[peer].seal_public, &e.aad(), &plain);
-        let signature = self.signer.sign(&e.canonical()).expect("sign");
-        Sealed {
-            envelope: e,
-            signature,
-        }
-    }
-
-    fn sealer_to(&self, to: &str, aad: &[u8], plain: &[u8]) -> Vec<u8> {
-        FakeSealer {
-            me: self.seal_public.clone(),
-        }
-        .seal(to, aad, plain)
-        .expect("seal")
     }
 }

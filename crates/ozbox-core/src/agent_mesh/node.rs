@@ -1,11 +1,18 @@
-//! One endpoint: its state, its keys, its screen and its audit trail, and the four things it does with a peer. A laptop and
-//! `main` run the same code; only the names and the way they reach each other differ.
+//! One endpoint: its state, its keys, its screen and its audit trail, and the things it does with a peer. A laptop and `main` run the
+//! same code; only the names and the way they reach each other differ.
+//!
+//! Every change is **one** write of the state under the store's lock, with the audit events written in the same write and handed to
+//! the audit log afterwards (by source number, so a crash or two processes at once can neither lose nor repeat one). A round with a
+//! peer is one write for everything it took, and no write at all when nothing changed.
 
-use super::model::{Label, Part, State as TState};
-use super::state::{NewTask, State, Verdict};
-use super::store::{Store, StoreError};
-use super::wire::{Sealed, Sealer, Signer, Transport, Verifier};
-use super::{AuditSink, Screen};
+use super::model::{Part, State as TState};
+use super::state::{NewTask, State};
+use super::{Screen, PROFILE};
+use crate::channel::audit::{change, change_if, drain, guard, AuditSink, JournalError};
+use crate::channel::flow::seal_drafts;
+use crate::channel::session::DraftOpts;
+use crate::channel::store::{Store, StoreError};
+use crate::channel::wire::{Crypto, Sealed};
 
 #[derive(Debug)]
 pub struct NodeError(pub String);
@@ -22,20 +29,32 @@ impl From<StoreError> for NodeError {
     }
 }
 
+impl From<JournalError> for NodeError {
+    fn from(e: JournalError) -> Self {
+        NodeError(e.0)
+    }
+}
+
+/// Moves sealed envelopes between two endpoints. The network is not trusted: a transport only moves bytes. One call carries what this
+/// end has for the peer and returns what the peer has for this end (a request and its reply).
+pub trait Transport {
+    fn exchange(&self, peer: &str, outbound: &[Sealed]) -> Result<Vec<Sealed>, String>;
+}
+
 /// What one round with a peer did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Round {
     pub sent: usize,
+    /// Messages of any kind that were applied.
     pub applied: usize,
+    pub buffered: usize,
     pub duplicates: usize,
     pub refused: Vec<String>,
 }
 
 pub struct Node<'a> {
-    pub store: &'a Store,
-    pub signer: &'a dyn Signer,
-    pub verifier: &'a dyn Verifier,
-    pub sealer: &'a dyn Sealer,
+    pub store: &'a Store<State>,
+    pub crypto: Crypto<'a>,
     pub screen: &'a dyn Screen,
     pub audit: &'a dyn AuditSink,
     pub clock: &'a dyn Fn() -> u64,
@@ -46,29 +65,20 @@ impl Node<'_> {
         (self.clock)()
     }
 
-    /// Hand pending audit events to the audit log. The events were written with the change they describe; a failure here leaves
-    /// them pending, and the event's source number keeps a retry from logging one twice.
-    pub fn drain_audit(&self) -> Result<(), NodeError> {
+    /// Refuse to work when the audit log is ahead of this store (it was rolled back and nobody said so).
+    pub fn guard(&self) -> Result<(), NodeError> {
         let st = self.store.read()?;
-        if st.audit.is_empty() {
-            return Ok(());
-        }
-        let n = st.audit.len();
-        for ev in st.audit {
-            self.audit.record(ev).map_err(|e| {
-                NodeError(format!("the audit log could not be written: {}", e.kind()))
-            })?;
-        }
-        self.store.update(|s| {
-            let k = n.min(s.audit.len());
-            s.audit.drain(..k);
-        })?;
-        Ok(())
+        Ok(guard(&st.core, self.audit)?)
+    }
+
+    /// Hand pending audit events to the audit log, under the store's lock.
+    pub fn drain_audit(&self) -> Result<(), NodeError> {
+        Ok(drain(self.store, self.audit)?)
     }
 
     fn change<T>(&self, f: impl FnOnce(&mut State, u64) -> T) -> Result<T, NodeError> {
         let now = self.now();
-        let out = self.store.update(|s| f(s, now))?;
+        let out = change(self.store, self.audit, |s| f(s, now))?;
         self.drain_audit()?;
         Ok(out)
     }
@@ -83,11 +93,10 @@ impl Node<'_> {
         &self,
         task_id: &str,
         parts: Vec<Part>,
-        label: Label,
         to_state: Option<(TState, Option<String>)>,
     ) -> Result<(), NodeError> {
         let screen = self.screen;
-        self.change(|s, now| s.reply(screen, now, task_id, parts, label, to_state))?
+        self.change(|s, now| s.reply(screen, now, task_id, parts, to_state))?
             .map_err(|c| NodeError(format!("refused: {c}")))
     }
 
@@ -96,70 +105,97 @@ impl Node<'_> {
             .map_err(|c| NodeError(format!("refused: {c}")))
     }
 
-    /// The signed, sealed envelopes for a peer, built fresh (new nonce, new validity) on every call.
+    /// Housekeeping, only when it would change something.
+    fn tick(&self) -> Result<(), NodeError> {
+        let now = self.now();
+        if self.store.read()?.tick_needed(now) {
+            self.change(|s, now| s.tick(now))?;
+        }
+        Ok(())
+    }
+
+    /// The signed, sealed envelopes for a peer, built fresh (new nonce, new validity) on every call: a `hello` first, then the oldest
+    /// unacknowledged messages, at most a window's worth.
     pub fn outbound(&self, peer: &str) -> Result<Vec<Sealed>, NodeError> {
         let now = self.now();
         let st = self.store.read()?;
-        let seal_to = st
-            .peers
-            .get(peer)
-            .map(|p| p.seal_public.clone())
-            .ok_or_else(|| NodeError("that peer is not pinned".into()))?;
-        let mut out = Vec::new();
-        for (mut env, plain) in st.drafts(peer, now) {
-            env.body = Vec::new();
-            let aad = env.aad();
-            env.body = self
-                .sealer
-                .seal(&seal_to, &aad, &plain)
-                .map_err(|e| NodeError(format!("a message could not be sealed: {e}")))?;
-            env.check()
-                .map_err(|e| NodeError(format!("a message is not valid: {e}")))?;
-            let signature = self
-                .signer
-                .sign(&env.canonical())
-                .map_err(|e| NodeError(format!("a message could not be signed: {e}")))?;
-            out.push(Sealed {
-                envelope: env,
-                signature,
-            });
+        if !st.core.links.contains_key(peer) {
+            return Err(NodeError("that peer is not pinned".into()));
         }
-        Ok(out)
+        let drafts = st.core.drafts(
+            peer,
+            now,
+            DraftOpts {
+                hello: true,
+                ack: false,
+                resend: true,
+            },
+        );
+        seal_drafts(&PROFILE, &self.crypto, &drafts)
+            .map_err(|e| NodeError(format!("a message could not be sealed or signed: {e}")))
     }
 
-    /// Take messages from a peer. Each is written before the next is looked at, so what is acknowledged is what is kept.
+    /// Take a batch from a peer, all in one write (and none when there is nothing to take or nothing changed).
     pub fn receive_all(&self, msgs: &[Sealed]) -> Result<Round, NodeError> {
-        let mut r = Round::default();
-        for m in msgs {
-            let (screen, v, s) = (self.screen, self.verifier, self.sealer);
-            let verdict = self.change(|st, now| st.receive(v, s, screen, now, m))?;
-            match verdict {
-                Verdict::Applied | Verdict::Buffered => r.applied += 1,
-                Verdict::Duplicate => r.duplicates += 1,
-                Verdict::Refused(c) => r.refused.push(c),
-            }
+        if msgs.is_empty() {
+            return Ok(Round::default());
         }
-        Ok(r)
+        let (cx, screen) = (self.crypto, self.screen);
+        let now = self.now();
+        // a round that took nothing durable (a quiet `hello` each way) costs no write
+        let r = change_if(self.store, self.audit, |st| {
+            let r = st.receive_round(&cx, screen, now, msgs);
+            let changed = !r.deliveries.is_empty();
+            (r, changed)
+        })?;
+        self.drain_audit()?;
+        Ok(Round {
+            sent: 0,
+            applied: r.deliveries.len() + r.control,
+            buffered: r.buffered,
+            duplicates: r.duplicates,
+            refused: r.refused,
+        })
     }
 
     /// The answering side of a round: take what the peer sent, and return what this side has for it.
     pub fn serve(&self, peer: &str, inbound: &[Sealed]) -> Result<(Round, Vec<Sealed>), NodeError> {
-        self.change(|s, now| s.tick(now))?;
+        self.tick()?;
         let round = self.receive_all(inbound)?;
         Ok((round, self.outbound(peer)?))
     }
 
-    /// The calling side of a round: send what is waiting, take the reply. A transport failure is returned and leaves every task
-    /// where it was; the outbox keeps what was not acknowledged.
+    /// The calling side of a round: send what is waiting, take the reply. A transport failure is returned and leaves every task where
+    /// it was; the outbox keeps what was not acknowledged.
     pub fn sync(&self, peer: &str, net: &dyn Transport) -> Result<Round, NodeError> {
-        self.change(|s, now| s.tick(now))?;
-        let out = self.outbound(peer)?;
-        let sent = out.len();
-        let back = net
-            .exchange(peer, &out)
-            .map_err(|e| NodeError(format!("{peer} could not be reached: {e}")))?;
-        let mut r = self.receive_all(&back)?;
-        r.sent = sent;
-        Ok(r)
+        self.tick()?;
+        let mut total = Round::default();
+        // The first contact (and the first contact after either side restarted) takes a second exchange to learn each other's
+        // incarnation before anything is sent. A person should not have to know that, so while messages are still waiting and the last
+        // exchange made progress, go again (at most three).
+        for attempt in 0..3 {
+            let out = self.outbound(peer)?;
+            let sent = out.len();
+            let back = net
+                .exchange(peer, &out)
+                .map_err(|e| NodeError(format!("{peer} could not be reached: {e}")))?;
+            let r = self.receive_all(&back)?;
+            total.sent += sent;
+            total.applied += r.applied;
+            total.buffered += r.buffered;
+            total.duplicates += r.duplicates;
+            total.refused.extend(r.refused);
+            let waiting = self
+                .store
+                .read()?
+                .core
+                .links
+                .get(peer)
+                .is_some_and(|l| !l.outbox.is_empty() && l.halted.is_none());
+            if !waiting || attempt == 2 || r.applied == 0 {
+                break;
+            }
+        }
+        Ok(total)
     }
 }

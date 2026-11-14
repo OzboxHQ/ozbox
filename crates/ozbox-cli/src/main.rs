@@ -137,6 +137,8 @@ mod state;
 #[cfg(test)]
 mod systemd_props_guard;
 mod tasks_cli;
+mod tasks_ops;
+mod tasks_service;
 mod telegram;
 mod telemetry;
 mod telemetry_cli;

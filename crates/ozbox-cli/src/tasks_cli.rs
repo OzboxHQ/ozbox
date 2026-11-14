@@ -1,39 +1,33 @@
-//! `ozbox tasks ...`: the typed task channel between two endpoints (ADR 0044, Preview). The same commands run on a laptop and
-//! on a box; only the names and the way they reach each other differ. Everything that is not a printout is in
-//! `ozbox_core::agent_mesh`; this file holds the key files, the sealing with `ozbox-seal`, the command transport and the output.
+//! `ozbox tasks ...`: the typed task channel between two endpoints (ADR 0044, Preview). The same commands run on a laptop and on a
+//! box; only the names and the way they reach each other differ. Everything that is not a printout is in
+//! [`crate::tasks_ops`] (the operations, shared with the box's router service) and `ozbox_core::agent_mesh`; this file is the command
+//! line: it picks where the operations run, takes the person's answers and prints.
+//!
+//! * **On a laptop** the operations run in this process, against the person's own files. One user holds the key.
+//! * **On a box** the channel runs as the service `ozbox tasks serve` under a system user of its own, and these commands are clients
+//!   of its sockets (an agent's `tasks send` goes to the agent socket; `init`, `pin` and `restored` need root and go to the admin
+//!   socket; the laptop's `ssh` reaches the keyless relay). A box with no such service runs as a laptop does, and says so.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
-use ozbox_core::agent_mesh::crypto::{self, RingSigner, RingVerifier};
-use ozbox_core::agent_mesh::model::{Act, Label, Part, State as TState, Task, TaskKind};
-use ozbox_core::agent_mesh::node::Node;
-use ozbox_core::agent_mesh::printable;
-use ozbox_core::agent_mesh::state::{NewTask, Peer, State};
-use ozbox_core::agent_mesh::store::Store;
-use ozbox_core::agent_mesh::wire::{word_ok, Sealed, Sealer, Transport};
-use ozbox_core::agent_mesh::Screen;
-use ozbox_core::audit::AuditLog;
+use ozbox_core::agent_mesh::node::Transport;
+use ozbox_core::channel::wire::{normalize_hex, unhex, word_ok, Sealed};
 use ozbox_core::{CommandRunner, CommandSpec, Error, Result, SystemRunner};
-use ozbox_seal::ServiceKey;
-use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::cli::TasksCommand;
 use crate::messages::t;
 use crate::runs_cli::Flags;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use crate::tasks_ops::{self as ops, dispatch, Ends, Offer, Policy};
+use crate::tasks_service as service;
 
 fn cfg(key: &str, args: &[(&str, &str)]) -> Error {
     Error::Config(t(key, args))
 }
 
-/// Where this endpoint keeps its channel: `OZBOX_TASKS_DIR`, else beside the settings file.
+/// Where this endpoint keeps its channel when it runs here: `OZBOX_TASKS_DIR`, else beside the settings file.
 pub fn dir() -> Result<PathBuf> {
     if let Some(d) = std::env::var_os("OZBOX_TASKS_DIR") {
         return Ok(PathBuf::from(d));
@@ -43,125 +37,106 @@ pub fn dir() -> Result<PathBuf> {
         .ok_or_else(|| cfg("tasks.no_dir", &[]))
 }
 
-/// The key file. Mode 0600, in a directory of mode 0700. A process of the same user can read it: on a box, run the channel as
-/// a service user of its own (ADR 0044 open question 6), so that an agent's user cannot.
-#[derive(Serialize, Deserialize)]
-struct IdentityFile {
-    name: String,
-    sign_pkcs8: String,
-    seal_secret: String,
+/// Where the box's router service listens: `OZBOX_TASKS_SOCKETS`, else the system location.
+fn sockets_root() -> PathBuf {
+    std::env::var_os("OZBOX_TASKS_SOCKETS")
+        .map_or_else(|| PathBuf::from("/run/ozbox-mesh"), PathBuf::from)
 }
 
-/// What is shared with the other side. Public halves only.
-#[derive(Serialize, Deserialize)]
-struct Offer {
-    name: String,
-    sign_public: String,
-    seal_public: String,
-    epoch: u64,
+/// Where the operations run.
+enum Backend {
+    /// In this process, on files this user owns.
+    Local(PathBuf),
+    /// Through the router service's sockets.
+    Service(PathBuf),
 }
 
-struct SealCrypto {
-    key: ServiceKey,
-}
-
-fn info_for(pk: &[u8; 32]) -> Vec<u8> {
-    ozbox_seal::info("mesh-body", &ozbox_seal::fingerprint(pk))
-}
-
-impl Sealer for SealCrypto {
-    fn seal(
-        &self,
-        receiver_hex: &str,
-        aad: &[u8],
-        plain: &[u8],
-    ) -> std::result::Result<Vec<u8>, String> {
-        let pk = ozbox_seal::public_from_hex(receiver_hex)
-            .map_err(|_| "the peer's sealing key is not valid".to_string())?;
-        let (enc, ct) = ozbox_seal::seal(&pk, &info_for(&pk), aad, plain)
-            .map_err(|_| "sealing failed".to_string())?;
-        let mut out = enc;
-        out.extend(ct);
-        Ok(out)
-    }
-
-    fn open(&self, aad: &[u8], sealed: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        if sealed.len() < 32 {
-            return Err("short".into());
+impl Backend {
+    fn detect() -> Result<Backend> {
+        let root = sockets_root();
+        if root.join("agent").join("agent.sock").exists()
+            || std::env::var_os("OZBOX_TASKS_SOCKETS").is_some()
+        {
+            return Ok(Backend::Service(root));
         }
-        let (enc, ct) = sealed.split_at(32);
-        self.key
-            .open(&info_for(&self.key.public()), aad, enc, ct)
-            .map(|z| z.to_vec())
-            .map_err(|_| "cannot open".to_string())
+        Ok(Backend::Local(dir()?))
     }
-}
 
-/// Finds key-shaped text with the same screen agent memory uses.
-struct MemScreen;
-
-impl Screen for MemScreen {
-    fn find(&self, text: &str) -> Option<&'static str> {
-        ozbox_memory::secret_shape::find_secret(text)
+    fn is_service(&self) -> bool {
+        matches!(self, Backend::Service(_))
     }
-}
 
-struct Ends {
-    store: Store,
-    signer: RingSigner,
-    sealer: SealCrypto,
-    audit: AuditLog,
-    clock: Box<dyn Fn() -> u64>,
-}
-
-impl Ends {
-    fn open() -> Result<Ends> {
-        let d = dir()?;
-        let store = Store::new(&d);
-        if !store.exists() {
-            return Err(cfg("tasks.not_inited", &[]));
+    /// Run one operation. `owner` operations need the admin socket (root) when there is a service.
+    fn call(&self, op: &str, mut args: Value, owner: bool) -> Result<Value> {
+        if let Some(o) = args.as_object_mut() {
+            o.insert("op".into(), json!(op));
         }
-        let id: IdentityFile = serde_json::from_slice(&std::fs::read(d.join("identity.json"))?)?;
-        let signer = RingSigner::from_pkcs8(&crypto::from_hex(&id.sign_pkcs8).unwrap_or_default())
-            .map_err(Error::Config)?;
-        let secret = crypto::from_hex(&id.seal_secret).unwrap_or_default();
-        let key = ServiceKey::from_secret_bytes(&secret)
-            .map_err(|_| Error::Config("the sealing key is not valid".into()))?;
-        let audit = AuditLog::beside(&d.join("mesh.json"));
-        Ok(Ends {
-            store,
-            signer,
-            sealer: SealCrypto { key },
-            audit,
-            clock: Box::new(now_ms),
+        match self {
+            Backend::Local(d) => {
+                let ends = Ends::open(d).map_err(|e| map_err(&e))?;
+                // on a laptop the store is the person's own file, and so is any agent's that runs as the person
+                dispatch(&ends, Policy::Admin, &args, true).map_err(|e| map_err(&e))
+            }
+            Backend::Service(root) => {
+                let sock = if owner {
+                    root.join("admin").join("admin.sock")
+                } else {
+                    root.join("agent").join("agent.sock")
+                };
+                service::call(&sock, &args, service::MAX_REPLY).map_err(|e| match e.as_str() {
+                    "permission-denied" if owner => cfg("tasks.admin_needed", &[]),
+                    "permission-denied" => cfg("tasks.service_denied", &[]),
+                    "no-service" => cfg("tasks.service_down", &[]),
+                    _ => map_err(&e),
+                })
+            }
+        }
+    }
+}
+
+/// An operation's refusal, in the person's words.
+fn map_err(e: &str) -> Error {
+    match e {
+        "not-initialised" => cfg("tasks.not_inited", &[]),
+        "bad-name" => cfg("tasks.bad_name", &[]),
+        "already-initialised" => cfg("tasks.already_inited", &[]),
+        "pin-bad" => cfg("tasks.pin_bad", &[]),
+        "pin-self" => cfg("tasks.pin_self", &[]),
+        "text-needed" => cfg("tasks.text_needed", &[]),
+        "unknown-task" => cfg("tasks.unknown", &[("id", "")]),
+        "not-allowed-here" => cfg("tasks.not_allowed_here", &[]),
+        s if s.starts_with("pin-exists:") => {
+            cfg("tasks.pin_exists", &[("name", &s["pin-exists:".len()..])])
+        }
+        s if s.starts_with("bad-state:") => {
+            cfg("tasks.bad_state", &[("state", &s["bad-state:".len()..])])
+        }
+        s if s.starts_with("refused: ") => {
+            cfg("tasks.refused", &[("why", &s["refused: ".len()..])])
+        }
+        other => Error::Config(ozbox_core::agent_mesh::printable_line(other)),
+    }
+}
+
+const MAX_REPLY: usize = 8 * 1024 * 1024;
+/// How long a transport command may take before it is stopped. A starting value (ADR 0044 open question 7); a test may shorten it.
+fn transport_timeout() -> Duration {
+    std::env::var("OZBOX_TASKS_TRANSPORT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(60), |ms| {
+            Duration::from_millis(ms.max(1))
         })
-    }
-
-    fn node(&self) -> Node<'_> {
-        Node {
-            store: &self.store,
-            signer: &self.signer,
-            verifier: &RingVerifier,
-            sealer: &self.sealer,
-            screen: &MemScreen,
-            audit: &self.audit,
-            clock: &*self.clock,
-        }
-    }
-
-    fn state(&self) -> Result<State> {
-        self.store.read().map_err(|e| Error::Config(e.to_string()))
-    }
 }
 
-/// Reaches the peer by running its `exchange` through a command (for example `ssh my-box ozbox`). An argv, never a shell string.
+/// Reaches the peer by running its `exchange` through a command (for example `ssh my-box /usr/local/bin/ozbox`). An argv, never a shell
+/// string. It is stopped after [`transport_timeout`], and what it writes is read through a cap, so one hung or hostile far end cannot
+/// stop `sync` or fill memory.
 struct CommandTransport<'a> {
     runner: &'a dyn CommandRunner,
     via: Vec<String>,
     me: String,
 }
-
-const MAX_REPLY: usize = 8 * 1024 * 1024;
 
 impl Transport for CommandTransport<'_> {
     fn exchange(
@@ -182,7 +157,17 @@ impl Transport for CommandTransport<'_> {
             env: Default::default(),
             stdin: Some(serde_json::to_vec(outbound).map_err(|e| e.to_string())?),
         };
-        let out = self.runner.run_ok(&spec).map_err(|e| e.to_string())?;
+        let out = self
+            .runner
+            .run_limited(&spec, transport_timeout(), MAX_REPLY)
+            .map_err(|e| e.to_string())?;
+        if out.status != Some(0) {
+            let why: String = ozbox_core::agent_mesh::printable_line(out.stderr.trim())
+                .chars()
+                .take(300)
+                .collect();
+            return Err(format!("the command failed ({:?}): {why}", out.status));
+        }
         if out.stdout.len() > MAX_REPLY {
             return Err("the reply is too large".into());
         }
@@ -200,87 +185,162 @@ fn read_stdin_text() -> Result<String> {
     Ok(s)
 }
 
-fn text_arg(text: &Option<String>, stdin: bool) -> Result<(String, bool)> {
+fn text_arg(text: &Option<String>, stdin: bool) -> Result<String> {
     match (text, stdin) {
-        (Some(x), _) => Ok((x.clone(), std::io::stdin().is_terminal())),
-        (None, true) => Ok((read_stdin_text()?, false)),
+        (Some(x), _) => Ok(x.clone()),
+        (None, true) => read_stdin_text(),
         _ => Err(cfg("tasks.text_needed", &[])),
     }
 }
 
-fn label(from_terminal: bool) -> Label {
-    if from_terminal {
-        Label::Person
-    } else {
-        Label::Fleet
-    }
-}
-
-fn peer_name(st: &State, wanted: &Option<String>) -> Result<String> {
-    match wanted {
-        Some(n) if st.peers.contains_key(n) => Ok(n.clone()),
-        Some(n) => Err(cfg("tasks.unknown_peer", &[("name", n)])),
-        None => {
-            let mut it = st.peers.keys();
-            match (it.next(), it.next()) {
-                (Some(n), None) => Ok(n.clone()),
-                (None, _) => Err(cfg("tasks.no_peers", &[])),
-                _ => Err(cfg("tasks.which_peer", &[])),
-            }
-        }
-    }
-}
-
-fn print_json(v: &serde_json::Value) -> Result<()> {
+fn print_json(v: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
 }
 
-fn row(tk: &Task, mark: &str) -> String {
+fn s<'a>(v: &'a Value, k: &str) -> &'a str {
+    v.get(k).and_then(Value::as_str).unwrap_or("")
+}
+
+fn row(tk: &Value, mark: &str) -> String {
     t(
         "tasks.inbox_row",
         &[
             ("mark", mark),
-            ("id", &tk.id),
-            ("state", tk.state.name()),
-            ("from", &printable(&tk.from)),
-            ("to", &printable(&tk.to)),
-            ("title", &printable(&tk.title)),
+            ("id", s(tk, "id")),
+            ("state", s(tk, "state")),
+            ("from", s(tk, "from")),
+            ("to", s(tk, "to")),
+            ("title", s(tk, "title")),
         ],
     )
 }
 
-fn needs_you(me: &str, tk: &Task) -> bool {
-    tk.unread || (tk.to == me && !tk.state.terminal())
+/// Print one task as a person reads it: every message says who wrote it and that a peer's words are a claim.
+fn print_task(tk: &Value) {
+    let reason = tk
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+    println!(
+        "{}",
+        t(
+            "tasks.show_head",
+            &[
+                ("id", s(tk, "id")),
+                ("title", s(tk, "title")),
+                ("from", s(tk, "from")),
+                ("to", s(tk, "to")),
+                ("kind", s(tk, "kind")),
+                ("state", s(tk, "state")),
+                ("reason", &reason)
+            ]
+        )
+    );
+    if tk.get("cancel_requested").and_then(Value::as_bool) == Some(true) {
+        println!("{}", t("tasks.show_cancel", &[]));
+    }
+    for m in tk
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let trust = if m.get("untrusted").and_then(Value::as_bool) == Some(true) {
+            "untrusted"
+        } else {
+            "yours"
+        };
+        let claimed = m
+            .get("claimed_label")
+            .and_then(Value::as_str)
+            .unwrap_or("fleet");
+        for p in m
+            .get("parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let txt = match p.get("type").and_then(Value::as_str) {
+                Some("text") => s(p, "text").to_string(),
+                _ => format!("[data: {}]", s(p, "schema")),
+            };
+            println!(
+                "{}",
+                t(
+                    "tasks.show_msg",
+                    &[
+                        ("prov", s(m, "provenance")),
+                        ("trust", trust),
+                        ("claimed", claimed),
+                        ("who", s(m, "from")),
+                        ("text", &txt)
+                    ]
+                )
+            );
+        }
+    }
+    for a in tk
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let h = s(a, "hash");
+        println!(
+            "{}",
+            t(
+                "tasks.show_artifact",
+                &[("name", s(a, "name")), ("hash", &h[..12.min(h.len())])]
+            )
+        );
+    }
 }
 
-fn refused(e: impl std::fmt::Display) -> Error {
-    cfg("tasks.refused", &[("why", &e.to_string())])
+fn fingerprints_of(offer: &Offer) -> (String, String) {
+    (
+        offer.sign_fingerprint.clone(),
+        offer.seal_fingerprint.clone(),
+    )
 }
 
-fn sync_once(ends: &Ends, peer: &str, runner: &dyn CommandRunner, json: bool) -> Result<()> {
-    let st = ends.state()?;
-    let p = st
-        .peers
-        .get(peer)
-        .ok_or_else(|| cfg("tasks.unknown_peer", &[("name", peer)]))?;
-    if p.via.is_empty() {
+fn sync_once(
+    dir: &std::path::Path,
+    peer: &str,
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> Result<()> {
+    let ends = Ends::open(dir).map_err(|e| map_err(&e))?;
+    let st = ends.state().map_err(|e| map_err(&e))?;
+    if !st.core.links.contains_key(peer) {
+        return Err(cfg("tasks.unknown_peer", &[("name", peer)]));
+    }
+    let via = st.via(peer);
+    if via.is_empty() {
         return Err(cfg("tasks.no_via", &[("name", peer)]));
     }
     let net = CommandTransport {
         runner,
-        via: p.via.clone(),
-        me: st.me.clone(),
+        via,
+        me: st.me().to_string(),
     };
+    ends.guard().map_err(|e| map_err(&e))?;
     let r = ends.node().sync(peer, &net).map_err(|e| {
         cfg(
             "tasks.unreachable",
-            &[("peer", peer), ("why", &printable(&e.to_string()))],
+            &[
+                ("peer", peer),
+                (
+                    "why",
+                    &ozbox_core::agent_mesh::printable_line(&e.to_string()),
+                ),
+            ],
         )
     })?;
     if json {
         return print_json(
-            &serde_json::json!({"peer": peer, "sent": r.sent, "applied": r.applied, "duplicates": r.duplicates, "refused": r.refused}),
+            &json!({"peer": peer, "sent": r.sent, "applied": r.applied, "buffered": r.buffered, "duplicates": r.duplicates, "refused": r.refused}),
         );
     }
     println!(
@@ -302,7 +362,30 @@ fn sync_once(ends: &Ends, peer: &str, runner: &dyn CommandRunner, json: bool) ->
             t("tasks.round_refused", &[("codes", &r.refused.join(", "))])
         );
     }
+    let halted = ends
+        .state()
+        .map_err(|e| map_err(&e))?
+        .core
+        .links
+        .get(peer)
+        .and_then(|l| l.halted.clone());
+    if let Some(h) = halted {
+        println!("{}", t("tasks.halted", &[("peer", peer), ("why", &h)]));
+    }
     Ok(())
+}
+
+/// The one peer when only one is pinned, or the named one.
+fn peer_name(peers: &[Value], wanted: &Option<String>) -> Result<String> {
+    match wanted {
+        Some(n) if peers.iter().any(|p| s(p, "name") == n) => Ok(n.clone()),
+        Some(n) => Err(cfg("tasks.unknown_peer", &[("name", n)])),
+        None => match peers {
+            [] => Err(cfg("tasks.no_peers", &[])),
+            [one] => Ok(s(one, "name").to_string()),
+            _ => Err(cfg("tasks.which_peer", &[])),
+        },
+    }
 }
 
 pub fn run(cmd: &TasksCommand, f: &Flags) -> Result<()> {
@@ -310,94 +393,73 @@ pub fn run(cmd: &TasksCommand, f: &Flags) -> Result<()> {
 }
 
 pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Result<()> {
+    if let TasksCommand::Serve {
+        dir,
+        agent_socket,
+        relay_socket,
+        admin_socket,
+    } = cmd
+    {
+        return service::serve(&service::Paths {
+            dir: dir.clone(),
+            agent: agent_socket.clone(),
+            relay: relay_socket.clone(),
+            admin: admin_socket.clone(),
+        });
+    }
+    let be = Backend::detect()?;
     match cmd {
         TasksCommand::Init { name } => {
             if !word_ok(name) {
                 return Err(cfg("tasks.bad_name", &[]));
             }
-            let d = dir()?;
-            let store = Store::new(&d);
-            if store.exists() {
-                return Err(cfg("tasks.already_inited", &[]));
+            match &be {
+                Backend::Local(d) => {
+                    ops::init(d, name).map_err(|e| map_err(&e))?;
+                }
+                Backend::Service(_) => {
+                    be.call("init", json!({"name": name}), true)?;
+                }
             }
-            let (pkcs8, sign_public) = crypto::generate().map_err(Error::Config)?;
-            let key =
-                ServiceKey::generate().map_err(|_| Error::Config("no random numbers".into()))?;
-            let file = IdentityFile {
-                name: name.clone(),
-                sign_pkcs8: crypto::to_hex(&pkcs8),
-                seal_secret: crypto::to_hex(&key.secret_bytes()[..]),
-            };
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(&d)?;
-            }
-            #[cfg(not(unix))]
-            std::fs::create_dir_all(&d)?;
-            write_private(&d.join("identity.json"), &serde_json::to_vec(&file)?)?;
-            store
-                .create(&State::new(
-                    name,
-                    &sign_public,
-                    &ozbox_seal::public_to_hex(&key.public()),
-                    now_ms(),
-                ))
-                .map_err(|e| Error::Config(e.to_string()))?;
             println!("{}", t("tasks.inited", &[("name", name)]));
+            if !be.is_service()
+                && cfg!(target_os = "linux")
+                && std::path::Path::new("/usr/local/bin/ozbox").exists()
+            {
+                // a box without the router service: the keys sit where an agent that runs as this user can read them
+                println!("{}", t("tasks.service_gap", &[]));
+            }
             Ok(())
         }
-        TasksCommand::Identity => {
-            let st = Ends::open()?.state()?;
-            print_json(&serde_json::to_value(Offer {
-                name: st.me.clone(),
-                sign_public: st.sign_public.clone(),
-                seal_public: st.seal_public.clone(),
-                epoch: st.epoch,
-            })?)
-        }
-        TasksCommand::Pin { file, via, replace } => {
-            let ends = Ends::open()?;
+        TasksCommand::Identity => print_json(&be.call("identity", json!({}), false)?),
+        TasksCommand::Pin {
+            file,
+            via_arg,
+            replace,
+        } => {
             let raw = if file.as_os_str() == "-" {
                 read_stdin_text()?
             } else {
                 std::fs::read_to_string(file)?
             };
             let offer: Offer = serde_json::from_str(&raw).map_err(|_| cfg("tasks.pin_bad", &[]))?;
-            let st = ends.state()?;
-            if !word_ok(&offer.name)
-                || crypto::from_hex(&offer.sign_public).is_none_or(|b| b.len() != 32)
-                || ozbox_seal::public_from_hex(&offer.seal_public).is_err()
-                || offer.epoch == 0
-            {
-                return Err(cfg("tasks.pin_bad", &[]));
-            }
-            if offer.name == st.me || offer.sign_public == st.sign_public {
-                return Err(cfg("tasks.pin_self", &[]));
-            }
-            if let Some(old) = st.peers.get(&offer.name) {
-                let same = old.sign_public == offer.sign_public
-                    && old.seal_public == offer.seal_public
-                    && old.epoch == offer.epoch;
-                if !same && !replace {
-                    return Err(cfg("tasks.pin_exists", &[("name", &offer.name)]));
-                }
-            }
+            let offer = offer.checked().ok_or_else(|| cfg("tasks.pin_bad", &[]))?;
+            let (sign, seal) = fingerprints_of(&offer);
             println!(
                 "{}",
                 t(
                     "tasks.pin_show",
                     &[
                         ("name", &offer.name),
-                        ("sign", &crypto::fingerprint(&offer.sign_public)),
-                        ("seal", &crypto::fingerprint(&offer.seal_public)),
+                        ("sign", &sign),
+                        ("seal", &seal),
                         ("epoch", &offer.epoch.to_string())
                     ]
                 )
             );
+            if !via_arg.is_empty() {
+                println!("{}", t("tasks.pin_via", &[("via", &via_arg.join(" "))]));
+            }
             if !f.yes {
                 if !std::io::stdin().is_terminal() {
                     return Err(cfg("tasks.pin_need_yes", &[]));
@@ -410,47 +472,28 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
                     return Ok(());
                 }
             }
-            let via: Vec<String> = via
-                .as_deref()
-                .map(|v| v.split_whitespace().map(String::from).collect())
-                .unwrap_or_default();
-            let name = offer.name.clone();
-            ends.store
-                .update(|s| {
-                    let keep = s.peers.get(&name).map(|p| (p.out_seq, p.outbox.clone()));
-                    let mut p = Peer::new(
-                        &name,
-                        &offer.sign_public,
-                        &offer.seal_public,
-                        offer.epoch,
-                        via.clone(),
-                    );
-                    if let Some(old) = s.peers.get(&name) {
-                        if old.sign_public == offer.sign_public
-                            && old.seal_public == offer.seal_public
-                        {
-                            // the same keys at a new epoch (or a new via): what was in flight stays, the window starts over
-                            if via.is_empty() {
-                                p.via = old.via.clone();
-                            }
-                            if let Some((seq, ob)) = keep {
-                                p.out_seq = seq;
-                                p.outbox = ob;
-                            }
-                        }
-                    }
-                    s.peers.insert(name.clone(), p);
-                    s.note(
-                        now_ms(),
-                        "mesh.peer.pinned",
-                        None,
-                        format!("peer={name} epoch={}", offer.epoch),
-                    );
-                })
-                .map_err(|e| Error::Config(e.to_string()))?;
-            ends.node()
-                .drain_audit()
-                .map_err(|e| Error::Config(e.to_string()))?;
+            let via = if via_arg.is_empty() {
+                Value::Null
+            } else {
+                json!(via_arg)
+            };
+            let r = be.call(
+                "pin",
+                json!({"offer": offer_json(&offer), "via": via, "replace": replace}),
+                true,
+            )?;
+            if r.get("keys_changed").and_then(Value::as_bool) == Some(true) {
+                println!("{}", t("tasks.pin_keys_changed", &[("name", &offer.name)]));
+            }
+            if r.get("via_changed").and_then(Value::as_bool) == Some(true) {
+                let v: Vec<String> = r["via"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect();
+                println!("{}", t("tasks.pin_via_changed", &[("via", &v.join(" "))]));
+            }
             println!("{}", t("tasks.pin_done", &[("name", &offer.name)]));
             Ok(())
         }
@@ -462,30 +505,16 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
             note,
             minutes,
         } => {
-            let ends = Ends::open()?;
-            let (body, term) = text_arg(text, *stdin)?;
-            let now = now_ms();
-            let id = ends
-                .node()
-                .submit(NewTask {
-                    to: to.clone(),
-                    kind: if *note {
-                        TaskKind::Note
-                    } else {
-                        TaskKind::Question
-                    },
-                    title: title.clone(),
-                    parts: vec![Part::Text { text: body }],
-                    label: label(term),
-                    act: None,
-                    parent: None,
-                    deadline_ms: minutes.map(|m| now + m.saturating_mul(60_000)),
-                })
-                .map_err(refused)?;
+            let body = text_arg(text, *stdin)?;
+            let r = be.call(
+                "send",
+                json!({"to": to, "title": title, "text": body, "note": note, "minutes": minutes}),
+                false,
+            )?;
             if f.json {
-                return print_json(&serde_json::json!({"id": id}));
+                return print_json(&json!({"id": r["id"]}));
             }
-            println!("{}", t("tasks.sent", &[("id", &id), ("to", to)]));
+            println!("{}", t("tasks.sent", &[("id", s(&r, "id")), ("to", to)]));
             Ok(())
         }
         TasksCommand::PushRef {
@@ -496,147 +525,67 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
             sha,
             env,
         } => {
-            let ends = Ends::open()?;
-            let id = ends
-                .node()
-                .submit(NewTask {
-                    to: to.clone(),
-                    kind: TaskKind::LaptopAct,
-                    title: format!("push {}", printable(r#ref)),
-                    parts: vec![Part::Text {
-                        text: "Please push this commit.".into(),
-                    }],
-                    label: Label::Fleet,
-                    act: Some(Act::PushRef {
-                        repo: repo.clone(),
-                        remote: remote.clone(),
-                        r#ref: r#ref.clone(),
-                        sha: sha.clone(),
-                        env: env.clone(),
-                    }),
-                    parent: None,
-                    deadline_ms: None,
-                })
-                .map_err(refused)?;
-            println!("{}", t("tasks.sent", &[("id", &id), ("to", to)]));
+            let r = be.call(
+                "push_ref",
+                json!({"to": to, "repo": repo, "remote": remote, "ref": r#ref, "sha": sha, "env": env}),
+                false,
+            )?;
+            println!("{}", t("tasks.sent", &[("id", s(&r, "id")), ("to", to)]));
             Ok(())
         }
-        TasksCommand::Inbox { all } => {
-            let st = Ends::open()?.state()?;
-            let mut tasks: Vec<&Task> = st
-                .tasks
-                .values()
-                .filter(|x| *all || needs_you(&st.me, x))
-                .collect();
-            tasks.sort_by_key(|x| x.created_ms);
+        TasksCommand::Inbox { all, for_model } => {
+            let v = be.call("inbox", json!({"all": all, "for_model": for_model}), false)?;
             if f.json {
-                return print_json(&serde_json::to_value(&tasks)?);
+                return print_json(&v);
             }
+            let tasks = v.as_array().cloned().unwrap_or_default();
             if tasks.is_empty() {
                 println!("{}", t("tasks.inbox_none", &[]));
             }
-            for x in tasks {
-                println!("{}", row(x, if x.unread { "*" } else { " " }));
+            for x in &tasks {
+                println!("{}", row(x, if x["unread"] == true { "*" } else { " " }));
             }
             Ok(())
         }
-        TasksCommand::Status { id } => {
-            let ends = Ends::open()?;
-            let st = ends.state()?;
-            match id {
-                None => {
-                    for p in st.peers.values() {
-                        let seen = if p.last_seen_ms == 0 {
-                            "never".to_string()
-                        } else {
-                            format!("{}s ago", now_ms().saturating_sub(p.last_seen_ms) / 1000)
-                        };
-                        println!(
-                            "{}",
-                            t(
-                                "tasks.peer_row",
-                                &[
-                                    ("name", &p.name),
-                                    ("epoch", &p.epoch.to_string()),
-                                    ("out", &p.outbox.len().to_string()),
-                                    ("fp", &p.seal_fingerprint()),
-                                    ("seen", &seen)
-                                ]
-                            )
-                        );
-                    }
-                    Ok(())
-                }
-                Some(id) => {
-                    let tk = st
-                        .tasks
-                        .get(id)
-                        .ok_or_else(|| cfg("tasks.unknown", &[("id", id)]))?;
-                    if f.json {
-                        return print_json(&serde_json::to_value(tk)?);
-                    }
-                    let reason = tk
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(" ({})", printable(r)))
-                        .unwrap_or_default();
+        TasksCommand::Status { id, for_model } => match id {
+            None => {
+                let peers = be.call("peers", json!({}), false)?;
+                for p in peers.as_array().into_iter().flatten() {
+                    let seen = match p["last_seen_ms"].as_u64() {
+                        Some(0) | None => "never".to_string(),
+                        Some(ms) => format!("{}s ago", ops::now_ms().saturating_sub(ms) / 1000),
+                    };
                     println!(
                         "{}",
                         t(
-                            "tasks.show_head",
+                            "tasks.peer_row",
                             &[
-                                ("id", &tk.id),
-                                ("title", &printable(&tk.title)),
-                                ("from", &tk.from),
-                                ("to", &tk.to),
-                                ("kind", tk.kind.name()),
-                                ("state", tk.state.name()),
-                                ("reason", &reason)
+                                ("name", s(p, "name")),
+                                ("epoch", &p["epoch"].to_string()),
+                                ("out", &p["outbox"].to_string()),
+                                ("fp", s(p, "seal_fingerprint")),
+                                ("seen", &seen)
                             ]
                         )
                     );
-                    for m in &tk.messages {
-                        for p in &m.parts {
-                            let txt = match p {
-                                Part::Text { text } => printable(text),
-                                Part::Data { schema, .. } => {
-                                    format!("[data: {}]", printable(schema))
-                                }
-                            };
-                            let lab = serde_json::to_value(m.label)?
-                                .as_str()
-                                .unwrap_or("untrusted")
-                                .to_string();
-                            println!(
-                                "{}",
-                                t(
-                                    "tasks.show_msg",
-                                    &[
-                                        ("label", &lab),
-                                        ("who", &printable(&m.from)),
-                                        ("text", &txt)
-                                    ]
-                                )
-                            );
-                        }
-                    }
-                    for a in &tk.artifacts {
+                    if let Some(h) = p["halted"].as_str() {
                         println!(
                             "{}",
-                            t(
-                                "tasks.show_artifact",
-                                &[
-                                    ("name", &printable(&a.name)),
-                                    ("hash", &a.hash[..12.min(a.hash.len())])
-                                ]
-                            )
+                            t("tasks.halted", &[("peer", s(p, "name")), ("why", h)])
                         );
                     }
-                    let _ = ends.store.update(|s| s.mark_read(id));
-                    Ok(())
                 }
+                Ok(())
             }
-        }
+            Some(id) => {
+                let tk = be.call("task", json!({"id": id, "for_model": for_model}), false)?;
+                if f.json {
+                    return print_json(&tk);
+                }
+                print_task(&tk);
+                Ok(())
+            }
+        },
         TasksCommand::Reply {
             id,
             text,
@@ -644,66 +593,52 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
             state,
             reason,
         } => {
-            let ends = Ends::open()?;
-            let (body, term) = if text.is_some() || *stdin {
+            let body = if text.is_some() || *stdin {
                 text_arg(text, *stdin)?
             } else {
-                (String::new(), false)
+                String::new()
             };
-            let to_state = match state.as_deref() {
-                None => None,
-                Some(s) => match TState::parse(s) {
-                    Some(x)
-                        if matches!(
-                            x,
-                            TState::Working
-                                | TState::InputRequired
-                                | TState::Completed
-                                | TState::Failed
-                        ) =>
-                    {
-                        Some((x, reason.clone()))
-                    }
-                    _ => return Err(cfg("tasks.bad_state", &[("state", s)])),
-                },
-            };
-            if body.is_empty() && to_state.is_none() {
-                return Err(cfg("tasks.text_needed", &[]));
-            }
-            let parts = if body.is_empty() {
-                Vec::new()
-            } else {
-                vec![Part::Text { text: body }]
-            };
-            ends.node()
-                .reply(id, parts, label(term), to_state)
-                .map_err(refused)?;
+            be.call(
+                "reply",
+                json!({"id": id, "text": body, "state": state, "reason": reason}),
+                false,
+            )?;
             println!("{}", t("tasks.replied", &[("id", id)]));
             Ok(())
         }
         TasksCommand::Cancel { id } => {
-            Ends::open()?.node().cancel(id).map_err(refused)?;
+            be.call("cancel", json!({"id": id}), false)?;
             println!("{}", t("tasks.canceled", &[("id", id)]));
             Ok(())
         }
         TasksCommand::Why { id } => {
-            for l in Ends::open()?.state()?.why(id, now_ms()) {
-                println!("{}", printable(&l));
+            let r = be.call("why", json!({"id": id}), false)?;
+            for l in r["lines"].as_array().into_iter().flatten() {
+                println!("{}", l.as_str().unwrap_or(""));
             }
             Ok(())
         }
         TasksCommand::Sync { peer } => {
-            let ends = Ends::open()?;
-            let name = peer_name(&ends.state()?, peer)?;
-            sync_once(&ends, &name, runner, f.json)
+            let Backend::Local(d) = &be else {
+                return Err(cfg("tasks.box_answers", &[]));
+            };
+            let peers = be.call("peers", json!({}), false)?;
+            let name = peer_name(peers.as_array().map_or(&[][..], Vec::as_slice), peer)?;
+            sync_once(d, &name, runner, f.json)
         }
         TasksCommand::Watch {
             peer,
             every,
             rounds,
         } => {
-            let ends = Ends::open()?;
-            let name = peer_name(&ends.state()?, peer)?;
+            let Backend::Local(d) = &be else {
+                return Err(cfg("tasks.box_answers", &[]));
+            };
+            if *every == 0 {
+                return Err(cfg("tasks.every_zero", &[]));
+            }
+            let peers = be.call("peers", json!({}), false)?;
+            let name = peer_name(peers.as_array().map_or(&[][..], Vec::as_slice), peer)?;
             println!(
                 "{}",
                 t(
@@ -711,24 +646,35 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
                     &[("peer", &name), ("secs", &every.to_string())]
                 )
             );
-            let mut told: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            // what has been told: bounded, so a long watch cannot grow without limit (the oldest entries are forgotten)
+            let mut told: std::collections::VecDeque<String> = std::collections::VecDeque::new();
             let mut n = 0u64;
             loop {
-                if let Err(e) = sync_once(&ends, &name, runner, false) {
+                if let Err(e) = sync_once(d, &name, runner, false) {
                     eprintln!("{e}");
                 }
-                let st = ends.state()?;
-                for x in st.tasks.values().filter(|x| x.unread) {
-                    if told.insert(format!("{}:{}", x.id, x.updated_ms)) {
+                let v = be.call("inbox", json!({"all": false, "for_model": false}), false)?;
+                for x in v
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|x| x["unread"] == true)
+                {
+                    let key = format!("{}:{}", s(x, "key"), x["updated_ms"]);
+                    if !told.contains(&key) {
+                        told.push_back(key);
+                        if told.len() > 1000 {
+                            told.pop_front();
+                        }
                         println!(
                             "{}",
                             t(
                                 "tasks.new_line",
                                 &[
-                                    ("id", &x.id),
-                                    ("state", x.state.name()),
-                                    ("from", &printable(&x.from)),
-                                    ("title", &printable(&x.title))
+                                    ("id", s(x, "id")),
+                                    ("state", s(x, "state")),
+                                    ("from", s(x, "from")),
+                                    ("title", s(x, "title"))
                                 ]
                             )
                         );
@@ -738,56 +684,69 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
                 if rounds.is_some_and(|r| n >= r) {
                     return Ok(());
                 }
-                std::thread::sleep(std::time::Duration::from_secs(*every));
+                std::thread::sleep(Duration::from_secs(*every));
             }
         }
         TasksCommand::Exchange { peer } => {
-            let ends = Ends::open()?;
-            let inbound: Vec<Sealed> = serde_json::from_str(&read_big_stdin()?)
-                .map_err(|_| refused("not a task channel request"))?;
-            let (_, out) = ends
-                .node()
-                .serve(peer, &inbound)
-                .map_err(|e| Error::Config(printable(&e.to_string())))?;
-            println!("{}", serde_json::to_string(&out)?);
+            // The answering side of a sync. Over the router service this process holds no key: it hands the envelope bytes it was given
+            // to the relay socket and prints what comes back, and it can do nothing else with them. Without a service it runs as before.
+            let inbound = read_big_stdin()?;
+            let out = match &be {
+                Backend::Service(root) => {
+                    let sock = root.join("relay").join("relay.sock");
+                    let r = service::call(
+                        &sock,
+                        &json!({"op": "exchange", "peer": peer, "inbound": inbound}),
+                        service::MAX_REPLY,
+                    )
+                    .map_err(|e| map_err(&e))?;
+                    r["outbound"].as_str().unwrap_or("[]").to_string()
+                }
+                Backend::Local(d) => {
+                    let ends = Ends::open(d).map_err(|e| map_err(&e))?;
+                    let r = dispatch(
+                        &ends,
+                        Policy::Relay,
+                        &json!({"op": "exchange", "peer": peer, "inbound": inbound}),
+                        true,
+                    )
+                    .map_err(|e| map_err(&e))?;
+                    r["outbound"].as_str().unwrap_or("[]").to_string()
+                }
+            };
+            println!("{out}");
             Ok(())
         }
+        TasksCommand::Serve { .. } => Ok(()),
         TasksCommand::Restored => {
-            let ends = Ends::open()?;
-            ends.store
-                .update(|s| s.restored(now_ms()))
-                .map_err(|e| Error::Config(e.to_string()))?;
-            ends.node()
-                .drain_audit()
-                .map_err(|e| Error::Config(e.to_string()))?;
+            let r = be.call("restored", json!({}), true)?;
             println!(
                 "{}",
-                t(
-                    "tasks.restored",
-                    &[("epoch", &ends.state()?.epoch.to_string())]
-                )
+                t("tasks.restored", &[("epoch", &r["epoch"].to_string())])
             );
             Ok(())
         }
     }
 }
 
+fn offer_json(o: &Offer) -> Value {
+    json!({
+        "name": o.name,
+        "sign_public": o.sign_public,
+        "seal_public": o.seal_public,
+        "epoch": o.epoch,
+    })
+}
+
 fn read_big_stdin() -> Result<String> {
     let mut s = String::new();
     std::io::stdin()
-        .take(8 * 1024 * 1024)
+        .take(8 * 1024 * 1024 + 1)
         .read_to_string(&mut s)?;
     Ok(s)
 }
 
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    o.open(path)?.write_all(bytes)?;
-    Ok(())
+#[allow(dead_code)]
+fn _hex_helpers_are_used(a: &str) -> Option<(String, Vec<u8>)> {
+    Some((normalize_hex(a)?, unhex(a)?))
 }

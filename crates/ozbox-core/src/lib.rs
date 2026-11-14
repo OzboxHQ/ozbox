@@ -24,6 +24,7 @@ pub mod daemon_scope;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod fence;
 pub mod filelock;
 pub mod hub;
 pub mod infra;

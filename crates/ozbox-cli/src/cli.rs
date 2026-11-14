@@ -2071,13 +2071,14 @@ pub enum TasksCommand {
     },
     /// Print this endpoint's public identity, to hand to the other side by a way you trust.
     Identity,
-    /// Pin the other side's identity (shows fingerprints first). `--via` is the command that reaches its `ozbox`, for example
-    /// `"ssh my-box ozbox"`; it is run as an argument list, never through a shell.
+    /// Pin the other side's identity (shows fingerprints first). `--via-arg` is one word of the command that reaches its `ozbox`;
+    /// repeat it for each word (for example `--via-arg ssh --via-arg my-box --via-arg /usr/local/bin/ozbox`, naming the program by
+    /// its absolute path so nothing on the other side's `PATH` can stand in for it). It is run as an argument list, never through a shell.
     Pin {
         /// A file from `ozbox tasks identity`, or `-` for standard input.
         file: std::path::PathBuf,
-        #[arg(long)]
-        via: Option<String>,
+        #[arg(long = "via-arg", allow_hyphen_values = true)]
+        via_arg: Vec<String>,
         /// Change an existing pin (a new epoch after a restore, or new keys). Compare the fingerprints first.
         #[arg(long)]
         replace: bool,
@@ -2121,9 +2122,17 @@ pub enum TasksCommand {
     Inbox {
         #[arg(long)]
         all: bool,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
     },
     /// One task with its messages, or (with no id) the pinned peers and what waits to be sent.
-    Status { id: Option<String> },
+    Status {
+        id: Option<String>,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
     /// Answer a task, and optionally move its state (only the side that received it may).
     Reply {
         id: String,
@@ -2131,7 +2140,7 @@ pub enum TasksCommand {
         text: Option<String>,
         #[arg(long)]
         stdin: bool,
-        /// working, input-required, completed or failed.
+        /// working, input-required, completed, failed or canceled (the last also answers a cancel the other side asked for).
         #[arg(long)]
         state: Option<String>,
         #[arg(long)]
@@ -2162,8 +2171,22 @@ pub enum TasksCommand {
         peer: String,
     },
     /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
-    /// accepted; every peer must pin the new epoch.
+    /// accepted; every peer must pin the new epoch. On a box this needs root.
     Restored,
+    /// Run the box's task router as a service of its own (a system user that agents cannot read as). Not for people: the unit that
+    /// `ozbox-mesh-setup` writes runs it.
+    #[command(hide = true)]
+    Serve {
+        /// The directory that holds the key, the state and the mesh audit log. Only the service user may enter it.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        agent_socket: std::path::PathBuf,
+        #[arg(long)]
+        relay_socket: std::path::PathBuf,
+        #[arg(long)]
+        admin_socket: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
