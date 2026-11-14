@@ -6,7 +6,7 @@ replaces the notes with tasks that have a state, an answer, an acknowledgement a
 forged, replayed or reordered on the way.
 
 See [how to read the status](README.md#how-to-read-the-status). **Preview:** built and covered by the test suite, including a
-test that runs two real endpoints through the real program. It has **not** been run against a real box. The design is
+test that runs two real endpoints through the real program. It has **not** been run against a real box; it leaves Preview when the real-box proof passes (the owner decided on 2026-11-15 that no second, independent security review is required). The design and the starting limits are owner-ratified (2026-11-15). The design is
 [ADR 0044](../adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant.md), and the format is not frozen.
 
 **What a message can do:** ask. A task never carries a permission, a secret or an approval. Writing "owner approved" in one

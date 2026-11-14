@@ -11,7 +11,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 <Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
   ## Your computer and a box can pass tasks instead of notes
 
-  Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box.
+  Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box, and it leaves Preview when that proof passes.
 
   - **A box runs the channel as a user of its own**, so an agent on the box can ask and answer through it but cannot read its keys. A peer's words are always shown as untrusted (`--for-model` fences them for a model), a cancel is a request the other side decides, and the first contact finishes in one `ozbox tasks sync`.
   - **`ozbox tasks`** sets up the two sides, sends a task, shows your inbox, answers, cancels, and explains why a task is stuck (`ozbox tasks why`).
