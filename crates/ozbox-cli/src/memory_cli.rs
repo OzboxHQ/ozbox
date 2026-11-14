@@ -223,7 +223,10 @@ pub fn run_skills(c: &SkillsCommand, json_out: bool, yes: bool) -> Result<(), Cl
             }
         }
         SkillsCommand::Add { dir } => {
-            let it = h.skills.add_to_library(dir).map_err(fail)?;
+            let it = h
+                .skills
+                .add_to_library(dir, "owner", now_ms())
+                .map_err(fail)?;
             println!(
                 "Added {} ({}). It is not approved or installed yet.",
                 it.name,

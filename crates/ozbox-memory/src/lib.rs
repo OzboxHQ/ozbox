@@ -15,10 +15,10 @@
 pub mod bundled;
 mod lock;
 pub mod memory;
-pub mod secret_shape;
 pub mod skills;
 
 pub use lock::FileLock;
+pub use ozbox_core::secret_shape;
 
 /// Milliseconds since the Unix epoch, now.
 pub fn now_ms() -> u64 {
@@ -35,14 +35,7 @@ pub(crate) fn random_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// A name that is safe to use as a file or folder name: letters, digits, `.`, `_`, `-`; 1 to 64; no leading dot.
-pub fn name_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && !s.starts_with('.')
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
-}
+pub use ozbox_core::skill_pack::name_ok;
 
 /// Write a file by writing a sibling and renaming it over the target, so a reader never sees half a file.
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {

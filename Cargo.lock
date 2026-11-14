@@ -953,6 +953,7 @@ name = "ozbox-memory"
 version = "0.2.0-beta.0"
 dependencies = [
  "getrandom 0.2.17",
+ "ozbox-core",
  "ring",
  "rusqlite",
  "serde",

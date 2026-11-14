@@ -35,6 +35,7 @@ fn skill_resp(e: SkillError) -> Resp {
     match e {
         SkillError::NotFound => Resp::error(404, "not_found", "there is no such skill"),
         SkillError::Refused(m) => Resp::error(409, "stale", &m),
+        SkillError::NotApproved(m) => Resp::error(409, "not_approved", &m),
         SkillError::Invalid(m) => Resp::error(400, "invalid", &m),
         SkillError::Io(m) => Resp::error(500, "internal", &m),
     }

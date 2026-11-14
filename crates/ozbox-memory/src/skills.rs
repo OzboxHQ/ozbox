@@ -14,226 +14,18 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ring::digest;
 use serde::{Deserialize, Serialize};
 
 use crate::lock::FileLock;
-use crate::secret_shape::find_secret;
 use crate::{name_ok, write_atomic};
 
-pub const MAX_FILES: usize = 50;
-pub const MAX_FILE_BYTES: usize = 128 * 1024;
-pub const MAX_TOTAL_BYTES: usize = 512 * 1024;
-const TEXT_EXT: &[&str] = &[
-    "md", "txt", "json", "yaml", "yml", "toml", "sh", "py", "js", "ts", "rs", "sql", "html", "css",
-    "csv",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SkillError {
-    Invalid(String),
-    NotFound,
-    /// Not allowed (not approved, not installed, a stale approval).
-    Refused(String),
-    Io(String),
-}
-
-impl fmt::Display for SkillError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SkillError::Invalid(s) | SkillError::Refused(s) | SkillError::Io(s) => f.write_str(s),
-            SkillError::NotFound => f.write_str("there is no such skill"),
-        }
-    }
-}
-
-impl std::error::Error for SkillError {}
+pub use ozbox_core::skill_pack::{
+    file_kind, hash_files, spdx_ok, SkillError, SkillPack, MAX_FILES, MAX_FILE_BYTES,
+    MAX_PACK_BODY, MAX_TOTAL_BYTES,
+};
 
 fn io<E: fmt::Display>(e: E) -> SkillError {
     SkillError::Io(format!("the skills store could not be used: {e}"))
-}
-
-/// A skill's files, in memory. Built from a folder or from the files shipped inside the program.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillPack {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    /// The author's licence as an SPDX identifier, from the `license:` line of the front matter. Optional here so that
-    /// existing skills keep loading; shown before a skill is approved.
-    pub license: Option<String>,
-    pub files: BTreeMap<String, Vec<u8>>,
-}
-
-/// Does this look like an SPDX licence expression (`Apache-2.0`, `MIT OR Apache-2.0`)? Plain characters only.
-pub fn spdx_ok(l: &str) -> bool {
-    !l.is_empty()
-        && l.len() <= 64
-        && l.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b' ' | b'(' | b')')
-        })
-}
-
-/// `key: value` lines between the first two `---` lines of a `SKILL.md`.
-fn front_matter(text: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return out;
-    }
-    for l in lines {
-        if l.trim() == "---" {
-            break;
-        }
-        if let Some((k, v)) = l.split_once(':') {
-            let v = v.trim().trim_matches(['"', '\'']);
-            out.insert(k.trim().to_string(), v.to_string());
-        }
-    }
-    out
-}
-
-fn path_ok(p: &str) -> bool {
-    let parts: Vec<&str> = p.split('/').collect();
-    !parts.is_empty() && parts.len() <= 4 && parts.iter().all(|c| name_ok(c))
-}
-
-impl SkillPack {
-    pub fn from_files(files: BTreeMap<String, Vec<u8>>) -> Result<SkillPack, SkillError> {
-        if files.len() > MAX_FILES {
-            return Err(SkillError::Invalid(format!(
-                "a skill has at most {MAX_FILES} files"
-            )));
-        }
-        let total: usize = files.values().map(Vec::len).sum();
-        if total > MAX_TOTAL_BYTES {
-            return Err(SkillError::Invalid(format!(
-                "a skill is at most {} KB in all",
-                MAX_TOTAL_BYTES / 1024
-            )));
-        }
-        for (p, b) in &files {
-            if !path_ok(p) {
-                return Err(SkillError::Invalid(format!(
-                    "{p} is not an allowed file name"
-                )));
-            }
-            let ext = p.rsplit('.').next().unwrap_or("");
-            if !TEXT_EXT.contains(&ext) {
-                return Err(SkillError::Invalid(format!(
-                    "{p}: a skill holds text files only ({})",
-                    TEXT_EXT.join(", ")
-                )));
-            }
-            if b.len() > MAX_FILE_BYTES {
-                return Err(SkillError::Invalid(format!(
-                    "{p} is over {} KB",
-                    MAX_FILE_BYTES / 1024
-                )));
-            }
-            let text = std::str::from_utf8(b)
-                .map_err(|_| SkillError::Invalid(format!("{p} is not text")))?;
-            if let Some(kind) = find_secret(text) {
-                return Err(SkillError::Invalid(format!(
-                    "{p} looks like it holds {kind}. A skill never holds a secret."
-                )));
-            }
-        }
-        let main = files
-            .get("SKILL.md")
-            .ok_or_else(|| SkillError::Invalid("a skill needs a SKILL.md".into()))?;
-        let fm = front_matter(&String::from_utf8_lossy(main));
-        let name = fm.get("name").cloned().ok_or_else(|| {
-            SkillError::Invalid("SKILL.md needs a name: line in its front matter".into())
-        })?;
-        if !name_ok(&name) || name.contains('.') {
-            return Err(SkillError::Invalid(
-                "a skill name is letters, digits, dash and underscore".into(),
-            ));
-        }
-        let description = fm.get("description").cloned().unwrap_or_default();
-        if description.is_empty() || description.chars().count() > 1024 {
-            return Err(SkillError::Invalid(
-                "SKILL.md needs a description of 1 to 1024 characters".into(),
-            ));
-        }
-        Ok(SkillPack {
-            name,
-            description,
-            version: fm.get("version").cloned().unwrap_or_else(|| "1".into()),
-            license: fm.get("license").filter(|l| spdx_ok(l)).cloned(),
-            files,
-        })
-    }
-
-    /// Read a skill folder. Symbolic links and anything that is not a plain file are refused.
-    pub fn from_dir(dir: &Path) -> Result<SkillPack, SkillError> {
-        let mut files = BTreeMap::new();
-        fn walk(
-            base: &Path,
-            dir: &Path,
-            out: &mut BTreeMap<String, Vec<u8>>,
-        ) -> Result<(), SkillError> {
-            for e in fs::read_dir(dir).map_err(io)?.flatten() {
-                let p = e.path();
-                let meta = fs::symlink_metadata(&p).map_err(io)?;
-                let rel = p
-                    .strip_prefix(base)
-                    .map_err(io)?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if meta.is_dir() {
-                    if rel.starts_with('.') || rel.contains("/.") {
-                        continue;
-                    }
-                    walk(base, &p, out)?;
-                } else if meta.is_file() {
-                    if rel.starts_with('.') || rel.contains("/.") {
-                        continue;
-                    }
-                    if out.len() > MAX_FILES {
-                        return Err(SkillError::Invalid(format!(
-                            "a skill has at most {MAX_FILES} files"
-                        )));
-                    }
-                    out.insert(rel, fs::read(&p).map_err(io)?);
-                } else {
-                    return Err(SkillError::Invalid(format!(
-                        "{rel} is a link or a special file; a skill holds plain files only"
-                    )));
-                }
-            }
-            Ok(())
-        }
-        walk(dir, dir, &mut files)?;
-        let pack = SkillPack::from_files(files)?;
-        if dir.file_name().and_then(|n| n.to_str()) != Some(pack.name.as_str()) {
-            return Err(SkillError::Invalid(
-                "the folder must be named for the skill (the name in SKILL.md)".into(),
-            ));
-        }
-        Ok(pack)
-    }
-
-    /// SHA-256 over every path and file, length-prefixed so no two different skills can collide by moving bytes around.
-    pub fn hash(&self) -> String {
-        hash_files(&self.files)
-    }
-}
-
-fn hash_files(files: &BTreeMap<String, Vec<u8>>) -> String {
-    let mut ctx = digest::Context::new(&digest::SHA256);
-    for (p, b) in files {
-        ctx.update(&(p.len() as u64).to_be_bytes());
-        ctx.update(p.as_bytes());
-        ctx.update(&(b.len() as u64).to_be_bytes());
-        ctx.update(b);
-    }
-    ctx.finish()
-        .as_ref()
-        .iter()
-        .map(|x| format!("{x:02x}"))
-        .collect()
 }
 
 /// Where an install applies.
@@ -285,13 +77,63 @@ pub struct Approval {
     pub approved_ms: u64,
 }
 
+/// A skill put on a box's own disk, as last recorded here. The box's own files are the truth: the dashboard asks the box
+/// what it holds. This record keeps the approval and the files that were pushed alive, and says who did it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Push {
+    pub name: String,
+    pub box_name: String,
+    pub hash: String,
+    #[serde(default)]
+    pub agents: Vec<String>,
+    pub pushed_by: String,
+    pub pushed_ms: u64,
+}
+
+/// One version of a library skill: the files hash, the version its `SKILL.md` names, who added it, when and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revision {
+    pub name: String,
+    pub hash: String,
+    pub version: String,
+    pub by: String,
+    /// `page_upload`, `page_editor`, `cli` or `restore`.
+    pub via: String,
+    pub ms: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     #[serde(default)]
     installs: Vec<Install>,
     #[serde(default)]
     approvals: Vec<Approval>,
+    #[serde(default)]
+    pushes: Vec<Push>,
+    #[serde(default)]
+    revisions: Vec<Revision>,
 }
+
+/// Who added a skill to the library and how.
+#[derive(Debug, Clone)]
+pub struct Origin {
+    pub by: String,
+    pub via: String,
+}
+
+/// What adding a skill may replace. A page names the hash it was looking at, so two tabs cannot overwrite each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replace {
+    /// There must be no skill of this name in the library.
+    Fresh,
+    /// The library's skill must still have this hash.
+    Over(String),
+    /// Replace whatever is there (the command line, which a person runs on purpose).
+    Force,
+}
+
+/// Versions kept per skill.
+pub const MAX_REVISIONS: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -320,6 +162,45 @@ pub struct InstallView {
 pub struct FileInfo {
     pub path: String,
     pub bytes: usize,
+    /// `instructions`, `script` (an agent may run it) or `text`.
+    pub kind: &'static str,
+}
+
+/// Where a skill came from, shown before anyone approves it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Provenance {
+    /// `bundled` (ships with Oz Box), `library` (added by a person) or `removed`.
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// `page_upload`, `page_editor`, `cli` or `restore`; none for a folder put in the library by hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ms: Option<u64>,
+}
+
+/// A skill pushed to a box, as last recorded.
+#[derive(Debug, Clone, Serialize)]
+pub struct PushView {
+    pub box_name: String,
+    pub hash: String,
+    pub agents: Vec<String>,
+    pub pushed_by: String,
+    pub pushed_ms: u64,
+    /// The library holds these same files now.
+    pub matches_library: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RevisionView {
+    pub hash: String,
+    pub version: String,
+    pub by: String,
+    pub via: String,
+    pub ms: u64,
+    pub current: bool,
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,6 +217,12 @@ pub struct CatalogItem {
     /// A person approved these exact files.
     pub approved: bool,
     pub installs: Vec<InstallView>,
+    pub provenance: Provenance,
+    /// A skill of your own has the name of one that ships with Oz Box and is what the catalog offers.
+    pub shadows_bundled: bool,
+    pub pushes: Vec<PushView>,
+    /// Earlier versions kept in the library (newest first), for a skill of your own.
+    pub revisions: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -348,12 +235,14 @@ pub struct Review {
     pub hash: String,
     pub approved: bool,
     pub files: Vec<ReviewFile>,
+    pub provenance: Provenance,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewFile {
     pub path: String,
     pub text: String,
+    pub kind: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -465,6 +354,7 @@ impl SkillStore {
             .installs
             .iter()
             .map(|i| (i.name.clone(), i.hash.clone()))
+            .chain(reg.pushes.iter().map(|p| (p.name.clone(), p.hash.clone())))
             .chain(src.iter().map(|(n, (p, _))| (n.clone(), p.hash())))
             .collect();
         reg.approvals
@@ -473,6 +363,7 @@ impl SkillStore {
             .installs
             .iter()
             .map(|i| (i.name.clone(), i.hash.clone()))
+            .chain(reg.pushes.iter().map(|p| (p.name.clone(), p.hash.clone())))
             .collect();
         if let Ok(names) = fs::read_dir(self.root.join("store")) {
             for n in names.flatten() {
@@ -510,84 +401,365 @@ impl SkillStore {
         }
     }
 
+    fn file_infos(p: &SkillPack) -> Vec<FileInfo> {
+        p.files
+            .iter()
+            .map(|(k, v)| FileInfo {
+                path: k.clone(),
+                bytes: v.len(),
+                kind: file_kind(k),
+            })
+            .collect()
+    }
+
+    fn provenance(reg: &Registry, name: &str, hash: &str, source: &str) -> Provenance {
+        let rev = reg
+            .revisions
+            .iter()
+            .rev()
+            .find(|r| r.name == name && r.hash == hash);
+        Provenance {
+            origin: source.to_string(),
+            by: rev.map(|r| r.by.clone()),
+            via: rev.map(|r| r.via.clone()),
+            ms: rev.map(|r| r.ms),
+        }
+    }
+
+    fn push_views(reg: &Registry, name: &str, current: Option<&str>) -> Vec<PushView> {
+        reg.pushes
+            .iter()
+            .filter(|p| p.name == name)
+            .map(|p| PushView {
+                box_name: p.box_name.clone(),
+                hash: p.hash.clone(),
+                agents: p.agents.clone(),
+                pushed_by: p.pushed_by.clone(),
+                pushed_ms: p.pushed_ms,
+                matches_library: current.is_some_and(|c| c == p.hash),
+            })
+            .collect()
+    }
+
     pub fn catalog(&self) -> Vec<CatalogItem> {
         let reg = self.registry();
         let mut out = Vec::new();
         let src = self.sources();
         for (name, (p, source)) in &src {
             let hash = p.hash();
+            let bundled_too = self.bundled.iter().any(|b| &b.name == name);
             out.push(CatalogItem {
                 name: name.clone(),
                 description: p.description.clone(),
                 version: p.version.clone(),
                 license: p.license.clone(),
                 approved: Self::approved(&reg, name, &hash),
-                files: p
-                    .files
-                    .iter()
-                    .map(|(k, v)| FileInfo {
-                        path: k.clone(),
-                        bytes: v.len(),
-                    })
-                    .collect(),
+                files: Self::file_infos(p),
                 installs: reg
                     .installs
                     .iter()
                     .filter(|i| &i.name == name)
                     .map(|i| self.view(&reg, i, Some(&hash)))
                     .collect(),
+                provenance: Self::provenance(&reg, name, &hash, source),
+                shadows_bundled: *source == "library" && bundled_too,
+                pushes: Self::push_views(&reg, name, Some(&hash)),
+                revisions: reg
+                    .revisions
+                    .iter()
+                    .filter(|r| &r.name == name && r.hash != hash)
+                    .count(),
                 source: (*source).to_string(),
                 hash,
             });
         }
-        // An install whose source has been removed from the library still shows, so it can be removed.
-        for i in reg.installs.iter().filter(|i| !src.contains_key(&i.name)) {
-            if let Some(p) = self.read_snapshot(&i.name, &i.hash) {
+        // An install or push whose source has been removed from the library still shows, so it can be removed.
+        let orphans: BTreeSet<(String, String)> = reg
+            .installs
+            .iter()
+            .map(|i| (i.name.clone(), i.hash.clone()))
+            .chain(reg.pushes.iter().map(|p| (p.name.clone(), p.hash.clone())))
+            .filter(|(n, _)| !src.contains_key(n))
+            .collect();
+        let mut seen = BTreeSet::new();
+        for (name, hash) in orphans {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(p) = self.read_snapshot(&name, &hash) {
                 out.push(CatalogItem {
-                    name: i.name.clone(),
+                    name: name.clone(),
                     description: p.description.clone(),
                     version: p.version.clone(),
                     license: p.license.clone(),
-                    hash: i.hash.clone(),
+                    hash: hash.clone(),
                     source: "removed".into(),
-                    approved: Self::approved(&reg, &i.name, &i.hash),
-                    files: p
-                        .files
+                    approved: Self::approved(&reg, &name, &hash),
+                    files: Self::file_infos(&p),
+                    installs: reg
+                        .installs
                         .iter()
-                        .map(|(k, v)| FileInfo {
-                            path: k.clone(),
-                            bytes: v.len(),
-                        })
+                        .filter(|i| i.name == name)
+                        .map(|i| self.view(&reg, i, None))
                         .collect(),
-                    installs: vec![self.view(&reg, i, None)],
+                    provenance: Self::provenance(&reg, &name, &hash, "removed"),
+                    shadows_bundled: false,
+                    pushes: Self::push_views(&reg, &name, None),
+                    revisions: 0,
                 });
             }
         }
         out
     }
 
-    /// Copy a folder into the library (the person's own skills). Replacing one changes its hash.
-    pub fn add_to_library(&self, dir: &Path) -> Result<CatalogItem, SkillError> {
-        let pack = SkillPack::from_dir(dir)?;
-        let _l = self.lock()?;
-        let dest = self.root.join("library").join(&pack.name);
-        let tmp = self
-            .root
-            .join("library")
-            .join(format!(".{}.new", pack.name));
-        let _ = fs::remove_dir_all(&tmp);
-        for (p, b) in &pack.files {
-            write_atomic(&tmp.join(p), b).map_err(io)?;
+    fn history_dir(&self, name: &str, hash: &str) -> PathBuf {
+        self.root.join("history").join(name).join(hash)
+    }
+
+    fn read_dir_pack(dir: &Path, hash: &str) -> Option<SkillPack> {
+        let mut files = BTreeMap::new();
+        fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Option<()> {
+            for e in fs::read_dir(dir).ok()?.flatten() {
+                let p = e.path();
+                let meta = fs::symlink_metadata(&p).ok()?;
+                if meta.is_dir() {
+                    walk(base, &p, out)?;
+                } else if meta.is_file() {
+                    let rel = p
+                        .strip_prefix(base)
+                        .ok()?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(rel, fs::read(&p).ok()?);
+                } else {
+                    return None;
+                }
+            }
+            Some(())
         }
+        walk(dir, dir, &mut files)?;
+        if hash_files(&files) != hash {
+            return None;
+        }
+        SkillPack::from_files(files).ok()
+    }
+
+    fn write_pack_dir(dir: &Path, pack: &SkillPack) -> Result<(), SkillError> {
+        let _ = fs::remove_dir_all(dir);
+        for (p, b) in &pack.files {
+            write_atomic(&dir.join(p), b).map_err(io)?;
+        }
+        Ok(())
+    }
+
+    /// Add a skill to the library (the person's own skills). Everything an agent could be told is in `pack`, already checked.
+    /// Replacing one that is there archives it first, so it can be read and restored; the new files are a new hash and wait
+    /// for a new approval.
+    pub fn add_pack(
+        &self,
+        pack: SkillPack,
+        origin: &Origin,
+        replace: &Replace,
+        allow_shadow: bool,
+        now: u64,
+    ) -> Result<CatalogItem, SkillError> {
+        let _l = self.lock()?;
+        let name = pack.name.clone();
+        let dest = self.root.join("library").join(&name);
+        let existing = if dest.is_dir() {
+            SkillPack::from_dir(&dest).ok()
+        } else {
+            None
+        };
+        match (&existing, replace) {
+            (Some(_), Replace::Fresh) => {
+                return Err(SkillError::Refused(format!(
+                    "your library already has a skill called {name}; choose to replace it, or use another name"
+                )))
+            }
+            (Some(e), Replace::Over(h)) if &e.hash() != h => {
+                return Err(SkillError::Refused(format!(
+                    "{name} changed in the library since you looked at it; reload and try again"
+                )))
+            }
+            (None, Replace::Over(_)) => {
+                return Err(SkillError::Refused(format!(
+                    "{name} is not in the library any more; reload and try again"
+                )))
+            }
+            _ => {}
+        }
+        if existing.is_none()
+            && !allow_shadow
+            && matches!(replace, Replace::Fresh | Replace::Over(_))
+            && self.bundled.iter().any(|b| b.name == name)
+        {
+            return Err(SkillError::Refused(format!(
+                "a skill that ships with Oz Box is called {name}; yours would replace it in the catalog. Confirm that, or use another name"
+            )));
+        }
+        let hash = pack.hash();
+        if existing.as_ref().is_some_and(|e| e.hash() == hash) {
+            drop(_l);
+            return self
+                .catalog()
+                .into_iter()
+                .find(|c| c.name == name)
+                .ok_or(SkillError::NotFound);
+        }
+        let mut reg = self.registry();
+        if let Some(e) = &existing {
+            let h = e.hash();
+            let hd = self.history_dir(&name, &h);
+            if Self::read_dir_pack(&hd, &h).is_none() {
+                Self::write_pack_dir(&hd, e)?;
+            }
+            if !reg.revisions.iter().any(|r| r.name == name && r.hash == h) {
+                reg.revisions.push(Revision {
+                    name: name.clone(),
+                    hash: h,
+                    version: e.version.clone(),
+                    by: "unknown".into(),
+                    via: "folder".into(),
+                    ms: 0,
+                });
+            }
+        }
+        let tmp = self.root.join("library").join(format!(".{name}.new"));
+        Self::write_pack_dir(&tmp, &pack)?;
         let _ = fs::remove_dir_all(&dest);
         fs::rename(&tmp, &dest).map_err(io)?;
-        let mut reg = self.registry();
+        // the new version's own copy, so it can be read after a later replacement
+        let hd = self.history_dir(&name, &hash);
+        if Self::read_dir_pack(&hd, &hash).is_none() {
+            Self::write_pack_dir(&hd, &pack)?;
+        }
+        reg.revisions
+            .retain(|r| !(r.name == name && r.hash == hash));
+        reg.revisions.push(Revision {
+            name: name.clone(),
+            hash: hash.clone(),
+            version: pack.version.clone(),
+            by: origin.by.clone(),
+            via: origin.via.clone(),
+            ms: now,
+        });
+        // keep the last MAX_REVISIONS of this skill, and drop the archived files of the rest
+        let mine: Vec<usize> = reg
+            .revisions
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.name == name)
+            .map(|(i, _)| i)
+            .collect();
+        if mine.len() > MAX_REVISIONS {
+            let drop_n = mine.len() - MAX_REVISIONS;
+            let gone: Vec<usize> = mine.into_iter().take(drop_n).collect();
+            for i in &gone {
+                let _ = fs::remove_dir_all(self.history_dir(&name, &reg.revisions[*i].hash));
+            }
+            let mut i = 0;
+            reg.revisions.retain(|_| {
+                i += 1;
+                !gone.contains(&(i - 1))
+            });
+        }
         self.gc(&mut reg);
         self.save(&reg)?;
+        drop(_l);
         self.catalog()
             .into_iter()
-            .find(|c| c.name == pack.name)
+            .find(|c| c.name == name)
             .ok_or(SkillError::NotFound)
+    }
+
+    /// Copy a folder into the library (`ozbox skills add`). Replacing one changes its hash.
+    pub fn add_to_library(
+        &self,
+        dir: &Path,
+        who: &str,
+        now: u64,
+    ) -> Result<CatalogItem, SkillError> {
+        let pack = SkillPack::from_dir(dir)?;
+        self.add_pack(
+            pack,
+            &Origin {
+                by: who.to_string(),
+                via: "cli".into(),
+            },
+            &Replace::Force,
+            true,
+            now,
+        )
+    }
+
+    /// The versions of a library skill kept here, newest first.
+    pub fn history(&self, name: &str) -> Result<Vec<RevisionView>, SkillError> {
+        let reg = self.registry();
+        let src = self.sources();
+        let current = src.get(name).map(|(p, _)| p.hash());
+        let mut v: Vec<RevisionView> = reg
+            .revisions
+            .iter()
+            .filter(|r| r.name == name)
+            .map(|r| RevisionView {
+                hash: r.hash.clone(),
+                version: r.version.clone(),
+                by: r.by.clone(),
+                via: r.via.clone(),
+                ms: r.ms,
+                current: current.as_deref() == Some(r.hash.as_str()),
+                approved: Self::approved(&reg, name, &r.hash),
+            })
+            .collect();
+        if v.is_empty() && !src.contains_key(name) {
+            return Err(SkillError::NotFound);
+        }
+        v.reverse();
+        Ok(v)
+    }
+
+    /// Make an earlier version of a library skill the current one again. It is a new addition: it waits for approval.
+    pub fn restore(
+        &self,
+        name: &str,
+        hash: &str,
+        who: &str,
+        now: u64,
+    ) -> Result<CatalogItem, SkillError> {
+        if !skill_name_ok_here(name) {
+            return Err(SkillError::NotFound);
+        }
+        let reg = self.registry();
+        if !reg
+            .revisions
+            .iter()
+            .any(|r| r.name == name && r.hash == hash)
+        {
+            return Err(SkillError::NotFound);
+        }
+        let pack = Self::read_dir_pack(&self.history_dir(name, hash), hash).ok_or_else(|| {
+            SkillError::Refused("that version's files are not intact any more".into())
+        })?;
+        let current = self
+            .sources()
+            .get(name)
+            .filter(|(_, s)| *s == "library")
+            .map(|(p, _)| p.hash());
+        let replace = match current {
+            Some(h) => Replace::Over(h),
+            None => Replace::Fresh,
+        };
+        self.add_pack(
+            pack,
+            &Origin {
+                by: who.to_string(),
+                via: "restore".into(),
+            },
+            &replace,
+            true,
+            now,
+        )
     }
 
     pub fn remove_from_library(&self, name: &str) -> Result<(), SkillError> {
@@ -600,9 +772,82 @@ impl SkillStore {
             return Err(SkillError::NotFound);
         }
         fs::remove_dir_all(dir).map_err(io)?;
+        let _ = fs::remove_dir_all(self.root.join("history").join(name));
         let mut reg = self.registry();
+        reg.revisions.retain(|r| r.name != name);
         self.gc(&mut reg);
         self.save(&reg)
+    }
+
+    /// The files to put on a box's disk: the catalog's current files, and only if a person approved exactly them. `hash` is
+    /// what the person was looking at; if the library has changed since, this is refused like a stale approval.
+    pub fn for_push(&self, name: &str, hash: &str) -> Result<SkillPack, SkillError> {
+        let reg = self.registry();
+        let src = self.sources();
+        let (pack, _) = src.get(name).ok_or(SkillError::NotFound)?;
+        if pack.hash() != hash {
+            return Err(SkillError::Refused(
+                "those are not the files of this skill any more; review it again".into(),
+            ));
+        }
+        if !Self::approved(&reg, name, hash) {
+            return Err(SkillError::NotApproved(
+                "a person has not approved these files yet; review and approve them first".into(),
+            ));
+        }
+        Ok(pack.clone())
+    }
+
+    /// Record that `hash` of `name` was put on `box_name` (replacing an earlier record for that box).
+    pub fn record_push(
+        &self,
+        name: &str,
+        box_name: &str,
+        hash: &str,
+        agents: Vec<String>,
+        who: &str,
+        now: u64,
+    ) -> Result<(), SkillError> {
+        let _l = self.lock()?;
+        let src = self.sources();
+        let (pack, _) = src.get(name).ok_or(SkillError::NotFound)?;
+        if pack.hash() != hash {
+            return Err(SkillError::Refused(
+                "those are not the files of this skill any more; review it again".into(),
+            ));
+        }
+        let dir = self.snapshot_dir(name, hash);
+        if self.read_snapshot(name, hash).is_none() {
+            Self::write_pack_dir(&dir, pack)?;
+        }
+        let mut reg = self.registry();
+        reg.pushes
+            .retain(|p| !(p.name == name && p.box_name == box_name));
+        reg.pushes.push(Push {
+            name: name.to_string(),
+            box_name: box_name.to_string(),
+            hash: hash.to_string(),
+            agents,
+            pushed_by: who.to_string(),
+            pushed_ms: now,
+        });
+        self.gc(&mut reg);
+        self.save(&reg)
+    }
+
+    /// Forget the record of `name` on `box_name`. Not an error when there is none: the box's disk is what counts.
+    pub fn forget_push(&self, name: &str, box_name: &str) -> Result<(), SkillError> {
+        let _l = self.lock()?;
+        let mut reg = self.registry();
+        reg.pushes
+            .retain(|p| !(p.name == name && p.box_name == box_name));
+        self.gc(&mut reg);
+        self.save(&reg)
+    }
+
+    /// Where the skills are kept, for a page to say.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Install (or update to the catalog's current files) at a scope. Installing never approves.
@@ -700,12 +945,25 @@ impl SkillStore {
                 src.get(name)
                     .filter(|(p, _)| p.hash() == h)
                     .map(|(p, _)| p.clone())
+                    .or_else(|| {
+                        // an earlier version of a skill of your own, to read before restoring it
+                        reg.revisions
+                            .iter()
+                            .any(|r| r.name == name && r.hash == h)
+                            .then(|| Self::read_dir_pack(&self.history_dir(name, h), h))
+                            .flatten()
+                    })
             }),
             None => src.get(name).map(|(p, _)| p.clone()),
         }
         .ok_or(SkillError::NotFound)?;
         let h = pack.hash();
+        let source = match src.get(name) {
+            Some((p, s)) if p.hash() == h => *s,
+            Some(_) | None => "library",
+        };
         Ok(Review {
+            provenance: Self::provenance(&reg, name, &h, source),
             name: pack.name.clone(),
             description: pack.description.clone(),
             version: pack.version.clone(),
@@ -718,6 +976,7 @@ impl SkillStore {
                 .map(|(p, b)| ReviewFile {
                     path: p.clone(),
                     text: String::from_utf8_lossy(b).to_string(),
+                    kind: file_kind(p),
                 })
                 .collect(),
         })
@@ -779,6 +1038,10 @@ impl SkillStore {
             .ok_or_else(|| SkillError::Invalid("that skill has no such file".into()))?;
         Ok(String::from_utf8_lossy(bytes).to_string())
     }
+}
+
+fn skill_name_ok_here(n: &str) -> bool {
+    ozbox_core::skill_pack::skill_name_ok(n)
 }
 
 #[cfg(test)]
@@ -849,7 +1112,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = store(d.path());
         let dir = write_dir(d.path(), "mine", "Version one.", None);
-        let first = s.add_to_library(&dir).unwrap();
+        let first = s.add_to_library(&dir, "owner", 1).unwrap();
         s.install("mine", &InstallScope::Box("main".into()), "alice", 1)
             .unwrap();
         s.approve("mine", &first.hash, "alice", 2).unwrap();
@@ -860,7 +1123,7 @@ mod tests {
         );
         // the library copy changes: the catalog hash moves, the old approval is gone, the install flags an update
         let dir = write_dir(d.path(), "mine", "Version two, now with a new step.", None);
-        let second = s.add_to_library(&dir).unwrap();
+        let second = s.add_to_library(&dir, "owner", 1).unwrap();
         assert_ne!(first.hash, second.hash);
         assert!(!second.approved);
         let v = &second.installs[0];
@@ -914,19 +1177,21 @@ mod tests {
             None,
         );
         assert!(matches!(
-            s.add_to_library(&dir),
+            s.add_to_library(&dir, "owner", 1),
             Err(SkillError::Invalid(_))
         ));
         let dir = write_dir(d.path(), "bin", "ok", Some(("tool.exe", "MZ")));
-        assert!(s.add_to_library(&dir).is_err());
+        assert!(s.add_to_library(&dir, "owner", 1).is_err());
         let dir = write_dir(d.path(), "wrongname", "ok", None);
         fs::rename(&dir, d.path().join("other-folder")).unwrap();
-        assert!(s.add_to_library(&d.path().join("other-folder")).is_err());
+        assert!(s
+            .add_to_library(&d.path().join("other-folder"), "owner", 1)
+            .is_err());
         #[cfg(unix)]
         {
             let dir = write_dir(d.path(), "linky", "ok", None);
             std::os::unix::fs::symlink("/etc/hosts", dir.join("hosts.md")).unwrap();
-            assert!(s.add_to_library(&dir).is_err());
+            assert!(s.add_to_library(&dir, "owner", 1).is_err());
         }
         let mut f = BTreeMap::new();
         f.insert("SKILL.md".to_string(), b"no front matter".to_vec());
@@ -972,5 +1237,122 @@ mod tests {
         assert!(r.files[0].text.contains("Group failures"));
         assert_eq!(r.hash, s.catalog()[0].hash);
         assert_eq!(s.review("nope", None).unwrap_err(), SkillError::NotFound);
+    }
+
+    fn origin() -> Origin {
+        Origin {
+            by: "owner".into(),
+            via: "page_upload".into(),
+        }
+    }
+
+    #[test]
+    fn replacing_a_library_skill_needs_the_hash_that_was_seen_and_keeps_the_old_version() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let one = s
+            .add_pack(pack("mine", "one"), &origin(), &Replace::Fresh, false, 1)
+            .unwrap();
+        assert!(matches!(
+            s.add_pack(pack("mine", "two"), &origin(), &Replace::Fresh, false, 2),
+            Err(SkillError::Refused(_))
+        ));
+        assert!(matches!(
+            s.add_pack(
+                pack("mine", "two"),
+                &origin(),
+                &Replace::Over("00".into()),
+                false,
+                2
+            ),
+            Err(SkillError::Refused(_))
+        ));
+        let two = s
+            .add_pack(
+                pack("mine", "two"),
+                &origin(),
+                &Replace::Over(one.hash.clone()),
+                false,
+                3,
+            )
+            .unwrap();
+        assert_ne!(one.hash, two.hash);
+        assert_eq!(
+            (two.revisions, two.provenance.via.as_deref()),
+            (1, Some("page_upload"))
+        );
+        let h = s.history("mine").unwrap();
+        assert_eq!(h.len(), 2);
+        assert!(h[0].current && !h[1].current);
+        // the old version can be read, and restoring it is a new addition that needs approval
+        assert!(s.review("mine", Some(&one.hash)).unwrap().files[0]
+            .text
+            .contains("one"));
+        s.approve("mine", &two.hash, "owner", 4).unwrap();
+        let back = s.restore("mine", &one.hash, "owner", 5).unwrap();
+        assert_eq!(
+            (back.hash.as_str(), back.approved),
+            (one.hash.as_str(), false)
+        );
+        assert_eq!(back.provenance.via.as_deref(), Some("restore"));
+        // a shipped skill's name is not taken without saying so
+        assert!(matches!(
+            s.add_pack(pack("triage", "mine"), &origin(), &Replace::Fresh, false, 6),
+            Err(SkillError::Refused(_))
+        ));
+        let sh = s
+            .add_pack(pack("triage", "mine"), &origin(), &Replace::Fresh, true, 6)
+            .unwrap();
+        assert!(sh.shadows_bundled && sh.source == "library");
+        // deleting forgets the versions too
+        s.remove_from_library("mine").unwrap();
+        assert!(s.history("mine").is_err());
+    }
+
+    #[test]
+    fn only_an_approved_and_current_hash_may_be_pushed_and_a_push_keeps_its_approval_alive() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let one = s
+            .add_pack(pack("mine", "one"), &origin(), &Replace::Fresh, false, 1)
+            .unwrap();
+        assert!(matches!(
+            s.for_push("mine", &one.hash),
+            Err(SkillError::NotApproved(_))
+        ));
+        s.approve("mine", &one.hash, "owner", 2).unwrap();
+        assert!(matches!(
+            s.for_push("mine", "00"),
+            Err(SkillError::Refused(_))
+        ));
+        let p = s.for_push("mine", &one.hash).unwrap();
+        assert_eq!(p.hash(), one.hash);
+        s.record_push(
+            "mine",
+            "alpha",
+            &one.hash,
+            vec!["claude-code".into()],
+            "owner",
+            3,
+        )
+        .unwrap();
+        // the library moves on and then the skill is removed: the pushed files and their approval stay readable
+        let two = s
+            .add_pack(
+                pack("mine", "two"),
+                &origin(),
+                &Replace::Over(one.hash.clone()),
+                false,
+                4,
+            )
+            .unwrap();
+        assert!(!two.approved);
+        s.remove_from_library("mine").unwrap();
+        let cat = s.catalog();
+        let left = cat.iter().find(|c| c.name == "mine").unwrap();
+        assert_eq!((left.source.as_str(), left.approved), ("removed", true));
+        assert_eq!(left.pushes[0].box_name, "alpha");
+        s.forget_push("mine", "alpha").unwrap();
+        assert!(s.catalog().iter().all(|c| c.name != "mine"));
     }
 }
