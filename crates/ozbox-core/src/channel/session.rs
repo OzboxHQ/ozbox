@@ -880,8 +880,6 @@ impl Core {
                 l.applied.clear();
                 l.in_chain.clear();
                 l.in_chain_ok = true;
-                l.out_chain.clear();
-                l.acked_chain = (0, String::new());
                 l.notice = None;
                 l.ack_dirty = false;
                 l.hello_reply = true;

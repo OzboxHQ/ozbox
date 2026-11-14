@@ -891,6 +891,34 @@ fn the_running_digest_agrees_after_a_normal_conversation_in_both_directions() {
 }
 
 #[test]
+fn the_running_digest_survives_a_peer_that_restarts_with_messages_still_queued() {
+    let (a, b, _) = pair(false);
+    let net = Net::new();
+    net.settle(&a, &b);
+    for i in 0..5 {
+        a.send("main", &format!("before{i}"));
+    }
+    // the peer loses its state before taking any of them, and comes back with the same keys and pins
+    b.restart_same_epoch();
+    for _ in 0..6 {
+        net.settle(&a, &b);
+    }
+    for i in 0..5 {
+        a.send("main", &format!("after{i}"));
+    }
+    for _ in 0..6 {
+        net.settle(&a, &b);
+    }
+    let st = a.state();
+    assert!(
+        st.core.links.values().all(|l| l.halted.is_none()),
+        "{:?}",
+        st.core.links["main"].halted
+    );
+    assert_eq!(texts(&b).len(), 10, "{:?}", texts(&b));
+}
+
+#[test]
 fn the_audit_backlog_is_bounded_and_a_full_one_refuses_a_change_rather_than_dropping() {
     let (a, _b, _) = pair(false);
     a.store
