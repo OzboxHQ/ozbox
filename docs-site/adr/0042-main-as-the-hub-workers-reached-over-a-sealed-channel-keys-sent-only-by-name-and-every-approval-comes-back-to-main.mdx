@@ -873,11 +873,23 @@ accepts, and by `ozbox-issuer` through a pin that says a box is a worker; `task_
 3. `task_start` with `keys`, `key_env`, `env` or `secrets` is refused with "A task never names keys", and `ozbox audit` shows
    `hub.keys.refused` with `code=conductor-named-keys` and no name or value.
 4. `tools/list` for the conductor shows no tool with a key, secret, token or password input.
-5. Against a Staging copy of the issuer config, mark one pinned box `worker = true`: a request and a release for it both return the
+5. Against a Staging copy of the issuer config, mark one pinned box `worker = true` (or `fleet = true` with no `worker`): a request and a release for it both return the
    Production refusal, `refused-worker` is in the issuer's own record, and no value was read.
 
 **For the next slice, once a real channel exists:** the acceptance test of this ADR, plus the D2 negatives on two real boxes (the hub's
 refusal with the network cut; a hand-made assignment with a Production declaration sent past the hub's check is refused by the worker).
+
+### Owner decisions on the first slice (2026-11-14)
+
+- **Hub-route features and the server's tick.** The tick never starts a feature handed over the hub. With no persisted transport field,
+  the rule is kept by state: a hub-route feature is handed over at once (`Starting`) or refused and `Failed`, never left `Planned`, and the
+  tick starts only `Planned` features. A feature that would have to wait for another cannot go over the hub yet. A persisted `transport`
+  field comes with the real channel.
+- **The Production rule in `approval.rs` stays as the later design.** A `worker-keys` decision for a Production name, decided by a laptop key
+  with presence, is the H3b design. In G6 v1 the only behaviour is the D2 refusal.
+- **Who writes the issuer's `worker` flag.** Only fleet enrolment. The pin also records whether the box is in the fleet. A fleet box with
+  no worker classification is **treated as a worker** and refused; only a box outside the fleet, or one enrolment classified as not a
+  worker, is not. An older pin with neither field is outside the fleet.
 
 ## 13. Benchmark (owner rule, 2026-11-12)
 

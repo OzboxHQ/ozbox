@@ -49,13 +49,23 @@ pub struct BoxPin {
     /// only for what the owner allocated to it.
     #[serde(default)]
     pub allowed: Vec<String>,
-    /// This box is a worker (ADR 0042), enrolled by the fleet's claim service. **A worker is refused Production (decision D2),
-    /// in code**: the field says what the box is, not whether the rule applies, and nothing in the config turns the refusal off.
+    /// Whether this box is a worker (ADR 0042). **Only fleet enrolment writes it** (owner, 2026-11-14). A worker is refused
+    /// Production (decision D2), in code: the field says what the box is, and nothing in the config turns the refusal off.
+    /// `None` means enrolment never said.
     #[serde(default)]
-    pub worker: bool,
+    pub worker: Option<bool>,
+    /// Whether the box is in the fleet (written by enrolment too). A fleet box that enrolment never classified is treated as a
+    /// worker, so a missing flag cannot open the door: only a box outside the fleet is "not a worker" by default.
+    #[serde(default)]
+    pub fleet: bool,
 }
 
 impl BoxPin {
+    /// Refused Production as a worker: marked one, or in the fleet with no classification.
+    fn counts_as_worker(&self) -> bool {
+        self.worker == Some(true) || (self.fleet && self.worker.is_none())
+    }
+
     fn allows(&self, secret: &str) -> bool {
         self.allowed.iter().any(|a| {
             a == secret
@@ -381,7 +391,7 @@ impl Issuer<'_> {
             .boxes
             .get(&scope.box_id)
             .ok_or(Error::UnknownBox)?;
-        if pin.worker {
+        if pin.counts_as_worker() {
             self.audit(
                 "refused-worker",
                 "-",
@@ -646,7 +656,7 @@ impl Issuer<'_> {
             .boxes
             .get(&scope.box_id)
             .ok_or(Error::UnknownBox)?;
-        if pin.worker {
+        if pin.counts_as_worker() {
             // an approval filed before the box was marked a worker is not honoured for it either
             self.audit(
                 "refused-worker",
@@ -793,7 +803,8 @@ mod tests {
                 service_key: key.public(),
                 caller: CALLER.into(),
                 allowed: vec!["prod/*".into()],
-                worker: false,
+                worker: None,
+                fleet: false,
             },
         );
         cfg.approvers = vec![
@@ -1435,7 +1446,7 @@ mod tests {
             ch.request_id
         };
         // ...is not honoured once the box is enrolled as a worker
-        w.cfg.boxes.get_mut("dev").unwrap().worker = true;
+        w.cfg.boxes.get_mut("dev").unwrap().worker = Some(true);
         let r = w.rand();
         let i = w.issuer(&r);
         assert_eq!(
@@ -1458,6 +1469,44 @@ mod tests {
             "nothing was released"
         );
         assert!(w.reader.calls.borrow().is_empty(), "no value was read");
+    }
+
+    #[test]
+    fn a_fleet_box_with_no_worker_flag_is_refused_and_only_a_classified_or_outside_box_is_not() {
+        let cases = [
+            // (worker, fleet, refused)
+            (None, true, true),
+            (Some(true), false, true),
+            (Some(true), true, true),
+            (Some(false), true, false),
+            (Some(false), false, false),
+            (None, false, false),
+        ];
+        for (worker, fleet, refused) in cases {
+            let mut w = world();
+            {
+                let pin = w.cfg.boxes.get_mut("dev").unwrap();
+                pin.worker = worker;
+                pin.fleet = fleet;
+            }
+            let r = w.rand();
+            let got = w.issuer(&r).request(w.scope(), CALLER, NOW);
+            assert_eq!(
+                matches!(got, Err(Error::ProductionToWorker)),
+                refused,
+                "worker={worker:?} fleet={fleet}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_written_before_these_fields_existed_is_not_a_fleet_box() {
+        // an old config has neither field: serde gives None and false, which counts as an ordinary box (it is not in the fleet)
+        let pin: BoxPin = serde_json::from_str(
+            r#"{"store_id":"s","service_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#,
+        )
+        .unwrap();
+        assert!(!pin.counts_as_worker());
     }
 
     #[test]

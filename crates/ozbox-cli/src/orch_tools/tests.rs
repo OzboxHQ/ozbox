@@ -1160,4 +1160,73 @@ mod hub_handoff {
             }
         }
     }
+
+    #[test]
+    fn the_servers_tick_never_starts_a_hub_route_feature() {
+        // owner decision (2026-11-14): with no persisted transport field, a hub-route feature is never left Planned, so the
+        // tick (which starts only Planned features whose box is ready) cannot start it by the laptop route
+        let h = hub_rig();
+        let id = start(&h.r);
+        let c = cond(&id);
+        let v =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"a","brief":"b","box":"worker-1","transport":"hub"}),
+                    20,
+                )
+                .unwrap();
+        let fid = v["feature"].as_str().unwrap().to_string();
+        let mut book = h.r.tools.store.load().unwrap();
+        let mut always = |_: &ozbox_core::orch::Feature| true;
+        for t in 0..5u64 {
+            book.tick_orchestrations(&mut ozbox_core::orch::NoChannel, &mut always, 30 + t);
+        }
+        let f = book
+            .orchestration(&id)
+            .unwrap()
+            .feature(&fid)
+            .unwrap()
+            .clone();
+        assert!(
+            f.task_id.is_none(),
+            "the tick queued a laptop-route task for a hub feature"
+        );
+        assert!(book.tasks.is_empty(), "no laptop-route task exists");
+    }
+
+    #[test]
+    fn a_hub_feature_that_would_have_to_wait_is_refused_and_never_left_planned() {
+        let h = hub_rig();
+        h.r.ops.boxes.lock().unwrap().push("worker-2".into());
+        let id = start(&h.r);
+        let c = cond(&id);
+        h.r.tools
+            .store
+            .update(|b| {
+                if let Some(o) = b.orchestration_mut(&id) {
+                    o.policy.on_overlap = ozbox_core::orch_rules::OverlapRule::Sequence;
+                }
+            })
+            .unwrap();
+        h.r.tools
+            .call(&c, "task_start", &json!({"title":"a","brief":"b","box":"worker-1","transport":"hub","claims":["src/x"]}), 5)
+            .unwrap();
+        let e = h
+            .r
+            .tools
+            .call(&c, "task_start", &json!({"title":"b","brief":"b","box":"worker-2","transport":"hub","claims":["src/x"]}), 6)
+            .unwrap_err();
+        assert!(matches!(e, ToolError::Refused(m) if m.contains("must wait")));
+        let mut book = h.r.tools.store.load().unwrap();
+        let o = book.orchestration(&id).unwrap();
+        assert_eq!(
+            o.feature("f2").unwrap().state,
+            ozbox_core::orch::FeatureState::Failed
+        );
+        let mut always = |_: &ozbox_core::orch::Feature| true;
+        book.tick_orchestrations(&mut ozbox_core::orch::NoChannel, &mut always, 40);
+        assert!(book.tasks.is_empty());
+    }
 }

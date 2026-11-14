@@ -798,6 +798,17 @@ impl Tools {
                 };
             }
             let waits = !f.after.is_empty();
+            // A feature that must wait for another cannot go over the hub yet: it would stay Planned, and the server's tick starts
+            // every Planned feature whose predecessors merged, by the laptop route. A hub-route feature is therefore never left
+            // Planned: it is handed over now (Starting), or refused and Failed (owner decision, 2026-11-14; no persisted transport).
+            if hub.is_some() && waits && !dry {
+                if let Some(fm) = book.orchestration_mut(id).and_then(|o| o.feature_mut(&fid)) {
+                    fm.state = ozbox_core::orch::FeatureState::Failed;
+                }
+                return Err(ToolError::Refused(
+                    "A task that must wait for another cannot be handed over the hub yet. Start it after the other merges, or use the ssh route.".into(),
+                ));
+            }
             // over the hub the worker is handed the task now, never by the laptop route
             if let (Some(h), false, false) = (&hub, waits, dry) {
                 let assign = ozbox_core::hub::engine::Assign {
