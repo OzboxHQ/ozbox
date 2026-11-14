@@ -1312,7 +1312,11 @@ mod hub_handoff {
         assert!(!book.orchestration(&id).unwrap().startable().contains(&fid));
         let mut always = |_: &ozbox_core::orch::Feature| true;
         book.tick_orchestrations(&mut ozbox_core::orch::NoChannel, &mut always, 40);
-        assert!(book.tasks.is_empty());
+        // the ssh-route feature may have a task of its own; the hub feature must have none
+        let f = book.orchestration(&id).unwrap().feature(&fid).unwrap();
+        assert!(f.task_id.is_none());
+        let after = book.orchestration(&id).unwrap().feature(&fid).unwrap();
+        assert!(after.task_id.is_none(), "the tick queued a task for it");
     }
 
     #[test]
