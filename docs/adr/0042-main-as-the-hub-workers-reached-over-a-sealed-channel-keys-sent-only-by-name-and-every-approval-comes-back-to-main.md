@@ -922,7 +922,7 @@ refusal with the network cut; a hand-made assignment with a Production declarati
 
 ### Owner decisions on the first slice (2026-11-14)
 
-- **Hub-route features and the server's tick.** *Amended in review (2026-11-14, H-1; the first version kept the rule by state alone).*
+- **Hub-route features and the server's tick.** *Amended in review (2026-11-14, H-1; the first version kept the rule by state alone).* **The persisted transport is owner-ratified 2026-11-15** (it was delegated).
   State alone cannot tell a hub-route `Starting` from a laptop-route `Starting`, and two transitions (`claims_declare` sequenced, `reassign`)
   move a feature back to `Planned`, where the tick starts it a second time by the laptop route. So the route is **persisted now**: a
   `transport` field on the feature (`ssh` by default, so an older Book loads as `ssh`; `hub` set by `task_start`). The tick starts only
@@ -930,7 +930,7 @@ refusal with the network cut; a hand-made assignment with a Production declarati
   `reassign` refuses a hub feature by name until `task.stop` exists. A feature that would have to wait for another cannot go over the hub yet.
 - **The Production rule in `approval.rs` stays as the later design.** A `worker-keys` decision for a Production name, decided by a laptop key
   with presence, is the H3b design. In G6 v1 the only behaviour is the D2 refusal.
-- **Who writes the issuer's box class.** *Refined in review (2026-11-14, H-5; the first version had `worker`/`fleet` flags, and an old pin
+- **Who writes the issuer's box class.** **The box-class decision is owner-ratified 2026-11-15** (it was delegated). *Refined in review (2026-11-14, H-5; the first version had `worker`/`fleet` flags, and an old pin
   of a real fleet box fell outside the rule).* A pin carries `class: main | worker`, and **a pin is a worker unless it positively says
   `main`**: a missing class is refused Production, exactly as a worker. The class is as trusted as the issuer's approver list beside it
   (both are the owner's own edit of that config) and enrolment becomes its only writer later; "nothing turns the refusal off" means no
