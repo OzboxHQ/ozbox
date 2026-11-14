@@ -240,6 +240,64 @@ pub struct Tools {
     pub hub: Option<Arc<ozbox_core::hub::engine::HubService>>,
 }
 
+/// Copy hub-channel events into the book by (source epoch, number): the high-water mark moves in the same change as the records,
+/// so a repeat records nothing.
+fn record_hub_events(b: &mut Book, actor: &str, events: &[ozbox_core::audit::NewEvent]) {
+    for ev in events {
+        if let (Some((ep, n)), Some((lep, ln))) = (&ev.src, &b.hub_channel_src) {
+            if ep == lep && n <= ln {
+                continue;
+            }
+        }
+        b.record(ev.ts_ms, actor, &ev.action, None, &ev.detail);
+        if ev.src.is_some() {
+            b.hub_channel_src = ev.src.clone();
+        }
+    }
+}
+
+/// The task book as the hub channel's audit sink, through the store (for a caller that does not hold the store's lock).
+struct BookSink<'a> {
+    store: &'a TaskStore,
+    actor: String,
+}
+
+impl ozbox_core::channel::audit::AuditSink for BookSink<'_> {
+    fn record_many(&self, events: Vec<ozbox_core::audit::NewEvent>) -> std::io::Result<()> {
+        self.store
+            .update(|b| record_hub_events(b, &self.actor, &events))
+    }
+
+    fn last_src(&self) -> std::io::Result<Option<(String, u64)>> {
+        Ok(self.store.load()?.hub_channel_src)
+    }
+}
+
+/// The same, over a book the caller already holds under the store's lock (the store cannot be taken again).
+struct HeldBookSink<'a, 'b> {
+    book: std::sync::Mutex<&'a mut Book>,
+    actor: &'b str,
+}
+
+impl ozbox_core::channel::audit::AuditSink for HeldBookSink<'_, '_> {
+    fn record_many(&self, events: Vec<ozbox_core::audit::NewEvent>) -> std::io::Result<()> {
+        let mut b = self
+            .book
+            .lock()
+            .map_err(|_| std::io::Error::other("the book is not usable"))?;
+        record_hub_events(&mut b, self.actor, &events);
+        Ok(())
+    }
+
+    fn last_src(&self) -> std::io::Result<Option<(String, u64)>> {
+        let b = self
+            .book
+            .lock()
+            .map_err(|_| std::io::Error::other("the book is not usable"))?;
+        Ok(b.hub_channel_src.clone())
+    }
+}
+
 fn store_err(e: std::io::Error) -> ToolError {
     ToolError::Failed(format!("the task store could not be used: {e}"))
 }
@@ -840,17 +898,21 @@ impl Tools {
                     lease_expiry_ms: now
                         .saturating_add(f.caps.max_runtime_s.unwrap_or(4 * 3600) * 1000),
                 };
-                let sent = h.with(now, |hub, st| {
-                    let r = hub.assign(st, &f.box_name, &assign, now);
-                    (r, st.take_audit())
-                });
-                let Some((r, lines)) = sent else {
+                let sent = h.with(now, |hub, st| hub.assign(st, &f.box_name, &assign, now));
+                let Some(r) = sent else {
                     return Err(ToolError::Failed(
                         "the hub's state could not be used".into(),
                     ));
                 };
-                for l in lines {
-                    book.record(l.ts_ms, &actor_of(s), &l.action, None, &l.detail);
+                {
+                    let actor = actor_of(s);
+                    let held = HeldBookSink {
+                        book: std::sync::Mutex::new(&mut *book),
+                        actor: &actor,
+                    };
+                    h.drain_audit(&held).map_err(|e| {
+                        ToolError::Failed(format!("the hub's events could not be recorded: {e}"))
+                    })?;
                 }
                 if let Err(e) = r {
                     if let Some(fm) = book.orchestration_mut(id).and_then(|o| o.feature_mut(&fid)) {
@@ -902,7 +964,7 @@ impl Tools {
         // what the workers reported over the hub: taken in first, and what that turned up (a rejected message, a quarantine) is recorded
         let reports = match &self.hub {
             Some(h) => {
-                let (map, lines) = h
+                let map = h
                     .with(now, |hub, st| {
                         hub.poll(st, now);
                         let mut m: BTreeMap<(String, String), Value> = BTreeMap::new();
@@ -921,19 +983,14 @@ impl Tools {
                                 );
                             }
                         }
-                        (m, st.take_audit())
+                        m
                     })
                     .unwrap_or_default();
-                if !lines.is_empty() {
-                    let actor = actor_of(s);
-                    self.store
-                        .update(|b| {
-                            for l in &lines {
-                                b.record(l.ts_ms, &actor, &l.action, None, &l.detail);
-                            }
-                        })
-                        .map_err(store_err)?;
-                }
+                h.drain_audit(&BookSink {
+                    store: &self.store,
+                    actor: actor_of(s),
+                })
+                .map_err(store_err)?;
                 map
             }
             None => BTreeMap::new(),

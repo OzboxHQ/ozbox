@@ -938,10 +938,21 @@ refusal with the network cut; a hand-made assignment with a Production declarati
   fixes it. **Cost:** every existing pin, `main`'s included, is refused Production at the issuer until it is classified once. There is
   no laptop command for the issuer's config yet (it is the owner's file); a command beside the approver-list edit arrives with enrolment.
 - **Recorded from the slice review (2026-11-14), not built:** the value check on a delivery is H3a (the Production rule above is a label check);
-  quarantine is in memory on the hub and is persisted with the outbox and enrolment, when it also removes the box from the roster and the
-  issuer refuses it (H-12); counters, incarnations and the outbox are persisted with the transport. Built now: reports keyed by
+  quarantine is kept in the hub's persisted state (`PeerState.quarantined`, written through the channel's store), so a restart keeps it; what
+  is still to build is that a quarantine also removes the box from the roster and the issuer refuses it, with enrolment (H-12); counters, incarnations and the outbox are persisted with the transport. Built now: reports keyed by
   orchestration and feature and refused for an unassigned feature (H-7); `task_start` arguments are an allowlist from the tool's schema (H-8);
   the audit line's box name is validated (H-9); the issuer checks the caller before the worker class and before writing its audit line (H-10).
+
+- **Recorded from the shared-channel check (2026-11-15).** The hub's audit events are handed to the task book by source number through
+  the channel's own drain (`HubService::drain_audit`; the book keeps the last channel record it holds in the same write as the records),
+  so a crash between the state's write and the book's repeats none and loses none (C-10). Stale authenticated envelopes (epoch, expiry,
+  skew, an old `hello`, an earlier incarnation) are counted once per round per peer and change no state, so replaying captured envelopes
+  costs one audit entry a round (C-3). A round is bounded by bytes as well as by count (4 MiB as the wire counts it, half of the 8 MiB a
+  transport reads), always keeping one message, and a single message that could never fit is refused when it is queued (C-12). Every
+  `hello` and `ack` carries a running digest of what the sender applied, which the other end compares with what it queued, so a sequence
+  number reused below the 64-number window is a halt and never an acknowledgement (C-5). After a restore the audit log is brought up to date
+  under the store's lock, the old numbering's pending events are dropped, and only then does the new epoch begin; the log de-duplicates by
+  source epoch and number (C-1, C-2). The golden vectors are made by `crates/ozbox-core/testdata/channel_golden_vectors.py` (H-13).
 
 ## 13. Benchmark (owner rule, 2026-11-12)
 

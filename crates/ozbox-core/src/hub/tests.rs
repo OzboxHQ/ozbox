@@ -764,7 +764,8 @@ fn a_captured_assignment_does_not_verify_again_after_the_worker_state_is_lost() 
     assert!(fresh.tasks.is_empty(), "the replay was not accepted");
     let a = fresh.take_audit();
     assert!(
-        a.iter().any(|l| l.detail.contains("code=incarnation")),
+        a.iter()
+            .any(|l| l.action == "hub.stale" && l.detail.contains("incarnation=1")),
         "{a:?}"
     );
 }
@@ -846,8 +847,9 @@ fn a_message_naming_the_old_hub_incarnation_starts_a_fresh_hello_not_a_silent_dr
     hs.take_audit();
     assert_eq!(hub.poll(&mut hs, 6), 0);
     let a = hs.take_audit();
-    assert_eq!(a[0].action, "hub.refused");
-    assert!(a[0].detail.contains("code=incarnation"));
+    // stale, not the peer's act: counted once for the round and named by peer and code
+    assert_eq!(a[0].action, "hub.stale");
+    assert!(a[0].detail.contains("from=worker-1") && a[0].detail.contains("incarnation=1"));
     // and the hub asked for a fresh hello, which the worker answers: both ends settle
     for _ in 0..6 {
         // past the one-second limit on unsolicited hellos
@@ -879,7 +881,7 @@ fn an_expired_or_far_future_message_is_refused_after_its_signature_verifies() {
     assert!(ws
         .take_audit()
         .iter()
-        .any(|l| l.detail.contains("code=expired")));
+        .any(|l| l.action == "hub.stale" && l.detail.contains("expired=1")));
     // stamped in the far future
     let m = f.hub_message(
         &hs,
@@ -895,7 +897,7 @@ fn an_expired_or_far_future_message_is_refused_after_its_signature_verifies() {
     assert!(ws
         .take_audit()
         .iter()
-        .any(|l| l.detail.contains("code=skew")));
+        .any(|l| l.action == "hub.stale" && l.detail.contains("skew=1")));
 }
 
 #[test]
@@ -1042,6 +1044,8 @@ fn the_hub_state_persists_and_a_restart_keeps_its_counters_and_unacknowledged_me
     assert_eq!(ws.tasks.len(), 1);
 }
 
+// Computed by `testdata/channel_golden_vectors.py` (HUB_EXT, HUB_CANONICAL, HUB_DIGEST, HUB_EXT_VIA, HUB_CANONICAL_VIA), not by the
+// crate's encoder.
 const GOLDEN_EXT: &str =
     "01000000106f7a626f782d6875622d6578742d7631000000080000000000000000000000080000000000000000";
 const GOLDEN_EXT_VIA: &str = "01000000106f7a626f782d6875622d6578742d763100000008000000000000000200000008000000000000000100000008776f726b65722d610000004062623030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303032";

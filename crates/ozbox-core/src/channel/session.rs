@@ -10,6 +10,8 @@
 //! * **Order.** Sequenced messages are applied in `seq` order from a window, de-duplicated, and acknowledged cumulatively.
 //!   The hash of every applied number is kept for a window, so a retry (same content) is told from a conflicting reuse of the
 //!   number (a sender restored from a backup without saying so), which is refused, alerted and told to the sender.
+//! * **Stale is not hostile.** An authenticated envelope that is only stale (epoch, expiry, skew, an old `hello`, an earlier
+//!   incarnation) is counted per round as one audit event and changes no state, so replaying captured envelopes costs one entry a round.
 //! * **Order of checks.** Shape, addressing, signature (all counted, never one audit entry each, because the sender is not
 //!   authenticated yet), then epochs, validity, the nonce, the seal, the profile's admission screen, incarnations, the
 //!   acknowledgement, and only then the sequence window and the effect. Nothing takes effect until every check passes.
@@ -20,8 +22,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 use super::wire::{
-    hex, hex_bytes, Crypto, Envelope, Profile, Sealed, KIND_ACK, KIND_HELLO, MAX_SKEW_MS,
-    MAX_VALIDITY_MS, VERSION, WINDOW,
+    hex, hex_bytes, wire_size, Crypto, Envelope, Profile, Sealed, KIND_ACK, KIND_HELLO,
+    MAX_SKEW_MS, MAX_VALIDITY_MS, ROUND_BYTES, SEAL_OVERHEAD, VERSION, WINDOW,
 };
 use crate::approval_subject::{to_hex, Encoder};
 use crate::audit::NewEvent;
@@ -41,6 +43,8 @@ pub const RESEND_AFTER_MS: u64 = 5000;
 pub mod code {
     pub const RATE: &str = "resource-exhausted";
     pub const TOO_BIG: &str = "too-big";
+    /// A single message that would not fit one round on the wire, whatever else is queued.
+    pub const TOO_BIG_FOR_ROUND: &str = "too-big-for-a-round";
     pub const UNKNOWN_PEER: &str = "unknown-peer";
     pub const JOURNAL_FULL: &str = "journal-full";
     pub const AUDIT_FULL: &str = "audit-backlog";
@@ -55,6 +59,17 @@ pub struct Outgoing {
     /// The plain body. It is sealed fresh on every delivery attempt.
     #[serde(with = "hex_bytes")]
     pub body: Vec<u8>,
+    /// The running digest of everything queued to the peer up to and including this message (see [`chain_next`]).
+    #[serde(default)]
+    pub chain: String,
+}
+
+/// The running digest of a conversation: each message's hash chained onto the one before. Two ends that applied the same messages in
+/// the same order hold the same value, whatever happened to either store in between.
+pub fn chain_next(prev: &str, seq: u64, msg_hash: &str) -> String {
+    let mut e = Encoder::new("ozbox-channel-chain");
+    e.text(prev).field(&seq.to_be_bytes()).text(msg_hash);
+    to_hex(&e.digest())
 }
 
 /// A message received out of order and waiting for the gap to fill. **Only what the profile's screen passed is kept**: a body that
@@ -65,6 +80,9 @@ pub struct Held {
     #[serde(with = "hex_bytes")]
     pub ext: Vec<u8>,
     pub hash: String,
+    /// The hash of the content as the peer sent it, for the running digest (equal to `hash` unless the screen refused the body).
+    #[serde(default)]
+    pub real: String,
     pub body: Option<HeldBody>,
     pub refusal: Option<String>,
 }
@@ -95,6 +113,18 @@ pub struct Link {
     pub held_in: BTreeMap<u64, Held>,
     /// The hash of each applied sequence number, for the last window.
     pub applied: BTreeMap<u64, String>,
+    /// The running digest of what this end queued for the peer (at `out_seq`), and at the last number the peer acknowledged. The peer
+    /// says what it applied in every `hello` and `ack`; a sequence number reused with other content (which the window can only see
+    /// for the last [`WINDOW`] numbers) shows up here as two digests that differ.
+    #[serde(default)]
+    pub out_chain: String,
+    #[serde(default)]
+    pub acked_chain: (u64, String),
+    /// The running digest of what this end applied from the peer, and whether it can be compared (not after a jump over lost numbers).
+    #[serde(default)]
+    pub in_chain: String,
+    #[serde(default)]
+    pub in_chain_ok: bool,
     pub dups: u64,
     pub last_seen_ms: u64,
     /// Set when this end must stop sending to the peer and why (an acknowledgement ahead of what was sent, or the peer saw a
@@ -130,6 +160,10 @@ impl Link {
             next_in: 1,
             held_in: BTreeMap::new(),
             applied: BTreeMap::new(),
+            out_chain: String::new(),
+            acked_chain: (0, String::new()),
+            in_chain: String::new(),
+            in_chain_ok: true,
             dups: 0,
             last_seen_ms: 0,
             halted: None,
@@ -152,6 +186,10 @@ impl Link {
         self.next_in = 1;
         self.held_in.clear();
         self.applied.clear();
+        self.out_chain.clear();
+        self.acked_chain = (0, String::new());
+        self.in_chain.clear();
+        self.in_chain_ok = true;
         self.halted = None;
         self.notice = None;
         self.pushed_hi = 0;
@@ -159,6 +197,22 @@ impl Link {
         self.ack_dirty = false;
         self.hello_wanted = true;
         self.hello_reply = false;
+    }
+
+    /// The digest of what this end applied up to `ack`, when there is one to say and it can be compared.
+    fn digest_to_say(&self, ack: u64) -> Option<String> {
+        (ack > 0 && self.in_chain_ok && ack == self.next_in - 1).then(|| self.in_chain.clone())
+    }
+
+    /// What this end queued up to `seq`, if it still knows (the last acknowledged number, or a message still waiting).
+    fn out_chain_at(&self, seq: u64) -> Option<&str> {
+        if seq == self.acked_chain.0 {
+            return Some(&self.acked_chain.1);
+        }
+        self.outbox
+            .iter()
+            .find(|o| o.seq == seq)
+            .map(|o| o.chain.as_str())
     }
 
     /// Whether a sequenced message to this peer would be accepted now: it has told this end its incarnation, and nothing halted it.
@@ -178,6 +232,9 @@ pub struct Tally {
     pub unverified: BTreeMap<String, u64>,
     /// Duplicates taken from an authenticated peer, by peer.
     pub duplicates: BTreeMap<String, u64>,
+    /// Authenticated but stale (an earlier epoch or incarnation, expired, out of skew, an old `hello`), by peer then code. These are
+    /// replays, or a re-pin that has not happened yet: not the peer's acts, so a round says so once and writes nothing per envelope.
+    pub stale: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 impl PartialEq for Tally {
@@ -242,11 +299,23 @@ pub struct HelloBody {
     /// current incarnation yet, and say so, so a session one end believes in and the other does not still converges.
     #[serde(default)]
     pub heard: u64,
+    /// The running digest of what the sender applied from the receiver, up to the `ack_seq` of the same envelope (absent before any,
+    /// or after a jump over lost numbers).
+    #[serde(default)]
+    pub applied_digest: Option<String>,
+}
+
+/// The body of an `ack`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckBody {
+    #[serde(default)]
+    pub applied_digest: Option<String>,
 }
 
 pub const NOTICE_SEQ_CONFLICT: &str = "seq-conflict";
 pub const HALT_ACK_AHEAD: &str = "ack-ahead";
 pub const HALT_PEER_SAW_CONFLICT: &str = "peer-saw-seq-conflict";
+pub const HALT_DIVERGED: &str = "applied-differs";
 
 /// A screen run on a body before it is held or applied: `(kind, ext, plain)` to `Ok` or a refusal code. The profile owns the rule.
 pub type Admit<'a> = &'a dyn Fn(&str, &[u8], &[u8]) -> Result<(), &'static str>;
@@ -336,13 +405,14 @@ impl Core {
         });
     }
 
-    /// Drop the events the audit log already holds (its last source number for this store), by number, never by count.
+    /// Drop the events the audit log already holds, by the event's own source epoch and number, never by number alone and never by
+    /// count: an event of another epoch than the log's last is not judged by the last's number.
     pub fn trim_logged(&mut self, last: Option<&(String, u64)>) {
         if let Some((ep, n)) = last {
-            if *ep == self.store_id {
-                self.audit
-                    .retain(|e| e.src.as_ref().map_or(true, |(_, k)| k > n));
-            }
+            self.audit.retain(|e| match &e.src {
+                Some((eep, k)) => !(eep == ep && k <= n),
+                None => true,
+            });
         }
     }
 
@@ -385,8 +455,12 @@ impl Core {
         if !p.sequenced(kind) {
             return Err("kind-not-allowed");
         }
-        if body.len() > p.max_body {
+        // the cap is on the sealed body, so the plain body leaves room for what sealing adds
+        if body.len() + SEAL_OVERHEAD > p.max_body {
             return Err(code::TOO_BIG);
+        }
+        if wire_size(ext.len(), body.len()) > ROUND_BYTES {
+            return Err(code::TOO_BIG_FOR_ROUND);
         }
         if self.audit.len() >= MAX_PENDING_AUDIT {
             return Err(code::AUDIT_FULL);
@@ -398,11 +472,13 @@ impl Core {
         self.tally.dirty = true;
         l.out_seq += 1;
         let seq = l.out_seq;
+        l.out_chain = chain_next(&l.out_chain, seq, &hash_message(kind, &ext, &body));
         l.outbox.push(Outgoing {
             seq,
             kind: kind.to_string(),
             ext,
             body,
+            chain: l.out_chain.clone(),
         });
         Ok(seq)
     }
@@ -453,6 +529,7 @@ impl Core {
                 heard: l.peer_inc,
                 // a notice is about the session this end holds; to a peer whose new incarnation this end has not adopted yet it
                 // would describe the old one
+                applied_digest: l.digest_to_say(ack),
                 notice: if l.named_inc == l.peer_inc {
                     l.notice.clone()
                 } else {
@@ -469,15 +546,32 @@ impl Core {
         }
         let mut carried = false;
         if l.session_ready() {
+            // a window by count and by bytes: stop at the first message that would take the round past the budget (the oldest go
+            // first, so what is cut is the newest, and the rest follow once these are acknowledged), but always offer one
+            let mut used = 0usize;
             for x in l.outbox.iter().take(WINDOW as usize) {
                 if o.resend || x.seq > l.pushed_hi {
+                    let cost = wire_size(x.ext.len(), x.body.len());
+                    if carried && used + cost > ROUND_BYTES {
+                        break;
+                    }
+                    used += cost;
                     out.push(mk(&x.kind, x.seq, &x.ext, l.peer_inc, x.body.clone()));
                     carried = true;
                 }
             }
         }
         if o.ack && l.ack_dirty && !carried && l.peer_inc != 0 {
-            out.push(mk(KIND_ACK, 0, &[], l.peer_inc, b"{}".to_vec()));
+            let body = AckBody {
+                applied_digest: l.digest_to_say(ack),
+            };
+            out.push(mk(
+                KIND_ACK,
+                0,
+                &[],
+                l.peer_inc,
+                serde_json::to_vec(&body).unwrap_or_default(),
+            ));
         }
         out
     }
@@ -526,6 +620,18 @@ impl Core {
         Received::Refused(code)
     }
 
+    /// A refusal that is not the peer's act (see [`Tally::stale`]): counted, never audited one by one, and it changes no state.
+    fn stale(&mut self, from: &str, code: &str) -> Received {
+        *self
+            .tally
+            .stale
+            .entry(from.to_string())
+            .or_default()
+            .entry(code.to_string())
+            .or_insert(0) += 1;
+        Received::Refused(code.to_string())
+    }
+
     fn refuse(&mut self, p: &Profile, now: u64, from: &str, e: &Envelope, why: &str) -> Received {
         // a profile whose ext is a task id gets it as the audit subject; binary ext is not a subject
         let subject = String::from_utf8(e.ext.clone())
@@ -559,6 +665,16 @@ impl Core {
                 &format!("{}.unverified", p.audit),
                 None,
                 format!("n={total} {}", by.join(" ")),
+            );
+        }
+        for (peer, codes) in t.stale {
+            let total: u64 = codes.values().sum();
+            let by: Vec<String> = codes.iter().map(|(c, n)| format!("{c}={n}")).collect();
+            self.note(
+                now,
+                &format!("{}.stale", p.audit),
+                None,
+                format!("from={peer} n={total} {}", by.join(" ")),
             );
         }
         for (peer, n) in t.duplicates {
@@ -602,13 +718,13 @@ impl Core {
         // authenticated from here: a refusal is the peer's, and is audited by name
         let from = e.from.clone();
         if e.receiver_epoch != self.epoch || e.sender_epoch != link.epoch {
-            return self.refuse(p, now, &from, e, "epoch");
+            return self.stale(&from, "epoch");
         }
         if e.valid_until_ms <= now {
-            return self.refuse(p, now, &from, e, "expired");
+            return self.stale(&from, "expired");
         }
         if e.ts_ms.abs_diff(now) > MAX_SKEW_MS {
-            return self.refuse(p, now, &from, e, "skew");
+            return self.stale(&from, "skew");
         }
         let nonce_hex = to_hex(&e.nonce);
         if self.nonces.contains_key(&nonce_hex) {
@@ -648,17 +764,25 @@ impl Core {
                     l.hello_wanted = true;
                     l.named_inc = e.sender_inc;
                 }
-                return self.refuse(p, now, &from, e, "incarnation");
+                return self.stale(&from, "incarnation");
             }
             if e.ts_ms < last_hello {
-                return self.refuse(p, now, &from, e, "stale-hello");
+                return self.stale(&from, "stale-hello");
             }
         } else if cur_inc == 0 || e.receiver_inc != self.incarnation || e.sender_inc != cur_inc {
             if let Some(l) = self.links.get_mut(&from) {
                 l.hello_wanted = true;
             }
-            return self.refuse(p, now, &from, e, "incarnation");
+            return self.stale(&from, "incarnation");
         }
+        let peer_digest: Option<String> = match (&hello, e.kind.as_str()) {
+            (Some(h), _) => h.applied_digest.clone(),
+            (None, KIND_ACK) => match serde_json::from_slice::<AckBody>(&plain) {
+                Ok(a) => a.applied_digest,
+                Err(_) => return self.refuse(p, now, &from, e, "malformed"),
+            },
+            _ => None,
+        };
         // an acknowledgement belongs to a session: a `hello` that opens a new one (the peer's incarnation changed) carries the old
         // session's number, which says nothing about this one
         let ack_valid =
@@ -677,6 +801,28 @@ impl Core {
             );
             return self.refuse(p, now, &from, e, HALT_ACK_AHEAD);
         }
+        // what the peer says it applied against what this end sent: the window only sees the last numbers, this sees them all
+        if ack_valid && e.ack_seq > 0 {
+            let differs = match (&peer_digest, self.links.get(&from)) {
+                (Some(d), Some(l)) if !d.is_empty() && l.halted.is_none() => {
+                    l.out_chain_at(e.ack_seq).is_some_and(|mine| mine != d)
+                }
+                _ => false,
+            };
+            if differs {
+                self.tally.dirty = true;
+                if let Some(l) = self.links.get_mut(&from) {
+                    l.halted = Some(HALT_DIVERGED.into());
+                }
+                self.note(
+                    now,
+                    &format!("{}.halted", p.audit),
+                    None,
+                    format!("from={from} code={HALT_DIVERGED}"),
+                );
+                return self.refuse(p, now, &from, e, HALT_DIVERGED);
+            }
+        }
         // every check passed
         self.nonces.insert(nonce_hex, e.valid_until_ms);
         if let Some(l) = self.links.get_mut(&from) {
@@ -690,7 +836,10 @@ impl Core {
             return Received::Control;
         }
         match admitted {
-            Some(a) => self.sequenced(p, now, &from, e, a),
+            Some(a) => {
+                let real = hash_message(&e.kind, &e.ext, &plain);
+                self.sequenced(p, now, &from, e, a, &real)
+            }
             None => Received::Control,
         }
     }
@@ -729,6 +878,10 @@ impl Core {
                 l.next_in = 1;
                 l.held_in.clear();
                 l.applied.clear();
+                l.in_chain.clear();
+                l.in_chain_ok = true;
+                l.out_chain.clear();
+                l.acked_chain = (0, String::new());
                 l.notice = None;
                 l.ack_dirty = false;
                 l.hello_reply = true;
@@ -747,6 +900,8 @@ impl Core {
                 && l.next_in == 1
             {
                 l.next_in = h.out_floor;
+                // the numbers below the floor are gone: what this end applied can no longer be compared with what the peer queued
+                l.in_chain_ok = false;
             }
         }
         if halted_now {
@@ -778,6 +933,9 @@ impl Core {
                 return;
             }
             let before = l.outbox.len();
+            if let Some(last) = l.outbox.iter().rfind(|o| o.seq <= ack) {
+                l.acked_chain = (last.seq, last.chain.clone());
+            }
             l.outbox.retain(|o| o.seq > ack);
             if l.outbox.len() != before {
                 self.tally.dirty = true;
@@ -792,6 +950,7 @@ impl Core {
         from: &str,
         e: &Envelope,
         admitted: Result<Vec<u8>, String>,
+        real_hash: &str,
     ) -> Received {
         let plain_for_hash: &[u8] = match &admitted {
             Ok(b) => b,
@@ -843,6 +1002,7 @@ impl Core {
                 kind: e.kind.clone(),
                 ext: e.ext.clone(),
                 hash,
+                real: real_hash.to_string(),
                 body,
                 refusal,
             },
@@ -855,6 +1015,10 @@ impl Core {
             };
             l.next_in += 1;
             l.applied.insert(next, h.hash.clone());
+            // the running digest runs over what the peer sent, never over the screen's verdict, so both ends compute the same value
+            // for a message this end refused
+            let said = if h.real.is_empty() { &h.hash } else { &h.real };
+            l.in_chain = chain_next(&l.in_chain, next, said);
             while l.applied.len() as u64 > WINDOW {
                 let Some(first) = l.applied.keys().next().copied() else {
                     break;

@@ -139,3 +139,52 @@ where
     })?;
     outcome.map_err(|e| JournalError(format!("the audit log could not be written: {}", e.kind())))
 }
+
+/// Acknowledge a restore: under the store's lock, hand the log whatever it does not hold of the old numbering, forget the old
+/// numbering's pending events, and only then start the new epoch (`start_new_epoch`, which calls [`Core::restored`]). The log is read inside the lock (store lock
+/// first, then the log's, like every other path). Nothing changes when the log cannot be read or written.
+///
+/// This is the only way a restore is acknowledged, and it is **not** refused by [`guard`]: the guard's own message tells the person
+/// to run it.
+pub fn restore<S>(
+    store: &Store<S>,
+    sink: &dyn AuditSink,
+    start_new_epoch: impl FnOnce(&mut S),
+) -> Result<(), JournalError>
+where
+    S: HasCore + Serialize + DeserializeOwned,
+{
+    let outcome = store.update_if(|s| -> (Result<(), JournalError>, bool) {
+        let last = match sink.last_src() {
+            Ok(l) => l,
+            Err(e) => {
+                return (
+                    Err(JournalError(format!(
+                        "the audit log could not be read: {}",
+                        e.kind()
+                    ))),
+                    false,
+                )
+            }
+        };
+        let core = s.core_mut();
+        core.trim_logged(last.as_ref());
+        // what is left is not in the log yet: it goes there now, so the new epoch never has to carry it
+        if !core.audit.is_empty() {
+            if let Err(e) = sink.record_many(core.audit.clone()) {
+                return (
+                    Err(JournalError(format!(
+                        "the audit log could not be written: {}",
+                        e.kind()
+                    ))),
+                    false,
+                );
+            }
+        }
+        core.audit.clear();
+        // the profile's own restore (it calls [`Core::restored`] and does whatever else a restore means to its state)
+        start_new_epoch(s);
+        (Ok(()), true)
+    })?;
+    outcome
+}

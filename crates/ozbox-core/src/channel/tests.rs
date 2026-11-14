@@ -1,9 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::audit::{change, drain, guard};
+use super::audit::{change, drain, guard, restore};
 use super::session::{Core, Link, Received, HALT_ACK_AHEAD, NOTICE_SEQ_CONFLICT};
 use super::testkit::{pair, End, Faults, Net, T0, TEST_PROFILE};
 use super::wire::{fingerprint, hex, unhex, Envelope, Sealed, Signer, WINDOW};
+use crate::audit::AuditLog;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -35,7 +36,7 @@ fn sample() -> Envelope {
 
 // ---- the wire form ------------------------------------------------------------------------------------------------
 
-// Computed by an independent script (scratchpad chan-vec.py), not by this crate's encoder: the ADR 0041 encoding-version byte,
+// Computed by the independent script `testdata/channel_golden_vectors.py` (TEST_CANONICAL), not by this crate's encoder: the ADR 0041 encoding-version byte,
 // the profile's tag, then the fields in the order of `Envelope::canonical`, each as a 4-byte big-endian length and its bytes.
 const GOLDEN_CANONICAL: &str = "01000000126f7a626f782d746573742d6368616e6e656c000000080000000000000001000000046e6f7465000000066c6170746f70000000046d61696e0000002330313233616263642d30313233616263642d30313233616263642d30313233616263640000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000800000000000000050000000800000000000000040000000e352d616162626363646465656666000000080000018bcfe56800000000080000018bcfee8fc000000010000102030405060708090a0b0c0d0e0f000000067461736b2d310000000568656c6c6f";
 const GOLDEN_DIGEST: &str = "30d6ec58b97bf3974f76e206a9aea8e490cec38da37450ce3ff8a07b82b00881";
@@ -264,6 +265,42 @@ fn a_captured_envelope_replayed_is_a_duplicate_then_expired() {
     clock.set(T0 + 11 * 60 * 1000);
     let r = b.take(&captured);
     assert!(r.refused.iter().all(|c| c == "expired"), "{:?}", r.refused);
+}
+
+#[test]
+fn replaying_captured_stale_envelopes_costs_one_audit_event_a_round_and_no_state_write_per_envelope(
+) {
+    let (a, b, clock) = pair(false);
+    let net = Net::new();
+    net.settle(&a, &b);
+    for i in 0..5 {
+        a.send("main", &format!("m{i}"));
+    }
+    net.settle(&a, &b);
+    let captured: Vec<Sealed> = net
+        .captured
+        .borrow()
+        .iter()
+        .filter(|m| m.envelope.sender_epoch != 0)
+        .cloned()
+        .collect();
+    assert!(captured.len() >= 5);
+    clock.set(T0 + 11 * 60 * 1000);
+    let before = b.sink.actions().len();
+    let mut flood = Vec::new();
+    for _ in 0..30 {
+        flood.extend(captured.iter().cloned());
+    }
+    let r = b.take(&flood);
+    assert!(r.refused.len() > 60);
+    let added: Vec<String> = b.sink.actions().split_off(before);
+    assert_eq!(
+        added.iter().filter(|x| x.ends_with(".stale")).count(),
+        1,
+        "{added:?}"
+    );
+    assert!(added.iter().all(|x| !x.ends_with(".refused")), "{added:?}");
+    assert!(added.len() <= 3, "{added:?}");
 }
 
 #[test]
@@ -619,13 +656,238 @@ fn a_restore_from_a_backup_with_the_log_kept_starts_a_new_source_epoch_and_is_no
         guard(&a.state().core, &a.sink).is_err(),
         "the log is ahead of the restored store: refuse to go on"
     );
-    a.store.update(|s| s.core.restored(T0)).unwrap();
+    restore(&a.store, &a.sink, |s| s.core.restored(T0)).unwrap();
     assert!(guard(&a.state().core, &a.sink).is_ok());
     drain(&a.store, &a.sink).unwrap();
     assert!(
         a.sink.actions().contains(&"channel.restored".to_string()),
         "the restore itself is in the log"
     );
+}
+
+#[test]
+fn after_a_restore_the_real_audit_log_holds_every_source_record_once() {
+    // the real log, not the test sink: its own de-duplication is what decides
+    let (a, _b, _) = pair(false);
+    let log = AuditLog::beside(&a.dir.path().join("tasks.json"));
+    for i in 0..5 {
+        change(&a.store, &log, |s| {
+            s.core.note(T0, "test.before", None, format!("{i}"))
+        })
+        .unwrap();
+        drain(&a.store, &log).unwrap();
+    }
+    // the backup carries events the log already holds (they are dropped from the state only at the next change)
+    let backup = std::fs::read(a.store.dir().join("state.json")).unwrap();
+    for i in 0..5 {
+        change(&a.store, &log, |s| {
+            s.core.note(T0, "test.after", None, format!("{i}"))
+        })
+        .unwrap();
+        drain(&a.store, &log).unwrap();
+    }
+    std::fs::write(a.store.dir().join("state.json"), backup).unwrap();
+    assert!(guard(&a.state().core, &log).is_err());
+    // acknowledging the restore is allowed while the guard refuses everything else
+    restore(&a.store, &log, |s| s.core.restored(T0)).unwrap();
+    assert!(guard(&a.state().core, &log).is_ok());
+    assert!(
+        a.state().core.audit.iter().all(|e| e
+            .src
+            .as_ref()
+            .is_some_and(|(ep, _)| *ep == a.state().core.store_id)),
+        "no event of the old numbering is left pending"
+    );
+    for i in 0..3 {
+        change(&a.store, &log, |s| {
+            s.core.note(T0, "test.new", None, format!("{i}"))
+        })
+        .unwrap();
+        drain(&a.store, &log).unwrap();
+        drain(&a.store, &log).unwrap();
+    }
+    let entries = log.entries().unwrap();
+    let srcs: Vec<String> = entries.iter().filter_map(|e| e.src.clone()).collect();
+    let unique: std::collections::BTreeSet<&String> = srcs.iter().collect();
+    assert_eq!(srcs.len(), unique.len(), "no source record twice: {srcs:?}");
+    assert_eq!(entries.iter().filter(|e| e.action == "test.new").count(), 3);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|e| e.action == "channel.restored")
+            .count(),
+        1
+    );
+    assert_eq!(entries.len(), 5 + 5 + 1 + 3);
+}
+
+#[test]
+fn a_restore_that_cannot_write_the_log_changes_nothing() {
+    struct Broken;
+    impl super::audit::AuditSink for Broken {
+        fn record_many(&self, _: Vec<crate::audit::NewEvent>) -> std::io::Result<()> {
+            Err(std::io::Error::other("full"))
+        }
+        fn last_src(&self) -> std::io::Result<Option<(String, u64)>> {
+            Ok(None)
+        }
+    }
+    let (a, _b, _) = pair(false);
+    a.store
+        .update(|s| s.core.note(T0, "test.pending", None, String::new()))
+        .unwrap();
+    let before = a.state();
+    assert!(restore(&a.store, &Broken, |s| s.core.restored(T0)).is_err());
+    assert_eq!(a.state(), before);
+}
+
+// ---- bytes, not only a count ------------------------------------------------------------------------------------
+
+static BIG: super::wire::Profile = super::wire::Profile {
+    tag: "ozbox-test-big",
+    audit: "big",
+    kinds: &["note"],
+    max_body: 600 * 1024,
+    check_ext: |_, _| true,
+};
+
+#[test]
+fn a_window_of_large_messages_is_cut_by_bytes_and_still_drains_over_rounds() {
+    use super::wire::{wire_size, ROUND_BYTES};
+    let mut c = Core::new("a", "sp", "kp", "fp", 1);
+    let mut l = Link::new("b", "sk", "pk", "pfp", 1);
+    l.peer_inc = 7;
+    c.pin(l);
+    for _ in 0..64 {
+        c.enqueue(&BIG, "b", "note", Vec::new(), vec![7u8; 500 * 1024])
+            .unwrap();
+    }
+    let mut rounds = 0;
+    while !c.links["b"].outbox.is_empty() {
+        let d = c.drafts(
+            "b",
+            T0,
+            super::session::DraftOpts {
+                hello: false,
+                ack: false,
+                resend: true,
+            },
+        );
+        assert!(!d.is_empty(), "every round makes progress");
+        let total: usize = d
+            .iter()
+            .map(|x| wire_size(x.env.ext.len(), x.plain.len()))
+            .sum();
+        assert!(total <= ROUND_BYTES, "a round of {total} bytes");
+        let top = d.iter().map(|x| x.env.seq).max().unwrap();
+        // the peer applied what was offered and said so
+        c.links.get_mut("b").unwrap().outbox.retain(|o| o.seq > top);
+        rounds += 1;
+        assert!(rounds <= 64);
+    }
+    assert!(rounds > 1, "64 messages of 500 KiB do not fit one round");
+}
+
+#[test]
+fn one_message_too_big_for_a_round_is_refused_when_it_is_queued() {
+    let mut c = Core::new("a", "sp", "kp", "fp", 1);
+    c.pin(Link::new("b", "sk", "pk", "pfp", 1));
+    static HUGE: super::wire::Profile = super::wire::Profile {
+        tag: "ozbox-test-huge",
+        audit: "huge",
+        kinds: &["note"],
+        max_body: 8 * 1024 * 1024,
+        check_ext: |_, _| true,
+    };
+    assert_eq!(
+        c.enqueue(&HUGE, "b", "note", Vec::new(), vec![0u8; 3 * 1024 * 1024]),
+        Err("too-big-for-a-round")
+    );
+    // a body that leaves no room for what sealing adds is refused too, not failed later at seal time
+    assert_eq!(
+        c.enqueue(&TEST_PROFILE, "b", "note", Vec::new(), vec![0u8; 4096]),
+        Err("too-big")
+    );
+    assert!(c
+        .enqueue(&TEST_PROFILE, "b", "note", Vec::new(), vec![0u8; 4096 - 48])
+        .is_ok());
+}
+
+#[test]
+fn the_size_estimate_is_never_below_what_goes_on_the_wire() {
+    let (a, b, _) = pair(true);
+    let net = Net::new();
+    net.settle(&a, &b);
+    a.send("main", &"x".repeat(4000));
+    for m in a.outbound("main") {
+        let real = serde_json::to_vec(&m).unwrap().len();
+        let est = super::wire::wire_size(
+            m.envelope.ext.len(),
+            m.envelope.body.len().saturating_sub(48),
+        );
+        assert!(est >= real, "estimate {est} is below the real {real}");
+    }
+}
+
+// ---- a reused number below the window ------------------------------------------------------------------------------
+
+#[test]
+fn a_store_rolled_back_by_more_than_the_window_is_caught_by_the_running_digest_not_acknowledged() {
+    let (a, b, _) = pair(false);
+    let net = Net::new();
+    net.settle(&a, &b);
+    let backup = std::fs::read(a.store.dir().join("state.json")).unwrap();
+    for i in 0..100 {
+        a.send("main", &format!("old{i}"));
+    }
+    for _ in 0..4 {
+        net.settle(&a, &b);
+    }
+    assert_eq!(texts(&b).len(), 100);
+    // the laptop's disk comes back from before, and nobody says so: it queues 150 messages of its own, numbered from 1 again
+    std::fs::write(a.store.dir().join("state.json"), backup).unwrap();
+    for i in 0..150 {
+        a.send("main", &format!("new{i}"));
+    }
+    // the peer says it applied 100; the window (the last 64 numbers) cannot see a reuse of number 3, the digest can
+    a.take(&b.outbound("laptop"));
+    let st = a.state();
+    let l = &st.core.links["main"];
+    assert_eq!(l.halted.as_deref(), Some("applied-differs"));
+    assert_eq!(l.outbox.len(), 150, "nothing was acknowledged away");
+    assert!(
+        a.outbound("main")
+            .iter()
+            .all(|m| m.envelope.kind == "hello"),
+        "a halted link sends nothing sequenced"
+    );
+}
+
+#[test]
+fn the_running_digest_agrees_after_a_normal_conversation_in_both_directions() {
+    let (a, b, _) = pair(false);
+    let net = Net::new();
+    net.settle(&a, &b);
+    for i in 0..70 {
+        a.send("main", &format!("a{i}"));
+        b.send("laptop", &format!("b{i}"));
+    }
+    for _ in 0..6 {
+        net.settle(&a, &b);
+    }
+    for e in [&a, &b] {
+        let st = e.state();
+        assert!(
+            st.core
+                .links
+                .values()
+                .all(|l| l.halted.is_none() && l.outbox.is_empty()),
+            "{}",
+            e.name
+        );
+    }
+    assert_eq!(texts(&b).len(), 70);
+    assert_eq!(texts(&a).len(), 70);
 }
 
 #[test]

@@ -26,6 +26,25 @@ pub const MAX_VALIDITY_MS: u64 = 10 * 60 * 1000;
 /// (the per-number hash window that tells a retry from a conflicting reuse).
 pub const WINDOW: u64 = 64;
 
+/// What sealing adds to a body (the encapsulated key and the tag).
+pub const SEAL_OVERHEAD: usize = 48;
+
+/// The most one round puts on the wire in one direction, as [`wire_size`] counts it. A round is cut at this size (always keeping at
+/// least one message), so a window of large messages is sent over several rounds and never becomes one transfer larger than a
+/// transport accepts. Half of [`TRANSPORT_CAP`], leaving room for the `hello`, the `ack` and the estimate's error.
+pub const ROUND_BYTES: usize = 4 * 1024 * 1024;
+
+/// The most a transport reads of one round's request or reply. The senders' budget above is sized from it, never the other way.
+pub const TRANSPORT_CAP: usize = 8 * 1024 * 1024;
+
+const _: () = assert!(ROUND_BYTES * 2 <= TRANSPORT_CAP);
+
+/// What one sequenced message costs on the wire: its sealed body and its `ext` written as hex (twice their size), and the envelope's
+/// own fields and signature. An upper estimate, used to cut a round before it is built.
+pub fn wire_size(ext_len: usize, plain_len: usize) -> usize {
+    2 * (plain_len + SEAL_OVERHEAD + ext_len) + 1536
+}
+
 /// The largest signed `ext` a profile may carry.
 pub const MAX_EXT: usize = 1024;
 

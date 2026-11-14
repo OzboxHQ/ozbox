@@ -1066,6 +1066,20 @@ mod hub_handoff {
         assert_eq!(hub["result"]["commit"], "deadbeef");
         assert_eq!(hub["keys"]["delivered"], 0);
         assert!(audit_actions(&h.r).contains(&"hub.assign".to_string()));
+        // the hub's events are handed over by number: asking again records none of them a second time
+        let hub_events = |r: &Rig| {
+            audit_actions(r)
+                .iter()
+                .filter(|a| a.starts_with("hub."))
+                .count()
+        };
+        let n = hub_events(&h.r);
+        for t in 25..28 {
+            h.r.tools.call(&c, "task_status", &json!({}), t).unwrap();
+        }
+        assert_eq!(hub_events(&h.r), n);
+        let book = h.r.tools.store.load().unwrap();
+        assert!(book.hub_channel_src.is_some());
     }
 
     #[test]

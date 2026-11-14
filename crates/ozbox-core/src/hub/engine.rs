@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::refusal::{refuse_production, KeyDeclaration, Refusal, AUDIT_REFUSED};
 use super::wire::{Ext, Kind, Transport, WireError, PROFILE};
+#[cfg(test)]
 use crate::audit::NewEvent;
 use crate::channel::audit::HasCore;
 use crate::channel::flow::{receive_round, seal_drafts};
@@ -115,7 +116,9 @@ impl HubState {
         self.core.links.get(worker).map_or(0, |l| l.peer_inc)
     }
 
-    /// Hand over the audit events written since the last call, for the caller to record elsewhere (the task book).
+    /// Hand over every pending audit event and forget it. For tests only: a server hands events over by number with
+    /// [`HubService::drain_audit`], so a crash between the state's write and the record's repeats none and loses none.
+    #[cfg(test)]
     pub fn take_audit(&mut self) -> Vec<NewEvent> {
         std::mem::take(&mut self.core.audit)
     }
@@ -486,5 +489,24 @@ impl HubService {
         }
         hub.flush_all(&mut st, now);
         Some(out)
+    }
+
+    /// Hand the pending audit events the sink does not hold to it, by source number (the channel's own drain, on the state this
+    /// service holds), then forget what it holds. Events stay in the state until the sink says it has them; one the sink already
+    /// holds is skipped, so a retry after a crash repeats nothing. Returns whether the sink could be written.
+    pub fn drain_audit(&self, sink: &dyn crate::channel::audit::AuditSink) -> std::io::Result<()> {
+        let mut st = self
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("the hub's state is not usable"))?;
+        let last = sink.last_src()?;
+        st.core.trim_logged(last.as_ref());
+        if st.core.audit.is_empty() {
+            return Ok(());
+        }
+        sink.record_many(st.core.audit.clone())?;
+        let last = sink.last_src()?;
+        st.core.trim_logged(last.as_ref());
+        Ok(())
     }
 }

@@ -10,6 +10,7 @@
 use super::engine::{Assign, ResultBody, StatusBody};
 use super::refusal::{refuse_production, AUDIT_REFUSED};
 use super::wire::{Ext, Kind, Transport, WireError, PROFILE};
+#[cfg(test)]
 use crate::audit::NewEvent;
 use crate::channel::audit::HasCore;
 use crate::channel::flow::{receive_round, seal_drafts};
@@ -53,6 +54,7 @@ impl WorkerState {
         self.core.links.values().next().map_or(0, |l| l.peer_inc)
     }
 
+    #[cfg(test)]
     pub fn take_audit(&mut self) -> Vec<NewEvent> {
         std::mem::take(&mut self.core.audit)
     }
