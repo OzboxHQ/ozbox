@@ -15,6 +15,10 @@
 //! do not already give, and each is audited. The real protection on this socket points the other way: the box user and its
 //! agents cannot reach the dashboard's process or its secrets.
 //!
+//! Skills on the box's own disk (`/v1/skills`) are on the table: a push writes only into the agents' skills folders, only
+//! the files of a skill a person approved, re-checked and re-hashed by the daemon, and is audited. It adds no authority the
+//! terminal does not already give.
+//!
 //! Left off, so "not available on a box's dashboard": backups (`/v1/backup`), the tool installer (`/v1/tools`), local models
 //! (`/v1/local-ai`), writing agent events (`POST /v1/agent-events`, the coding agent's own hook), answering an agent's
 //! permission request (`POST /v1/agent-events/permission/{id}`: no socket takes it, so no process on the box can approve its
@@ -71,6 +75,9 @@ pub const ROUTES: &[Route] = &[
     r("files_rename", "POST", "/v1/files/rename"),
     r("files_delete", "POST", "/v1/files/delete"),
     r("files_restore", "POST", "/v1/files/trash/restore"),
+    r("skills_read", "GET", "/v1/skills"),
+    r("skill_push", "PUT", "/v1/skills/{}"),
+    r("skill_remove", "DELETE", "/v1/skills/{}"),
     r("checkpoint", "POST", "/v1/checkpoint"),
     r("terminal_attach", "GET", "/v1/terminal"),
     r("terminal_audit", "GET", "/v1/terminal/audit"),
@@ -155,6 +162,9 @@ mod tests {
             ("PUT", "/v1/files/write", "files_write"),
             ("POST", "/v1/files/delete", "files_delete"),
             ("POST", "/v1/checkpoint", "checkpoint"),
+            ("GET", "/v1/skills", "skills_read"),
+            ("PUT", "/v1/skills/demo", "skill_push"),
+            ("DELETE", "/v1/skills/demo", "skill_remove"),
             (
                 "GET",
                 "/v1/agent-sessions/term-1/capture",
@@ -181,6 +191,10 @@ mod tests {
             ("POST", "/v1/agent-events/permission/abc"),
             ("DELETE", "/v1/files/trash"),
             ("POST", "/v1/terminal"),
+            ("POST", "/v1/skills"),
+            ("PUT", "/v1/skills"),
+            ("PUT", "/v1/skills/a/b"),
+            ("GET", "/v1/skills/demo"),
             ("DELETE", "/v1/runs"),
             ("GET", "/v1/runs/abc"),
             ("GET", "/"),

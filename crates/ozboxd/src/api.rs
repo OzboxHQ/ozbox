@@ -181,6 +181,20 @@ impl AppState {
                     }),
                 ),
             },
+            p if crate::skills::handles(p) => match crate::skills::global() {
+                Some(svc) => {
+                    let (status, v) = svc.route(method, &p["/v1/skills".len()..], &req.body);
+                    Response::json(status, &v)
+                }
+                None => Response::json(
+                    503,
+                    &serde_json::json!({
+                        "code": "skills_unavailable",
+                        "message": "skills on the box's disk are not available on this box",
+                        "error": "skills on the box's disk are not available on this box"
+                    }),
+                ),
+            },
             p if p == "/v1/local-ai" || p.starts_with("/v1/local-ai/") => {
                 match crate::local_ai::global() {
                     Some(svc) => {
@@ -833,7 +847,7 @@ mod unix {
             }
             return;
         }
-        let resp = if head.content_length > http::MAX_BODY {
+        let resp = if head.content_length > http::body_limit(&head.method, &head.path) {
             Response::error(413, "request body too large")
         } else {
             let mut body = head.early.clone();

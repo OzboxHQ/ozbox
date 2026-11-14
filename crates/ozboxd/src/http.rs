@@ -12,6 +12,16 @@ pub const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_HEADERS: usize = 64;
 
+/// The most a request to this path may carry. Everything is 64 KiB except a skill push, whose files may be up to
+/// `ozbox_core::skill_pack::MAX_PACK_BODY` as JSON.
+pub fn body_limit(method: &str, path: &str) -> usize {
+    if method == "PUT" && path.starts_with("/v1/skills/") {
+        ozbox_core::skill_pack::MAX_PACK_BODY
+    } else {
+        MAX_BODY
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub method: String,
@@ -231,13 +241,14 @@ pub fn read_head<R: Read>(r: &mut R, deadline: Instant) -> Result<Head, HttpErro
 pub fn read_request<R: Read>(r: &mut R, deadline: Instant) -> Result<Request, HttpError> {
     let h = read_head(r, deadline)?;
     let want = h.content_length;
-    if want > MAX_BODY {
+    let limit = body_limit(&h.method, &h.path);
+    if want > limit {
         return Err(HttpError::BodyTooLarge);
     }
     let mut body = h.early;
     while body.len() < want {
         read_some(r, &mut body, deadline)?;
-        if body.len() > MAX_BODY {
+        if body.len() > limit {
             return Err(HttpError::BodyTooLarge);
         }
     }

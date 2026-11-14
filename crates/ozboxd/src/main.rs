@@ -683,6 +683,14 @@ mod daemon {
                 clock.clone(),
             )));
         }
+        // Skills on the box's disk: the folders its coding agents read, under the box user's home.
+        if let Some(home) = std::env::var_os("HOME") {
+            ozboxd::skills::install_global(Arc::new(ozboxd::skills::SkillsService::new(
+                PathBuf::from(home),
+                cfg.state_dir.clone(),
+                clock.clone(),
+            )));
+        }
         if cfg.terminal.enabled {
             ozboxd::terminal::install_global(Arc::new(ozboxd::terminal::TerminalService::new(
                 cfg.terminal.clone(),
