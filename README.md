@@ -135,6 +135,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox permissions show\|mode\|grant\|revoke\|check` | The default mode, the active rules, and time-boxed Production grants; rules are edited in the dashboard |
 | `ozbox audit list\|verify\|seal` | The tamper-evident audit log, and a check that nothing in it was changed |
 | `ozbox memory` · `ozbox skills` | Notes in git that agents read once you approve them; skills usable only after you approve their exact files |
+| `ozbox tasks` | Typed, signed tasks between your computer and a box (questions, answers, status), with a state and an audit record; acts are refused until the passkey approval path exists. Preview |
 | `ozbox orch` | One conductor agent hands features to worker boxes, with claims, contracts, a mailbox and a merge queue |
 | `ozbox schedule` · `ozbox trigger` | Agent runs on a schedule in your time zone, or started by signed webhooks |
 | `ozbox models` · `ozbox cost` | Your model providers, which engine uses which model, usage and prices; the real cloud bill beside the estimate |

@@ -1,6 +1,6 @@
 # Use cases
 
-Well over a hundred worked examples of what Oz Box is for, in fifteen guides: for people who build software, and for
+Well over a hundred worked examples of what Oz Box is for, in sixteen guides: for people who build software, and for
 business, finance, creative and education work. Each example says what you want, the steps in the
 dashboard and on the command line, what happens underneath, and how mature that path is.
 
@@ -10,6 +10,7 @@ dashboard and on the command line, what happens underneath, and how mature that 
 | [Coding from anywhere](coding-from-anywhere.md) | web IDE, desktop editors, terminals that keep running, your own domain |
 | [Fleets](fleets.md) | many boxes: per project, throwaway clones, budgets, a test lane |
 | [Agentic fleet](agentic-fleet.md) | coding agents running supervised on your boxes: tasks, caps, approvals, schedules, triggers |
+| [A task channel](task-channel.md) | your computer and a box pass questions, answers and status as signed tasks with a state and an audit record, not notes |
 | [Orchestrating a fleet](orchestrating-a-fleet.md) | one agent hands features to worker boxes: claims, contracts, a mailbox, a merge queue, rules files |
 | [A secure workspace for AI agents](secure-agent-workspace.md) | an agent with no keys in reach, a limited network, ask-mode, Production out of reach, an audit log, spend limits, and when a per-request sandbox fits better |
 | [Chat with your coding agents](chat.md) | talk to agents from the dashboard, Telegram, Slack or WhatsApp: start, follow, answer, approve |

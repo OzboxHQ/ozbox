@@ -44,6 +44,7 @@
               "use-cases/coding-from-anywhere",
               "use-cases/fleets",
               "use-cases/agentic-fleet",
+              "use-cases/task-channel",
               "use-cases/orchestrating-a-fleet",
               "use-cases/secure-agent-workspace",
               "use-cases/chat",
