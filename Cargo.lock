@@ -921,6 +921,7 @@ dependencies = [
 name = "ozbox-core"
 version = "0.2.0-beta.0"
 dependencies = [
+ "ozbox-seal",
  "ring",
  "serde",
  "serde_json",

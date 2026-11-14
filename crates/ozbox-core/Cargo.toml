@@ -15,6 +15,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tempfile = "3"
 
+[dev-dependencies]
+ozbox-seal = { path = "../ozbox-seal" }
+
 [lints]
 workspace = true
 
