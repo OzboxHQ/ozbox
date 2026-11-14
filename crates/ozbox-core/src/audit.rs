@@ -17,7 +17,7 @@
 
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ring::digest::{digest, SHA256};
 use ring::hmac;
@@ -300,36 +300,14 @@ impl AuditLog {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let lock_path = self.path.with_extension("lock");
-        let start = Instant::now();
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Lock(lock_path)),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&lock_path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > Duration::from_secs(30));
-                    if stale {
-                        let _ = std::fs::remove_file(&lock_path);
-                        continue;
-                    }
-                    if start.elapsed() > Duration::from_secs(5) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "the audit log is busy",
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => return Err(e),
+        // one advisory lock on an open descriptor: never judged by age, never removed (see `crate::filelock`)
+        Lock::acquire(&self.path.with_extension("lock"), Duration::from_secs(5)).map_err(|e| {
+            if e.kind() == io::ErrorKind::TimedOut {
+                io::Error::new(io::ErrorKind::TimedOut, "the audit log is busy")
+            } else {
+                e
             }
-        }
+        })
     }
 
     /// The seal key, made on first use. Readable only by its owner.
@@ -737,13 +715,7 @@ impl LegacyChain {
     }
 }
 
-struct Lock(PathBuf);
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+type Lock = crate::filelock::FileLock;
 
 fn line_of(l: &Line) -> io::Result<String> {
     let mut s = serde_json::to_string(l).map_err(io::Error::other)?;
@@ -973,6 +945,27 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         std::os::unix::fs::symlink(&victim, other.join("tasks.audit.jsonl")).unwrap();
         assert!(LegacyChain::read(&other.join("tasks.audit.jsonl")).is_err());
+    }
+
+    #[test]
+    fn four_writers_at_once_leave_one_unbroken_chain() {
+        let d = tempfile::tempdir().unwrap();
+        let l = log(d.path());
+        std::thread::scope(|s| {
+            for w in 0..4u64 {
+                let l = &l;
+                s.spawn(move || {
+                    for i in 0..20u64 {
+                        l.append(ev(w * 100 + i, "run.queued")).unwrap();
+                    }
+                });
+            }
+        });
+        let r = l.verify().unwrap();
+        assert!(r.ok, "{r:?}");
+        assert_eq!(l.entries().unwrap().len(), 80);
+        // the lock file is never removed (removing it is how a second holder gets in)
+        assert!(d.path().join("tasks.audit.lock").exists());
     }
 
     fn fill(l: &AuditLog, n: u64) {

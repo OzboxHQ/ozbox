@@ -2,7 +2,7 @@
 
 use super::audit::{change, drain, guard};
 use super::session::{Core, Link, Received, HALT_ACK_AHEAD, NOTICE_SEQ_CONFLICT};
-use super::testkit::{pair, End, Faults, Net, TEST_PROFILE, T0};
+use super::testkit::{pair, End, Faults, Net, T0, TEST_PROFILE};
 use super::wire::{fingerprint, hex, unhex, Envelope, Sealed, Signer, WINDOW};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -95,7 +95,10 @@ fn every_field_changes_the_canonical_bytes() {
             check_ext: |_, _| true,
         }
     };
-    assert_ne!(sample().canonical(&other), sample().canonical(&TEST_PROFILE));
+    assert_ne!(
+        sample().canonical(&other),
+        sample().canonical(&TEST_PROFILE)
+    );
 }
 
 #[test]
@@ -145,7 +148,10 @@ fn shape_checks() {
     e.seq = 0;
     e.ext = Vec::new();
     e.receiver_inc = 0;
-    assert!(e.check(&TEST_PROFILE).is_ok(), "a hello may name no receiver incarnation");
+    assert!(
+        e.check(&TEST_PROFILE).is_ok(),
+        "a hello may name no receiver incarnation"
+    );
 }
 
 // ---- delivery -----------------------------------------------------------------------------------------------------
@@ -191,9 +197,23 @@ fn nothing_is_lost_when_the_network_drops_and_a_drop_resends() {
     let net = Net::new();
     net.settle(&a, &b);
     a.send("main", "keep me");
-    net.round(&a, &b, Faults { drop_out: true, ..Faults::default() });
+    net.round(
+        &a,
+        &b,
+        Faults {
+            drop_out: true,
+            ..Faults::default()
+        },
+    );
     assert!(texts(&b).is_empty());
-    net.round(&a, &b, Faults { drop_back: true, ..Faults::default() });
+    net.round(
+        &a,
+        &b,
+        Faults {
+            drop_back: true,
+            ..Faults::default()
+        },
+    );
     net.settle(&a, &b);
     assert_eq!(texts(&b), ["keep me"], "applied once, not twice");
     assert!(a.state().core.links["main"].outbox.is_empty());
@@ -280,7 +300,13 @@ fn the_incarnation_check_stands_alone_when_the_epoch_is_unchanged() {
     // b loses its state and starts again with the same epoch: a fresh incarnation, no session
     b.store
         .update(|s| {
-            let fresh = Core::new("main", &b.sign_public, &b.seal_public, &fingerprint(&unhex(&b.seal_public).unwrap()), 1);
+            let fresh = Core::new(
+                "main",
+                &b.sign_public,
+                &b.seal_public,
+                &fingerprint(&unhex(&b.seal_public).unwrap()),
+                1,
+            );
             let mut link = s.core.links["laptop"].clone();
             link.peer_inc = 0;
             link.next_in = 1;
@@ -291,7 +317,11 @@ fn the_incarnation_check_stands_alone_when_the_epoch_is_unchanged() {
         .expect("reset");
     let r = b.take(&captured);
     assert!(texts(&b).is_empty());
-    assert!(r.refused.iter().any(|c| c == "incarnation"), "{:?}", r.refused);
+    assert!(
+        r.refused.iter().any(|c| c == "incarnation"),
+        "{:?}",
+        r.refused
+    );
     // and the session is rebuilt by hellos, after which the same message is delivered from the outbox
     net.settle(&a, &b);
     assert_eq!(texts(&b), ["never delivered"]);
@@ -302,43 +332,27 @@ fn a_captured_hello_from_an_earlier_life_cannot_roll_a_session_back() {
     let (a, b, clock) = pair(false);
     let net = Net::new();
     net.settle(&a, &b);
+    let first_inc = a.state().core.incarnation;
     let old_hello = a
         .outbound("main")
         .into_iter()
         .find(|m| m.envelope.kind == "hello")
         .unwrap();
+    // the laptop starts over with a fresh incarnation and the same epoch, and the session is rebuilt
     clock.set(T0 + 1000);
-    a.store.update(|s| s.core.restored(T0 + 1000)).expect("restore a");
-    b.store
-        .update(|s| {
-            if let Some(l) = s.core.links.get_mut("laptop") {
-                l.epoch += 1;
-            }
-        })
-        .expect("repin");
+    a.restart_same_epoch();
     net.settle(&a, &b);
     let adopted = b.state().core.links["laptop"].peer_inc;
     assert_eq!(adopted, a.state().core.incarnation);
-    // the old hello carries the old epoch, so build one that is valid in every way but its age: same epoch as now
+    assert_ne!(adopted, first_inc);
+    // the captured hello names the earlier life: valid in every way but its age, and it never reached main
     let r = b.take(&[old_hello]);
-    assert_eq!(b.state().core.links["laptop"].peer_inc, adopted);
-    assert!(!r.refused.is_empty());
-}
-
-#[test]
-fn a_hello_that_is_valid_but_older_than_the_last_one_taken_is_refused_as_stale() {
-    let (a, b, clock) = pair(false);
-    let net = Net::new();
-    net.settle(&a, &b);
-    let early = a
-        .outbound("main")
-        .into_iter()
-        .find(|m| m.envelope.kind == "hello")
-        .unwrap();
-    clock.set(T0 + 5000);
-    net.settle(&a, &b);
-    let r = b.take(&[early]);
     assert_eq!(r.refused, ["stale-hello"]);
+    assert_eq!(
+        b.state().core.links["laptop"].peer_inc,
+        adopted,
+        "the session was not rolled back"
+    );
 }
 
 // ---- a store rolled back without saying so -------------------------------------------------------------------------
@@ -360,7 +374,10 @@ fn a_store_rolled_back_without_restored_acknowledges_nothing_it_did_not_apply() 
     net.settle(&a, &b);
     assert_eq!(texts(&b), ["m1", "m2"], "the reused number was not applied");
     let bs = b.state();
-    assert_eq!(bs.core.links["laptop"].notice.as_deref(), Some(NOTICE_SEQ_CONFLICT));
+    assert_eq!(
+        bs.core.links["laptop"].notice.as_deref(),
+        Some(NOTICE_SEQ_CONFLICT)
+    );
     let st = a.state();
     let l = &st.core.links["main"];
     assert!(l.halted.is_some(), "the rolled-back end stops sending");
@@ -368,7 +385,9 @@ fn a_store_rolled_back_without_restored_acknowledges_nothing_it_did_not_apply() 
     let acts: Vec<String> = b.sink.actions();
     assert!(acts.contains(&"test.alert".to_string()), "{acts:?}");
     // acknowledging the restore is the way out
-    a.store.update(|s| s.core.restored(a.now())).expect("restored");
+    a.store
+        .update(|s| s.core.restored(a.now()))
+        .expect("restored");
     b.store
         .update(|s| {
             if let Some(l) = s.core.links.get_mut("laptop") {
@@ -407,7 +426,10 @@ fn an_acknowledgement_ahead_of_what_this_end_sent_halts_it() {
         .expect("rollback");
     b.send("laptop", "hello?");
     net.settle(&a, &b);
-    assert_eq!(a.state().core.links["main"].halted.as_deref(), Some(HALT_ACK_AHEAD));
+    assert_eq!(
+        a.state().core.links["main"].halted.as_deref(),
+        Some(HALT_ACK_AHEAD)
+    );
     assert!(a.sink.actions().contains(&"test.halted".to_string()));
 }
 
@@ -429,7 +451,10 @@ fn a_refused_body_is_never_written_to_the_state_even_while_it_waits_for_a_gap() 
         .collect();
     b.take(&held_only);
     let raw = std::fs::read_to_string(b.store.dir().join("state.json")).unwrap();
-    assert!(!raw.contains("SECRET") && !hex_contains(&raw, b"SECRET"), "the key reached the disk");
+    assert!(
+        !raw.contains("SECRET") && !hex_contains(&raw, b"SECRET"),
+        "the key reached the disk"
+    );
     net.settle(&a, &b);
     assert_eq!(texts(&b), ["first", "REFUSED:key-shaped-content"]);
 }
@@ -454,7 +479,11 @@ fn a_flood_of_unverifiable_envelopes_is_one_counted_event_and_nothing_is_stored(
     let before = b.state().core.audit_n;
     b.take(&junk);
     let after = b.state();
-    assert_eq!(after.core.audit_n, before + 1, "one event for sixty refusals");
+    assert_eq!(
+        after.core.audit_n,
+        before + 1,
+        "one event for sixty refusals"
+    );
     let ev = b.sink.events.lock().unwrap();
     let last = ev.last().unwrap();
     assert_eq!(last.action, "test.unverified");
@@ -469,11 +498,18 @@ fn a_mutated_header_with_a_valid_signature_cannot_open_the_body_real_hpke() {
     a.send("main", "secret-ish");
     let mut batch = a.outbound("main");
     // the sender signs a header that differs from the one the body was sealed to: the AAD no longer matches
-    let m = batch.iter_mut().find(|m| m.envelope.kind == "note").unwrap();
+    let m = batch
+        .iter_mut()
+        .find(|m| m.envelope.kind == "note")
+        .unwrap();
     m.envelope.ext = b"other".to_vec();
     m.signature = a.signer.sign(&m.envelope.canonical(&TEST_PROFILE)).unwrap();
     let r = b.take(&batch);
-    assert!(r.refused.contains(&"unopenable".to_string()), "{:?}", r.refused);
+    assert!(
+        r.refused.contains(&"unopenable".to_string()),
+        "{:?}",
+        r.refused
+    );
     assert!(texts(&b).is_empty());
 }
 
@@ -486,11 +522,17 @@ fn a_body_sealed_to_another_receiver_or_another_key_is_unopenable_real_hpke() {
     a.send("main", "for main only");
     // sealed to a key that is not main's: validly signed, addressed to main, but main cannot open it
     let mut batch = a.outbound("main");
-    let m = batch.iter_mut().find(|m| m.envelope.kind == "note").unwrap();
+    let m = batch
+        .iter_mut()
+        .find(|m| m.envelope.kind == "note")
+        .unwrap();
     let mut env = m.envelope.clone();
     env.body = Vec::new();
     let aad = env.aad(&TEST_PROFILE);
-    env.body = c.sealer.seal(&c.seal_public, &aad, b"for main only").unwrap();
+    env.body = c
+        .sealer
+        .seal(&c.seal_public, &aad, b"for main only")
+        .unwrap();
     m.signature = a.signer.sign(&env.canonical(&TEST_PROFILE)).unwrap();
     m.envelope = env;
     let r = b.take(&batch);
@@ -498,7 +540,10 @@ fn a_body_sealed_to_another_receiver_or_another_key_is_unopenable_real_hpke() {
     // and an envelope naming another receiver's fingerprint is refused before the signature
     let mut other = a.outbound("main").remove(0);
     other.envelope.receiver_fp = fingerprint(&unhex(&c.seal_public).unwrap());
-    other.signature = a.signer.sign(&other.envelope.canonical(&TEST_PROFILE)).unwrap();
+    other.signature = a
+        .signer
+        .sign(&other.envelope.canonical(&TEST_PROFILE))
+        .unwrap();
     let r = b.take(&[other]);
     assert_eq!(r.refused, ["wrong-receiver"]);
     assert!(texts(&b).is_empty());
@@ -554,11 +599,17 @@ fn two_drainers_and_a_writer_at_once_lose_nothing_and_log_nothing_twice() {
 fn a_restore_from_a_backup_with_the_log_kept_starts_a_new_source_epoch_and_is_not_blank() {
     let (a, _b, _) = pair(false);
     for i in 0..5 {
-        change(&a.store, &a.sink, |s| s.core.note(T0, "test.before", None, format!("{i}"))).unwrap();
+        change(&a.store, &a.sink, |s| {
+            s.core.note(T0, "test.before", None, format!("{i}"))
+        })
+        .unwrap();
     }
     let backup = std::fs::read(a.store.dir().join("state.json")).unwrap();
     for i in 0..5 {
-        change(&a.store, &a.sink, |s| s.core.note(T0, "test.after", None, format!("{i}"))).unwrap();
+        change(&a.store, &a.sink, |s| {
+            s.core.note(T0, "test.after", None, format!("{i}"))
+        })
+        .unwrap();
     }
     drain(&a.store, &a.sink).unwrap();
     assert!(guard(&a.state().core, &a.sink).is_ok());
@@ -587,8 +638,45 @@ fn the_audit_backlog_is_bounded_and_a_full_one_refuses_a_change_rather_than_drop
             }
         })
         .unwrap();
-    let r = change(&a.store, &a.sink, |s| s.core.enqueue(&TEST_PROFILE, "main", "note", Vec::new(), b"x".to_vec())).unwrap();
+    let r = change(&a.store, &a.sink, |s| {
+        s.core
+            .enqueue(&TEST_PROFILE, "main", "note", Vec::new(), b"x".to_vec())
+    })
+    .unwrap();
     assert_eq!(r, Err("audit-backlog"));
+}
+
+// ---- one write per round --------------------------------------------------------------------------------------
+
+#[test]
+fn a_round_that_took_thirty_messages_cost_one_write_and_a_quiet_round_none() {
+    let (a, b, _) = pair(false);
+    let net = Net::new();
+    net.settle(&a, &b);
+    for i in 0..30 {
+        a.send("main", &format!("m{i}"));
+    }
+    let batch = a.outbound("main");
+    let before = b.store.writes();
+    let r = b.take(&batch);
+    assert_eq!(r.deliveries.len(), 30);
+    assert_eq!(b.store.writes() - before, 1, "thirty messages, one write");
+    net.settle(&a, &b);
+    // nothing is left to say: a hello each way changes nothing, so it writes nothing
+    let (wa, wb) = (a.store.writes(), b.store.writes());
+    let (sa, sb) = (
+        std::fs::read(a.store.dir().join("state.json")).unwrap(),
+        std::fs::read(b.store.dir().join("state.json")).unwrap(),
+    );
+    net.round(&a, &b, Faults::default());
+    net.round(&b, &a, Faults::default());
+    assert_eq!(
+        (a.store.writes(), b.store.writes()),
+        (wa, wb),
+        "a quiet round wrote"
+    );
+    assert_eq!(sa, std::fs::read(a.store.dir().join("state.json")).unwrap());
+    assert_eq!(sb, std::fs::read(b.store.dir().join("state.json")).unwrap());
 }
 
 // ---- the store ---------------------------------------------------------------------------------------------------
@@ -597,7 +685,8 @@ fn the_audit_backlog_is_bounded_and_a_full_one_refuses_a_change_rather_than_drop
 fn state_survives_closing_and_reopening_the_store() {
     let (a, b, _) = pair(false);
     a.send("main", "before the crash");
-    let reopened: super::store::Store<super::testkit::TState> = super::store::Store::new(a.store.dir());
+    let reopened: super::store::Store<super::testkit::TState> =
+        super::store::Store::new(a.store.dir());
     let st = reopened.read().unwrap();
     assert_eq!(st.core.links["main"].outbox.len(), 1);
     let net = Net::new();

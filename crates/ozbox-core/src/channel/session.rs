@@ -167,14 +167,26 @@ impl Link {
     }
 }
 
-/// What happened in a round, counted so a flood costs one audit event and not thousands.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What happened in a round, counted so a flood costs one audit event and not thousands. Transient: never written, and never part of
+/// whether two states are equal.
+#[derive(Debug, Clone, Default)]
 pub struct Tally {
+    /// Something durable changed since the state was read (a message taken, an event noted, a session moved). A caller that holds the
+    /// store's lock writes only when this is set, so a round in which nothing happened costs no write.
+    pub dirty: bool,
     /// Refused before the signature verified, by code. The sender is not authenticated, so its words are never logged.
     pub unverified: BTreeMap<String, u64>,
     /// Duplicates taken from an authenticated peer, by peer.
     pub duplicates: BTreeMap<String, u64>,
 }
+
+impl PartialEq for Tally {
+    fn eq(&self, _: &Tally) -> bool {
+        true
+    }
+}
+
+impl Eq for Tally {}
 
 /// One end: identity, every peer's link, the replay set and the audit backlog. Embedded in the profile's own state (the hub's, the
 /// mesh's task state), so a message and everything it changes are written together.
@@ -303,10 +315,12 @@ impl Core {
 
     /// Pin a peer, or replace its pin (new keys or epoch), keeping nothing of an earlier session.
     pub fn pin(&mut self, link: Link) {
+        self.tally.dirty = true;
         self.links.insert(link.name.clone(), link);
     }
 
     pub fn note(&mut self, now: u64, action: &str, subject: Option<&str>, detail: String) {
+        self.tally.dirty = true;
         self.audit_n += 1;
         self.audit.push(NewEvent {
             ts_ms: now,
@@ -323,7 +337,7 @@ impl Core {
         if let Some((ep, n)) = last {
             if *ep == self.store_id {
                 self.audit
-                    .retain(|e| e.src.as_ref().is_none_or(|(_, k)| k > n));
+                    .retain(|e| e.src.as_ref().map_or(true, |(_, k)| k > n));
             }
         }
     }
@@ -331,6 +345,7 @@ impl Core {
     /// After a restore from a backup: a new epoch, a new incarnation and a new audit source epoch. Envelopes captured before it
     /// no longer verify, the peers are told to pin the new epoch, and nothing in flight survives.
     pub fn restored(&mut self, now: u64) {
+        self.tally.dirty = true;
         self.epoch += 1;
         self.incarnation = fresh_incarnation();
         self.store_id = fresh_id();
@@ -339,7 +354,12 @@ impl Core {
         for l in self.links.values_mut() {
             l.reset_session();
         }
-        self.note(now, "channel.restored", None, format!("epoch={}", self.epoch));
+        self.note(
+            now,
+            "channel.restored",
+            None,
+            format!("epoch={}", self.epoch),
+        );
     }
 
     /// Forget expired nonces.
@@ -371,6 +391,7 @@ impl Core {
         if l.outbox.len() >= MAX_OUTBOX {
             return Err(code::RATE);
         }
+        self.tally.dirty = true;
         l.out_seq += 1;
         let seq = l.out_seq;
         l.outbox.push(Outgoing {
@@ -517,10 +538,17 @@ impl Core {
     /// Emit the round's counted events (one per kind of refusal, one for duplicates) and reset the tally. Call once per round,
     /// inside the same write as the receives.
     pub fn end_round(&mut self, p: &Profile, now: u64) {
+        // the round's counts are reported and cleared; whether anything durable changed is not
+        let dirty = self.tally.dirty;
         let t = std::mem::take(&mut self.tally);
+        self.tally.dirty = dirty;
         if !t.unverified.is_empty() {
             let total: u64 = t.unverified.values().sum();
-            let by: Vec<String> = t.unverified.iter().map(|(c, n)| format!("{c}={n}")).collect();
+            let by: Vec<String> = t
+                .unverified
+                .iter()
+                .map(|(c, n)| format!("{c}={n}"))
+                .collect();
             self.note(
                 now,
                 &format!("{}.unverified", p.audit),
@@ -596,7 +624,11 @@ impl Core {
         };
         // the profile's screen runs before anything is held, so refused content is never written down
         let admitted = if p.sequenced(&e.kind) {
-            Some(admit(&e.kind, &e.ext, &plain).map(|()| plain.clone()).map_err(str::to_string))
+            Some(
+                admit(&e.kind, &e.ext, &plain)
+                    .map(|()| plain.clone())
+                    .map_err(str::to_string),
+            )
         } else {
             None
         };
@@ -624,9 +656,11 @@ impl Core {
         }
         // an acknowledgement belongs to a session: a `hello` that opens a new one (the peer's incarnation changed) carries the old
         // session's number, which says nothing about this one
-        let ack_valid = hello.is_none() || (e.sender_inc == cur_inc && e.receiver_inc == self.incarnation);
+        let ack_valid =
+            hello.is_none() || (e.sender_inc == cur_inc && e.receiver_inc == self.incarnation);
         if ack_valid && e.ack_seq > out_seq {
             // the peer has applied more than this end ever sent: this end's store was rolled back
+            self.tally.dirty = true;
             if let Some(l) = self.links.get_mut(&from) {
                 l.halted = Some(HALT_ACK_AHEAD.into());
             }
@@ -656,7 +690,14 @@ impl Core {
         }
     }
 
-    fn take_hello(&mut self, p: &Profile, now: u64, from: &str, e: &Envelope, h: &HelloBody) -> Received {
+    fn take_hello(
+        &mut self,
+        p: &Profile,
+        now: u64,
+        from: &str,
+        e: &Envelope,
+        h: &HelloBody,
+    ) -> Received {
         let me_inc = self.incarnation;
         let mut halted_now = false;
         let mut adopted = false;
@@ -666,7 +707,11 @@ impl Core {
             .is_some_and(|l| e.sender_inc == l.peer_inc && e.receiver_inc == me_inc);
         if let Some(l) = self.links.get_mut(from) {
             l.last_hello_ms = e.ts_ms;
-            l.named_inc = e.sender_inc;
+            if l.named_inc != e.sender_inc {
+                // what the next `hello` names must outlive a restart, or the session could never be completed
+                l.named_inc = e.sender_inc;
+                self.tally.dirty = true;
+            }
             if e.receiver_inc == 0 {
                 // a request: the peer does not know this end's incarnation, so this end says it
                 l.hello_reply = true;
@@ -680,6 +725,7 @@ impl Core {
                 l.ack_dirty = false;
                 l.hello_reply = true;
                 adopted = true;
+                self.tally.dirty = true;
             }
             if h.notice.as_deref() == Some(NOTICE_SEQ_CONFLICT) && l.halted.is_none() {
                 l.halted = Some(HALT_PEER_SAW_CONFLICT.into());
@@ -707,7 +753,12 @@ impl Core {
             self.apply_ack(from, e.ack_seq);
         }
         if adopted {
-            self.note(now, &format!("{}.session", p.audit), None, format!("from={from}"));
+            self.note(
+                now,
+                &format!("{}.session", p.audit),
+                None,
+                format!("from={from}"),
+            );
         }
         Received::Control
     }
@@ -718,7 +769,11 @@ impl Core {
             if l.halted.is_some() {
                 return;
             }
+            let before = l.outbox.len();
             l.outbox.retain(|o| o.seq > ack);
+            if l.outbox.len() != before {
+                self.tally.dirty = true;
+            }
         }
     }
 
@@ -769,6 +824,7 @@ impl Core {
             }
             return self.refuse(p, now, from, e, "seq-conflict");
         }
+        self.tally.dirty = true;
         let (body, refusal) = match admitted {
             Ok(b) => (Some(HeldBody(b)), None),
             Err(c) => (None, Some(c)),

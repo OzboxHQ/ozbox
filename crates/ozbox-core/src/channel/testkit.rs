@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 
-use super::audit::{change, drain, AuditSink, HasCore};
+use super::audit::{change, change_if, drain, AuditSink, HasCore};
 use super::flow::{receive_round, seal_drafts, RoundReport};
 use super::ring_crypto::{generate, RingSigner, RingVerifier};
 use super::session::{Core, DraftOpts, Link};
@@ -187,12 +187,7 @@ impl End {
             (Box::new(HpkeSealer { key }), public)
         } else {
             let public = hex(digest(&SHA256, name.as_bytes()).as_ref());
-            (
-                Box::new(FakeSealer {
-                    me: public.clone(),
-                }),
-                public,
-            )
+            (Box::new(FakeSealer { me: public.clone() }), public)
         };
         let fp = fingerprint(&unhex(&seal_public).unwrap());
         let store = Store::new(dir.path().join("chan"));
@@ -234,14 +229,39 @@ impl End {
         self.store.update(|s| s.core.pin(link)).expect("pin");
     }
 
+    /// The end loses its state and starts again with the same keys, pins and epoch: a fresh incarnation, nothing else.
+    pub fn restart_same_epoch(&self) {
+        let fp = fingerprint(&unhex(&self.seal_public).unwrap());
+        self.store
+            .update(|s| {
+                let old = s.core.links.clone();
+                s.core = Core::new(&self.name, &self.sign_public, &self.seal_public, &fp, 1);
+                for l in old.values() {
+                    s.core.pin(Link::new(
+                        &l.name,
+                        &l.sign_key,
+                        &l.seal_key,
+                        &l.seal_fp,
+                        l.epoch,
+                    ));
+                }
+            })
+            .expect("restart");
+    }
+
     pub fn state(&self) -> TState {
         self.store.read().expect("read")
     }
 
     pub fn send(&self, to: &str, text: &str) -> u64 {
         change(&self.store, &self.sink, |s| {
-            s.core
-                .enqueue(&TEST_PROFILE, to, "note", Vec::new(), text.as_bytes().to_vec())
+            s.core.enqueue(
+                &TEST_PROFILE,
+                to,
+                "note",
+                Vec::new(),
+                text.as_bytes().to_vec(),
+            )
         })
         .expect("change")
         .expect("enqueue")
@@ -273,7 +293,7 @@ impl End {
                 Ok(())
             }
         };
-        let r = change(&self.store, &self.sink, |s| {
+        let r = change_if(&self.store, &self.sink, |s| {
             s.core.tick(now);
             let r = receive_round(&mut s.core, &TEST_PROFILE, &cx, &admit, now, msgs);
             for d in &r.deliveries {
@@ -282,7 +302,8 @@ impl End {
                     Err(c) => format!("REFUSED:{c}"),
                 });
             }
-            r
+            let changed = !r.deliveries.is_empty();
+            (r, changed)
         })
         .expect("change");
         drain(&self.store, &self.sink).expect("drain");
@@ -313,6 +334,12 @@ pub struct Net {
     pub captured: RefCell<Vec<Sealed>>,
 }
 
+impl Default for Net {
+    fn default() -> Self {
+        Net::new()
+    }
+}
+
 impl Net {
     pub fn new() -> Net {
         Net {
@@ -324,11 +351,19 @@ impl Net {
     pub fn round(&self, a: &End, b: &End, f: Faults) -> (RoundReport, RoundReport) {
         let out = a.outbound(&b.name);
         self.captured.borrow_mut().extend(out.iter().cloned());
-        let sent = if f.drop_out { Vec::new() } else { shape(out, f) };
+        let sent = if f.drop_out {
+            Vec::new()
+        } else {
+            shape(out, f)
+        };
         let rb = b.take(&sent);
         let back = b.outbound(&a.name);
         self.captured.borrow_mut().extend(back.iter().cloned());
-        let got = if f.drop_back { Vec::new() } else { shape(back, f) };
+        let got = if f.drop_back {
+            Vec::new()
+        } else {
+            shape(back, f)
+        };
         let ra = a.take(&got);
         (ra, rb)
     }

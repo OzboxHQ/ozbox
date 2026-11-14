@@ -91,6 +91,30 @@ where
     })?)
 }
 
+/// [`change`] that writes only when the closure says something changed (its second value), or when the core was marked dirty by what
+/// the closure did: a round in which nothing happened costs no write.
+pub fn change_if<S, T>(
+    store: &Store<S>,
+    sink: &dyn AuditSink,
+    f: impl FnOnce(&mut S) -> (T, bool),
+) -> Result<T, JournalError>
+where
+    S: HasCore + Serialize + DeserializeOwned,
+{
+    let last = sink
+        .last_src()
+        .map_err(|e| JournalError(format!("the audit log could not be read: {}", e.kind())))?;
+    Ok(store.update_if(|s| {
+        // a trim alone is not a reason to write: the events stay pending and are skipped by number until the next real change
+        let (out, changed) = f(s);
+        let dirty = s.core().tally.dirty;
+        if changed || dirty {
+            s.core_mut().trim_logged(last.as_ref());
+        }
+        (out, changed || dirty)
+    })?)
+}
+
 /// Hand every pending event the log does not hold to the log, under the store's lock so no writer interleaves. Writes no state.
 pub fn drain<S>(store: &Store<S>, sink: &dyn AuditSink) -> Result<(), JournalError>
 where

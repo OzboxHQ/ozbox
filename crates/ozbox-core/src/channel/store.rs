@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -17,6 +18,7 @@ use crate::filelock::FileLock;
 
 pub struct Store<T> {
     dir: PathBuf,
+    writes: AtomicU64,
     _t: PhantomData<fn() -> T>,
 }
 
@@ -47,6 +49,7 @@ impl<T: Serialize + DeserializeOwned> Store<T> {
     pub fn new(dir: impl Into<PathBuf>) -> Store<T> {
         Store {
             dir: dir.into(),
+            writes: AtomicU64::new(0),
             _t: PhantomData,
         }
     }
@@ -113,7 +116,13 @@ impl<T: Serialize + DeserializeOwned> Store<T> {
         if let Ok(d) = File::open(&self.dir) {
             let _ = d.sync_all();
         }
+        self.writes.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// How many times this handle has written the state (for tests and diagnostics: a round should cost one write, or none).
+    pub fn writes(&self) -> u64 {
+        self.writes.load(Ordering::Relaxed)
     }
 
     /// Create the state. Refuses to overwrite one.
@@ -145,6 +154,18 @@ impl<T: Serialize + DeserializeOwned> Store<T> {
         let mut st = self.read_unlocked()?;
         let out = f(&mut st);
         self.write_unlocked(&st)?;
+        Ok(out)
+    }
+
+    /// [`Store::update`] that writes **only when the closure says something changed** (its second value). A round in which nothing
+    /// happened costs no write and no fsync.
+    pub fn update_if<R>(&self, f: impl FnOnce(&mut T) -> (R, bool)) -> Result<R, StoreError> {
+        let _l = self.lock()?;
+        let mut st = self.read_unlocked()?;
+        let (out, changed) = f(&mut st);
+        if changed {
+            self.write_unlocked(&st)?;
+        }
         Ok(out)
     }
 
