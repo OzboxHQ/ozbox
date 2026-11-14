@@ -83,6 +83,8 @@ pub(super) fn classify_named(method: &str, path: &str) -> Option<Need> {
         // memory is the agents' notes; a skill is code an agent may run, so reviewing one is the owner's
         ["memory", ..] => read_or(FileWrite),
         ["skills", ..] => read_or(SettingsChange),
+        // a skill put on a box's own disk is guidance its agents will follow: an owner's act, like approving one
+        ["boxes", _, "skills", ..] => read_or(SettingsChange),
         // permissions, secrets, costs, settings and people
         ["permissions", "check"] => Need::Read,
         ["permissions", "grants", ..] => read_or(GrantCreate),
@@ -465,6 +467,20 @@ mod tests {
             ("POST", "/v1/apps/webhooks", Need::Act(SettingsChange)),
             ("POST", "/v1/skills/x/approve", Need::Act(SettingsChange)),
             ("POST", "/v1/memory", Need::Act(FileWrite)),
+            ("POST", "/v1/skills", Need::Act(SettingsChange)),
+            ("DELETE", "/v1/skills/demo", Need::Act(SettingsChange)),
+            ("GET", "/v1/skills/holdings", Need::Read),
+            ("GET", "/v1/boxes/dev/skills", Need::Read),
+            (
+                "PUT",
+                "/v1/boxes/dev/skills/demo",
+                Need::Act(SettingsChange),
+            ),
+            (
+                "DELETE",
+                "/v1/boxes/dev/skills/demo",
+                Need::Act(SettingsChange),
+            ),
             // not in the table: reading is open to anyone signed in, a change is an owner's
             ("GET", "/v1/something-new", Need::Read),
             ("POST", "/v1/something-new", Need::Act(SettingsChange)),

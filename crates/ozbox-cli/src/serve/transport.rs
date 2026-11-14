@@ -1495,6 +1495,34 @@ impl BoxAgent for SshAgent {
         Ok((status, v))
     }
 
+    fn skills(
+        &self,
+        rec: &BoxRecord,
+        method: &str,
+        sub: &str,
+        body: &[u8],
+    ) -> Result<(u16, Value), AgentError> {
+        // On a box's own dashboard this goes through the table of routes its scoped socket carries (`skills_read`, `skill_push`,
+        // `skill_remove`), like a run or a file write; a path off the table is refused there.
+        let path = format!("/v1/skills{sub}");
+        let sock = self.socket_route(rec, method, &path)?;
+        let (status, raw) = request_with_body(&sock, method, &path, body)?;
+        let v: Value = serde_json::from_slice(&raw).map_err(|_| {
+            AgentError::Unreachable(
+                "the box's agent answered with data that is not understood".into(),
+            )
+        })?;
+        // A daemon from before skills existed answers "not found" for the route itself; a skill that is not there answers
+        // with its own code.
+        if status == 404 && v["error"] == "not found" {
+            return Ok((
+                501,
+                serde_json::json!({ "code": "agent_too_old", "message": "this box's agent does not manage skills yet; upgrade the box", "error": "this box's agent does not manage skills yet; upgrade the box" }),
+            ));
+        }
+        Ok((status, v))
+    }
+
     fn metrics_now(&self, rec: &BoxRecord, _now_ms: u64) -> Result<MetricsSample, AgentError> {
         let v = self.get(rec, "/v1/metrics/now")?;
         serde_json::from_value(v).map_err(|_| {
@@ -1800,6 +1828,9 @@ mod tests {
             "/v1/local-ai/pull" => (202, serde_json::json!({ "ok": true, "state": "pulling" }).to_string()),
             "/v1/local-ai/llama3.1%3A8b" => (200, serde_json::json!({ "ok": true }).to_string()),
             "/v1/local-ai/gone%3A1b" => (404, serde_json::json!({ "error": "that model is not on this box", "message": "that model is not on this box" }).to_string()),
+            "/v1/skills" => (200, serde_json::json!({ "agents": [], "skills": [], "others": {} }).to_string()),
+            "/v1/skills/demo" => (200, serde_json::json!({ "ok": true, "name": "demo", "results": [] }).to_string()),
+            "/v1/skills/gone" => (404, serde_json::json!({ "error": "no such skill here", "message": "no such skill here", "code": "not_found" }).to_string()),
             "/v1/sessions/term-1/stop" => (200, serde_json::json!({ "stopped": true }).to_string()),
             "/v1/sessions/gone/stop" => (404, serde_json::json!({ "error": "that is not running, or it is not yours" }).to_string()),
             "/v1/processes/900/stop" => (403, serde_json::json!({ "error": "that is not a coding agent or a server, so it was left alone" }).to_string()),
@@ -2046,6 +2077,46 @@ mod tests {
         assert_eq!(v["status"]["runtimes"][0]["running"], true);
         let v = a.local_ai(&rec, &serde_json::json!({ "action": "nonsense" }))?;
         assert_eq!(v["ok"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn skills_calls_map_onto_the_daemons_routes_and_an_old_daemon_says_to_upgrade() -> TestResult {
+        let ssh = Arc::new(FakeSsh::default());
+        let a = agent(&ssh)?;
+        let rec = aws_box("dev")?;
+        let (st, v) = a.skills(&rec, "GET", "", &[])?;
+        assert_eq!((st, v["skills"].is_array()), (200, true));
+        let (st, v) = a.skills(&rec, "PUT", "/demo", b"{}")?;
+        assert_eq!((st, v["ok"].as_bool()), (200, Some(true)));
+        // a skill that is not there is the daemon's own answer, passed on
+        let (st, v) = a.skills(&rec, "DELETE", "/gone", &[])?;
+        assert_eq!((st, v["code"].as_str()), (404, Some("not_found")));
+        // a daemon from before skills answers "not found" for the route itself
+        let (st, v) = a.skills(&rec, "GET", "/older", &[])?;
+        assert_eq!((st, v["code"].as_str()), (501, Some("agent_too_old")));
+        Ok(())
+    }
+
+    #[test]
+    fn on_a_boxs_own_dashboard_skills_go_through_the_scoped_sockets_table() -> TestResult {
+        let ssh = Arc::new(FakeSsh::default());
+        let a = SshAgent::local_at(
+            ssh.clone(),
+            RouteInputs::default(),
+            PathBuf::from("/nonexistent/ozbox-test-daemon.sock"),
+        )?;
+        let rec = aws_box("dev")?;
+        // the three routes of the table are tried on the socket (which is not there, and says so)...
+        for (m, sub) in [("GET", ""), ("PUT", "/demo"), ("DELETE", "/demo")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(!e.contains(NOT_ON_A_BOX), "{m} {sub}: {e}");
+        }
+        // ...and anything else is "not available on a box's dashboard", never sent anywhere
+        for (m, sub) in [("POST", ""), ("PUT", ""), ("GET", "/demo")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(e.contains(NOT_ON_A_BOX), "{m} {sub}: {e}");
+        }
         Ok(())
     }
 

@@ -63,6 +63,7 @@ mod run_transport;
 mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
+mod skills_routes;
 #[cfg(test)]
 pub(crate) use sim_code::accept_key as sim_code_accept;
 pub(crate) mod runs_routes;
@@ -795,6 +796,7 @@ impl App {
             ["setup", rest @ ..] => self.setup_route(rest, req),
             ["dashboard-access", rest @ ..] => self.dashboard_access(req, rest),
             ["boxes", name, "tools", rest @ ..] => self.box_tools(name, rest, req),
+            ["boxes", name, "skills", rest @ ..] => self.box_skills(name, rest, req),
             ["backups", rest @ ..] => self.backups_fleet(&req.method, rest, &req.body),
             ["boxes", name, "backups", rest @ ..] => self.box_backups(name, &req.method, rest),
             ["boxes", name, "code", rest @ ..] => self.box_code(name, &req.method, rest, &req.body),
@@ -2703,16 +2705,32 @@ pub fn serve(
             }
             continue;
         }
-        let too_big = request.body_length().is_some_and(|n| n > MAX_BODY);
+        // A skill's files may be far more than 64 KiB. That one route may carry up to the cap that holds the largest skill,
+        // and the sign-in and role checks run before any of it is read, as they do for a file transfer.
+        let limit = skills_routes::big_body_cap(&method, &path).unwrap_or(MAX_BODY);
+        if limit > MAX_BODY {
+            let meta = Req {
+                method: method.clone(),
+                path: path.clone(),
+                query: query.clone(),
+                headers: headers.clone(),
+                body: Vec::new(),
+            };
+            if let Some(refusal) = app.guard(&meta, true) {
+                let _ = request.respond(to_http(refusal, false, &[]));
+                continue;
+            }
+        }
+        let too_big = request.body_length().is_some_and(|n| n > limit);
         let mut body = Vec::new();
         let resp = if too_big {
             Resp::error(413, "too_large", "request body too large")
         } else {
             let _ = request
                 .as_reader()
-                .take(MAX_BODY as u64 + 1)
+                .take(limit as u64 + 1)
                 .read_to_end(&mut body);
-            if body.len() > MAX_BODY {
+            if body.len() > limit {
                 Resp::error(413, "too_large", "request body too large")
             } else {
                 app.handle(&Req {

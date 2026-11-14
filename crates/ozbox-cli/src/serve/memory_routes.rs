@@ -102,7 +102,16 @@ impl App {
             crate::this_box::box_name(crate::this_box::Facts::detect().hostname.as_deref())
                 .to_string()
         });
-        json!({ "persisted": self.settings_path.is_some(), "on_a_box": on_a_box, "host": host })
+        json!({ "persisted": self.settings_path.is_some(), "on_a_box": on_a_box, "host": host,
+                "folder": self.memory_dir().display().to_string() })
+    }
+
+    /// The folder that holds `memory/` and `skills/`: beside the settings file, or this process's own temporary one.
+    fn memory_dir(&self) -> PathBuf {
+        match &self.settings_path {
+            Some(p) => p.with_file_name("agent-memory"),
+            None => std::env::temp_dir().join(format!("ozbox-memory-{}", std::process::id())),
+        }
     }
 
     /// The memory and skills stores, opened on first use beside the configuration.
@@ -110,10 +119,7 @@ impl App {
         if let Some(h) = &self.memory_host {
             return Ok(Arc::clone(h));
         }
-        let dir: PathBuf = match &self.settings_path {
-            Some(p) => p.with_file_name("agent-memory"),
-            None => std::env::temp_dir().join(format!("ozbox-memory-{}", std::process::id())),
-        };
+        let dir: PathBuf = self.memory_dir();
         let host = MemoryHost::open(&dir).map_err(|e| Resp::error(500, "internal", &e))?;
         let host = Arc::new(host);
         self.memory_host = Some(Arc::clone(&host));
@@ -252,6 +258,11 @@ impl App {
                 200,
                 &json!({ "skills": host.skills.catalog(), "store": self.memory_store_json() }),
             ),
+            ("GET", ["holdings"]) => self.skill_holdings(),
+            ("POST", []) => self.skill_add(req),
+            ("DELETE", [name]) => self.skill_delete(name),
+            ("GET", [name, "history"]) => self.skill_history(name),
+            ("POST", [name, "restore"]) => self.skill_restore(name, req),
             ("GET", [name, "review"]) => {
                 let q = parse_query(&req.query);
                 match host.skills.review(name, q.get("hash").map(String::as_str)) {
@@ -318,9 +329,13 @@ impl App {
                 }
                 Err(e) => skill_resp(e),
             },
-            (_, [] | [_, "review" | "install" | "uninstall" | "approve" | "revoke"]) => {
-                Resp::error(405, "method_not_allowed", "method not allowed")
-            }
+            (
+                _,
+                []
+                | ["holdings"]
+                | [_]
+                | [_, "history" | "review" | "install" | "uninstall" | "approve" | "revoke" | "restore"],
+            ) => Resp::error(405, "method_not_allowed", "method not allowed"),
             _ => Resp::error(404, "not_found", "no such endpoint"),
         }
     }
@@ -549,5 +564,277 @@ mod tests {
         assert_eq!(s, 400);
         let (s, _) = call(&mut a, "GET", "/v1/skills/nope/review", Value::Null);
         assert_eq!(s, 404);
+    }
+
+    fn app_with_boxes(dir: &std::path::Path, running: &[&str], paused: &[&str]) -> App {
+        use ozbox_core::{BoxName, BoxSpec, Provider, Size};
+        let p = ozbox_provider_fake::open(dir.join("state"));
+        for n in running.iter().chain(paused) {
+            let provider: &dyn Provider = &p;
+            let plan = provider
+                .plan(&ozbox_core::Operation::Create {
+                    spec: BoxSpec::new(BoxName::new(*n).unwrap(), Size::S),
+                })
+                .unwrap();
+            provider.apply(&plan).unwrap();
+        }
+        for n in paused {
+            let provider: &dyn Provider = &p;
+            let plan = provider
+                .plan(&ozbox_core::Operation::Pause {
+                    name: BoxName::new(*n).unwrap(),
+                })
+                .unwrap();
+            provider.apply(&plan).unwrap();
+        }
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7878);
+        App::new(Box::new(p), true, addr, "tok".into()).with_settings(
+            crate::settings::Settings::default(),
+            Some(dir.join("settings.json")),
+        )
+    }
+
+    fn files_body(name: &str, extra: &str) -> Value {
+        json!({ "files": {
+            "SKILL.md": format!("---\nname: {name}\ndescription: Does a thing.\nversion: 1\n---\n{extra}\n"),
+            "notes/a.md": "more",
+        }})
+    }
+
+    #[test]
+    fn a_person_adds_a_skill_of_their_own_and_it_waits_for_approval() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let (s, v) = call(&mut a, "POST", "/v1/skills", files_body("mine", "Do it."));
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["source"], "library");
+        assert_eq!(v["approved"], false);
+        assert_eq!(v["provenance"]["via"], "page_upload");
+        assert!(v["provenance"]["by"].as_str().is_some());
+        // the same name again needs the hash the person saw, so two tabs cannot overwrite each other
+        let (s, r) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            files_body("mine", "Do it differently."),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("stale")));
+        let mut again = files_body("mine", "Do it differently.");
+        again["replaces"] = json!("00");
+        assert_eq!(call(&mut a, "POST", "/v1/skills", again.clone()).0, 409);
+        again["replaces"] = v["hash"].clone();
+        again["via"] = json!("page_editor");
+        let (s, v2) = call(&mut a, "POST", "/v1/skills", again);
+        assert_eq!(s, 200, "{v2}");
+        assert_eq!(v2["revisions"], 1);
+        assert_ne!(v2["hash"], v["hash"]);
+        // history and restore: the earlier version is read, restored, and waits for approval again
+        let (_, h) = call(&mut a, "GET", "/v1/skills/mine/history", Value::Null);
+        assert_eq!(h["revisions"].as_array().unwrap().len(), 2);
+        let old = v["hash"].as_str().unwrap();
+        let (s, r) = call(
+            &mut a,
+            "GET",
+            &format!("/v1/skills/mine/review?hash={old}"),
+            Value::Null,
+        );
+        assert_eq!(s, 200);
+        assert!(r["files"][0]["text"].as_str().unwrap().contains("Do it."));
+        let (s, back) = call(
+            &mut a,
+            "POST",
+            "/v1/skills/mine/restore",
+            json!({ "hash": old }),
+        );
+        assert_eq!((s, back["hash"].as_str()), (200, Some(old)));
+        assert_eq!(back["provenance"]["via"], "restore");
+        // a bundled name is not taken over without saying so
+        let (s, r) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            files_body("release-runner", "mine"),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("stale")));
+        let mut shadow = files_body("release-runner", "mine");
+        shadow["shadow_bundled"] = json!(true);
+        let (s, r) = call(&mut a, "POST", "/v1/skills", shadow);
+        assert_eq!((s, r["shadows_bundled"].clone()), (200, json!(true)));
+        // refused: a secret, a hidden character, a path that escapes, a type that is not text
+        let mut bad = files_body("sneaky", "x");
+        bad["files"]["k.md"] = json!(concat!("the key is s", "k-abcdefghijklmnopqrstuvwxyz0123"));
+        let (s, r) = call(&mut a, "POST", "/v1/skills", bad);
+        assert_eq!(s, 400);
+        assert!(!r.to_string().contains("sk-abc"));
+        for (path, text) in [
+            ("n.md", "a\u{202E}b"),
+            ("../x.md", "x"),
+            ("run.exe", "x"),
+            ("link.md", "\u{0}"),
+        ] {
+            let mut bad = files_body("sneaky", "x");
+            bad["files"][path] = json!(text);
+            assert_eq!(call(&mut a, "POST", "/v1/skills", bad).0, 400, "{path}");
+        }
+        assert_eq!(
+            call(
+                &mut a,
+                "POST",
+                "/v1/skills",
+                json!({ "files": {}, "extra": 1 })
+            )
+            .0,
+            400
+        );
+        // delete leaves the bundled ones alone
+        assert_eq!(
+            call(&mut a, "DELETE", "/v1/skills/mine", Value::Null).0,
+            200
+        );
+        assert_eq!(
+            call(&mut a, "DELETE", "/v1/skills/mine", Value::Null).0,
+            404
+        );
+        assert_eq!(
+            call(
+                &mut a,
+                "DELETE",
+                "/v1/skills/ci-failure-triage",
+                Value::Null
+            )
+            .0,
+            404
+        );
+    }
+
+    #[test]
+    fn a_skill_is_put_on_a_boxs_disk_only_when_approved_and_what_the_box_holds_is_read_back() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app_with_boxes(d.path(), &["alpha"], &["bravo"]);
+        let (_, v) = call(&mut a, "POST", "/v1/skills", files_body("mine", "Do it."));
+        let hash = v["hash"].as_str().unwrap().to_string();
+        // not approved: refused, and nothing is written
+        let (s, r) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/alpha/skills/mine",
+            json!({ "hash": hash }),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("not_approved")));
+        let (_, hold) = call(&mut a, "GET", "/v1/boxes/alpha/skills", Value::Null);
+        assert_eq!(hold["skills"].as_array().unwrap().len(), 0);
+        let (s, _) = call(
+            &mut a,
+            "POST",
+            "/v1/skills/mine/approve",
+            json!({ "hash": hash }),
+        );
+        assert_eq!(s, 200);
+        // a hash the library no longer has is a stale push
+        let (s, r) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/alpha/skills/mine",
+            json!({ "hash": "00" }),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("stale")));
+        // an agent this box cannot serve is refused; a stopped box cannot be asked
+        let (s, _) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/alpha/skills/mine",
+            json!({ "hash": hash, "agents": ["nope"] }),
+        );
+        assert_eq!(s, 400);
+        let (s, r) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/bravo/skills/mine",
+            json!({ "hash": hash }),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("box_not_running")));
+        let (s, r) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/alpha/skills/mine",
+            json!({ "hash": hash, "agents": ["claude-code", "agents"] }),
+        );
+        assert_eq!(s, 200, "{r}");
+        assert_eq!(r["source"], "simulated");
+        let (_, hold) = call(&mut a, "GET", "/v1/boxes/alpha/skills", Value::Null);
+        let place = &hold["skills"][0]["places"][0];
+        assert_eq!(
+            (place["state"].as_str(), place["matches_library"].clone()),
+            (Some("intact"), json!(true))
+        );
+        assert_eq!(hold["skills"][0]["places"].as_array().unwrap().len(), 2);
+        // the whole fleet: a stopped box is "not known", never "holds nothing"
+        let (_, all) = call(&mut a, "GET", "/v1/skills/holdings", Value::Null);
+        let by: std::collections::HashMap<&str, &Value> = all["boxes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| (b["box"].as_str().unwrap(), b))
+            .collect();
+        assert_eq!(by["alpha"]["state"], "ok");
+        assert_eq!(by["bravo"]["state"], "stopped");
+        // the library moves on: the box's copy is now different, and a new push needs the new approval
+        let mut next = files_body("mine", "Do it better.");
+        next["replaces"] = json!(hash);
+        let (_, v2) = call(&mut a, "POST", "/v1/skills", next);
+        let (_, hold) = call(&mut a, "GET", "/v1/boxes/alpha/skills", Value::Null);
+        assert_eq!(hold["skills"][0]["places"][0]["matches_library"], false);
+        let (s, r) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/alpha/skills/mine",
+            json!({ "hash": v2["hash"] }),
+        );
+        assert_eq!((s, r["code"].as_str()), (409, Some("not_approved")));
+        // the recorded push keeps its approval alive, and shows in the catalog
+        let (_, l) = call(&mut a, "GET", "/v1/skills", Value::Null);
+        let mine = l["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == "mine")
+            .unwrap();
+        assert_eq!(mine["pushes"][0]["box_name"], "alpha");
+        assert_eq!(mine["pushes"][0]["matches_library"], false);
+        // remove: only what the push made
+        let (s, _) = call(&mut a, "DELETE", "/v1/boxes/alpha/skills/mine", Value::Null);
+        assert_eq!(s, 200);
+        let (s, r) = call(&mut a, "DELETE", "/v1/boxes/alpha/skills/mine", Value::Null);
+        assert_eq!((s, r["code"].as_str()), (404, Some("not_found")));
+        let (_, hold) = call(&mut a, "GET", "/v1/boxes/alpha/skills", Value::Null);
+        assert_eq!(hold["skills"].as_array().unwrap().len(), 0);
+        let (_, l) = call(&mut a, "GET", "/v1/skills", Value::Null);
+        let mine = l["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["name"] == "mine")
+            .unwrap();
+        assert_eq!(mine["pushes"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn only_a_skills_upload_may_be_larger_than_the_usual_body() {
+        assert_eq!(
+            super::super::skills_routes::big_body_cap("POST", "/v1/skills"),
+            Some(ozbox_core::skill_pack::MAX_PACK_BODY)
+        );
+        for (m, p) in [
+            ("POST", "/v1/memory"),
+            ("PUT", "/v1/skills"),
+            ("POST", "/v1/skills/x/approve"),
+            ("GET", "/v1/skills"),
+        ] {
+            assert_eq!(
+                super::super::skills_routes::big_body_cap(m, p),
+                None,
+                "{m} {p}"
+            );
+        }
     }
 }

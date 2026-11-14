@@ -355,6 +355,18 @@ pub trait BoxAgent: Send + Sync {
     ) -> Result<FileReply, AgentError> {
         Err(AgentError::Unsupported(NoTransport::REASON.into()))
     }
+    /// One call to the box's skills API (`sub` is what follows `/v1/skills`: empty to list, `/<name>` to put or take away one).
+    /// The daemon's answer, whatever its status; only a box that cannot be reached is an error. A daemon from before this
+    /// existed answers `501` with the code `agent_too_old`.
+    fn skills(
+        &self,
+        _rec: &BoxRecord,
+        _method: &str,
+        _sub: &str,
+        _body: &[u8],
+    ) -> Result<(u16, serde_json::Value), AgentError> {
+        Err(AgentError::Unsupported(NoTransport::REASON.into()))
+    }
     /// A stream to a loopback `port` on the box, over the same outbound route as everything else. A forward that has
     /// dropped is rebuilt here, so the next call works.
     fn connect_tcp(&self, _rec: &BoxRecord, _port: u16) -> Result<Conn, AgentError> {
@@ -443,6 +455,8 @@ pub struct SimulatedAgent {
     host_is_box: bool,
     base: PathBuf,
     files: Mutex<HashMap<String, Arc<FilesService>>>,
+    /// Each demo box's skills service, over a private home folder: the real code over a pretend disk.
+    skills: Mutex<HashMap<String, Arc<ozboxd::skills::SkillsService>>>,
     tools: Mutex<HashMap<String, super::tools::SimTools>>,
     /// The demo repository every demo box backs up to, and each box's service in front of it.
     repo: super::sim_restic::SimRepo,
@@ -479,6 +493,7 @@ impl SimulatedAgent {
             host_is_box,
             base: std::env::temp_dir().join(format!("ozbox-demo-{id}")),
             files: Mutex::new(HashMap::new()),
+            skills: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
             repo: super::sim_restic::SimRepo::default(),
             restic: Mutex::new(HashMap::new()),
@@ -520,6 +535,26 @@ impl SimulatedAgent {
     #[cfg(test)]
     pub(crate) fn demo_folder_exists(&self) -> bool {
         self.base.exists()
+    }
+
+    /// The same skills service a real box runs, over a private home folder for this box.
+    fn skills_for(&self, name: &str) -> Result<Arc<ozboxd::skills::SkillsService>, AgentError> {
+        self.refuse_on_a_box("skills")?;
+        let mut map = self
+            .skills
+            .lock()
+            .map_err(|_| AgentError::Unreachable("the demo skills are unavailable".into()))?;
+        if let Some(s) = map.get(name) {
+            return Ok(Arc::clone(s));
+        }
+        let root = self.base.join(name);
+        let svc = Arc::new(ozboxd::skills::SkillsService::new(
+            root.join("home"),
+            root.join("state"),
+            Arc::new(SystemClock),
+        ));
+        map.insert(name.to_string(), Arc::clone(&svc));
+        Ok(svc)
     }
 
     /// The same file API a real box runs, over a private folder of sample files for this box.
@@ -978,6 +1013,18 @@ impl BoxAgent for SimulatedAgent {
             .entry(rec.spec.name.to_string())
             .or_default()
             .call(request))
+    }
+
+    fn skills(
+        &self,
+        rec: &BoxRecord,
+        method: &str,
+        sub: &str,
+        body: &[u8],
+    ) -> Result<(u16, serde_json::Value), AgentError> {
+        Ok(self
+            .skills_for(rec.spec.name.as_str())?
+            .route(method, sub, body))
     }
 
     fn files(
