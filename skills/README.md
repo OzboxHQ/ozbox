@@ -18,5 +18,6 @@ files, and approve them; any later change to the files asks again (ADR 0024).
 | [`eval-runner`](eval-runner/SKILL.md) | running an evaluation suite against a pinned baseline and reporting regressions with evidence |
 | [`keep-memory`](keep-memory/SKILL.md) | using the memory tools well: search first, propose short durable notes, never store a secret |
 
-To add your own, put a folder in your library with `ozbox skills add <folder>`; the folder's name must match the skill's
-`name`. Copy a bundled skill and change it to suit you.
+To add your own, choose **Add a skill** on the dashboard's Skills page (write one, or upload files), or put a folder in your
+library with `ozbox skills add <folder>`; the folder's name must match the skill's `name`. Copy a bundled skill and change it
+to suit you. An approved skill can also be put on a box's own disk, where its coding agents read it (ADR 0051).

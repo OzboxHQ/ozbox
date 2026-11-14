@@ -44,6 +44,7 @@
               "use-cases/coding-from-anywhere",
               "use-cases/fleets",
               "use-cases/agentic-fleet",
+              "use-cases/skills",
               "use-cases/orchestrating-a-fleet",
               "use-cases/secure-agent-workspace",
               "use-cases/chat",
@@ -140,6 +141,7 @@
               "adr/0045-box-memory-guard",
               "adr/0049-sessions-come-back-after-a-stop-the-session-not-the-process",
               "adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver",
+              "adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again",
               "adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest"
             ]
           },

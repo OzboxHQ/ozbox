@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
+  ## Add your own skills from the page, and put an approved one where a box's coding agents read it
+
+  Skills could only be added with `ozbox skills add` on the computer running the dashboard, and an installed skill never reached a box's own coding agents.
+
+  - **Add a skill** on the Skills page: write one (name, description, version, instructions, extra files) or upload a folder or files. It is checked as you go: text files only, at most 50 files, 128 KB each and 512 KB in all, no path that escapes the folder, no link, nothing that looks like a key, and no hidden or direction-changing character.
+  - **Every skill shows where it came from**: shipped with Oz Box, or who added it, how and when. The review says what to look for in text an agent will follow, shows each file as plain text, and marks script files.
+  - **Nothing reaches an agent before a person approves the exact files**, as before. Replacing a skill of your own keeps the earlier version, which you can read and restore; a restored version needs approving again. Two people editing at once cannot overwrite each other silently.
+  - **Put it on a box's disk**: choose **On a box's disk** when installing an approved skill. It is written into the folders the box's coding agents read (`~/.claude/skills`, and the shared `~/.agents/skills`), after the box checks the files again. A folder you made by hand is never overwritten or removed.
+  - **Each card says what every box holds**: matches the library, different from it, changed on the box, or missing. A box that is stopped or cannot be reached is shown as not known, not as empty. An agent on the box can edit its own skills folder; the page shows that it did and pushing again restores the approved files, but nothing stops the edit.
+  - **Only an owner** adds, approves or puts a skill on a box. The page now says which folder your skills are kept in.
+  - **Not built yet.** Signing by a publisher, putting a skill on several boxes at once, and putting one on a box from the command line. **Not yet run against a real cloud box.**
+
 <Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security", "Platform"]} description="0.2.0-beta.0: the first public Beta">
   ## Oz Box 0.2.0-beta.0: the first public Beta
 
@@ -194,7 +207,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Installing a skill says who may use it**: every agent session, the orchestration agents on one box, or the orchestration agents in one project. You pick a box from a list rather than typing `box:name`.
   - **A viewer can read notes, skills and orchestrations and is offered nothing to change.** A member may change notes and orchestrations. Only an owner installs, reviews or approves a skill.
   - **Memory and Skills show an error when forgetting a note or removing an install fails**, instead of closing quietly.
-  - **Not built yet.** Adding a skill of your own from the page (use `ozbox skills add <folder>` on the computer that runs the dashboard), and putting a skill onto a box's own disk. **Not yet run against a real cloud box**: the new checks run a real dashboard on one computer.
+  - **Not yet run against a real cloud box**: the new checks run a real dashboard on one computer.
 </Update>
 
 <Update label="November 15, 2026" tags={["Dashboard"]} description="Tasks and Approvals">

@@ -1,0 +1,46 @@
+# 0051 — A skill can be put on a box's own disk only as the exact files a person approved, and the box checks them again
+
+**Decision.** Coding agents on a box (Claude Code, and the programs that read the shared agents folder) read skills from
+folders in the box user's home. Until now Oz Box installed a skill only into the dashboard's own store, for the agents Oz Box
+itself starts through the tool host (ADR 0025). A person can now also **put an approved skill on a box's disk**, and add
+skills of their own from the page.
+
+1. **A separate act, not a new install scope.** The `box:<name>` install scope keeps meaning "the orchestration agents on that
+   box are offered it through the tool host". Putting files on the disk is its own request
+   (`PUT /v1/boxes/<box>/skills/<name>`, removal by `DELETE`), so what a scope means never changes under anyone.
+2. **Only what was approved, and only the current version.** The request names the hash the person was looking at. The server
+   refuses unless that hash is the library's current one and a person approved exactly it (ADR 0025, point 3), then sends the
+   files. An owner makes the request, as for every other skill act.
+3. **The box checks again.** The box daemon (`/v1/skills`) applies the same file rules as the library (one shared module, so
+   the two cannot drift: text only, size limits, no path escapes, no links, the secret screen, no hidden or direction-changing
+   characters), recomputes the hash, and writes nothing unless it equals the hash it was sent. It stages the files in a new
+   folder beside the target and swaps it in by rename, so an agent reading the folder never sees half a skill. Files are mode
+   0644: a skill's scripts are text an agent may run by name, and are never made executable.
+4. **It never touches what it did not put there.** A folder of the same name that a person made by hand is refused, not
+   overwritten, and removal deletes only folders a push made. It never writes through a symbolic link.
+5. **The box's disk is the truth, and it is the box user's.** What a box holds is read from the box on every look and
+   re-hashed, never from a record kept on the dashboard. The page says `matches the library`, `different from the library`,
+   `changed on the box` or `missing`. A box that is stopped or cannot be reached is shown as not known, never as holding
+   nothing.
+6. **Skills of your own** are added from the page as JSON text files (no archive is unpacked, so there is no path-escape to
+   guard). They go through the same checks as every other skill, are versioned in the library (the last twenty versions are
+   kept, readable, and can be restored as a new, unapproved addition), show who added them and how, and need the same review
+   and approval before any agent sees them. The review shows every file as raw text, marks the ones an agent may run, and says
+   in words what to look for.
+
+**What is not covered.**
+- **Drift is detected, not prevented.** An agent running as the box user can edit its own skills folder. Nothing here stops it;
+  the next look says the copy changed, and pushing again puts the approved files back. The dashboard's own socket is how the
+  files get there; it does not make the folder the agent's to leave alone.
+- **A skill is guidance, not security** (ADR 0025). Approval means a person read the files, not that they are safe to follow.
+- The folders are those each program documents for user-level skills; they were checked against the programs' own
+  documentation, and are not yet proven on a real box for every program.
+- No signing by a publisher, and no way to push to several boxes in one request.
+
+**Why.** Skills only reached the agents Oz Box starts. The coding agents people run themselves on a box read their own
+folders, so the same instructions had to be copied there by hand, unreviewed. Doing it through the dashboard keeps one review
+gate in front of both, and the box's own re-check keeps a compromised or stale dashboard from putting unreviewed bytes on a disk.
+
+**Cost.** The daemon gains a route and the dashboard's table gains three (ADR 0040), each audited by name only. A push body can
+be up to about 3 MB, so that one request is allowed above the usual 64 KiB limit, with the sign-in and role checks done before
+any of it is read.

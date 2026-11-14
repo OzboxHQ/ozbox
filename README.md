@@ -208,7 +208,7 @@ upgraded; a machine outside the fleet is the better home ([ADR 0010](docs/adr/00
 | Tamper-evident log | A hash chain with sealed checkpoints; `ozbox audit verify` | [ADR 0022](docs/adr/0022-permission-engine-and-tamper-evident-audit-log.md) |
 | Agents never hold a model key | A credential broker and per-run tokens | [ADR 0017](docs/adr/0017-credential-broker-per-run-tokens.md) |
 | Secrets out of reach | Envelope encryption, a separate user, a runner user, a closed network for declared commands, a commit barrier | [ADR 0018](docs/adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md), [ADR 0023](docs/adr/0023-the-supervisor-egress-approvals-and-the-commit-barrier.md), [ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md) |
-| Reviewed memory and skills | Agents propose; a person approves the note or the skill's exact hash | [ADR 0024](docs/adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md), [ADR 0025](docs/adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md) |
+| Reviewed memory and skills | Agents propose; a person approves the note or the skill's exact hash | [ADR 0024](docs/adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md), [ADR 0025](docs/adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md), [ADR 0051](docs/adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again.md) |
 | Signed images | An upgrade verifies the image's release signature first | [infra/README.md](infra/README.md), [ADR 0010](docs/adr/0010-bring-your-own-tunnels.md) |
 
 Each record also says what it does **not** cover. In short: egress limits apply to a project's declared commands, not to an
