@@ -14,14 +14,19 @@ const W2_FP: &str = "bb000000000000000000000000000000000000000000000000000000000
 
 fn sample() -> Envelope {
     Envelope {
+        version: ENVELOPE_VERSION,
         kind: Kind::TaskAssign,
         from: "main".into(),
         to: "worker-1".into(),
         receiver_fp: W1_FP.into(),
         epoch: 7,
         seq: 3,
+        ack_seq: 2,
+        sender_inc: 0x1111,
+        receiver_inc: 0x2222,
         id: "main-worker-1-3".into(),
         ts_ms: 1_700_000_000_000,
+        expires_ms: 1_700_000_600_000,
         level: 0,
         via: Vec::new(),
         body: b"hello".to_vec(),
@@ -63,6 +68,10 @@ fn the_message_kinds_are_frozen_in_name_and_order() {
             "hello",
             "heartbeat",
             "bye",
+            "ack",
+            "resync",
+            "task.stop",
+            "task.end",
         ]
     );
     for k in Kind::ALL {
@@ -77,6 +86,49 @@ fn golden_vector_of_the_canonical_envelope() {
     let e = sample();
     assert_eq!(hex(&e.canonical()), GOLDEN_CANONICAL);
     assert_eq!(e.digest_hex(), GOLDEN_DIGEST);
+}
+
+#[test]
+fn the_leading_byte_is_the_encoding_version_then_the_tag_then_the_envelope_version() {
+    let c = sample().canonical();
+    assert_eq!(c[0], crate::approval_subject::ENCODING_VERSION);
+    let tag = super::wire::ENVELOPE_TAG.as_bytes();
+    assert_eq!(&c[5..5 + tag.len()], tag);
+    // the envelope's version is the first field after the tag: length 1, then the byte
+    let at = 5 + tag.len();
+    assert_eq!(&c[at..at + 5], &[0, 0, 0, 1, ENVELOPE_VERSION]);
+}
+
+#[test]
+fn only_this_envelope_version_and_the_one_before_are_accepted() {
+    let mut e = sample();
+    e.version = ENVELOPE_VERSION + 1;
+    assert_eq!(e.check(), Err(super::wire::WireError::BadVersion));
+    e.version = ENVELOPE_VERSION;
+    assert!(e.check().is_ok());
+    e.version = super::wire::MIN_ENVELOPE_VERSION;
+    assert!(e.check().is_ok());
+}
+
+#[test]
+fn the_new_kinds_are_directed_and_acknowledged_as_designed() {
+    for k in [Kind::Resync, Kind::TaskStop, Kind::TaskEnd] {
+        assert!(k.hub_to_worker() && k.acknowledged(), "{k:?}");
+    }
+    assert!(!Kind::Ack.acknowledged() && !Kind::Ack.hub_to_worker());
+}
+
+#[test]
+fn a_signer_or_transport_that_fails_is_reported_not_swallowed() {
+    struct NoSign;
+    impl super::wire::Signer for NoSign {
+        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, super::wire::WireError> {
+            Err(super::wire::WireError::SignFailed)
+        }
+    }
+    let f = fx();
+    let r = super::wire::seal_and_sign(sample(), b"x", &f.hub_sealer, &NoSign);
+    assert_eq!(r.unwrap_err(), super::wire::WireError::SignFailed);
 }
 
 #[test]
@@ -107,6 +159,17 @@ fn every_field_changes_the_canonical_bytes() {
     change(&|e| e.receiver_fp = W2_FP.into());
     change(&|e| e.epoch = 8);
     change(&|e| e.seq = 4);
+    change(&|e| e.ack_seq = 3);
+    change(&|e| e.sender_inc = 1);
+    change(&|e| e.receiver_inc = 1);
+    change(&|e| e.expires_ms = 1);
+    change(&|e| e.version = 0);
+    change(&|e| {
+        e.via = vec![super::wire::Hop {
+            box_id: "w".into(),
+            key_fp: W2_FP.into(),
+        }]
+    });
     change(&|e| e.id = "x".into());
     change(&|e| e.ts_ms = 1);
     change(&|e| e.level = 1);
@@ -232,12 +295,16 @@ struct Fx {
 
 fn fx() -> Fx {
     let mut keys = BTreeMap::new();
-    keys.insert("main".to_string(), "k-main".to_string());
-    keys.insert("worker-1".to_string(), "k-w1".to_string());
-    keys.insert("worker-2".to_string(), "k-w2".to_string());
+    keys.insert(HUB_FP.to_string(), "k-main".to_string());
+    keys.insert(W1_FP.to_string(), "k-w1".to_string());
+    keys.insert(W2_FP.to_string(), "k-w2".to_string());
     let mut signers = BTreeMap::new();
-    for (n, k) in &keys {
-        signers.insert(n.clone(), TestKey(k.clone()));
+    for (n, k) in [
+        ("main", "k-main"),
+        ("worker-1", "k-w1"),
+        ("worker-2", "k-w2"),
+    ] {
+        signers.insert(n.to_string(), TestKey(k.to_string()));
     }
     let mut roster = BTreeMap::new();
     roster.insert(
@@ -257,9 +324,11 @@ fn fx() -> Fx {
         signers,
         roster_keys: TestRoster(keys),
         roster,
-        hub_sealer: TestSealer { me: "main".into() },
+        hub_sealer: TestSealer {
+            my_fp: HUB_FP.into(),
+        },
         w1_sealer: TestSealer {
-            me: "worker-1".into(),
+            my_fp: W1_FP.into(),
         },
     }
 }
@@ -286,6 +355,8 @@ impl Fx {
                 peer_fp: HUB_FP,
                 my_fp: W1_FP,
                 epoch: 7,
+                my_inc: 0,
+                peer_inc: 0,
                 level: 1,
                 signer: &self.signers["worker-1"],
                 verifier: &self.roster_keys,
@@ -406,6 +477,8 @@ fn a_taken_over_hub_still_cannot_hand_a_worker_production() {
         peer_fp: W1_FP,
         my_fp: HUB_FP,
         epoch: 7,
+        my_inc: 1,
+        peer_inc: 0,
         level: 0,
         signer: &f.signers["main"],
         verifier: &f.roster_keys,
@@ -415,6 +488,7 @@ fn a_taken_over_hub_still_cannot_hand_a_worker_production() {
     link.send(
         Kind::TaskAssign,
         1,
+        0,
         "x-1".into(),
         1,
         &serde_json::to_vec(&bad).unwrap(),
@@ -443,7 +517,7 @@ fn a_message_sealed_for_another_worker_is_not_opened() {
     .unwrap();
     // worker-2's message lands in worker-1's queue (the network is not trusted)
     let m = f.net.recv("worker-2").unwrap();
-    f.net.send("worker-1", m);
+    f.net.send("worker-1", m).unwrap();
     let mut ws = WorkerState::default();
     assert_eq!(f.worker().poll(&mut ws, 2), 0);
     assert!(ws.tasks.is_empty());
@@ -458,7 +532,7 @@ fn a_forged_or_damaged_report_is_rejected_and_quarantines_nobody() {
     w.report(&mut ws, 1, "f1", "x");
     let mut m = f.net.recv("main").unwrap();
     m.signature[0] ^= 1;
-    f.net.send("main", m);
+    f.net.send("main", m).unwrap();
     assert_eq!(hub.poll(&mut hs, 2), 0);
     assert_eq!(hs.take_audit()[0].action, "hub.rejected");
     assert!(hs
@@ -474,8 +548,8 @@ fn a_duplicate_is_dropped_and_a_gap_is_not_taken() {
     let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
     w.report(&mut ws, 1, "f1", "one");
     let first = f.net.recv("main").unwrap();
-    f.net.send("main", first.clone());
-    f.net.send("main", first);
+    f.net.send("main", first.clone()).unwrap();
+    f.net.send("main", first).unwrap();
     assert_eq!(hub.poll(&mut hs, 2), 1);
     assert_eq!(hs.duplicates, 1);
     // a gap: number 3 arrives before number 2
@@ -516,13 +590,15 @@ fn key_delivery_is_not_supported_and_the_worker_says_so() {
         peer_fp: W1_FP,
         my_fp: HUB_FP,
         epoch: 7,
+        my_inc: 1,
+        peer_inc: 0,
         level: 0,
         signer: &f.signers["main"],
         verifier: &f.roster_keys,
         sealer: &f.hub_sealer,
         net: &f.net,
     };
-    link.send(Kind::KeysDeliver, 1, "k-1".into(), 1, b"sealed-value")
+    link.send(Kind::KeysDeliver, 1, 0, "k-1".into(), 1, b"sealed-value")
         .unwrap();
     w.poll(&mut ws, 2);
     assert_eq!(ws.audit[0].action, "worker.unsupported");
@@ -545,10 +621,12 @@ fn a_relayed_message_is_refused_in_this_release() {
     }];
     let sealed =
         super::wire::seal_and_sign(e, b"{}", &f.w1_sealer, &f.signers["worker-1"]).unwrap();
-    f.net.send("main", sealed);
+    f.net.send("main", sealed).unwrap();
     assert_eq!(f.hub().poll(&mut hs, 1), 0);
 }
 
-const GOLDEN_CANONICAL: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d763100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000f6d61696e2d776f726b65722d312d33000000080000018bcfe568000000000800000000000000000000000800000000000000000000000568656c6c6f";
-const GOLDEN_DIGEST: &str = "ce7107c4613b5f16dc5d417a699911c3142f117a49847c509011032de60f2c93";
-const GOLDEN_CANONICAL_VIA: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d763100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000f6d61696e2d776f726b65722d312d33000000080000018bcfe5680000000008000000000000000200000008000000000000000100000008776f726b65722d6100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030320000000568656c6c6f";
+// Computed by an independent script (not by this crate's encoder): the ADR 0041 encoding-version byte, the domain tag, the
+// envelope version, then the fields in the order of `Envelope::canonical`, each as a 4-byte big-endian length and its bytes.
+const GOLDEN_CANONICAL: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d7631000000010100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc00000000800000000000000000000000800000000000000000000000568656c6c6f";
+const GOLDEN_DIGEST: &str = "64a03f7fe745d9b6525c81f9bd9a6984d09d10665efb625e750bd06cada92461";
+const GOLDEN_CANONICAL_VIA: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d7631000000010100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc000000008000000000000000200000008000000000000000100000008776f726b65722d6100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030320000000568656c6c6f";

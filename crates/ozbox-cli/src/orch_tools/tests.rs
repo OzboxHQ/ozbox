@@ -954,8 +954,8 @@ mod hub_handoff {
         r.ops.boxes.lock().unwrap().push("worker-1".into());
         let net = Arc::new(MemTransport::default());
         let mut keys = std::collections::BTreeMap::new();
-        keys.insert("main".to_string(), "k-main".to_string());
-        keys.insert("worker-1".to_string(), "k-w1".to_string());
+        keys.insert(HUB_FP.to_string(), "k-main".to_string());
+        keys.insert(W_FP.to_string(), "k-w1".to_string());
         let mut roster = std::collections::BTreeMap::new();
         roster.insert(
             "worker-1".to_string(),
@@ -970,7 +970,9 @@ mod hub_handoff {
             roster,
             signer: Arc::new(TestKey("k-main".into())),
             verifier: Arc::new(TestRoster(keys.clone())),
-            sealer: Arc::new(TestSealer { me: "main".into() }),
+            sealer: Arc::new(TestSealer {
+                my_fp: HUB_FP.into(),
+            }),
             net: net.clone(),
             state: Mutex::new(HubState::default()),
         };
@@ -995,6 +997,8 @@ mod hub_handoff {
                 peer_fp: HUB_FP,
                 my_fp: W_FP,
                 epoch: 1,
+                my_inc: 0,
+                peer_inc: 0,
                 level: 1,
                 signer,
                 verifier: &h.keys,
@@ -1041,12 +1045,7 @@ mod hub_handoff {
             .task_id
             .is_none());
         // the worker takes it, accepts it, works and finishes
-        let (sk, ss) = (
-            TestKey("k-w1".into()),
-            TestSealer {
-                me: "worker-1".into(),
-            },
-        );
+        let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
         let w = worker_end(&h, &sk, &ss);
         let mut ws = WorkerState::default();
         assert_eq!(w.poll(&mut ws, 21), 1);

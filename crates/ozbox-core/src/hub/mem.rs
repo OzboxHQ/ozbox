@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use ring::digest::{digest, SHA256};
 
-use super::wire::{Sealed, Sealer, Signer, Transport, Verifier};
+use super::wire::{Sealed, Sealer, Signer, Transport, Verifier, WireError};
 
 /// One queue per receiver. Delivery is a function call; ordering is the queue's.
 #[derive(Default)]
@@ -20,13 +20,18 @@ pub struct MemTransport {
 }
 
 impl Transport for MemTransport {
-    fn send(&self, to: &str, msg: Sealed) {
-        if let Ok(mut c) = self.capture.lock() {
-            c.push(msg.clone());
-        }
-        if let Ok(mut q) = self.queues.lock() {
-            q.entry(to.to_string()).or_default().push_back(msg);
-        }
+    fn send(&self, to: &str, msg: Sealed) -> Result<(), WireError> {
+        self.capture
+            .lock()
+            .map_err(|_| WireError::SendFailed)?
+            .push(msg.clone());
+        self.queues
+            .lock()
+            .map_err(|_| WireError::SendFailed)?
+            .entry(to.to_string())
+            .or_default()
+            .push_back(msg);
+        Ok(())
     }
 
     fn recv(&self, who: &str) -> Option<Sealed> {
@@ -54,26 +59,27 @@ fn tag(secret: &str, msg: &[u8]) -> Vec<u8> {
 }
 
 impl Signer for TestKey {
-    fn sign(&self, canonical: &[u8]) -> Vec<u8> {
-        tag(&self.0, canonical)
+    fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, WireError> {
+        Ok(tag(&self.0, canonical))
     }
 }
 
-/// Verifies against the secrets the roster holds per sender.
+/// Verifies against the secrets the roster holds per key fingerprint.
 #[derive(Default)]
 pub struct TestRoster(pub BTreeMap<String, String>);
 
 impl Verifier for TestRoster {
-    fn verify(&self, sender: &str, canonical: &[u8], signature: &[u8]) -> bool {
+    fn verify(&self, sender_key_fp: &str, canonical: &[u8], signature: &[u8]) -> bool {
         self.0
-            .get(sender)
+            .get(sender_key_fp)
             .is_some_and(|k| tag(k, canonical) == signature)
     }
 }
 
-/// A reversible wrapper: the receiver's name, then the plaintext xor a pad from the aad. Opens only with the same aad.
+/// A reversible wrapper: the receiver's key fingerprint, then the plaintext xor a pad from the aad. Opens only with the same aad.
 pub struct TestSealer {
-    pub me: String,
+    /// This end's own key fingerprint: the only one it opens.
+    pub my_fp: String,
 }
 
 fn pad(aad: &[u8], n: usize) -> Vec<u8> {
@@ -90,17 +96,17 @@ fn pad(aad: &[u8], n: usize) -> Vec<u8> {
 }
 
 impl Sealer for TestSealer {
-    fn seal(&self, receiver: &str, aad: &[u8], plain: &[u8]) -> Vec<u8> {
-        let mut out = vec![u8::try_from(receiver.len()).unwrap_or(u8::MAX)];
-        out.extend_from_slice(receiver.as_bytes());
+    fn seal(&self, receiver_key_fp: &str, aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, WireError> {
+        let mut out = vec![u8::try_from(receiver_key_fp.len()).unwrap_or(u8::MAX)];
+        out.extend_from_slice(receiver_key_fp.as_bytes());
         out.extend(plain.iter().zip(pad(aad, plain.len())).map(|(a, b)| a ^ b));
-        out
+        Ok(out)
     }
 
     fn open(&self, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
         let n = usize::from(*sealed.first()?);
         let to = sealed.get(1..=n)?;
-        if to != self.me.as_bytes() {
+        if to != self.my_fp.as_bytes() {
             return None;
         }
         let rest = sealed.get(n + 1..)?;

@@ -9,12 +9,30 @@ use super::refusal::{refuse_production, AUDIT_REFUSED};
 use super::wire::{Kind, Link};
 
 /// What the worker keeps. Disposable: losing it loses unacknowledged messages and nothing else (ADR 0020's invariant).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerState {
+    /// This worker's incarnation: fresh whenever the state is created, so losing the state can never make an old message
+    /// verify again (ADR 0042 H-2).
+    pub inc: u64,
+    /// The hub's incarnation as learned from its `hello` (0 until then).
+    pub hub_inc: u64,
     pub out_seq: u64,
     pub in_seq: u64,
     pub tasks: Vec<Assign>,
     pub audit: Vec<AuditLine>,
+}
+
+impl Default for WorkerState {
+    fn default() -> Self {
+        WorkerState {
+            inc: super::engine::fresh_incarnation(),
+            hub_inc: 0,
+            out_seq: 0,
+            in_seq: 0,
+            tasks: Vec::new(),
+            audit: Vec::new(),
+        }
+    }
 }
 
 impl WorkerState {
@@ -36,8 +54,16 @@ impl WorkerEnd<'_> {
     fn say(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
         st.out_seq += 1;
         let id = format!("{}-{}", self.link.me, st.out_seq);
-        // a message that cannot be built is dropped: the hub's resync asks again
-        let _ = self.link.send(kind, st.out_seq, id, now, plain);
+        let link = self.link.with_incarnations(st.inc, st.hub_inc);
+        if let Err(e) = link.send(kind, st.out_seq, st.in_seq, id, now, plain) {
+            // a message that cannot be built or sent is said, never dropped silently; the hub's resync asks again
+            st.out_seq -= 1;
+            st.note(
+                now,
+                "worker.send-failed",
+                format!("kind={} reason={e}", kind.name()),
+            );
+        }
     }
 
     fn status(&self, st: &mut WorkerState, now: u64, feature: &str, state: &str, text: &str) {

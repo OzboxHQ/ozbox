@@ -62,6 +62,8 @@ pub struct WorkerReport {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerState {
+    /// The worker's incarnation as learned from its `hello` (0 until then).
+    pub peer_inc: u64,
     pub out_seq: u64,
     pub in_seq: u64,
     pub quarantined: Option<String>,
@@ -69,13 +71,43 @@ pub struct PeerState {
     pub assigned: Vec<String>,
 }
 
+/// A fresh random incarnation. Never 0: 0 means "not learned yet" on the wire.
+pub fn fresh_incarnation() -> u64 {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut b = [0u8; 8];
+    loop {
+        if SystemRandom::new().fill(&mut b).is_ok() {
+            let n = u64::from_be_bytes(b);
+            if n != 0 {
+                return n;
+            }
+        }
+    }
+}
+
 /// Everything the hub keeps, per worker. Plain data: it serialises into the task store.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Its counters are in memory in this slice: a hub restart is a new incarnation ([`HubState::inc`]), which the workers learn
+/// from the next `hello`. Persisting counters waits for the outbox (ADR 0042 section 1, stated limit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubState {
+    /// This hub's incarnation: fresh whenever the state is created.
+    pub inc: u64,
     pub peers: BTreeMap<String, PeerState>,
     pub audit: Vec<AuditLine>,
     /// Messages dropped because they were duplicates (a retry of one already taken).
     pub duplicates: u64,
+}
+
+impl Default for HubState {
+    fn default() -> Self {
+        HubState {
+            inc: fresh_incarnation(),
+            peers: BTreeMap::new(),
+            audit: Vec::new(),
+            duplicates: 0,
+        }
+    }
 }
 
 impl HubState {
@@ -133,8 +165,16 @@ pub struct Hub<'a> {
 }
 
 impl Hub<'_> {
-    fn link<'l>(&'l self, worker: &'l str, peer_fp: &'l str) -> Link<'l> {
+    fn link<'l>(
+        &'l self,
+        worker: &'l str,
+        peer_fp: &'l str,
+        my_inc: u64,
+        peer_inc: u64,
+    ) -> Link<'l> {
         Link {
+            my_inc,
+            peer_inc,
             me: self.me,
             peer: worker,
             peer_fp,
@@ -175,9 +215,10 @@ impl Hub<'_> {
         let body = serde_json::to_vec(a).map_err(|_| HubError::Wire(WireError::BadSeal))?;
         let peer = st.peers.entry(worker.to_string()).or_default();
         let seq = peer.out_seq + 1;
+        let (ack, peer_inc) = (peer.in_seq, peer.peer_inc);
         let id = format!("{}-{}-{}", self.me, worker, seq);
-        self.link(worker, &entry.key_fp)
-            .send(Kind::TaskAssign, seq, id, now, &body)
+        self.link(worker, &entry.key_fp, st.inc, peer_inc)
+            .send(Kind::TaskAssign, seq, ack, id, now, &body)
             .map_err(HubError::Wire)?;
         let peer = st.peers.entry(worker.to_string()).or_default();
         peer.out_seq = seq;
@@ -221,7 +262,8 @@ impl Hub<'_> {
             );
             return false;
         };
-        let link = self.link(&from, &entry.key_fp);
+        let peer_inc = st.peers.get(&from).map_or(0, |p| p.peer_inc);
+        let link = self.link(&from, &entry.key_fp, st.inc, peer_inc);
         let (env, plain) = match link.open(msg) {
             Ok(x) => x,
             Err(e) => {
