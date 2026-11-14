@@ -469,11 +469,10 @@ impl State {
             .map(|t| (t.id.clone(), self.side_of(t)))
             .filter(|(id, side)| {
                 let st = self.tasks.get(id).map(|t| t.state);
-                match (side, st) {
-                    (Side::Sender, Some(TState::Held)) => true,
-                    (Side::Receiver, Some(_)) => true,
-                    _ => false,
-                }
+                matches!(
+                    (side, st),
+                    (Side::Sender, Some(TState::Held)) | (Side::Receiver, Some(_))
+                )
             })
             .collect();
         for (id, side) in due {

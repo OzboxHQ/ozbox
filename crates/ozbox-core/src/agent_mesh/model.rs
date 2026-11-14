@@ -275,6 +275,7 @@ pub const MAX_TITLE: usize = 200;
 pub const MAX_INLINE: usize = 64 * 1024;
 
 /// The sealed bodies of the sequenced and control kinds.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "body", rename_all = "kebab-case")]
 pub enum Body {

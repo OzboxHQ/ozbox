@@ -144,7 +144,7 @@ impl Node<'_> {
 
     /// The answering side of a round: take what the peer sent, and return what this side has for it.
     pub fn serve(&self, peer: &str, inbound: &[Sealed]) -> Result<(Round, Vec<Sealed>), NodeError> {
-        let _ = self.change(|s, now| s.tick(now))?;
+        self.change(|s, now| s.tick(now))?;
         let round = self.receive_all(inbound)?;
         Ok((round, self.outbound(peer)?))
     }
@@ -152,7 +152,7 @@ impl Node<'_> {
     /// The calling side of a round: send what is waiting, take the reply. A transport failure is returned and leaves every task
     /// where it was; the outbox keeps what was not acknowledged.
     pub fn sync(&self, peer: &str, net: &dyn Transport) -> Result<Round, NodeError> {
-        let _ = self.change(|s, now| s.tick(now))?;
+        self.change(|s, now| s.tick(now))?;
         let out = self.outbound(peer)?;
         let sent = out.len();
         let back = net
