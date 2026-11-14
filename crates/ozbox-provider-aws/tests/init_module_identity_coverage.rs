@@ -182,11 +182,14 @@ fn every_resource_type_in_a_module_init_applies_is_covered_by_the_identity_that_
                     s["Effect"] == "Deny"
                         && strings(&s["Action"]).iter().any(|p| matches(p, a))
                         && reaches(s, &reach)
-                        && s.get("Condition").is_none_or(|c| {
+                        && match s.get("Condition") {
+                            None => true,
                             // a Deny on a production tag never meets what init makes (it makes no production key)
-                            !c.to_string().contains("ozbox-production")
-                                && !c.to_string().contains("BypassPolicyLockoutSafetyCheck")
-                        })
+                            Some(c) => {
+                                !c.to_string().contains("ozbox-production")
+                                    && !c.to_string().contains("BypassPolicyLockoutSafetyCheck")
+                            }
+                        }
                 });
                 assert!(!denied, "{module}: {a} is denied on a {t} by {policy}");
             }

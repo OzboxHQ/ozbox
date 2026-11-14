@@ -20,8 +20,6 @@ pub struct FileLock {
 
 impl FileLock {
     /// Take the lock on `path` (made if absent, mode 0600), waiting up to `wait`.
-    // `File::try_lock` is stable from Rust 1.89, and the toolchain is `stable`; the declared MSRV is older than that.
-    #[allow(clippy::incompatible_msrv)]
     pub fn acquire(path: &Path, wait: Duration) -> io::Result<FileLock> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).create(true).truncate(false);
@@ -33,18 +31,38 @@ impl FileLock {
         let file = opts.open(path)?;
         let start = Instant::now();
         loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(FileLock { _file: file }),
-                Err(std::fs::TryLockError::WouldBlock) => {
+            match try_flock(&file) {
+                Ok(true) => return Ok(FileLock { _file: file }),
+                Ok(false) => {
                     if start.elapsed() >= wait {
                         return Err(io::Error::new(io::ErrorKind::TimedOut, "the lock is busy"));
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(std::fs::TryLockError::Error(e)) => return Err(e),
+                Err(e) => return Err(e),
             }
         }
     }
+}
+
+/// A non-blocking exclusive `flock(2)` on the descriptor: `Ok(true)` taken, `Ok(false)` held by someone else. Through `rustix`
+/// rather than `File::try_lock`, which needs a newer Rust than the workspace declares.
+#[cfg(unix)]
+fn try_flock(file: &File) -> io::Result<bool> {
+    use rustix::fs::{flock, FlockOperation};
+    match flock(file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(true),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK => Ok(false),
+        Err(e) => Err(io::Error::from(e)),
+    }
+}
+
+#[cfg(not(unix))]
+fn try_flock(_file: &File) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file locks need a Unix host",
+    ))
 }
 
 #[cfg(test)]
