@@ -146,9 +146,10 @@ fn the_user_data_stays_inside_the_provider_limit() {
     // what decide (the modules' own tests): Hetzner under 32 KiB raw, AWS under 16 KB gzipped. Both drop the template's
     // comment lines before rendering; the AWS module started doing so in the same change, when its rendered size had gone
     // over the limit. Raised again from 25 000 when the memory guard's first-boot line met the dashboard role's
-    // additions in one template (25 118 bytes); the rendered AWS size is the one that matters and has about 1.4 KB of room.
+    // additions in one template (25 118 bytes), and the task router's setup script joined it after (26 249 bytes); its comment lines are
+    // dropped before rendering like every other script's. The rendered AWS size is the one that matters.
     let t = repo("infra/cloud-init/box.yaml.tftpl");
-    assert!(t.len() < 26_000, "the template is {} bytes", t.len());
+    assert!(t.len() < 27_000, "the template is {} bytes", t.len());
 }
 
 #[test]

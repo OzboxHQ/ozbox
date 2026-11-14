@@ -151,6 +151,17 @@ write_files:
     content: ${base64gzip(replace(file("${scripts_dir}/ozbox-user-manager.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
 %{ endif ~}
 
+  - path: /usr/local/sbin/ozbox-mesh-setup.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-mesh-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-mesh-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
   - path: /usr/local/sbin/ozbox-install-agent.sh
     permissions: "0755"
     owner: root:root
@@ -543,6 +554,8 @@ runcmd:
   - [systemctl, enable, --now, ozbox-backup.path]
   - [systemctl, enable, --now, ozbox-admin.path]
   - [bash, /usr/local/sbin/ozbox-secrets-setup.sh, "${box_name}", "${secrets_kms_key_id}", "${secrets_kms_region}", "${approval_key}"]
+  # The task router (ADR 0044) gets a user of its own, so the channel's keys, state and audit chain are out of an agent's reach (a failure must not stop the boot).
+  - [bash, -c, "/usr/local/sbin/ozbox-mesh-setup.sh || echo 'the task router could not be set up; run: ozbox admin <box> -- ozbox-mesh-setup' >&2"]
   # The dashboard gets a user of its own (an existing box's dashboard is moved, idempotently; a failure must not stop the boot).
   - [bash, -c, "/usr/local/bin/ozbox secrets supervisor-setup || echo 'the dashboard could not be moved to the supervisor user; run: ozbox admin <box> -- ensure-supervisor' >&2"]
   # The browser gets a user of its own and a launcher only the dashboard's user may open (a failure must not stop the boot). The
