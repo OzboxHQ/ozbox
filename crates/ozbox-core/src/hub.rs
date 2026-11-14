@@ -1,0 +1,28 @@
+//! The hub: `main` hands work to worker boxes and reads their reports (ADR 0042), as the **pure core** of it.
+//!
+//! What is here, and only this (the first slice of phase H1, and the Production refusal of decision D2):
+//!
+//! * [`wire`]: the frozen envelope. One version byte, a domain tag that names the receiver's key and the hub's epoch, then
+//!   length-prefixed fields in a fixed order (ADR 0041's [`crate::approval_subject::Encoder`]). The message kinds, `level` and
+//!   `via` are pinned by golden vectors in `hub/tests.rs`: a change to any of them fails there first.
+//! * [`refusal`]: a worker is never given a Production credential in this release. One function, [`refusal::refuse_production`],
+//!   with no flag, no setting and no argument that turns it off. It runs **on the hub before an assignment is made and again on
+//!   the worker before it is accepted**, so a hub that has been taken over still cannot hand a worker Production.
+//! * [`engine`]: the hub's side. It assigns a task to a worker named in the roster, checks every report (signature, sequence,
+//!   duplicate) and keeps the latest report per worker so the conductor can read it. It opens no network connection and no shell.
+//! * [`worker`]: the worker's side, the part the worker's own service runs.
+//! * [`mem`]: an in-memory transport for tests and for the fake fleet.
+//!
+//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery,
+//! the merge queue over the channel, test lanes, and the approval path. Signing and sealing are traits ([`wire::Signer`],
+//! [`wire::Sealer`]); the real ones are the secrets service's operations and `ozbox-seal`, wired in the next slice. A fleet role
+//! (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and that is the transport's job.
+
+pub mod engine;
+pub mod mem;
+pub mod refusal;
+pub mod wire;
+pub mod worker;
+
+#[cfg(test)]
+mod tests;

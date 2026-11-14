@@ -22,6 +22,7 @@ pub mod daemon_scope;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod hub;
 pub mod infra;
 pub mod memory_plan;
 pub mod metrics;
