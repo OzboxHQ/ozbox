@@ -930,3 +930,234 @@ fn an_orchestration_tool_asked_from_the_terminal_door_names_the_program_and_its_
     // nothing was made
     assert!(r.ops.applied.lock().unwrap().is_empty());
 }
+
+// ---- the hub hand-off (ADR 0042, first slice) -----------------------------------------------------------------------
+
+mod hub_handoff {
+    use super::*;
+    use ozbox_core::hub::engine::{HubService, HubState, RosterEntry};
+    use ozbox_core::hub::mem::{MemTransport, TestKey, TestRoster, TestSealer};
+    use ozbox_core::hub::wire::Link;
+    use ozbox_core::hub::worker::{WorkerEnd, WorkerState};
+
+    const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
+    const W_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000001";
+
+    struct HubRig {
+        r: Rig,
+        net: Arc<MemTransport>,
+        keys: TestRoster,
+    }
+
+    fn hub_rig() -> HubRig {
+        let mut r = rig(false);
+        r.ops.boxes.lock().unwrap().push("worker-1".into());
+        let net = Arc::new(MemTransport::default());
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("main".to_string(), "k-main".to_string());
+        keys.insert("worker-1".to_string(), "k-w1".to_string());
+        let mut roster = std::collections::BTreeMap::new();
+        roster.insert(
+            "worker-1".to_string(),
+            RosterEntry {
+                key_fp: W_FP.into(),
+            },
+        );
+        let svc = HubService {
+            me: "main".into(),
+            my_fp: HUB_FP.into(),
+            epoch: 1,
+            roster,
+            signer: Arc::new(TestKey("k-main".into())),
+            verifier: Arc::new(TestRoster(keys.clone())),
+            sealer: Arc::new(TestSealer { me: "main".into() }),
+            net: net.clone(),
+            state: Mutex::new(HubState::default()),
+        };
+        let tools = Tools::new(
+            TaskStore::new(r._dir.path().join("tasks.json")),
+            r.ops.clone(),
+        )
+        .with_hub(Some(Arc::new(svc)));
+        r.tools = tools;
+        HubRig {
+            r,
+            net,
+            keys: TestRoster(keys),
+        }
+    }
+
+    fn worker_end<'a>(h: &'a HubRig, signer: &'a TestKey, sealer: &'a TestSealer) -> WorkerEnd<'a> {
+        WorkerEnd {
+            link: Link {
+                me: "worker-1",
+                peer: "main",
+                peer_fp: HUB_FP,
+                my_fp: W_FP,
+                epoch: 1,
+                level: 1,
+                signer,
+                verifier: &h.keys,
+                sealer,
+                net: h.net.as_ref(),
+            },
+        }
+    }
+
+    fn audit_actions(r: &Rig) -> Vec<String> {
+        r.tools
+            .store
+            .load()
+            .unwrap()
+            .audit
+            .iter()
+            .map(|a| a.action.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_task_is_handed_over_the_hub_and_its_reports_come_back_in_task_status() {
+        let h = hub_rig();
+        let id = start(&h.r);
+        let c = cond(&id);
+        let v =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"a","brief":"b","box":"worker-1","transport":"hub"}),
+                    20,
+                )
+                .unwrap();
+        assert_eq!(v["state"], "starting");
+        let fid = v["feature"].as_str().unwrap().to_string();
+        // the laptop route did not start it: no task of its own
+        let book = h.r.tools.store.load().unwrap();
+        assert!(book
+            .orchestration(&id)
+            .unwrap()
+            .feature(&fid)
+            .unwrap()
+            .task_id
+            .is_none());
+        // the worker takes it, accepts it, works and finishes
+        let (sk, ss) = (
+            TestKey("k-w1".into()),
+            TestSealer {
+                me: "worker-1".into(),
+            },
+        );
+        let w = worker_end(&h, &sk, &ss);
+        let mut ws = WorkerState::default();
+        assert_eq!(w.poll(&mut ws, 21), 1);
+        assert_eq!(ws.tasks[0].claims, Vec::<String>::new());
+        w.report(&mut ws, 22, &fid, "halfway");
+        w.finish(&mut ws, 23, &fid, "deadbeef", "built");
+        let st = h.r.tools.call(&c, "task_status", &json!({}), 24).unwrap();
+        let hub = &st["features"][0]["hub"];
+        assert_eq!(hub["worker"], "worker-1");
+        assert_eq!(hub["status"]["state"], "working");
+        assert_eq!(hub["result"]["commit"], "deadbeef");
+        assert_eq!(hub["keys"]["delivered"], 0);
+        assert!(audit_actions(&h.r).contains(&"hub.assign".to_string()));
+    }
+
+    #[test]
+    fn the_hub_route_is_refused_by_name_on_a_box_with_no_hub() {
+        let r = rig(false);
+        r.ops.boxes.lock().unwrap().push("worker-1".into());
+        let id = start(&r);
+        let e = r
+            .tools
+            .call(
+                &cond(&id),
+                "task_start",
+                &json!({"title":"a","brief":"b","box":"worker-1","transport":"hub"}),
+                1,
+            )
+            .unwrap_err();
+        assert!(matches!(e, ToolError::Refused(m) if m.contains("no worker channel")));
+        let st = r
+            .tools
+            .call(&cond(&id), "task_status", &json!({}), 2)
+            .unwrap();
+        assert!(
+            st["features"].as_array().unwrap().is_empty(),
+            "nothing was added"
+        );
+    }
+
+    #[test]
+    fn an_unknown_transport_is_invalid() {
+        let h = hub_rig();
+        let id = start(&h.r);
+        let e =
+            h.r.tools
+                .call(
+                    &cond(&id),
+                    "task_start",
+                    &json!({"title":"a","brief":"b","transport":"carrier-pigeon"}),
+                    1,
+                )
+                .unwrap_err();
+        assert!(matches!(e, ToolError::Invalid(_)));
+    }
+
+    #[test]
+    fn a_box_the_hub_has_no_key_for_is_not_handed_a_task() {
+        let h = hub_rig();
+        h.r.ops.boxes.lock().unwrap().push("stranger".into());
+        let id = start(&h.r);
+        let c = cond(&id);
+        let e =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"a","brief":"b","box":"stranger","transport":"hub"}),
+                    5,
+                )
+                .unwrap_err();
+        assert!(matches!(e, ToolError::Failed(m) if m.contains("not a worker box")));
+        assert!(h.net.capture.lock().unwrap().is_empty(), "nothing was sent");
+        let st = h.r.tools.call(&c, "task_status", &json!({}), 6).unwrap();
+        assert_eq!(st["features"][0]["state"], "failed");
+    }
+
+    #[test]
+    fn a_conductor_that_names_keys_is_refused_and_it_is_recorded() {
+        let h = hub_rig();
+        let id = start(&h.r);
+        let c = cond(&id);
+        for args in [
+            json!({"title":"a","brief":"b","box":"worker-1","transport":"hub","keys":["STRIPE_LIVE_KEY"],"key_env":"production"}),
+            json!({"title":"a","brief":"b","box":"worker-1","transport":"hub","keys":["SUPABASE_URL"],"key_env":"staging"}),
+            json!({"title":"a","brief":"b","box":"worker-1","secrets":["X"]}),
+        ] {
+            let e = h.r.tools.call(&c, "task_start", &args, 5).unwrap_err();
+            assert!(matches!(e, ToolError::Refused(m) if m.contains("never names keys")));
+        }
+        assert!(h.net.capture.lock().unwrap().is_empty());
+        let acts = audit_actions(&h.r);
+        assert_eq!(acts.iter().filter(|a| *a == "hub.keys.refused").count(), 3);
+        let st = h.r.tools.call(&c, "task_status", &json!({}), 6).unwrap();
+        assert!(st["features"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn no_tool_takes_a_key_name() {
+        for role in [Role::Person, Role::Conductor { orch: "o".into() }] {
+            for d in tool_defs(&role) {
+                let props = d["inputSchema"]["properties"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                for k in props.keys() {
+                    for bad in ["keys", "key_env", "secret", "secrets", "token", "password"] {
+                        assert!(k != bad, "{} takes {k}", d["name"]);
+                    }
+                }
+            }
+        }
+    }
+}
