@@ -693,12 +693,21 @@ impl Tools {
             return Err(ToolError::Invalid("transport is ssh or hub".into()));
         }
         // ADR 0042 section 5: no tool takes a key name. A worker's keys come from the project's declared commands, approved by
-        // the owner and checked by the worker; a conductor that tries to name one is refused and the attempt is recorded.
-        if ["keys", "key_env", "env", "secrets"]
+        // the owner and checked by the worker. The arguments are an ALLOWLIST taken from the tool's own schema: any argument it
+        // does not declare (`keys`, `credentials`, a nested object, anything) is refused and the attempt is recorded.
+        let declared: Vec<String> = tool_defs(&s.role)
             .iter()
-            .any(|k| a.get(*k).is_some())
+            .find(|d| d["name"] == "task_start")
+            .and_then(|d| d["inputSchema"]["properties"].as_object().cloned())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        if a.as_object()
+            .is_some_and(|m| m.keys().any(|k| !declared.contains(k)))
         {
-            let who = self::s(a, "box").unwrap_or("-").to_string();
+            // only a valid box name goes into the audit line: a conductor cannot forge fields or store a value in it
+            let who = self::s(a, "box")
+                .and_then(|b| ozbox_core::name::BoxName::new(b.to_string()).ok())
+                .map_or_else(|| "-".to_string(), |b| b.to_string());
             let detail = format!("side=conductor worker={who} task=- code=conductor-named-keys");
             self.store
                 .update(|b| {
@@ -712,7 +721,7 @@ impl Tools {
                 })
                 .map_err(store_err)?;
             return Err(ToolError::Refused(
-                "A task never names keys. A worker's keys come from the project's declared commands, which the owner approves.".into(),
+                "A task never names keys, and takes no argument it does not declare. A worker's keys come from the project's declared commands, which the owner approves.".into(),
             ));
         }
         let decl = ozbox_core::hub::refusal::KeyDeclaration::default();
@@ -798,6 +807,11 @@ impl Tools {
                     },
                     ..f.worker.clone()
                 };
+            }
+            if hub.is_some() {
+                if let Some(fm) = o.feature_mut(&fid) {
+                    fm.transport = ozbox_core::orch::Transport::Hub;
+                }
             }
             let waits = !f.after.is_empty();
             // A feature that must wait for another cannot go over the hub yet: it would stay Planned, and the server's tick starts
@@ -891,17 +905,17 @@ impl Tools {
                 let (map, lines) = h
                     .with(|hub, st| {
                         hub.poll(st, now);
-                        let mut m: BTreeMap<String, Value> = BTreeMap::new();
+                        let mut m: BTreeMap<(String, String), Value> = BTreeMap::new();
                         for (worker, p) in &st.peers {
-                            for f in &p.assigned {
+                            for (o, f) in &p.assigned {
                                 m.insert(
-                                    f.clone(),
+                                    (o.clone(), f.clone()),
                                     json!({
                                         "worker": worker,
                                         "last_seen_ms": p.report.last_seen_ms,
                                         "quarantined": p.quarantined,
-                                        "status": p.report.status.get(f),
-                                        "result": p.report.results.get(f),
+                                        "status": p.report.status.get(o).and_then(|m| m.get(f)),
+                                        "result": p.report.results.get(o).and_then(|m| m.get(f)),
                                         "keys": {"delivered": 0, "note": "key delivery to workers is not built in this release"},
                                     }),
                                 );
@@ -931,7 +945,13 @@ impl Tools {
                 .filter(|f| want.as_deref().is_none_or(|w| w == f.id))
                 .map(|f| {
                     let mut j = feature_json(book, f);
-                    if let (Some(r), Some(obj)) = (reports.get(&f.id), j.as_object_mut()) {
+                    // keyed by orchestration and feature, and only the worker that holds the feature now
+                    if let (Some(r), Some(obj)) = (
+                        reports
+                            .get(&(o.id.clone(), f.id.clone()))
+                            .filter(|r| r["worker"] == f.box_name.as_str()),
+                        j.as_object_mut(),
+                    ) {
                         obj.insert("hub".to_string(), r.clone());
                     }
                     j

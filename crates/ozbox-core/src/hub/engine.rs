@@ -30,6 +30,9 @@ pub struct Assign {
 /// A worker's report (the body of `status`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusBody {
+    /// The orchestration the feature belongs to (feature ids are only unique inside one). `-` with feature `-` is a report
+    /// about the worker itself, not a feature.
+    pub orchestration: String,
     pub feature: String,
     /// `accepted`, `working`, `refused`, `unsupported`.
     pub state: String,
@@ -39,6 +42,7 @@ pub struct StatusBody {
 /// A worker's result (the body of `result`): the commit it reports, which is the SHA the merge queue merges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultBody {
+    pub orchestration: String,
     pub feature: String,
     pub commit: String,
     pub summary: String,
@@ -55,8 +59,9 @@ pub struct AuditLine {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerReport {
     pub last_seen_ms: u64,
-    pub status: BTreeMap<String, StatusBody>,
-    pub results: BTreeMap<String, ResultBody>,
+    /// Latest status per orchestration, then feature.
+    pub status: BTreeMap<String, BTreeMap<String, StatusBody>>,
+    pub results: BTreeMap<String, BTreeMap<String, ResultBody>>,
     pub questions: Vec<String>,
 }
 
@@ -68,8 +73,20 @@ pub struct PeerState {
     pub in_seq: u64,
     pub quarantined: Option<String>,
     pub report: WorkerReport,
-    pub assigned: Vec<String>,
+    /// What this hub handed this worker: orchestration and feature.
+    pub assigned: Vec<(String, String)>,
+    /// The last time a `hello` was started for this peer and the last time a below-counter duplicate was audited (each is
+    /// rate-limited so a flood cannot fill the audit or the wire).
+    #[serde(default)]
+    pub last_hello_ms: u64,
+    #[serde(default)]
+    pub last_dup_audit_ms: u64,
 }
+
+/// At most one audit line and one `hello` per peer per this long.
+pub const RATE_LIMIT_MS: u64 = 1000;
+/// A below-counter duplicate is audited at most this often per peer.
+pub const DUP_AUDIT_MS: u64 = 60_000;
 
 /// A fresh random incarnation. Never 0: 0 means "not learned yet" on the wire.
 pub fn fresh_incarnation() -> u64 {
@@ -136,6 +153,8 @@ pub enum HubError {
     /// Not in the roster: not a managed box, or not enrolled.
     NotAWorker(String),
     Quarantined(String),
+    /// No session with the worker yet (its incarnation is not known): a `hello` was started, so try again after the worker answers.
+    NoSession(String),
     /// Production, or a malformed declaration: refused, and audited before this returned.
     Refused(Refusal),
     Wire(WireError),
@@ -146,6 +165,10 @@ impl std::fmt::Display for HubError {
         match self {
             HubError::NotAWorker(w) => write!(f, "{w} is not a worker box this hub may reach"),
             HubError::Quarantined(w) => write!(f, "{w} is quarantined and is sent nothing"),
+            HubError::NoSession(w) => write!(
+                f,
+                "{w} has not completed the hello yet: one was sent, so try again once the worker has answered"
+            ),
             HubError::Refused(r) => write!(f, "{r}"),
             HubError::Wire(e) => write!(f, "{e}"),
         }
@@ -212,6 +235,10 @@ impl Hub<'_> {
             );
             return Err(HubError::Refused(r));
         }
+        if peer.peer_inc == 0 {
+            self.hello(st, worker, now).map_err(HubError::Wire)?;
+            return Err(HubError::NoSession(worker.to_string()));
+        }
         let body = serde_json::to_vec(a).map_err(|_| HubError::Wire(WireError::BadSeal))?;
         let peer = st.peers.entry(worker.to_string()).or_default();
         let seq = peer.out_seq + 1;
@@ -222,7 +249,8 @@ impl Hub<'_> {
             .map_err(HubError::Wire)?;
         let peer = st.peers.entry(worker.to_string()).or_default();
         peer.out_seq = seq;
-        peer.assigned.push(a.feature.clone());
+        peer.assigned
+            .push((a.orchestration.clone(), a.feature.clone()));
         st.note(
             now,
             "hub.assign",
@@ -239,6 +267,33 @@ impl Hub<'_> {
             ),
         );
         Ok(())
+    }
+
+    /// Start a `hello` with a worker (step one: it names no incarnation of the worker's). Sent when a session is missing or a
+    /// message named the wrong incarnation; rate-limited per peer, and a limited call sends nothing and succeeds.
+    pub fn hello(&self, st: &mut HubState, worker: &str, now: u64) -> Result<(), WireError> {
+        let entry = self.roster.get(worker).ok_or(WireError::BadName("to"))?;
+        let inc = st.inc;
+        let peer = st.peers.entry(worker.to_string()).or_default();
+        if peer.last_hello_ms != 0 && now < peer.last_hello_ms.saturating_add(RATE_LIMIT_MS) {
+            return Ok(());
+        }
+        peer.last_hello_ms = now;
+        self.send_hello(worker, &entry.key_fp, inc, 0, now)
+    }
+
+    fn send_hello(
+        &self,
+        worker: &str,
+        fp: &str,
+        my_inc: u64,
+        receiver_inc: u64,
+        now: u64,
+    ) -> Result<(), WireError> {
+        let id = format!("{}-hello-{}-{now}", self.me, worker);
+        self.link(worker, fp, my_inc, receiver_inc)
+            .send(Kind::Hello, 0, 0, id, now, b"{}")
+            .map(|_| ())
     }
 
     /// Take every message waiting for the hub: verify, de-duplicate, order, apply. Returns how many were applied.
@@ -264,9 +319,22 @@ impl Hub<'_> {
         };
         let peer_inc = st.peers.get(&from).map_or(0, |p| p.peer_inc);
         let link = self.link(&from, &entry.key_fp, st.inc, peer_inc);
-        let (env, plain) = match link.open(msg) {
+        let (env, plain) = match link.open(msg, now) {
             Ok(x) => x,
             Err(e) => {
+                if e == WireError::WrongIncarnation {
+                    // signed by the worker's key but for another incarnation: a restart on one side. Never accepted; the remedy
+                    // is a fresh hello (rate-limited), which is also how a hub restart is learned
+                    st.note(
+                        now,
+                        "hub.rejected",
+                        format!("from={from} reason=incarnation"),
+                    );
+                    if self.hello(st, &from, now).is_err() {
+                        st.note(now, "hub.hello-failed", format!("worker={from}"));
+                    }
+                    return false;
+                }
                 // forged or damaged bytes are not the worker's fault, so nobody is quarantined for them
                 st.note(now, "hub.rejected", format!("from={from} reason={e}"));
                 return false;
@@ -280,8 +348,31 @@ impl Hub<'_> {
             st.note(now, "hub.rejected", format!("from={from} reason=level"));
             return false;
         }
+        if env.kind == Kind::Hello {
+            return self.take_hello(
+                st,
+                &from,
+                &entry.key_fp,
+                env.sender_inc,
+                env.receiver_inc,
+                now,
+            );
+        }
         if env.seq <= peer.in_seq {
+            let below = peer.in_seq;
+            let audit = peer.last_dup_audit_ms == 0
+                || now >= peer.last_dup_audit_ms.saturating_add(DUP_AUDIT_MS);
+            if audit {
+                peer.last_dup_audit_ms = now;
+            }
             st.duplicates += 1;
+            if audit {
+                st.note(
+                    now,
+                    "hub.duplicate",
+                    format!("from={from} seq={} below={below}", env.seq),
+                );
+            }
             return false;
         }
         if env.seq != peer.in_seq + 1 {
@@ -309,12 +400,36 @@ impl Hub<'_> {
         match env.kind {
             Kind::Status => {
                 if let Ok(s) = serde_json::from_slice::<StatusBody>(&plain) {
-                    peer.report.status.insert(s.feature.clone(), s);
+                    if peer.knows(&s.orchestration, &s.feature) {
+                        peer.report
+                            .status
+                            .entry(s.orchestration.clone())
+                            .or_default()
+                            .insert(s.feature.clone(), s);
+                    } else {
+                        st.note(
+                            now,
+                            "hub.rejected",
+                            format!("from={from} reason=unassigned-feature kind=status"),
+                        );
+                    }
                 }
             }
             Kind::Result => {
                 if let Ok(r) = serde_json::from_slice::<ResultBody>(&plain) {
-                    peer.report.results.insert(r.feature.clone(), r);
+                    if peer.knows(&r.orchestration, &r.feature) {
+                        peer.report
+                            .results
+                            .entry(r.orchestration.clone())
+                            .or_default()
+                            .insert(r.feature.clone(), r);
+                    } else {
+                        st.note(
+                            now,
+                            "hub.rejected",
+                            format!("from={from} reason=unassigned-feature kind=result"),
+                        );
+                    }
                 }
             }
             Kind::Question | Kind::Blocked => {
@@ -323,6 +438,52 @@ impl Hub<'_> {
                     .push(String::from_utf8_lossy(&plain).chars().take(2000).collect());
             }
             _ => {}
+        }
+        true
+    }
+}
+
+impl PeerState {
+    /// Whether the hub handed this worker that feature. `-`/`-` is the worker's report about itself.
+    fn knows(&self, orchestration: &str, feature: &str) -> bool {
+        (orchestration == "-" && feature == "-")
+            || self
+                .assigned
+                .iter()
+                .any(|(o, f)| o == orchestration && f == feature)
+    }
+}
+
+impl Hub<'_> {
+    /// The two steps of a `hello`. A request (names no incarnation of ours) is answered by an echo that names the worker's; an
+    /// echo of **our current** incarnation is what sets the worker's incarnation and restarts both sequences, and is answered
+    /// once, only when it changed something, so the exchange ends.
+    fn take_hello(
+        &self,
+        st: &mut HubState,
+        worker: &str,
+        fp: &str,
+        sender_inc: u64,
+        receiver_inc: u64,
+        now: u64,
+    ) -> bool {
+        let inc = st.inc;
+        if receiver_inc == 0 {
+            if self.send_hello(worker, fp, inc, sender_inc, now).is_err() {
+                st.note(now, "hub.hello-failed", format!("worker={worker}"));
+            }
+            return true;
+        }
+        let peer = st.peers.entry(worker.to_string()).or_default();
+        if peer.peer_inc == sender_inc {
+            return true;
+        }
+        peer.peer_inc = sender_inc;
+        peer.in_seq = 0;
+        peer.out_seq = 0;
+        st.note(now, "hub.session", format!("worker={worker}"));
+        if self.send_hello(worker, fp, inc, sender_inc, now).is_err() {
+            st.note(now, "hub.hello-failed", format!("worker={worker}"));
         }
         true
     }

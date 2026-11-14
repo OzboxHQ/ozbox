@@ -222,6 +222,11 @@ pub enum WireError {
     SealFailed,
     /// The transport could not take the message.
     SendFailed,
+    /// Signed and well formed, but expired or stamped outside the skew window.
+    Stale,
+    /// Signed and well formed, but for another incarnation of this end, or from another incarnation of the peer than the one
+    /// the session was made with. The remedy is a fresh `hello`, never accepting it.
+    WrongIncarnation,
 }
 
 impl std::fmt::Display for WireError {
@@ -240,6 +245,10 @@ impl std::fmt::Display for WireError {
             WireError::SignFailed => f.write_str("the message could not be signed"),
             WireError::SealFailed => f.write_str("the message could not be sealed"),
             WireError::SendFailed => f.write_str("the message could not be sent"),
+            WireError::Stale => {
+                f.write_str("the message is expired or its time is outside the window")
+            }
+            WireError::WrongIncarnation => f.write_str("the message is for another incarnation"),
         }
     }
 }
@@ -255,7 +264,7 @@ fn word_ok(s: &str) -> bool {
 impl Envelope {
     /// Shape checks that hold for any envelope, sent or received.
     pub fn check(&self) -> Result<(), WireError> {
-        if self.version < MIN_ENVELOPE_VERSION || self.version > ENVELOPE_VERSION {
+        if !(MIN_ENVELOPE_VERSION..=ENVELOPE_VERSION).contains(&self.version) {
             return Err(WireError::BadVersion);
         }
         if self.body.len() > MAX_BODY {
@@ -268,6 +277,9 @@ impl Envelope {
             if !word_ok(v) {
                 return Err(WireError::BadName(what));
             }
+        }
+        if self.sender_inc == 0 {
+            return Err(WireError::BadName("sender_inc"));
         }
         if self.receiver_fp.len() != 64 || !self.receiver_fp.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -455,8 +467,13 @@ impl Link<'_> {
         Ok(out)
     }
 
-    /// Verify and open an inbound message: right receiver key, right epoch, from the peer, signed, opens.
-    pub fn open(&self, msg: &Sealed) -> Result<(Envelope, Vec<u8>), WireError> {
+    /// Verify and open an inbound message: right receiver key, right epoch, from the peer, signed, opens, **then** fresh (inside
+    /// the skew window and not expired) and for the right incarnations. The freshness and incarnation checks come after the
+    /// signature so a forger learns nothing from them and cannot make an end start a `hello`.
+    ///
+    /// A `hello` carries `receiver_inc` 0 (a request) or this end's current incarnation (the echo); anything else needs a
+    /// session: the peer's incarnation known, named by the sender, and this end's named by the receiver.
+    pub fn open(&self, msg: &Sealed, now: u64) -> Result<(Envelope, Vec<u8>), WireError> {
         let e = &msg.envelope;
         if e.to != self.me
             || e.receiver_fp != self.my_fp
@@ -466,6 +483,17 @@ impl Link<'_> {
             return Err(WireError::BadName("addressing"));
         }
         let plain = verify_and_open(msg, self.peer_fp, self.verifier, self.sealer)?;
+        if e.ts_ms.abs_diff(now) > MAX_SKEW_MS || e.expires_ms <= now {
+            return Err(WireError::Stale);
+        }
+        let in_session = if e.kind == Kind::Hello {
+            e.receiver_inc == 0 || e.receiver_inc == self.my_inc
+        } else {
+            self.peer_inc != 0 && e.receiver_inc == self.my_inc && e.sender_inc == self.peer_inc
+        };
+        if !in_session {
+            return Err(WireError::WrongIncarnation);
+        }
         Ok((e.clone(), plain))
     }
 }

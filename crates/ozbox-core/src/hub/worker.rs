@@ -4,9 +4,9 @@
 //! Production is refused here too (decision D2), so a hub that has been taken over still cannot hand a worker Production. A kind
 //! this release does not build is refused and answered, never silently ignored.
 
-use super::engine::{Assign, AuditLine, ResultBody, StatusBody};
+use super::engine::{Assign, AuditLine, ResultBody, StatusBody, DUP_AUDIT_MS, RATE_LIMIT_MS};
 use super::refusal::{refuse_production, AUDIT_REFUSED};
-use super::wire::{Kind, Link};
+use super::wire::{Kind, Link, WireError};
 
 /// What the worker keeps. Disposable: losing it loses unacknowledged messages and nothing else (ADR 0020's invariant).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,9 @@ pub struct WorkerState {
     pub in_seq: u64,
     pub tasks: Vec<Assign>,
     pub audit: Vec<AuditLine>,
+    /// Rate limits (see the hub's `PeerState`).
+    pub last_hello_ms: u64,
+    pub last_dup_audit_ms: u64,
 }
 
 impl Default for WorkerState {
@@ -31,6 +34,8 @@ impl Default for WorkerState {
             in_seq: 0,
             tasks: Vec::new(),
             audit: Vec::new(),
+            last_hello_ms: 0,
+            last_dup_audit_ms: 0,
         }
     }
 }
@@ -52,6 +57,11 @@ pub struct WorkerEnd<'a> {
 
 impl WorkerEnd<'_> {
     fn say(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
+        if st.hub_inc == 0 {
+            // no session yet: the hub would refuse it, so it is not sent (and not counted)
+            st.note(now, "worker.no-session", format!("kind={}", kind.name()));
+            return;
+        }
         st.out_seq += 1;
         let id = format!("{}-{}", self.link.me, st.out_seq);
         let link = self.link.with_incarnations(st.inc, st.hub_inc);
@@ -66,8 +76,35 @@ impl WorkerEnd<'_> {
         }
     }
 
-    fn status(&self, st: &mut WorkerState, now: u64, feature: &str, state: &str, text: &str) {
+    /// Step one of a `hello`: tell the hub this worker's incarnation (it names none of the hub's). Rate-limited.
+    pub fn hello(&self, st: &mut WorkerState, now: u64) {
+        self.send_hello(st, now, 0, true);
+    }
+
+    fn send_hello(&self, st: &mut WorkerState, now: u64, receiver_inc: u64, limited: bool) {
+        if limited && st.last_hello_ms != 0 && now < st.last_hello_ms.saturating_add(RATE_LIMIT_MS)
+        {
+            return;
+        }
+        st.last_hello_ms = now;
+        let link = self.link.with_incarnations(st.inc, receiver_inc);
+        let id = format!("{}-hello-{now}", self.link.me);
+        if let Err(e) = link.send(Kind::Hello, 0, 0, id, now, b"{}") {
+            st.note(now, "worker.send-failed", format!("kind=hello reason={e}"));
+        }
+    }
+
+    fn status(
+        &self,
+        st: &mut WorkerState,
+        now: u64,
+        orchestration: &str,
+        feature: &str,
+        state: &str,
+        text: &str,
+    ) {
         let body = StatusBody {
+            orchestration: orchestration.to_string(),
             feature: feature.to_string(),
             state: state.to_string(),
             text: text.to_string(),
@@ -77,15 +114,68 @@ impl WorkerEnd<'_> {
         }
     }
 
+    fn hello_taken(&self, st: &mut WorkerState, now: u64, sender_inc: u64, receiver_inc: u64) {
+        if receiver_inc == 0 {
+            // the hub's request: answer with an echo naming its incarnation; nothing changes yet
+            self.send_hello(st, now, sender_inc, false);
+            return;
+        }
+        if st.hub_inc == sender_inc {
+            return;
+        }
+        st.hub_inc = sender_inc;
+        st.in_seq = 0;
+        st.out_seq = 0;
+        st.note(now, "worker.session", String::new());
+        self.send_hello(st, now, sender_inc, false);
+    }
+
     /// Take every message waiting for this worker. Returns how many were applied.
     pub fn poll(&self, st: &mut WorkerState, now: u64) -> usize {
         let mut applied = 0;
         while let Some(msg) = self.link.net.recv(self.link.me) {
-            let Ok((env, plain)) = self.link.open(&msg) else {
-                st.note(now, "worker.rejected", "reason=unverified".to_string());
-                continue;
+            let link = self.link.with_incarnations(st.inc, st.hub_inc);
+            let (env, plain) = match link.open(&msg, now) {
+                Ok(x) => x,
+                Err(e @ (WireError::WrongIncarnation | WireError::Stale)) => {
+                    st.note(
+                        now,
+                        "worker.rejected",
+                        format!(
+                            "reason={}",
+                            if e == WireError::Stale {
+                                "stale"
+                            } else {
+                                "incarnation"
+                            }
+                        ),
+                    );
+                    if e == WireError::WrongIncarnation {
+                        // a restart on one side: ask for a fresh session (rate-limited), never accept the message
+                        self.hello(st, now);
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    st.note(now, "worker.rejected", "reason=unverified".to_string());
+                    continue;
+                }
             };
+            if env.kind == Kind::Hello {
+                self.hello_taken(st, now, env.sender_inc, env.receiver_inc);
+                continue;
+            }
             if env.seq <= st.in_seq {
+                if st.last_dup_audit_ms == 0
+                    || now >= st.last_dup_audit_ms.saturating_add(DUP_AUDIT_MS)
+                {
+                    st.last_dup_audit_ms = now;
+                    st.note(
+                        now,
+                        "worker.duplicate",
+                        format!("seq={} below={}", env.seq, st.in_seq),
+                    );
+                }
                 continue;
             }
             if env.seq != st.in_seq + 1 || env.level != 0 || !env.kind.hub_to_worker() {
@@ -110,6 +200,7 @@ impl WorkerEnd<'_> {
                     self.status(
                         st,
                         now,
+                        "-",
                         "-",
                         "unsupported",
                         &format!("{} is not supported in this release", env.kind.name()),
@@ -136,26 +227,52 @@ impl WorkerEnd<'_> {
                 AUDIT_REFUSED,
                 format!("side=worker {}", r.audit_detail(self.link.me, &a.feature)),
             );
-            self.status(st, now, &a.feature, "refused", &r.message);
+            self.status(st, now, &a.orchestration, &a.feature, "refused", &r.message);
             return;
         }
-        self.status(st, now, &a.feature, "accepted", "");
+        if a.lease_expiry_ms <= now {
+            // a captured or stale assignment: the lease is the task's life
+            st.note(
+                now,
+                "worker.rejected",
+                "kind=task.assign reason=lease-expired".to_string(),
+            );
+            self.status(
+                st,
+                now,
+                &a.orchestration,
+                &a.feature,
+                "refused",
+                "the lease on this assignment has expired",
+            );
+            return;
+        }
+        self.status(st, now, &a.orchestration, &a.feature, "accepted", "");
         st.tasks.push(a);
     }
 
-    pub fn report(&self, st: &mut WorkerState, now: u64, feature: &str, text: &str) {
-        self.status(st, now, feature, "working", text);
+    pub fn report(
+        &self,
+        st: &mut WorkerState,
+        now: u64,
+        orchestration: &str,
+        feature: &str,
+        text: &str,
+    ) {
+        self.status(st, now, orchestration, feature, "working", text);
     }
 
     pub fn finish(
         &self,
         st: &mut WorkerState,
         now: u64,
+        orchestration: &str,
         feature: &str,
         commit: &str,
         summary: &str,
     ) {
         let body = ResultBody {
+            orchestration: orchestration.to_string(),
             feature: feature.to_string(),
             commit: commit.to_string(),
             summary: summary.to_string(),

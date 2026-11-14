@@ -1008,6 +1008,22 @@ mod hub_handoff {
         }
     }
 
+    /// Run the worker's `hello` so the hub holds a session with worker-1 (the hub offers no task without one). Returns the
+    /// worker's state: its incarnation is part of every later message.
+    fn connect(h: &HubRig, c: &Session) -> WorkerState {
+        let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
+        let w = worker_end(h, &sk, &ss);
+        let mut ws = WorkerState::default();
+        w.hello(&mut ws, 15);
+        for _ in 0..4 {
+            // a task_status call polls the hub
+            h.r.tools.call(c, "task_status", &json!({}), 16).unwrap();
+            w.poll(&mut ws, 16);
+        }
+        assert_ne!(ws.hub_inc, 0);
+        ws
+    }
+
     fn audit_actions(r: &Rig) -> Vec<String> {
         r.tools
             .store
@@ -1024,6 +1040,7 @@ mod hub_handoff {
         let h = hub_rig();
         let id = start(&h.r);
         let c = cond(&id);
+        let mut ws = connect(&h, &c);
         let v =
             h.r.tools
                 .call(
@@ -1047,11 +1064,10 @@ mod hub_handoff {
         // the worker takes it, accepts it, works and finishes
         let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
         let w = worker_end(&h, &sk, &ss);
-        let mut ws = WorkerState::default();
         assert_eq!(w.poll(&mut ws, 21), 1);
         assert_eq!(ws.tasks[0].claims, Vec::<String>::new());
-        w.report(&mut ws, 22, &fid, "halfway");
-        w.finish(&mut ws, 23, &fid, "deadbeef", "built");
+        w.report(&mut ws, 22, &id, &fid, "halfway");
+        w.finish(&mut ws, 23, &id, &fid, "deadbeef", "built");
         let st = h.r.tools.call(&c, "task_status", &json!({}), 24).unwrap();
         let hub = &st["features"][0]["hub"];
         assert_eq!(hub["worker"], "worker-1");
@@ -1132,13 +1148,20 @@ mod hub_handoff {
             json!({"title":"a","brief":"b","box":"worker-1","transport":"hub","keys":["STRIPE_LIVE_KEY"],"key_env":"production"}),
             json!({"title":"a","brief":"b","box":"worker-1","transport":"hub","keys":["SUPABASE_URL"],"key_env":"staging"}),
             json!({"title":"a","brief":"b","box":"worker-1","secrets":["X"]}),
+            json!({"title":"a","brief":"b","box":"worker-1","credentials":{"STRIPE":"x"}}),
+            json!({"title":"a","brief":"b","box":"worker-1","caps":{"keys":["A"]}}),
+            json!({"title":"a","brief":"b","box":"has space code=ok","environment":"production"}),
         ] {
             let e = h.r.tools.call(&c, "task_start", &args, 5).unwrap_err();
             assert!(matches!(e, ToolError::Refused(m) if m.contains("never names keys")));
         }
         assert!(h.net.capture.lock().unwrap().is_empty());
         let acts = audit_actions(&h.r);
-        assert_eq!(acts.iter().filter(|a| *a == "hub.keys.refused").count(), 3);
+        assert_eq!(acts.iter().filter(|a| *a == "hub.keys.refused").count(), 6);
+        // the forged box name never reached the audit line
+        let book = h.r.tools.store.load().unwrap();
+        assert!(book.audit.iter().all(|a| !a.detail.contains("has space")));
+        assert!(book.audit.iter().any(|a| a.detail.contains("worker=- ")));
         let st = h.r.tools.call(&c, "task_status", &json!({}), 6).unwrap();
         assert!(st["features"].as_array().unwrap().is_empty());
     }
@@ -1167,6 +1190,7 @@ mod hub_handoff {
         let h = hub_rig();
         let id = start(&h.r);
         let c = cond(&id);
+        let _ws = connect(&h, &c);
         let v =
             h.r.tools
                 .call(
@@ -1201,6 +1225,7 @@ mod hub_handoff {
         h.r.ops.boxes.lock().unwrap().push("worker-2".into());
         let id = start(&h.r);
         let c = cond(&id);
+        let _ws = connect(&h, &c);
         h.r.tools
             .store
             .update(|b| {
@@ -1227,5 +1252,116 @@ mod hub_handoff {
         let mut always = |_: &ozbox_core::orch::Feature| true;
         book.tick_orchestrations(&mut ozbox_core::orch::NoChannel, &mut always, 40);
         assert!(book.tasks.is_empty());
+    }
+
+    #[test]
+    fn claims_declare_sequenced_and_reassign_leave_a_hub_feature_unstartable() {
+        let h = hub_rig();
+        h.r.ops.boxes.lock().unwrap().push("worker-2".into());
+        let id = start(&h.r);
+        let c = cond(&id);
+        let _ws = connect(&h, &c);
+        h.r.tools
+            .store
+            .update(|b| {
+                if let Some(o) = b.orchestration_mut(&id) {
+                    o.policy.on_overlap = ozbox_core::orch_rules::OverlapRule::Sequence;
+                }
+            })
+            .unwrap();
+        // an ssh-route feature that owns src/x
+        h.r.tools
+            .call(
+                &c,
+                "task_start",
+                &json!({"title":"a","brief":"b","box":"worker-2","claims":["src/x"]}),
+                5,
+            )
+            .unwrap();
+        let v =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"b","brief":"b","box":"worker-1","transport":"hub"}),
+                    6,
+                )
+                .unwrap();
+        let fid = v["feature"].as_str().unwrap().to_string();
+        // the conductor now declares claims that overlap: sequenced, which used to move Starting back to Planned
+        let e =
+            h.r.tools
+                .call(
+                    &c,
+                    "claims_declare",
+                    &json!({"feature": fid, "claims":["src/x"]}),
+                    7,
+                )
+                .unwrap_err();
+        assert!(format!("{e:?}").contains("worker channel"), "{e:?}");
+        let mut book = h.r.tools.store.load().unwrap();
+        let o = book.orchestration(&id).unwrap();
+        assert!(!o.startable().contains(&fid));
+        assert_eq!(
+            o.feature(&fid).unwrap().state,
+            ozbox_core::orch::FeatureState::Failed
+        );
+        // reassign refuses a hub feature by name
+        let o = book.orchestration_mut(&id).unwrap();
+        assert!(o.reassign(&fid, "worker-2", 8).is_err());
+        assert!(!book.orchestration(&id).unwrap().startable().contains(&fid));
+        let mut always = |_: &ozbox_core::orch::Feature| true;
+        book.tick_orchestrations(&mut ozbox_core::orch::NoChannel, &mut always, 40);
+        assert!(book.tasks.is_empty());
+    }
+
+    #[test]
+    fn a_book_written_before_the_transport_field_loads_as_ssh() {
+        let h = hub_rig();
+        let id = start(&h.r);
+        h.r.tools
+            .call(
+                &cond(&id),
+                "task_start",
+                &json!({"title":"a","brief":"b","box":"worker-1"}),
+                5,
+            )
+            .unwrap();
+        let mut v = serde_json::to_value(h.r.tools.store.load().unwrap()).unwrap();
+        for o in v["orchestrations"].as_array_mut().into_iter().flatten() {
+            for f in o["features"].as_array_mut().into_iter().flatten() {
+                assert!(f.as_object_mut().unwrap().remove("transport").is_some());
+            }
+        }
+        let book: ozbox_core::run::Book = serde_json::from_value(v).unwrap();
+        let f = book.orchestration(&id).unwrap().feature("f1").unwrap();
+        assert_eq!(f.transport, ozbox_core::orch::Transport::Ssh);
+    }
+
+    #[test]
+    fn a_hub_report_is_keyed_by_orchestration_and_belongs_to_the_assigned_worker() {
+        let h = hub_rig();
+        let id = start(&h.r);
+        let c = cond(&id);
+        let mut ws = connect(&h, &c);
+        let v =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"a","brief":"b","box":"worker-1","transport":"hub"}),
+                    20,
+                )
+                .unwrap();
+        let fid = v["feature"].as_str().unwrap().to_string();
+        let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
+        let w = worker_end(&h, &sk, &ss);
+        w.poll(&mut ws, 21);
+        // a report for the same feature id under another orchestration is refused, not merged
+        w.report(&mut ws, 22, "orch-other", &fid, "wrong orchestration");
+        w.report(&mut ws, 23, &id, &fid, "mine");
+        let st = h.r.tools.call(&c, "task_status", &json!({}), 24).unwrap();
+        assert_eq!(st["features"][0]["hub"]["status"]["text"], "mine");
+        assert!(audit_actions(&h.r).len() > 1);
     }
 }

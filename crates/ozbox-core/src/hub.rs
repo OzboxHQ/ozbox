@@ -4,10 +4,12 @@
 //!
 //! * [`wire`]: the frozen envelope. One version byte, a domain tag that names the receiver's key and the hub's epoch, then
 //!   length-prefixed fields in a fixed order (ADR 0041's [`crate::approval_subject::Encoder`]). The message kinds, `level` and
-//!   `via` are pinned by golden vectors in `hub/tests.rs`: a change to any of them fails there first.
+//!   `via` are pinned by golden vectors in `hub/tests.rs` (computed by a separate script): a change to any of them fails there first.
+//!   The format freezes when the first real transport ships; until then it is revised with new vectors.
 //! * [`refusal`]: a worker is never given a Production credential in this release. One function, [`refusal::refuse_production`],
 //!   with no flag, no setting and no argument that turns it off. It runs **on the hub before an assignment is made and again on
-//!   the worker before it is accepted**, so a hub that has been taken over still cannot hand a worker Production.
+//!   the worker before it is accepted**, so a hub that has been taken over still cannot hand a worker a Production *label*. These are label checks (the declaration's
+//!   environment and key names); the check of the delivered value is H3a and is not built yet.
 //! * [`engine`]: the hub's side. It assigns a task to a worker named in the roster, checks every report (signature, sequence,
 //!   duplicate) and keeps the latest report per worker so the conductor can read it. It opens no network connection and no shell.
 //! * [`worker`]: the worker's side, the part the worker's own service runs.
