@@ -254,6 +254,8 @@ impl Tools {
         }
     }
 
+    // the server attaches a hub once a worker channel exists (ADR 0042); until then only the tests do
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_hub(mut self, hub: Option<Arc<ozbox_core::hub::engine::HubService>>) -> Self {
         self.hub = hub;
         self
