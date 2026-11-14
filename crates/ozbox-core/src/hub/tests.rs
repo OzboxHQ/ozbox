@@ -5,8 +5,11 @@ use std::collections::BTreeMap;
 use super::engine::{Assign, Hub, HubError, HubState, RosterEntry};
 use super::mem::{MemTransport, TestKey, TestRoster, TestSealer};
 use super::refusal::{refuse_production, KeyDeclaration, CODE_PRODUCTION};
-use super::wire::{Envelope, Kind, Link, Transport, ENVELOPE_VERSION};
+use super::wire::{Ext, Hop, Kind, Transport, ENVELOPE_TAG, PROFILE};
 use super::worker::{WorkerEnd, WorkerState};
+use crate::channel::wire::{
+    hex, seal_and_sign, Crypto, Envelope, Sealed, Signer, WireError as ChannelError, VERSION,
+};
 
 const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
 const W1_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000001";
@@ -14,27 +17,24 @@ const W2_FP: &str = "bb000000000000000000000000000000000000000000000000000000000
 
 fn sample() -> Envelope {
     Envelope {
-        version: ENVELOPE_VERSION,
-        kind: Kind::TaskAssign,
+        version: VERSION,
+        kind: "task.assign".into(),
         from: "main".into(),
         to: "worker-1".into(),
         receiver_fp: W1_FP.into(),
-        epoch: 7,
-        seq: 3,
-        ack_seq: 2,
+        sender_epoch: 7,
+        receiver_epoch: 1,
         sender_inc: 0x1111,
         receiver_inc: 0x2222,
+        seq: 3,
+        ack_seq: 2,
         id: "main-worker-1-3".into(),
         ts_ms: 1_700_000_000_000,
-        expires_ms: 1_700_000_600_000,
-        level: 0,
-        via: Vec::new(),
+        valid_until_ms: 1_700_000_600_000,
+        nonce: (0u8..16).collect(),
+        ext: Ext::at(0).encode(),
         body: b"hello".to_vec(),
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 // ---- the frozen schema ---------------------------------------------------------------------------------------------
@@ -77,37 +77,49 @@ fn the_message_kinds_are_frozen_in_name_and_order() {
     for k in Kind::ALL {
         assert_eq!(Kind::parse(k.name()), Some(k));
     }
-    assert_eq!(ENVELOPE_VERSION, 1);
+    assert_eq!(VERSION, 1);
+}
+
+#[test]
+fn the_profile_lists_every_kind_but_the_channels_own_two() {
+    let want: Vec<&str> = Kind::ALL
+        .iter()
+        .filter(|k| !matches!(k, Kind::Hello | Kind::Ack))
+        .map(|k| k.name())
+        .collect();
+    assert_eq!(PROFILE.kinds, want.as_slice());
+    assert_eq!(PROFILE.tag, ENVELOPE_TAG);
 }
 
 #[test]
 fn golden_vector_of_the_canonical_envelope() {
-    // Frozen. If this fails the wire format changed: that needs a new version byte and a new tag, never an edit here.
+    // Frozen once a transport ships. A change here is a wire change: a new version and a new vector, never an edit to fit.
     let e = sample();
-    assert_eq!(hex(&e.canonical()), GOLDEN_CANONICAL);
-    assert_eq!(e.digest_hex(), GOLDEN_DIGEST);
+    assert_eq!(hex(&Ext::at(0).encode()), GOLDEN_EXT);
+    assert_eq!(hex(&e.canonical(&PROFILE)), GOLDEN_CANONICAL);
+    assert_eq!(e.digest_hex(&PROFILE), GOLDEN_DIGEST);
 }
 
 #[test]
 fn the_leading_byte_is_the_encoding_version_then_the_tag_then_the_envelope_version() {
-    let c = sample().canonical();
+    let c = sample().canonical(&PROFILE);
     assert_eq!(c[0], crate::approval_subject::ENCODING_VERSION);
-    let tag = super::wire::ENVELOPE_TAG.as_bytes();
+    let tag = ENVELOPE_TAG.as_bytes();
     assert_eq!(&c[5..5 + tag.len()], tag);
-    // the envelope's version is the first field after the tag: length 1, then the byte
+    // the envelope's version is the first field after the tag: length 8, then the number
     let at = 5 + tag.len();
-    assert_eq!(&c[at..at + 5], &[0, 0, 0, 1, ENVELOPE_VERSION]);
+    assert_eq!(&c[at..at + 12], &[0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1]);
 }
 
 #[test]
-fn only_this_envelope_version_and_the_one_before_are_accepted() {
-    let mut e = sample();
-    e.version = ENVELOPE_VERSION + 1;
-    assert_eq!(e.check(), Err(super::wire::WireError::BadVersion));
-    e.version = ENVELOPE_VERSION;
-    assert!(e.check().is_ok());
-    e.version = super::wire::MIN_ENVELOPE_VERSION;
-    assert!(e.check().is_ok());
+fn a_receiver_accepts_exactly_the_current_envelope_version() {
+    // there is no version before this one, so there is no "one before" to accept
+    for v in [0, VERSION + 1] {
+        let mut e = sample();
+        e.version = v;
+        assert_eq!(e.check(&PROFILE), Err(ChannelError::Version), "version {v}");
+    }
+    assert!(sample().check(&PROFILE).is_ok());
 }
 
 #[test]
@@ -119,88 +131,102 @@ fn the_new_kinds_are_directed_and_acknowledged_as_designed() {
 }
 
 #[test]
-fn a_signer_or_transport_that_fails_is_reported_not_swallowed() {
+fn a_signer_that_fails_is_reported_not_swallowed() {
     struct NoSign;
-    impl super::wire::Signer for NoSign {
-        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, super::wire::WireError> {
-            Err(super::wire::WireError::SignFailed)
+    impl Signer for NoSign {
+        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, ChannelError> {
+            Err(ChannelError::SignFailed)
         }
     }
     let f = fx();
-    let r = super::wire::seal_and_sign(sample(), b"x", &f.hub_sealer, &NoSign);
-    assert_eq!(r.unwrap_err(), super::wire::WireError::SignFailed);
+    let cx = Crypto {
+        signer: &NoSign,
+        verifier: &f.roster_keys,
+        sealer: &f.hub_sealer,
+    };
+    let r = seal_and_sign(&PROFILE, sample(), W1_FP, b"x", &cx);
+    assert_eq!(r.unwrap_err(), ChannelError::SignFailed);
 }
 
 #[test]
 fn golden_vector_with_a_relay_hop() {
     let mut e = sample();
-    e.level = 2;
-    e.via = vec![super::wire::Hop {
-        box_id: "worker-a".into(),
-        key_fp: W2_FP.into(),
-    }];
-    assert_eq!(hex(&e.canonical()), GOLDEN_CANONICAL_VIA);
+    e.ext = Ext {
+        level: 2,
+        via: vec![Hop {
+            box_id: "worker-a".into(),
+            key_fp: W2_FP.into(),
+        }],
+    }
+    .encode();
+    assert_eq!(hex(&e.ext), GOLDEN_EXT_VIA);
+    assert_eq!(hex(&e.canonical(&PROFILE)), GOLDEN_CANONICAL_VIA);
+    assert!(
+        e.check(&PROFILE).is_ok(),
+        "the schema carries hops; a receiver at level 1 refuses them"
+    );
+}
+
+#[test]
+fn the_ext_round_trips_and_nothing_else_decodes() {
+    let x = Ext {
+        level: 1,
+        via: vec![Hop {
+            box_id: "w".into(),
+            key_fp: W1_FP.into(),
+        }],
+    };
+    assert_eq!(Ext::decode(&x.encode()), Some(x));
+    assert_eq!(Ext::decode(&[]), None);
+    assert_eq!(Ext::decode(&Ext::at(3).encode()), None, "no level past 2");
+    let mut long = Ext::at(1).encode();
+    long.push(0);
+    assert_eq!(Ext::decode(&long), None, "trailing bytes");
 }
 
 #[test]
 fn every_field_changes_the_canonical_bytes() {
-    let base = sample().canonical();
-    let mut seen = vec![base.clone()];
+    let mut seen = vec![sample().canonical(&PROFILE)];
     let mut change = |f: &dyn Fn(&mut Envelope)| {
         let mut e = sample();
         f(&mut e);
-        let c = e.canonical();
+        let c = e.canonical(&PROFILE);
         assert!(!seen.contains(&c));
         seen.push(c);
     };
-    change(&|e| e.kind = Kind::Status);
+    change(&|e| e.kind = "status".into());
     change(&|e| e.from = "other".into());
     change(&|e| e.to = "worker-2".into());
     change(&|e| e.receiver_fp = W2_FP.into());
-    change(&|e| e.epoch = 8);
+    change(&|e| e.sender_epoch = 8);
+    change(&|e| e.receiver_epoch = 2);
     change(&|e| e.seq = 4);
     change(&|e| e.ack_seq = 3);
     change(&|e| e.sender_inc = 1);
     change(&|e| e.receiver_inc = 1);
-    change(&|e| e.expires_ms = 1);
+    change(&|e| e.valid_until_ms = 1);
     change(&|e| e.version = 0);
-    change(&|e| {
-        e.via = vec![super::wire::Hop {
-            box_id: "w".into(),
-            key_fp: W2_FP.into(),
-        }]
-    });
+    change(&|e| e.ext = Ext::at(1).encode());
     change(&|e| e.id = "x".into());
     change(&|e| e.ts_ms = 1);
-    change(&|e| e.level = 1);
+    change(&|e| e.nonce = vec![7; 16]);
     change(&|e| e.body = b"hellp".to_vec());
-}
-
-#[test]
-fn a_field_cannot_run_into_the_next() {
-    let mut a = sample();
-    a.from = "ab".into();
-    a.to = "c".into();
-    let mut b = sample();
-    b.from = "a".into();
-    b.to = "bc".into();
-    assert_ne!(a.canonical(), b.canonical());
 }
 
 #[test]
 fn shape_checks() {
     let mut e = sample();
-    e.level = 3;
-    assert!(e.check().is_err());
+    e.ext = Ext::at(3).encode();
+    assert!(e.check(&PROFILE).is_err(), "a level past the tree");
     let mut e = sample();
     e.body = vec![0; super::wire::MAX_BODY + 1];
-    assert!(e.check().is_err());
+    assert!(e.check(&PROFILE).is_err());
     let mut e = sample();
     e.from = "Bad Name".into();
-    assert!(e.check().is_err());
+    assert!(e.check(&PROFILE).is_err());
     let mut e = sample();
     e.receiver_fp = "xyz".into();
-    assert!(e.check().is_err());
+    assert!(e.check(&PROFILE).is_err());
 }
 
 // ---- decision D2: Production is refused ----------------------------------------------------------------------------
@@ -338,32 +364,72 @@ impl Fx {
         Hub {
             me: "main",
             my_fp: HUB_FP,
-            epoch: 7,
             roster: &self.roster,
             signer: &self.signers["main"],
             verifier: &self.roster_keys,
             sealer: &self.hub_sealer,
             net: &self.net,
+            deferred: false,
         }
     }
 
     fn worker(&self) -> WorkerEnd<'_> {
         WorkerEnd {
-            link: Link {
-                me: "worker-1",
-                peer: "main",
-                peer_fp: HUB_FP,
-                my_fp: W1_FP,
-                epoch: 7,
-                my_inc: 0,
-                peer_inc: 0,
-                level: 1,
-                signer: &self.signers["worker-1"],
-                verifier: &self.roster_keys,
-                sealer: &self.w1_sealer,
-                net: &self.net,
-            },
+            me: "worker-1",
+            hub: "main",
+            signer: &self.signers["worker-1"],
+            verifier: &self.roster_keys,
+            sealer: &self.w1_sealer,
+            net: &self.net,
         }
+    }
+
+    fn hub_state(&self) -> HubState {
+        HubState::new("main", HUB_FP, 7)
+    }
+
+    fn worker_state(&self) -> WorkerState {
+        WorkerState::new("worker-1", W1_FP, "main", HUB_FP, 7)
+    }
+
+    /// An envelope the hub's key signed, built by hand as a taken-over hub would: every field honest except what the test sets.
+    /// `seq` and the times are the caller's; the incarnations are those the session `connect` made.
+    #[allow(clippy::too_many_arguments)]
+    fn hub_message(
+        &self,
+        hs: &HubState,
+        ws: &WorkerState,
+        kind: &str,
+        seq: u64,
+        ts: u64,
+        valid_until: u64,
+        plain: &[u8],
+    ) -> Sealed {
+        let env = Envelope {
+            version: VERSION,
+            kind: kind.into(),
+            from: "main".into(),
+            to: "worker-1".into(),
+            receiver_fp: W1_FP.into(),
+            sender_epoch: 7,
+            receiver_epoch: 1,
+            sender_inc: hs.inc(),
+            receiver_inc: ws.inc(),
+            seq,
+            ack_seq: 0,
+            id: format!("x-{seq}"),
+            ts_ms: ts,
+            valid_until_ms: valid_until,
+            nonce: vec![seq as u8 + 100; 16],
+            ext: Ext::at(0).encode(),
+            body: Vec::new(),
+        };
+        let cx = Crypto {
+            signer: &self.signers["main"],
+            verifier: &self.roster_keys,
+            sealer: &self.hub_sealer,
+        };
+        seal_and_sign(&PROFILE, env, W1_FP, plain, &cx).unwrap()
     }
 }
 
@@ -390,37 +456,35 @@ fn connect(f: &Fx, hs: &mut HubState, ws: &mut WorkerState, now: u64) {
         hub.poll(hs, now);
         w.poll(ws, now);
     }
-    assert_eq!(hs.peers["worker-1"].peer_inc, ws.inc);
-    assert_eq!(ws.hub_inc, hs.inc);
+    assert_eq!(hs.peer_inc("worker-1"), ws.inc());
+    assert_eq!(ws.hub_inc(), hs.inc());
 }
 
-/// A hub-side link built by hand, as a taken-over hub would, for the session `connect` made.
-fn hub_link<'a>(f: &'a Fx, hs: &HubState, ws: &WorkerState) -> Link<'a> {
-    Link {
-        me: "main",
-        peer: "worker-1",
-        peer_fp: W1_FP,
-        my_fp: HUB_FP,
-        epoch: 7,
-        my_inc: hs.inc,
-        peer_inc: ws.inc,
-        level: 0,
-        signer: &f.signers["main"],
-        verifier: &f.roster_keys,
-        sealer: &f.hub_sealer,
-        net: &f.net,
-    }
-}
-
-fn actions(a: &[super::engine::AuditLine]) -> Vec<&str> {
+fn actions(a: &[crate::audit::NewEvent]) -> Vec<&str> {
     a.iter().map(|l| l.action.as_str()).collect()
+}
+
+/// A taken-over hub sends a message outside its own queue: the worker will acknowledge it, so the hub's count must have moved.
+fn claim_seq(hs: &mut HubState) {
+    hs.core.links.get_mut("worker-1").unwrap().out_seq += 1;
+}
+
+fn captured(f: &Fx, kind: &str) -> Vec<Sealed> {
+    f.net
+        .capture
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.envelope.kind == kind)
+        .cloned()
+        .collect()
 }
 
 #[test]
 fn main_hands_a_task_to_a_worker_and_reads_its_reports() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 9);
     hs.take_audit();
     hub.assign(
@@ -453,7 +517,7 @@ fn main_hands_a_task_to_a_worker_and_reads_its_reports() {
 fn a_box_that_is_not_in_the_roster_is_never_sent_anything() {
     let f = fx();
     let hub = f.hub();
-    let mut hs = HubState::default();
+    let mut hs = f.hub_state();
     let e = hub
         .assign(
             &mut hs,
@@ -470,7 +534,7 @@ fn a_box_that_is_not_in_the_roster_is_never_sent_anything() {
 fn the_hub_refuses_production_and_audits_before_returning() {
     let f = fx();
     let hub = f.hub();
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hs.take_audit();
     let sent_before = f.net.capture.lock().unwrap().len();
@@ -504,83 +568,78 @@ fn the_hub_refuses_production_and_audits_before_returning() {
         6,
     )
     .unwrap();
-    assert_eq!(
-        f.net.capture.lock().unwrap().last().unwrap().envelope.seq,
-        1
-    );
+    assert_eq!(captured(&f, "task.assign").last().unwrap().envelope.seq, 1);
 }
 
 #[test]
 fn a_taken_over_hub_still_cannot_hand_a_worker_production() {
-    // the hub's check is bypassed: the assignment is sent straight on the link. The worker refuses it on its own.
+    // the hub's check is bypassed: the assignment is signed by hand and sent straight on. The worker refuses it on its own.
     let f = fx();
     let w = f.worker();
     let hub = f.hub();
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
-    ws.audit.clear();
+    ws.take_audit();
     let bad = assign("f9", decl("live", &["STRIPE_LIVE_KEY"]));
-    hub_link(&f, &hs, &ws)
-        .send(
-            Kind::TaskAssign,
-            1,
-            0,
-            "x-1".into(),
-            1,
-            &serde_json::to_vec(&bad).unwrap(),
-        )
-        .unwrap();
+    claim_seq(&mut hs);
+    let m = f.hub_message(
+        &hs,
+        &ws,
+        "task.assign",
+        1,
+        1,
+        100,
+        &serde_json::to_vec(&bad).unwrap(),
+    );
+    f.net.send("worker-1", m).unwrap();
     w.poll(&mut ws, 2);
     assert!(ws.tasks.is_empty(), "the task was not accepted");
-    assert_eq!(ws.audit.len(), 1);
-    assert_eq!(ws.audit[0].action, "hub.keys.refused");
-    assert!(ws.audit[0].detail.contains("side=worker"));
+    let audit = ws.take_audit();
+    let refused: Vec<_> = audit
+        .iter()
+        .filter(|a| a.action == "hub.keys.refused")
+        .collect();
+    assert_eq!(refused.len(), 1);
+    assert!(refused[0].detail.contains("side=worker"));
     // the hub never assigned f9, so its refusal report is itself refused as unassigned (and audited)
     hub.poll(&mut hs, 3);
-    assert!(!hs.peers["worker-1"].report.status.contains_key("orch-1"));
+    assert!(!hs
+        .peers
+        .get("worker-1")
+        .is_some_and(|p| p.report.status.contains_key("orch-1")));
 }
 
 #[test]
 fn a_message_sealed_for_another_worker_is_not_opened() {
     let f = fx();
-    let mut ws = WorkerState::default();
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    ws.take_audit();
     // the hub's message for worker-2 lands in worker-1's queue (the network is not trusted)
-    let to_w2 = Link {
-        me: "main",
-        peer: "worker-2",
-        peer_fp: W2_FP,
-        my_fp: HUB_FP,
-        epoch: 7,
-        my_inc: 5,
-        peer_inc: 6,
-        level: 0,
+    let env = Envelope {
+        to: "worker-2".into(),
+        receiver_fp: W2_FP.into(),
+        ..sample()
+    };
+    let cx = Crypto {
         signer: &f.signers["main"],
         verifier: &f.roster_keys,
         sealer: &f.hub_sealer,
-        net: &f.net,
     };
-    to_w2
-        .send(
-            Kind::TaskAssign,
-            1,
-            0,
-            "m-1".into(),
-            1,
-            &serde_json::to_vec(&assign("f1", KeyDeclaration::default())).unwrap(),
-        )
-        .unwrap();
-    let m = f.net.recv("worker-2").unwrap();
+    let m = seal_and_sign(&PROFILE, env, W2_FP, b"{}", &cx).unwrap();
     f.net.send("worker-1", m).unwrap();
     assert_eq!(f.worker().poll(&mut ws, 2), 0);
     assert!(ws.tasks.is_empty());
-    assert_eq!(ws.audit[0].action, "worker.rejected");
+    let a = ws.take_audit();
+    assert_eq!(a[0].action, "hub.unverified");
+    assert!(a[0].detail.contains("not-for-me=1"));
 }
 
 #[test]
 fn a_forged_or_damaged_report_is_rejected_and_quarantines_nobody() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hs.take_audit();
     w.report(&mut ws, 1, "-", "-", "x");
@@ -588,15 +647,20 @@ fn a_forged_or_damaged_report_is_rejected_and_quarantines_nobody() {
     m.signature[0] ^= 1;
     f.net.send("main", m).unwrap();
     assert_eq!(hub.poll(&mut hs, 2), 0);
-    assert_eq!(hs.take_audit()[0].action, "hub.rejected");
-    assert!(hs.peers["worker-1"].quarantined.is_none());
+    let a = hs.take_audit();
+    assert_eq!(a[0].action, "hub.unverified");
+    assert!(a[0].detail.contains("bad-signature=1"));
+    assert!(hs
+        .peers
+        .get("worker-1")
+        .map_or(true, |p| p.quarantined.is_none()));
 }
 
 #[test]
-fn a_duplicate_is_dropped_and_audited_and_a_gap_is_not_taken() {
+fn a_duplicate_is_dropped_and_counted_once_and_a_gap_is_not_taken() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hs.take_audit();
     w.report(&mut ws, 1, "-", "-", "one");
@@ -605,22 +669,23 @@ fn a_duplicate_is_dropped_and_audited_and_a_gap_is_not_taken() {
     f.net.send("main", first.clone()).unwrap();
     f.net.send("main", first).unwrap();
     assert_eq!(hub.poll(&mut hs, 2), 1);
-    assert_eq!(hs.duplicates, 2);
-    // two duplicates inside a minute are one audit line, not two
-    assert_eq!(actions(&hs.take_audit()), ["hub.duplicate"]);
+    // two duplicates in one round are one counted audit line, not two
+    let a = hs.take_audit();
+    assert_eq!(actions(&a), ["hub.duplicate"]);
+    assert!(a[0].detail.contains("n=2"));
     // a gap: number 3 arrives before number 2
     w.report(&mut ws, 3, "-", "-", "two");
     w.report(&mut ws, 4, "-", "-", "three");
     let _lost = f.net.recv("main").unwrap();
     assert_eq!(hub.poll(&mut hs, 5), 0);
-    assert_eq!(hs.peers["worker-1"].in_seq, 1);
+    assert_eq!(hs.core.links["worker-1"].next_in, 2);
 }
 
 #[test]
 fn a_worker_that_sends_a_hub_only_kind_is_quarantined_and_sent_nothing() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     w.say_raw(&mut ws, 1, Kind::KeysDeliver, b"x");
     hub.poll(&mut hs, 2);
@@ -640,14 +705,14 @@ fn a_worker_that_sends_a_hub_only_kind_is_quarantined_and_sent_nothing() {
 fn key_delivery_is_not_supported_and_the_worker_says_so() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
-    ws.audit.clear();
-    hub_link(&f, &hs, &ws)
-        .send(Kind::KeysDeliver, 1, 0, "k-1".into(), 1, b"sealed-value")
-        .unwrap();
+    ws.take_audit();
+    claim_seq(&mut hs);
+    let m = f.hub_message(&hs, &ws, "keys.deliver", 1, 1, 100, b"sealed-value");
+    f.net.send("worker-1", m).unwrap();
     w.poll(&mut ws, 2);
-    assert_eq!(ws.audit[0].action, "worker.unsupported");
+    assert_eq!(ws.take_audit()[0].action, "worker.unsupported");
     hub.poll(&mut hs, 3);
     assert_eq!(
         hs.peers["worker-1"].report.status["-"]["-"].state,
@@ -661,7 +726,7 @@ fn key_delivery_is_not_supported_and_the_worker_says_so() {
 fn the_hub_offers_no_task_before_a_session_exists_and_starts_one() {
     let f = fx();
     let hub = f.hub();
-    let mut hs = HubState::default();
+    let mut hs = f.hub_state();
     let e = hub
         .assign(
             &mut hs,
@@ -673,7 +738,7 @@ fn the_hub_offers_no_task_before_a_session_exists_and_starts_one() {
     assert!(matches!(e, HubError::NoSession(_)));
     let sent = f.net.capture.lock().unwrap();
     assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0].envelope.kind, Kind::Hello);
+    assert_eq!(sent[0].envelope.kind, "hello");
     assert_eq!(sent[0].envelope.receiver_inc, 0);
 }
 
@@ -681,7 +746,7 @@ fn the_hub_offers_no_task_before_a_session_exists_and_starts_one() {
 fn a_captured_assignment_does_not_verify_again_after_the_worker_state_is_lost() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hub.assign(
         &mut hs,
@@ -691,28 +756,24 @@ fn a_captured_assignment_does_not_verify_again_after_the_worker_state_is_lost() 
     )
     .unwrap();
     assert_eq!(w.poll(&mut ws, 3), 1);
-    let captured = f
-        .net
-        .capture
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|m| m.envelope.kind == Kind::TaskAssign)
-        .unwrap()
-        .clone();
-    // the worker's state is lost: a fresh incarnation, in_seq back to 0
-    let mut fresh = WorkerState::default();
-    f.net.send("worker-1", captured).unwrap();
+    let cap = captured(&f, "task.assign").remove(0);
+    // the worker's state is lost: a fresh incarnation, nothing applied
+    let mut fresh = f.worker_state();
+    f.net.send("worker-1", cap).unwrap();
     assert_eq!(w.poll(&mut fresh, 4), 0);
     assert!(fresh.tasks.is_empty(), "the replay was not accepted");
-    assert_eq!(fresh.audit[0].detail, "reason=incarnation");
+    let a = fresh.take_audit();
+    assert!(
+        a.iter().any(|l| l.detail.contains("code=incarnation")),
+        "{a:?}"
+    );
 }
 
 #[test]
 fn a_replay_inside_the_same_incarnation_is_a_duplicate_and_is_audited() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hub.assign(
         &mut hs,
@@ -721,27 +782,19 @@ fn a_replay_inside_the_same_incarnation_is_a_duplicate_and_is_audited() {
         2,
     )
     .unwrap();
-    let first = f
-        .net
-        .capture
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|m| m.envelope.kind == Kind::TaskAssign)
-        .unwrap()
-        .clone();
+    let first = captured(&f, "task.assign").remove(0);
     w.poll(&mut ws, 3);
     f.net.send("worker-1", first).unwrap();
     assert_eq!(w.poll(&mut ws, 4), 0);
     assert_eq!(ws.tasks.len(), 1);
-    assert!(actions(&ws.audit).contains(&"worker.duplicate"));
+    assert!(actions(&ws.core.audit).contains(&"hub.duplicate"));
 }
 
 #[test]
 fn a_hub_restart_is_learned_by_a_hello_and_the_next_assignment_is_delivered() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hub.assign(
         &mut hs,
@@ -751,9 +804,9 @@ fn a_hub_restart_is_learned_by_a_hello_and_the_next_assignment_is_delivered() {
     )
     .unwrap();
     assert_eq!(w.poll(&mut ws, 3), 1);
-    // the hub restarts: a new state, a new incarnation, counters back to 0. The worker is still at in_seq 1.
-    let mut hs2 = HubState::default();
-    assert_ne!(hs2.inc, hs.inc);
+    // the hub restarts: a new state, a new incarnation, counters back to 0. The worker is still at next_in 2.
+    let mut hs2 = f.hub_state();
+    assert_ne!(hs2.inc(), hs.inc());
     // before a session the hub starts a hello instead of sending a task the worker would drop as a "duplicate"
     let e = hub
         .assign(
@@ -768,7 +821,7 @@ fn a_hub_restart_is_learned_by_a_hello_and_the_next_assignment_is_delivered() {
         w.poll(&mut ws, 11);
         hub.poll(&mut hs2, 11);
     }
-    assert_eq!(ws.hub_inc, hs2.inc);
+    assert_eq!(ws.hub_inc(), hs2.inc());
     hub.assign(
         &mut hs2,
         "worker-1",
@@ -784,71 +837,90 @@ fn a_hub_restart_is_learned_by_a_hello_and_the_next_assignment_is_delivered() {
 fn a_message_naming_the_old_hub_incarnation_starts_a_fresh_hello_not_a_silent_drop() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     // the worker restarts (new state) but the hub still holds the old incarnation, and the worker speaks with its new one
-    let mut ws2 = WorkerState {
-        hub_inc: hs.inc,
-        ..WorkerState::default()
-    };
+    let mut ws2 = f.worker_state();
+    ws2.core.links.get_mut("main").unwrap().peer_inc = hs.inc();
     w.report(&mut ws2, 5, "-", "-", "hi");
     hs.take_audit();
     assert_eq!(hub.poll(&mut hs, 6), 0);
     let a = hs.take_audit();
-    assert_eq!(a[0].action, "hub.rejected");
-    assert!(a[0].detail.contains("reason=incarnation"));
+    assert_eq!(a[0].action, "hub.refused");
+    assert!(a[0].detail.contains("code=incarnation"));
     // and the hub asked for a fresh hello, which the worker answers: both ends settle
     for _ in 0..6 {
-        w.poll(&mut ws2, 6);
-        hub.poll(&mut hs, 6);
+        // past the one-second limit on unsolicited hellos
+        w.poll(&mut ws2, 3000);
+        hub.poll(&mut hs, 3000);
     }
-    assert_eq!(hs.peers["worker-1"].peer_inc, ws2.inc);
+    assert_eq!(hs.peer_inc("worker-1"), ws2.inc());
 }
 
 #[test]
 fn an_expired_or_far_future_message_is_refused_after_its_signature_verifies() {
     let f = fx();
     let w = f.worker();
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1_000_000);
-    let link = hub_link(&f, &hs, &ws);
+    ws.take_audit();
     // sent at 1_000_000, lives 10 minutes; read 11 minutes later
-    link.send(Kind::Heartbeat, 1, 0, "h-1".into(), 1_000_000, b"{}")
-        .unwrap();
-    assert_eq!(w.poll(&mut ws, 1_000_000 + 11 * 60 * 1000), 0);
-    assert_eq!(ws.audit.last().unwrap().detail, "reason=stale");
-    // stamped in the far future
-    link.send(
-        Kind::Heartbeat,
+    let m = f.hub_message(
+        &hs,
+        &ws,
+        "heartbeat",
         1,
-        0,
-        "h-2".into(),
-        1_000_000 + 10 * 60 * 1000,
+        1_000_000,
+        1_000_000 + 600_000,
         b"{}",
-    )
-    .unwrap();
+    );
+    f.net.send("worker-1", m).unwrap();
+    assert_eq!(w.poll(&mut ws, 1_000_000 + 11 * 60 * 1000), 0);
+    assert!(ws
+        .take_audit()
+        .iter()
+        .any(|l| l.detail.contains("code=expired")));
+    // stamped in the far future
+    let m = f.hub_message(
+        &hs,
+        &ws,
+        "heartbeat",
+        1,
+        1_000_000 + 600_000,
+        1_000_000 + 1_200_000,
+        b"{}",
+    );
+    f.net.send("worker-1", m).unwrap();
     assert_eq!(w.poll(&mut ws, 1_000_000), 0);
+    assert!(ws
+        .take_audit()
+        .iter()
+        .any(|l| l.detail.contains("code=skew")));
 }
 
 #[test]
 fn a_worker_refuses_an_assignment_whose_lease_has_passed() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     let mut a = assign("f1", KeyDeclaration::default());
     a.lease_expiry_ms = 5;
     hub.assign(&mut hs, "worker-1", &a, 2).unwrap();
     assert_eq!(w.poll(&mut ws, 6), 1);
     assert!(ws.tasks.is_empty());
-    assert!(ws.audit.iter().any(|l| l.detail.contains("lease-expired")));
+    assert!(ws
+        .core
+        .audit
+        .iter()
+        .any(|l| l.detail.contains("lease-expired")));
 }
 
 #[test]
 fn a_report_for_a_feature_the_hub_did_not_assign_is_refused_and_audited() {
     let f = fx();
     let (hub, w) = (f.hub(), f.worker());
-    let (mut hs, mut ws) = (HubState::default(), WorkerState::default());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
     connect(&f, &mut hs, &mut ws, 1);
     hub.assign(
         &mut hs,
@@ -884,24 +956,95 @@ fn a_report_for_a_feature_the_hub_did_not_assign_is_refused_and_audited() {
 #[test]
 fn a_relayed_message_is_refused_in_this_release() {
     let f = fx();
-    let mut hs = HubState::default();
-    let mut e = sample();
-    e.from = "worker-1".into();
-    e.to = "main".into();
-    e.receiver_fp = HUB_FP.into();
-    e.level = 2;
-    e.via = vec![super::wire::Hop {
-        box_id: "worker-a".into(),
-        key_fp: W2_FP.into(),
-    }];
-    let sealed =
-        super::wire::seal_and_sign(e, b"{}", &f.w1_sealer, &f.signers["worker-1"]).unwrap();
+    let (hub, w) = (f.hub(), f.worker());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    hs.take_audit();
+    // a worker-signed message whose ext names a relay hop: well formed, signed, in order, and refused by the hub
+    let ext = Ext {
+        level: 2,
+        via: vec![Hop {
+            box_id: "worker-a".into(),
+            key_fp: W2_FP.into(),
+        }],
+    }
+    .encode();
+    let env = Envelope {
+        from: "worker-1".into(),
+        to: "main".into(),
+        receiver_fp: HUB_FP.into(),
+        sender_epoch: 1,
+        receiver_epoch: 7,
+        sender_inc: ws.inc(),
+        receiver_inc: hs.inc(),
+        seq: 1,
+        ack_seq: 0,
+        ext,
+        kind: "status".into(),
+        ..sample()
+    };
+    let cx = Crypto {
+        signer: &f.signers["worker-1"],
+        verifier: &f.roster_keys,
+        sealer: &f.w1_sealer,
+    };
+    let sealed = seal_and_sign(
+        &PROFILE,
+        Envelope {
+            valid_until_ms: 400,
+            ts_ms: 1,
+            ..env
+        },
+        HUB_FP,
+        b"{}",
+        &cx,
+    )
+    .unwrap();
     f.net.send("main", sealed).unwrap();
-    assert_eq!(f.hub().poll(&mut hs, 1), 0);
+    assert_eq!(hub.poll(&mut hs, 2), 0);
+    assert!(hs
+        .take_audit()
+        .iter()
+        .any(|l| l.detail.contains("reason=relay")));
+    let _ = w;
 }
 
-// Computed by an independent script (not by this crate's encoder): the ADR 0041 encoding-version byte, the domain tag, the
-// envelope version, then the fields in the order of `Envelope::canonical`, each as a 4-byte big-endian length and its bytes.
-const GOLDEN_CANONICAL: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d7631000000010100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc00000000800000000000000000000000800000000000000000000000568656c6c6f";
-const GOLDEN_DIGEST: &str = "64a03f7fe745d9b6525c81f9bd9a6984d09d10665efb625e750bd06cada92461";
-const GOLDEN_CANONICAL_VIA: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d7631000000010100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d310000000800000000000000030000000800000000000000020000000800000000000011110000000800000000000022220000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc000000008000000000000000200000008000000000000000100000008776f726b65722d6100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030320000000568656c6c6f";
+#[test]
+fn the_hub_state_persists_and_a_restart_keeps_its_counters_and_unacknowledged_messages() {
+    use crate::channel::store::Store;
+    let f = fx();
+    let (hub, w) = (f.hub(), f.worker());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    hub.assign(
+        &mut hs,
+        "worker-1",
+        &assign("f1", KeyDeclaration::default()),
+        2,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store: Store<HubState> = Store::new(dir.path().join("hub"));
+    store.create(&hs).unwrap();
+    let back = store.read().unwrap();
+    assert_eq!(back, hs, "what the hub keeps survives a restart");
+    assert_eq!(
+        back.inc(),
+        hs.inc(),
+        "the incarnation is the same life, not a new one"
+    );
+    // the worker never saw the assignment (it was dropped): the restarted hub still holds it and sends it again
+    let mut hs2 = back;
+    f.net.recv("worker-1");
+    while f.net.recv("worker-1").is_some() {}
+    hub.flush(&mut hs2, "worker-1", 10_000).unwrap();
+    assert_eq!(w.poll(&mut ws, 10_001), 1);
+    assert_eq!(ws.tasks.len(), 1);
+}
+
+const GOLDEN_EXT: &str =
+    "01000000106f7a626f782d6875622d6578742d7631000000080000000000000000000000080000000000000000";
+const GOLDEN_EXT_VIA: &str = "01000000106f7a626f782d6875622d6578742d763100000008000000000000000200000008000000000000000100000008776f726b65722d610000004062623030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303032";
+const GOLDEN_CANONICAL: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d76310000000800000000000000010000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d3100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000800000000000000010000000800000000000011110000000800000000000022220000000800000000000000030000000800000000000000020000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc000000010000102030405060708090a0b0c0d0e0f0000002d01000000106f7a626f782d6875622d6578742d76310000000800000000000000000000000800000000000000000000000568656c6c6f";
+const GOLDEN_DIGEST: &str = "afd2ef9686ad687b1c7fdd03fcbe679eeb53d9f5b522e781d3b84b05081699ca";
+const GOLDEN_CANONICAL_VIA: &str = "01000000156f7a626f782d6875622d656e76656c6f70652d76310000000800000000000000010000000b7461736b2e61737369676e000000046d61696e00000008776f726b65722d3100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030310000000800000000000000070000000800000000000000010000000800000000000011110000000800000000000022220000000800000000000000030000000800000000000000020000000f6d61696e2d776f726b65722d312d33000000080000018bcfe56800000000080000018bcfee8fc000000010000102030405060708090a0b0c0d0e0f0000007d01000000106f7a626f782d6875622d6578742d763100000008000000000000000200000008000000000000000100000008776f726b65722d6100000040626230303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030320000000568656c6c6f";

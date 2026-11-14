@@ -3,95 +3,129 @@
 //! The worker trusts the hub for **delivery and nothing else**. Before it accepts a task it repeats the checks the hub made:
 //! Production is refused here too (decision D2), so a hub that has been taken over still cannot hand a worker Production. A kind
 //! this release does not build is refused and answered, never silently ignored.
+//!
+//! Sessions, order, replay and acknowledgement are the channel's ([`crate::channel`]); the worker keeps a [`Core`] with one link, to
+//! the hub, and queues what it says in that link's outbox, so a report is never lost to a gap in the session.
 
-use super::engine::{Assign, AuditLine, ResultBody, StatusBody, DUP_AUDIT_MS, RATE_LIMIT_MS};
+use super::engine::{Assign, ResultBody, StatusBody};
 use super::refusal::{refuse_production, AUDIT_REFUSED};
-use super::wire::{Kind, Link, WireError};
+use super::wire::{Ext, Kind, Transport, WireError, PROFILE};
+use crate::audit::NewEvent;
+use crate::channel::audit::HasCore;
+use crate::channel::flow::{receive_round, seal_drafts};
+use crate::channel::session::{Core, Link};
+use crate::channel::wire::{Crypto, Sealed, Sealer, Signer, Verifier};
 
 /// What the worker keeps. Disposable: losing it loses unacknowledged messages and nothing else (ADR 0020's invariant).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerState {
-    /// This worker's incarnation: fresh whenever the state is created, so losing the state can never make an old message
-    /// verify again (ADR 0042 H-2).
-    pub inc: u64,
-    /// The hub's incarnation as learned from its `hello` (0 until then).
-    pub hub_inc: u64,
-    pub out_seq: u64,
-    pub in_seq: u64,
+    pub core: Core,
     pub tasks: Vec<Assign>,
-    pub audit: Vec<AuditLine>,
-    /// Rate limits (see the hub's `PeerState`).
-    pub last_hello_ms: u64,
-    pub last_dup_audit_ms: u64,
 }
 
-impl Default for WorkerState {
-    fn default() -> Self {
-        WorkerState {
-            inc: super::engine::fresh_incarnation(),
-            hub_inc: 0,
-            out_seq: 0,
-            in_seq: 0,
-            tasks: Vec::new(),
-            audit: Vec::new(),
-            last_hello_ms: 0,
-            last_dup_audit_ms: 0,
-        }
+impl HasCore for WorkerState {
+    fn core(&self) -> &Core {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
     }
 }
 
 impl WorkerState {
+    /// A new worker state: this worker's name and key fingerprint, and the hub it is pinned to (its name, key fingerprint and the
+    /// hub's epoch). The incarnation is fresh, so losing the state can never make an old message verify again (ADR 0042 H-2).
+    pub fn new(me: &str, my_fp: &str, hub: &str, hub_fp: &str, hub_epoch: u64) -> WorkerState {
+        let mut core = Core::new(me, my_fp, my_fp, my_fp, super::engine::WORKER_EPOCH);
+        core.pin(Link::new(hub, hub_fp, hub_fp, hub_fp, hub_epoch));
+        WorkerState {
+            core,
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn inc(&self) -> u64 {
+        self.core.incarnation
+    }
+
+    /// The hub's incarnation as learned from its `hello` (0 until then).
+    pub fn hub_inc(&self) -> u64 {
+        self.core.links.values().next().map_or(0, |l| l.peer_inc)
+    }
+
+    pub fn take_audit(&mut self) -> Vec<NewEvent> {
+        std::mem::take(&mut self.core.audit)
+    }
+
     fn note(&mut self, now: u64, action: &str, detail: String) {
-        self.audit.push(AuditLine {
-            ts_ms: now,
-            action: action.to_string(),
-            detail,
-        });
+        self.core.note(now, action, None, detail);
     }
 }
 
 /// The worker's end of its one link, to the hub.
 pub struct WorkerEnd<'a> {
-    pub link: Link<'a>,
+    pub me: &'a str,
+    pub hub: &'a str,
+    pub signer: &'a dyn Signer,
+    pub verifier: &'a dyn Verifier,
+    pub sealer: &'a dyn Sealer,
+    pub net: &'a dyn Transport,
 }
 
 impl WorkerEnd<'_> {
-    fn say(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
-        if st.hub_inc == 0 {
-            // no session yet: the hub would refuse it, so it is not sent (and not counted)
-            st.note(now, "worker.no-session", format!("kind={}", kind.name()));
+    fn cx(&self) -> Crypto<'_> {
+        Crypto {
+            signer: self.signer,
+            verifier: self.verifier,
+            sealer: self.sealer,
+        }
+    }
+
+    /// Push what the channel says the hub is owed. A transport that cannot take it is said, never dropped silently; the outbox
+    /// keeps it and the next push sends it again.
+    fn flush(&self, st: &mut WorkerState, now: u64) {
+        let opts = st.core.push_opts(self.hub, now);
+        let drafts = st.core.drafts(self.hub, now, opts);
+        if drafts.is_empty() {
             return;
         }
-        st.out_seq += 1;
-        let id = format!("{}-{}", self.link.me, st.out_seq);
-        let link = self.link.with_incarnations(st.inc, st.hub_inc);
-        if let Err(e) = link.send(kind, st.out_seq, st.in_seq, id, now, plain) {
-            // a message that cannot be built or sent is said, never dropped silently; the hub's resync asks again
-            st.out_seq -= 1;
+        let sent: Result<(), WireError> = seal_drafts(&PROFILE, &self.cx(), &drafts)
+            .map_err(WireError::from)
+            .and_then(|sealed| {
+                sealed
+                    .into_iter()
+                    .try_for_each(|m| self.net.send(self.hub, m))
+            });
+        match sent {
+            Ok(()) => st.core.pushed(self.hub, now, &drafts),
+            Err(e) => st.note(now, "worker.send-failed", format!("reason={e}")),
+        }
+    }
+
+    fn say(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
+        if let Err(c) = st.core.enqueue(
+            &PROFILE,
+            self.hub,
+            kind.name(),
+            Ext::at(1).encode(),
+            plain.to_vec(),
+        ) {
             st.note(
                 now,
                 "worker.send-failed",
-                format!("kind={} reason={e}", kind.name()),
+                format!("kind={} reason={c}", kind.name()),
             );
+            return;
         }
+        self.flush(st, now);
     }
 
     /// Step one of a `hello`: tell the hub this worker's incarnation (it names none of the hub's). Rate-limited.
     pub fn hello(&self, st: &mut WorkerState, now: u64) {
-        self.send_hello(st, now, 0, true);
-    }
-
-    fn send_hello(&self, st: &mut WorkerState, now: u64, receiver_inc: u64, limited: bool) {
-        if limited && st.last_hello_ms != 0 && now < st.last_hello_ms.saturating_add(RATE_LIMIT_MS)
-        {
-            return;
+        if let Some(l) = st.core.links.get_mut(self.hub) {
+            l.hello_wanted = true;
         }
-        st.last_hello_ms = now;
-        let link = self.link.with_incarnations(st.inc, receiver_inc);
-        let id = format!("{}-hello-{now}", self.link.me);
-        if let Err(e) = link.send(Kind::Hello, 0, 0, id, now, b"{}") {
-            st.note(now, "worker.send-failed", format!("kind=hello reason={e}"));
-        }
+        self.flush(st, now);
     }
 
     fn status(
@@ -114,101 +148,50 @@ impl WorkerEnd<'_> {
         }
     }
 
-    fn hello_taken(&self, st: &mut WorkerState, now: u64, sender_inc: u64, receiver_inc: u64) {
-        if receiver_inc == 0 {
-            // the hub's request: answer with an echo naming its incarnation; nothing changes yet
-            self.send_hello(st, now, sender_inc, false);
-            return;
-        }
-        if st.hub_inc == sender_inc {
-            return;
-        }
-        st.hub_inc = sender_inc;
-        st.in_seq = 0;
-        st.out_seq = 0;
-        st.note(now, "worker.session", String::new());
-        self.send_hello(st, now, sender_inc, false);
-    }
-
     /// Take every message waiting for this worker. Returns how many were applied.
     pub fn poll(&self, st: &mut WorkerState, now: u64) -> usize {
+        let mut msgs: Vec<Sealed> = Vec::new();
+        while let Some(m) = self.net.recv(self.me) {
+            msgs.push(m);
+        }
+        st.core.tick(now);
+        let cx = self.cx();
+        let r = receive_round(&mut st.core, &PROFILE, &cx, &|_, _, _| Ok(()), now, &msgs);
         let mut applied = 0;
-        while let Some(msg) = self.link.net.recv(self.link.me) {
-            let link = self.link.with_incarnations(st.inc, st.hub_inc);
-            let (env, plain) = match link.open(&msg, now) {
-                Ok(x) => x,
-                Err(e @ (WireError::WrongIncarnation | WireError::Stale)) => {
-                    st.note(
-                        now,
-                        "worker.rejected",
-                        format!(
-                            "reason={}",
-                            if e == WireError::Stale {
-                                "stale"
-                            } else {
-                                "incarnation"
-                            }
-                        ),
-                    );
-                    if e == WireError::WrongIncarnation {
-                        // a restart on one side: ask for a fresh session (rate-limited), never accept the message
-                        self.hello(st, now);
-                    }
-                    continue;
-                }
-                Err(_) => {
-                    st.note(now, "worker.rejected", "reason=unverified".to_string());
-                    continue;
-                }
+        for d in r.deliveries {
+            let kind = Kind::parse(&d.kind);
+            let level_ok = Ext::decode(&d.ext).is_some_and(|e| e.level == 0 && e.via.is_empty());
+            let (Some(kind), Ok(plain), true) = (kind, d.body, level_ok) else {
+                st.note(now, "worker.rejected", "reason=shape".to_string());
+                continue;
             };
-            if env.kind == Kind::Hello {
-                self.hello_taken(st, now, env.sender_inc, env.receiver_inc);
-                continue;
-            }
-            if env.seq <= st.in_seq {
-                if st.last_dup_audit_ms == 0
-                    || now >= st.last_dup_audit_ms.saturating_add(DUP_AUDIT_MS)
-                {
-                    st.last_dup_audit_ms = now;
-                    st.note(
-                        now,
-                        "worker.duplicate",
-                        format!("seq={} below={}", env.seq, st.in_seq),
-                    );
-                }
-                continue;
-            }
-            if env.seq != st.in_seq + 1 || env.level != 0 || !env.kind.hub_to_worker() {
+            if !kind.hub_to_worker() {
                 st.note(
                     now,
                     "worker.rejected",
-                    format!("kind={} reason=shape", env.kind.name()),
+                    format!("kind={} reason=shape", kind.name()),
                 );
                 continue;
             }
-            st.in_seq = env.seq;
             applied += 1;
-            match env.kind {
+            match kind {
                 Kind::TaskAssign => self.assigned(st, now, &plain),
                 Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay => {
                     // key delivery, pins and the laptop relay are not built in this release: said, never ignored
-                    st.note(
-                        now,
-                        "worker.unsupported",
-                        format!("kind={}", env.kind.name()),
-                    );
+                    st.note(now, "worker.unsupported", format!("kind={}", kind.name()));
                     self.status(
                         st,
                         now,
                         "-",
                         "-",
                         "unsupported",
-                        &format!("{} is not supported in this release", env.kind.name()),
+                        &format!("{} is not supported in this release", kind.name()),
                     );
                 }
                 _ => {}
             }
         }
+        self.flush(st, now);
         applied
     }
 
@@ -225,7 +208,7 @@ impl WorkerEnd<'_> {
             st.note(
                 now,
                 AUDIT_REFUSED,
-                format!("side=worker {}", r.audit_detail(self.link.me, &a.feature)),
+                format!("side=worker {}", r.audit_detail(self.me, &a.feature)),
             );
             self.status(st, now, &a.orchestration, &a.feature, "refused", &r.message);
             return;

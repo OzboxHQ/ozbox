@@ -840,7 +840,7 @@ impl Tools {
                     lease_expiry_ms: now
                         .saturating_add(f.caps.max_runtime_s.unwrap_or(4 * 3600) * 1000),
                 };
-                let sent = h.with(|hub, st| {
+                let sent = h.with(now, |hub, st| {
                     let r = hub.assign(st, &f.box_name, &assign, now);
                     (r, st.take_audit())
                 });
@@ -903,7 +903,7 @@ impl Tools {
         let reports = match &self.hub {
             Some(h) => {
                 let (map, lines) = h
-                    .with(|hub, st| {
+                    .with(now, |hub, st| {
                         hub.poll(st, now);
                         let mut m: BTreeMap<(String, String), Value> = BTreeMap::new();
                         for (worker, p) in &st.peers {

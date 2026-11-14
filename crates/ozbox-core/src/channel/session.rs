@@ -238,6 +238,10 @@ pub struct HelloBody {
     /// A thing the sender wants its peer to know (`seq-conflict`), or nothing.
     #[serde(default)]
     pub notice: Option<String>,
+    /// The incarnation of the receiver this end has adopted (0 if none): lets the receiver see that this end has not adopted *its*
+    /// current incarnation yet, and say so, so a session one end believes in and the other does not still converges.
+    #[serde(default)]
+    pub heard: u64,
 }
 
 pub const NOTICE_SEQ_CONFLICT: &str = "seq-conflict";
@@ -446,6 +450,7 @@ impl Core {
             let floor = l.outbox.first().map_or(l.out_seq + 1, |x| x.seq);
             let body = HelloBody {
                 out_floor: floor,
+                heard: l.peer_inc,
                 // a notice is about the session this end holds; to a peer whose new incarnation this end has not adopted yet it
                 // would describe the old one
                 notice: if l.named_inc == l.peer_inc {
@@ -715,6 +720,9 @@ impl Core {
             if e.receiver_inc == 0 {
                 // a request: the peer does not know this end's incarnation, so this end says it
                 l.hello_reply = true;
+            } else if e.receiver_inc == me_inc && e.sender_inc == l.peer_inc && h.heard != me_inc {
+                // the peer is in a session with this end's old life: tell it the current one (at the unsolicited rate)
+                l.hello_wanted = true;
             }
             if e.receiver_inc == me_inc && e.sender_inc != l.peer_inc {
                 l.peer_inc = e.sender_inc;

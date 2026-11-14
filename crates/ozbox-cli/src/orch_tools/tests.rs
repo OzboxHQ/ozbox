@@ -937,7 +937,6 @@ mod hub_handoff {
     use super::*;
     use ozbox_core::hub::engine::{HubService, HubState, RosterEntry};
     use ozbox_core::hub::mem::{MemTransport, TestKey, TestRoster, TestSealer};
-    use ozbox_core::hub::wire::Link;
     use ozbox_core::hub::worker::{WorkerEnd, WorkerState};
 
     const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
@@ -966,7 +965,6 @@ mod hub_handoff {
         let svc = HubService {
             me: "main".into(),
             my_fp: HUB_FP.into(),
-            epoch: 1,
             roster,
             signer: Arc::new(TestKey("k-main".into())),
             verifier: Arc::new(TestRoster(keys.clone())),
@@ -974,7 +972,8 @@ mod hub_handoff {
                 my_fp: HUB_FP.into(),
             }),
             net: net.clone(),
-            state: Mutex::new(HubState::default()),
+            state: Mutex::new(HubState::new("main", HUB_FP, 1)),
+            store: None,
         };
         let tools = Tools::new(
             TaskStore::new(r._dir.path().join("tasks.json")),
@@ -991,20 +990,12 @@ mod hub_handoff {
 
     fn worker_end<'a>(h: &'a HubRig, signer: &'a TestKey, sealer: &'a TestSealer) -> WorkerEnd<'a> {
         WorkerEnd {
-            link: Link {
-                me: "worker-1",
-                peer: "main",
-                peer_fp: HUB_FP,
-                my_fp: W_FP,
-                epoch: 1,
-                my_inc: 0,
-                peer_inc: 0,
-                level: 1,
-                signer,
-                verifier: &h.keys,
-                sealer,
-                net: h.net.as_ref(),
-            },
+            me: "worker-1",
+            hub: "main",
+            signer,
+            verifier: &h.keys,
+            sealer,
+            net: h.net.as_ref(),
         }
     }
 
@@ -1013,14 +1004,14 @@ mod hub_handoff {
     fn connect(h: &HubRig, c: &Session) -> WorkerState {
         let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
         let w = worker_end(h, &sk, &ss);
-        let mut ws = WorkerState::default();
+        let mut ws = WorkerState::new("worker-1", W_FP, "main", HUB_FP, 1);
         w.hello(&mut ws, 15);
         for _ in 0..4 {
             // a task_status call polls the hub
             h.r.tools.call(c, "task_status", &json!({}), 16).unwrap();
             w.poll(&mut ws, 16);
         }
-        assert_ne!(ws.hub_inc, 0);
+        assert_ne!(ws.hub_inc(), 0);
         ws
     }
 

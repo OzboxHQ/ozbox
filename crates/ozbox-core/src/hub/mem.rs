@@ -9,7 +9,8 @@ use std::sync::Mutex;
 
 use ring::digest::{digest, SHA256};
 
-use super::wire::{Sealed, Sealer, Signer, Transport, Verifier, WireError};
+use super::wire::{Transport, WireError};
+use crate::channel::wire::{Sealed, Sealer, Signer, Verifier, WireError as ChannelError};
 
 /// One queue per receiver. Delivery is a function call; ordering is the queue's.
 #[derive(Default)]
@@ -59,7 +60,7 @@ fn tag(secret: &str, msg: &[u8]) -> Vec<u8> {
 }
 
 impl Signer for TestKey {
-    fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, WireError> {
+    fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, ChannelError> {
         Ok(tag(&self.0, canonical))
     }
 }
@@ -96,25 +97,29 @@ fn pad(aad: &[u8], n: usize) -> Vec<u8> {
 }
 
 impl Sealer for TestSealer {
-    fn seal(&self, receiver_key_fp: &str, aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, WireError> {
+    fn seal(
+        &self,
+        receiver_key_fp: &str,
+        aad: &[u8],
+        plain: &[u8],
+    ) -> Result<Vec<u8>, ChannelError> {
         let mut out = vec![u8::try_from(receiver_key_fp.len()).unwrap_or(u8::MAX)];
         out.extend_from_slice(receiver_key_fp.as_bytes());
         out.extend(plain.iter().zip(pad(aad, plain.len())).map(|(a, b)| a ^ b));
         Ok(out)
     }
 
-    fn open(&self, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
-        let n = usize::from(*sealed.first()?);
-        let to = sealed.get(1..=n)?;
+    fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, ChannelError> {
+        let n = usize::from(*sealed.first().ok_or(ChannelError::BadSeal)?);
+        let to = sealed.get(1..=n).ok_or(ChannelError::BadSeal)?;
         if to != self.my_fp.as_bytes() {
-            return None;
+            return Err(ChannelError::BadSeal);
         }
-        let rest = sealed.get(n + 1..)?;
-        Some(
-            rest.iter()
-                .zip(pad(aad, rest.len()))
-                .map(|(a, b)| a ^ b)
-                .collect(),
-        )
+        let rest = sealed.get(n + 1..).ok_or(ChannelError::BadSeal)?;
+        Ok(rest
+            .iter()
+            .zip(pad(aad, rest.len()))
+            .map(|(a, b)| a ^ b)
+            .collect())
     }
 }

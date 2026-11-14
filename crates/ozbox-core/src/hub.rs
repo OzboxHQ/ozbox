@@ -2,16 +2,18 @@
 //!
 //! What is here, and only this (the first slice of phase H1, and the Production refusal of decision D2):
 //!
-//! * [`wire`]: the frozen envelope. One version byte, a domain tag that names the receiver's key and the hub's epoch, then
-//!   length-prefixed fields in a fixed order (ADR 0041's [`crate::approval_subject::Encoder`]). The message kinds, `level` and
-//!   `via` are pinned by golden vectors in `hub/tests.rs` (computed by a separate script): a change to any of them fails there first.
-//!   The format freezes when the first real transport ships; until then it is revised with new vectors.
+//! * [`wire`]: the worker channel's **profile** of the shared envelope ([`crate::channel`], which the agent mesh uses too): the closed
+//!   list of message kinds and who may send which, and the signed `ext` (the sender's level in the tree and the relay hops). The
+//!   envelope, its canonical bytes, sessions, order, replay and acknowledgement are the channel's. The kinds, `level` and `via` are
+//!   pinned by golden vectors in `hub/tests.rs` (computed by a separate script): a change to any of them fails there first. The format
+//!   freezes when the first real transport ships; until then it is revised with new vectors.
 //! * [`refusal`]: a worker is never given a Production credential in this release. One function, [`refusal::refuse_production`],
 //!   with no flag, no setting and no argument that turns it off. It runs **on the hub before an assignment is made and again on
 //!   the worker before it is accepted**, so a hub that has been taken over still cannot hand a worker a Production *label*. These are label checks (the declaration's
 //!   environment and key names); the check of the delivered value is H3a and is not built yet.
-//! * [`engine`]: the hub's side. It assigns a task to a worker named in the roster, checks every report (signature, sequence,
-//!   duplicate) and keeps the latest report per worker so the conductor can read it. It opens no network connection and no shell.
+//! * [`engine`]: the hub's side. It assigns a task to a worker named in the roster, checks every report (through the channel's fixed
+//!   order of checks) and keeps the latest report per worker so the conductor can read it. Its state (the channel's core plus the
+//!   reports) persists through the channel's store when it runs as a service. It opens no network connection and no shell.
 //! * [`worker`]: the worker's side, the part the worker's own service runs.
 //! * [`mem`]: an in-memory transport for tests and for the fake fleet.
 //!
