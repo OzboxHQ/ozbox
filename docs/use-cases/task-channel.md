@@ -33,11 +33,11 @@ compare them over a call or a chat that is not this channel:
 ```sh
 ozbox tasks identity > laptop.json                      # on your computer; copy the file to the box
 ozbox tasks identity > main.json                        # on the box; copy the file to your computer
-ozbox tasks pin main.json --via "ssh my-box ozbox"      # on your computer
+ozbox tasks pin main.json --via-arg ssh --via-arg my-box --via-arg /usr/local/bin/ozbox   # on your computer
 ozbox tasks pin laptop.json                             # on the box
 ```
 
-`--via` is the command that runs `ozbox` on the other side, split on spaces and run as an argument list, never through a shell.
+`--via-arg` is one word of the command that runs `ozbox` on the other side; repeat it for each word. It is run as an argument list, never through a shell, and a word may contain spaces. Name the program by its absolute path so nothing on the other side's `PATH` can stand in for it. On a box the channel runs as its own service user (`ozbox-mesh`), so agents there use the same commands but cannot read its keys.
 Use whatever reaches the box already: `ssh`, `aws ssm`, or `env OZBOX_TASKS_DIR=... ozbox` for a local test.
 
 **Limit:** on the box, the key file is readable by the box user. Run the channel as a user your agents cannot reach.

@@ -36,27 +36,34 @@ Each endpoint has a name, an Ed25519 signing key and an X25519 sealing key (`ozb
 
 ### 2. The envelope
 
-An envelope has an explicit `version` field encoded after the domain tag, and a closed list of kinds (`hello`, `task`, `message`,
-`status`, `artifact`, `cancel`, `resync`). It carries the sender's and the receiver's **epoch**, the sender's **incarnation**, a 128-bit
-nonce, a per-direction sequence number, a cumulative acknowledgement and a validity window of at most ten minutes. The body is sealed to
-the receiver's key (HPKE through `ozbox-seal`), and the signature covers the sealed envelope, so a relay verifies without opening
-anything. The mesh does not reuse the hub's wire types: it has its own envelope so that the hub's can change; when the hub's sealed
-channel is ready, mesh bodies ride it unchanged.
+The mesh is a **profile of the shared channel** (`ozbox_core::channel`, which the worker channel of ADR 0042 uses too), not an envelope of its
+own. The channel owns the version (a receiver accepts exactly the current one), the sender's and receiver's **epoch** and **incarnation**
+(a receiver's is 0 only in a `hello`), a 128-bit nonce, a per-direction sequence number, a cumulative acknowledgement, a validity window of
+at most ten minutes and one 2-minute clock skew, the sealed body (HPKE through `ozbox-seal`) and a signature over the sealed envelope, so a
+relay verifies without opening anything. The mesh supplies its tag, its five kinds (`task`, `message`, `status`, `artifact`, `cancel`), a
+96 KiB body cap and the signed `ext`, which names the task as `<sender of the task>/<task id>`. There is no mesh `resync`: a gap past the
+window is refused, and the sender resends its window every round.
 
 A receiver checks, in this order, and acts on nothing until all pass: shape and version; addressing; the signature against the **pinned**
-key; both epochs; validity against its **own** clock; the seal; the nonce; the incarnation; the acknowledgement; then the sequence
-window. Every refusal is named and audited.
+key (all counted as **one** audit event per round, because the sender is not authenticated yet); both epochs; validity against its **own**
+clock; the nonce; the seal; the body screen (so refused content is never held); the incarnation; the acknowledgement; then the sequence
+window. Every later refusal is named and audited.
 
 - **Ordered and de-duplicated.** Sequenced kinds are applied in sequence order from a bounded window; a repeat is a no-op; a gap past
-  the window is refused and a resync is asked for. A task is de-duplicated on `(sender, task id)`: the same body is the same task; **the
-  same id with another body is refused and raised**.
-- **Replay and state loss.** A nonce is remembered for its validity. An incarnation that goes down is refused; one that goes up is taken
-  only through a `hello`. A restored store calls `ozbox tasks restored`, which moves its epoch, so nothing captured before verifies.
+  the window is refused and a resync is asked for. Tasks are stored under `<sender>/<id>`, so a peer can never overwrite a task this end sent or
+  another peer's by reusing an id. The same body is the same task; **the same key with another body is refused and raised**, also after the
+  task was reduced to a tombstone.
+- **Replay and state loss.** A nonce is remembered for its validity. A peer's incarnation is adopted only from a signed
+  `hello` that names this end's current one, and an older `hello` is refused. A restored store calls `ozbox tasks restored`, which moves its
+  epoch, incarnation and audit source epoch. A store rolled back **without** saying so is caught: a reused sequence number with other content
+  is refused and the sender halts instead of treating the peer's acknowledgement as delivery.
 - **Journal before acknowledgement.** The state file (tasks, outbox, windows, nonces, pending audit events) is written atomically
   (temp file, fsync, rename) under a lock before anything is acknowledged. The outbox is written in the same write as the task it
   carries; nothing is sent while the lock is held, and each delivery attempt is signed afresh.
 - **Limits.** Starting values: 64 KiB inline per message, 20 new tasks and 120 messages a minute per sender, 50 open tasks per sender,
-  a bounded outbox and journal. Past a limit the task is `rejected` with `resource-exhausted`.
+  a bounded outbox, 200 messages and 50 artifacts per task, and a 32 MiB state budget. Finished tasks are reduced to a tombstone after 30
+  days, so the cap measures what is open. A round takes at most a window plus two envelopes and is one write. Past a limit the task is
+  `rejected` with `resource-exhausted`. A transport command is stopped after 60 seconds and its output is read through a cap.
 
 ### 3. Tasks
 
@@ -83,11 +90,17 @@ A task carries no permission, no secret, no approval and no change to the receiv
 - **Production is refused in code at both ends**, with no flag or setting: an environment not known to be non-Production counts as
   Production. When the path exists, the owner's decision for a Production act is a passkey on `main`'s dashboard **plus** presence at the
   laptop (owner decision, 2026-11-13; ADR 0042 Amendment 1), and nothing weaker.
-- **No secrets in messages.** Text, titles, data parts, artifacts, replies and status reasons are screened with the same key-shape screen
-  agent memory uses, on send and on receive. A refused task is stored as `[refused]` with no content, and the audit trail never holds
-  message text.
-- **Labels are display only.** A message's `person`, `fleet` or `untrusted` label is a claim by the sender, shown as one; no rule reads it.
-  Text a peer supplied is stripped of control characters before it is printed.
+- **Keys pasted by accident are caught; the screen is not a defence against a sender trying to get one past it.** Every string in a body
+  (text, titles, ids, `parent`, reasons, artifacts) is screened with the key-shape screen agent memory uses, on send and on receive, **before
+  anything is held**. A refused task is stored as `[refused]` with only its id and the code, and the audit trail never holds message text.
+  Base64, hex, reversed or split keys pass a shape screen.
+- **Labels are claims, and an end never claims a person.** Every message an end sends says `fleet`. The receiver stamps `peer:<name>` and
+  `untrusted: true` itself and keeps the sender's word only as `claimed_label`. `--for-model` wraps every piece of peer text in the same
+  fenced untrusted block triggers use. Control and Unicode format characters (bidi overrides) are stripped, and line breaks from fields that
+  must stay one line.
+- **A cancel is a request.** The receiver records it, tells the sender it arrived, and the task ends only when the receiver moves it.
+- **An act is a shape a digest can sign:** a plain branch name (no `+`, no `:`), the name of a remote and a repository pinned on the receiver
+  (never a URL or a path), a full object id.
 
 ### 5. How it travels, and what it costs
 
@@ -110,11 +123,14 @@ disk has not been measured.
 
 ## What is not covered
 
-- **The router's key can be read by the box user.** The signing and sealing keys sit in a mode-0600 file. On `main` the channel should
-  run as a service user that agents cannot reach; until that separation is built an injected agent on the same user could read them and
-  speak as that endpoint. This is the largest known gap.
+- **The router's key and state, on a box without the service.** On a box the channel runs as the system user `ozbox-mesh` (`ozbox tasks
+  serve`, set up by `ozbox-mesh-setup.sh`): agents reach it only through an agent socket (submit, reply, inbox, status, why, cancel), the
+  keyless relay a laptop's `ssh` reaches, and an admin socket for root (`init`, `pin`, `restored`). Where that service is absent the keys
+  sit where the box user can read them; `tasks init` says so and every JSON task carries `store_writable_by_agents: true`. **Proven on a
+  real box: not yet**, so the channel is not recommended on `main` and has no approval path until it is.
 - **A restore that does not call `ozbox tasks restored`** leaves the epoch unchanged. Captured envelopes then stay valid for their
-  validity window (ten minutes) at most, and tasks seen in the last seven days are still de-duplicated.
+  validity window (ten minutes) at most, and tombstones still de-duplicate.
+- **A peer whose clock steps back** past its last `hello` cannot open a new session until the clock catches up (`stale-hello`).
 - **A compromised host with root** can sign as the endpoint. Metadata (who, when, how much) is visible to anything that carries the traffic.
 - **Approval fatigue** is the main residual risk once acts exist; the prompt rate and decision time are to be measured then.
 - **No approval path, no hub transport, no directory, no worker-to-worker tasks.**
