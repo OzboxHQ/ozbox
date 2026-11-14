@@ -10,6 +10,7 @@
 pub mod adopt;
 pub mod agent_engine;
 pub mod agent_line;
+pub mod agent_mesh;
 pub mod approval;
 pub mod approval_subject;
 pub mod approval_verify;
