@@ -2,6 +2,8 @@
 // the same rules; this only saves a round trip and says what is wrong in the person's words. The limits mirror
 // `ozbox_core::skill_pack`.
 
+import { HIDDEN_RANGES } from './skill-hidden';
+
 export const MAX_FILES = 50;
 export const MAX_FILE_BYTES = 128 * 1024;
 export const MAX_TOTAL_BYTES = 512 * 1024;
@@ -16,23 +18,31 @@ export function fileKind(path: string): FileKind {
   return SCRIPT_EXTENSIONS.includes(ext) ? 'script' : 'text';
 }
 
-const NAME = /^[A-Za-z0-9_-]{1,64}$/;
+// The open Agent Skills format: lower-case letters and digits with single hyphens between them. Mirrors `skill_name_ok`.
+const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const COMPONENT = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
-// Characters a reviewer cannot see or that change how text reads: control characters other than newline, return and tab,
-// zero-width and direction marks, variation selectors and tag characters. The same set the server refuses.
-const HIDDEN_RANGES: [number, number][] = [
-  [0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e],
-  [0x2060, 0x2064], [0x2066, 0x2069], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xe0000, 0xe007f],
-];
-export const hasHidden = (text: string): boolean => {
-  for (const ch of text) {
-    const c = ch.codePointAt(0) ?? 0;
-    if (HIDDEN_RANGES.some(([a, b]) => c >= a && c <= b)) return true;
+// Characters a reviewer cannot see or that change how text reads: control characters other than newline, return and tab, every
+// format character (zero-width, direction marks, tags, variation selectors, Hangul fillers, ...), line and paragraph separators,
+// private-use and unassigned code points. The table is generated from the Unicode Character Database with the server's own
+// (scripts/gen-skill-hidden-chars.py), so the page and the server refuse the same characters.
+export const isHidden = (c: number): boolean => {
+  let lo = 0;
+  let hi = HIDDEN_RANGES.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [a, b] = HIDDEN_RANGES[mid] as readonly [number, number];
+    if (c < a) hi = mid - 1;
+    else if (c > b) lo = mid + 1;
+    else return true;
   }
   return false;
 };
+export const hasHidden = (text: string): boolean => {
+  for (const ch of text) if (isHidden(ch.codePointAt(0) ?? 0)) return true;
+  return false;
+};
 
-export const skillNameOk = (n: string): boolean => NAME.test(n);
+export const skillNameOk = (n: string): boolean => n.length <= 64 && NAME.test(n);
 
 export interface Fields {
   name: string;
@@ -42,12 +52,16 @@ export interface Fields {
   instructions: string;
 }
 
-/** The `SKILL.md` for a skill written on the page. A front-matter value is one line, so line breaks become spaces. */
+/**
+ * The `SKILL.md` for a skill written on the page. A front-matter value is one line, so line breaks become spaces, and it is
+ * written as a quoted string so that a colon or a `#` in it cannot change what the YAML means.
+ */
 export function composeSkillMd(f: Fields): string {
   const one = (s: string) => s.replace(/\s+/g, ' ').trim();
-  const lines = ['---', `name: ${one(f.name)}`, `description: ${one(f.description)}`];
-  if (one(f.version)) lines.push(`version: ${one(f.version)}`);
-  if (one(f.license)) lines.push(`license: ${one(f.license)}`);
+  const q = (s: string) => JSON.stringify(one(s));
+  const lines = ['---', `name: ${one(f.name)}`, `description: ${q(f.description)}`];
+  if (one(f.version)) lines.push(`version: ${q(f.version)}`);
+  if (one(f.license)) lines.push(`license: ${q(f.license)}`);
   lines.push('---', '', f.instructions.replace(/\s+$/, ''), '');
   return lines.join('\n');
 }
@@ -84,17 +98,31 @@ export function checkFiles(files: Record<string, string>): Problem[] {
   return out;
 }
 
-/** `name:` and `description:` from a SKILL.md's front matter, the way the server reads them. */
+/**
+ * `name:`, `description:` and `version:` from a SKILL.md's front matter, for a quick check before sending. Only top-level lines
+ * count (an indented `name:` under another key is not the skill's name), as in the YAML the server reads. The server is the
+ * authority and answers anything this does not understand.
+ */
 export function readFrontMatter(md: string): { name: string; description: string; version: string } {
   const out = { name: '', description: '', version: '' };
   const lines = md.split(/\r?\n/);
   if (lines[0]?.trim() !== '---') return out;
   for (const l of lines.slice(1)) {
     if (l.trim() === '---') break;
+    if (/^\s/.test(l) || l.startsWith('#') || l.startsWith('-')) continue;
     const i = l.indexOf(':');
     if (i < 0) continue;
     const k = l.slice(0, i).trim();
-    const v = l.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+    let v = l.slice(i + 1).trim();
+    if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
+      try {
+        v = JSON.parse(v) as string;
+      } catch {
+        v = v.slice(1, -1);
+      }
+    } else {
+      v = v.replace(/^'|'$/g, '');
+    }
     if (k === 'name' || k === 'description' || k === 'version') out[k] = v;
   }
   return out;

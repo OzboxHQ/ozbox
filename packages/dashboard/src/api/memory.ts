@@ -103,6 +103,8 @@ export interface SkillItem {
   source: 'bundled' | 'library' | 'removed';
   files: SkillFileInfo[];
   approved: boolean;
+  /** What it asks an agent program to do that needs acknowledging (`SkillAskKey`s); empty for a plain skill. */
+  asks: SkillAskKey[];
   installs: SkillInstall[];
   provenance: Provenance;
   shadows_bundled: boolean;
@@ -111,12 +113,25 @@ export interface SkillItem {
   revisions: number;
 }
 
+/** What a skill asks an agent program to do that needs its own acknowledgement. */
+export type SkillAskKey = 'hooks' | 'allowed-tools' | 'shell' | 'agent' | 'shell-injection';
+
+export interface SkillAsks {
+  /** Commands it runs or permissions it widens: each must be acknowledged before the skill can be approved. */
+  acknowledge: { key: SkillAskKey; detail: string[] }[];
+  /** Other documented settings it declares, as `[field, value]`. */
+  shown: [string, string][];
+  /** Fields in its front matter that nothing this page knows reads. */
+  unknown: string[];
+}
+
 export interface SkillReview {
   name: string;
   description: string;
   version: string;
   hash: string;
   approved: boolean;
+  asks: SkillAsks;
   provenance: Provenance;
   files: { path: string; text: string; kind: FileKind }[];
 }
@@ -144,11 +159,14 @@ export type HoldState = 'intact' | 'modified' | 'missing';
 
 export interface BoxHold {
   agent: string;
+  /** Read from the box's disk against the box's own record. */
   state: HoldState;
+  /** What the box's record says was put there. The box user can edit that record; `origin` is not taken from it. */
   hash: string;
-  version: string;
-  pushed_by: string;
-  pushed_ms: number;
+  /** What the files on the box's disk hash to now, when they can be read. */
+  disk_hash: string | null;
+  /** `dashboard` only when this dashboard's own push record names the same hash; anything else is `box`: put there on the box. */
+  origin: 'dashboard' | 'box';
   /** The box's files are exactly the library's current ones. `null` when the library no longer has the skill. */
   matches_library: boolean | null;
 }
@@ -157,6 +175,8 @@ export interface BoxSkills {
   box: string;
   /** `ok`, or why it is not known: `stopped` and `unreachable` are never read as "holds nothing". */
   state: 'ok' | 'stopped' | 'unreachable';
+  /** Whether this dashboard can put a skill on the box's disk or take one off. Only a dashboard on the box can; another one only reads. */
+  can_write?: boolean;
   reason?: string;
   code?: string | null;
   agents?: BoxAgentFolder[];
@@ -203,7 +223,8 @@ export function createMemoryApi(request: Req) {
     review: (name: string, s?: AbortSignal, hash?: string) => request<SkillReview>('GET', `/v1/skills/${id(name)}/review${hash ? `?hash=${id(hash)}` : ''}`, undefined, s),
     install: (name: string, scope: string) => request<SkillInstall>('POST', `/v1/skills/${id(name)}/install`, { scope }),
     uninstall: (name: string, scope: string) => request<{ removed: string }>('POST', `/v1/skills/${id(name)}/uninstall`, { scope }),
-    approveSkill: (name: string, hash: string) => request<{ approved: string }>('POST', `/v1/skills/${id(name)}/approve`, { hash }),
+    approveSkill: (name: string, hash: string, acknowledged: string[] = []) =>
+      request<{ approved: string }>('POST', `/v1/skills/${id(name)}/approve`, { hash, acknowledged }),
     revoke: (name: string) => request<{ revoked: string }>('POST', `/v1/skills/${id(name)}/revoke`),
     addSkill: (b: AddSkillBody) => request<SkillItem>('POST', '/v1/skills', b),
     deleteSkill: (name: string) => request<{ removed: string }>('DELETE', `/v1/skills/${id(name)}`),

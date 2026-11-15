@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 
 import { expect, test, type Page } from '@playwright/test';
@@ -16,7 +17,7 @@ let s: RealStack;
 let page: Page;
 
 test.beforeAll(async ({ browser }) => {
-  s = await startRealThisBox({ port: 4186, signIn: true });
+  s = await startRealThisBox({ port: 4186, signIn: true, dashboardSocket: true });
   page = await (await browser.newContext()).newPage();
   await addVirtualAuthenticator(page);
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -91,10 +92,68 @@ test('a folder a person made by hand is never overwritten or removed', async () 
   const r = await call('PUT', `/v1/boxes/${s.box}/skills/${name}`, { hash, agents: ['claude-code'] });
   expect([r.status, (r.body['code'] as string | undefined) ?? '']).toEqual([409, 'not_ours']);
   expect(readFileSync(join(dir, 'SKILL.md'), 'utf8')).toBe('my own skill');
-  expect((await call('DELETE', `/v1/boxes/${s.box}/skills/${name}`)).status).toBe(404);
+  // nothing was put there through Oz Box, so there is nothing for it to remove
+  const pulled = await call('DELETE', `/v1/boxes/${s.box}/skills/${name}`);
+  expect([pulled.status, pulled.body['code']]).toEqual([404, 'not_found']);
   expect(existsSync(join(dir, 'SKILL.md'))).toBe(true);
   const view = (await call('GET', `/v1/boxes/${s.box}/skills`)).body as { others: Record<string, string[]> };
   expect(view.others['claude-code']).toContain(name);
+});
+
+/** One request to the daemon's own (box user's) socket, the way any process of the box user can make one. */
+function onTheBoxSocket(method: string, path: string, body: string): Promise<{ status: number; body: Json }> {
+  return new Promise((ok, fail) => {
+    const r = httpRequest({ socketPath: join(s.dir, 'd.sock'), method, path, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => {
+      let buf = '';
+      res.on('data', (d: Buffer) => (buf += d.toString()));
+      res.on('end', () => ok({ status: res.statusCode ?? 0, body: JSON.parse(buf || '{}') as Json }));
+    });
+    r.on('error', fail);
+    r.end(body);
+  });
+}
+
+test('a process on the box cannot push or remove a skill, and cannot make a folder look like the dashboard\'s', async () => {
+  const name = 'tb-forge';
+  // a person's own folder, which a process of the box user then writes a record for, as if the dashboard had put it there
+  const dir = folder('.claude', name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'), 'my own skill');
+  mkdirSync(join(s.work, '.ozbox'), { recursive: true });
+  writeFileSync(join(s.work, '.ozbox', 'skills.json'), JSON.stringify({ entries: [{ name, agent: 'claude-code', hash: 'ab', version: '1', pushed_ms: 1 }] }));
+  const hash = await addAndApprove(name, { 'SKILL.md': md(name, 'Pushed.') });
+  // the box socket answers reads and refuses every write, whatever hash it is sent
+  const refused = await onTheBoxSocket('PUT', `/v1/skills/${name}`, JSON.stringify({ hash, files: { 'SKILL.md': md(name, 'Pushed.') } }));
+  expect([refused.status, refused.body['code']]).toEqual([403, 'skills_write_not_here']);
+  expect((await onTheBoxSocket('DELETE', `/v1/skills/${name}`, '{}')).status).toBe(403);
+  expect((await onTheBoxSocket('GET', '/v1/skills', '')).status).toBe(200);
+  // the dashboard shows the forged record's folder as put there on the box, never as its own, and never touches it
+  const view = (await call('GET', `/v1/boxes/${s.box}/skills`)).body as { skills: { name: string; places: { origin: string; state: string }[] }[] };
+  const place = view.skills.find((x) => x.name === name)?.places[0];
+  expect([place?.origin, place?.state]).toEqual(['box', 'modified']);
+  const push = await call('PUT', `/v1/boxes/${s.box}/skills/${name}`, { hash, agents: ['claude-code'] });
+  expect([push.status, push.body['code']]).toEqual([409, 'not_ours']);
+  expect(readFileSync(join(dir, 'SKILL.md'), 'utf8')).toBe('my own skill');
+  writeFileSync(join(s.work, '.ozbox', 'skills.json'), JSON.stringify({ entries: [] }));
+});
+
+test('a skill that runs commands needs each acknowledged before it is approved or put on a box', async () => {
+  const name = 'tb-risky';
+  const md2 = `---\nname: ${name}\ndescription: Checks the tier B skill.\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: ./x.sh\n---\nDiff: !\`git diff\`\n`;
+  const added = await call('POST', '/v1/skills', { files: { 'SKILL.md': md2 } });
+  expect(added.status, JSON.stringify(added.body)).toBe(200);
+  const hash = added.body['hash'] as string;
+  const review = (await call('GET', `/v1/skills/${name}/review`)).body as { asks: { acknowledge: { key: string }[] } };
+  expect(review.asks.acknowledge.map((a) => a.key)).toEqual(['hooks', 'shell-injection']);
+  for (const acknowledged of [undefined, ['hooks'], ['hooks', 'shell-injection', 'bogus']]) {
+    const r = await call('POST', `/v1/skills/${name}/approve`, { hash, ...(acknowledged ? { acknowledged } : {}) });
+    expect([409, 400]).toContain(r.status);
+  }
+  const refused = await call('PUT', `/v1/boxes/${s.box}/skills/${name}`, { hash, agents: ['claude-code'] });
+  expect([refused.status, refused.body['code']]).toEqual([409, 'not_approved']);
+  expect(existsSync(folder('.claude', name))).toBe(false);
+  expect((await call('POST', `/v1/skills/${name}/approve`, { hash, acknowledged: ['hooks', 'shell-injection'] })).status).toBe(200);
+  expect((await call('PUT', `/v1/boxes/${s.box}/skills/${name}`, { hash, agents: ['claude-code'] })).status).toBe(200);
 });
 
 test('nothing unapproved, stale or tampered reaches the disk', async () => {

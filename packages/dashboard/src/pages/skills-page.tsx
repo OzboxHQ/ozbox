@@ -22,7 +22,7 @@ import { SourceNote } from '../components/source-badge';
 import { StoreNote } from '../components/store-note';
 import { t, type MessageKey } from '../lib/i18n';
 import { mayWrite, PAGE_CANNOT, PAGE_CAPABILITY } from '../lib/role-gates';
-import { holdKey, skillScopeLabel } from '../lib/skills';
+import { holdKey, originKey, skillScopeLabel } from '../lib/skills';
 import { useAsync } from '../lib/use-async';
 import { useCan } from '../lib/use-can';
 
@@ -41,6 +41,8 @@ interface Held {
   box: string;
   hold: BoxHold;
   folder: string;
+  /** This dashboard can take a skill off that box (it runs on it). */
+  canWrite: boolean;
 }
 
 /** What each box holds of one skill, read from the boxes themselves. */
@@ -49,7 +51,7 @@ function heldOf(name: string, boxes: BoxSkills[]): Held[] {
   for (const b of boxes) {
     if (b.state !== 'ok') continue;
     const places = b.skills?.find((s) => s.name === name)?.places ?? [];
-    for (const hold of places) out.push({ box: b.box, hold, folder: b.agents?.find((a) => a.id === hold.agent)?.label ?? hold.agent });
+    for (const hold of places) out.push({ box: b.box, hold, folder: b.agents?.find((a) => a.id === hold.agent)?.label ?? hold.agent, canWrite: b.can_write !== false });
   }
   return out;
 }
@@ -111,6 +113,7 @@ export function SkillsPage() {
                   <Badge variant="outline">{t('skills.version', { v: s.version })}</Badge>
                   <Badge variant="outline">{t(SOURCE_KEY[s.source])}</Badge>
                   {s.files.some((f) => f.kind === 'script') ? <Badge variant="outline" data-testid="skill-has-scripts">{t('skills.has_scripts')}</Badge> : null}
+                  {s.asks.length > 0 ? <Badge variant="outline" data-testid="skill-runs-commands">{t('skills.runs_badge')}</Badge> : null}
                 </div>
                 <p className="text-sm">{s.description}</p>
                 <p className="text-xs text-muted-foreground" data-testid="skill-provenance">
@@ -143,7 +146,8 @@ export function SkillsPage() {
                         <li key={`${h.box}/${h.hold.agent}`} className="flex flex-wrap items-center gap-2" data-testid="skill-box-hold" data-box={h.box} data-state={h.hold.state}>
                           <span className="text-sm">{t('skills.hold_place', { box: h.box, agent: h.folder })}</span>
                           <Badge variant={holdKey(h.hold) === 'skills.hold_matches' ? 'default' : 'outline'}>{t(holdKey(h.hold))}</Badge>
-                          {write ? (
+                          <Badge variant="outline" data-testid="skill-hold-origin" data-origin={h.hold.origin}>{t(originKey(h.hold))}</Badge>
+                          {write && h.canWrite && h.hold.origin === 'dashboard' ? (
                             <Button variant="outline" className={TAP_ACTION_DEFAULT} onClick={() => setPulling({ name: s.name, box: h.box })}>
                               {t('skills.hold_remove', { box: h.box })}
                             </Button>

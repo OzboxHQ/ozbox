@@ -138,7 +138,7 @@ test('uploaded files are checked, scripts are marked, and a hidden character is 
     await expect(add.getByTestId('skill-picked')).toContainText('2 files chosen');
     await add.getByRole('button', { name: 'Add to library' }).click();
     const review = page.getByTestId('skill-review-sheet');
-    await expect(review.getByTestId('skill-review-scripts')).toContainText('never made executable');
+    await expect(review.getByTestId('skill-review-scripts')).toContainText('An agent can run any file in a skill');
     await expect(review.getByTestId('skill-script-badge')).toHaveCount(1);
     await expect(review.getByTestId('skill-review-provenance')).toContainText('uploading files');
     await review.getByRole('button', { name: 'Cancel' }).click();
@@ -209,4 +209,72 @@ test('when what the boxes hold cannot be read the page says so; the real server 
   await page.route((u) => u.pathname === '/v1/skills/holdings', (route) => route.fulfill({ status: 500, json: { error: 'the boxes could not be asked', code: 'internal' } }));
   await page.reload();
   await expect(page.getByTestId('skills-holdings-error')).toContainText('What the boxes hold could not be read');
+});
+
+const risky = (name: string) =>
+  `---\nname: ${name}\ndescription: Checks the e2e skill.\nallowed-tools: Bash(git *)\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: ./notify.sh\nmodel: opus\n---\nChanges: !\`git diff --stat\`\n`;
+
+for (const width of WIDTHS) {
+  test(`a skill that runs commands shows what it asks for and is approved only when each is acknowledged, at ${width}px`, async ({ page, request }) => {
+    const name = `own-risky-${width}`;
+    await clean(request, name);
+    try {
+      const added = await api(request, 'POST', '/v1/skills', { files: { 'SKILL.md': risky(name) } });
+      expect(added.status, JSON.stringify(added.body)).toBe(200);
+      const hash = added.body['hash'] as string;
+      await page.setViewportSize({ width, height: 900 });
+      await open(page, '/skills');
+      await expect(card(page, name).getByTestId('skill-runs-commands')).toBeVisible({ timeout: 15_000 });
+      await card(page, name).getByRole('button', { name: 'Review and approve' }).click();
+      const review = page.getByTestId('skill-review-sheet');
+      const asks = review.getByTestId('skill-review-asks');
+      // each thing it asks for is named, with the commands, and the other settings are shown
+      for (const key of ['allowed-tools', 'hooks', 'shell-injection']) await expect(asks.locator(`[data-ask="${key}"]`)).toBeVisible();
+      await expect(asks.locator('[data-ask="hooks"] pre')).toContainText('./notify.sh');
+      await expect(asks.locator('[data-ask="shell-injection"] pre')).toContainText('git diff --stat');
+      await expect(asks.getByTestId('skill-asks-shown')).toContainText('model');
+      await expect(review.getByTestId('skill-runs-badge')).toBeVisible();
+      if (width < 1024) await expectTouchTargets(page, review);
+      await axeClean(page, 'skill-review-sheet');
+      await expectNoSidewaysScroll(page);
+      // approval waits for every one of them
+      const approve = review.getByRole('button', { name: 'Approve these files' });
+      await expect(approve).toBeDisabled();
+      for (const key of ['allowed-tools', 'hooks']) await asks.getByTestId(`skill-ack-${key}`).click();
+      await expect(approve).toBeDisabled();
+      expect((await api(request, 'POST', `/v1/skills/${name}/approve`, { hash, acknowledged: ['hooks', 'allowed-tools'] })).status).toBe(409);
+      await asks.getByTestId('skill-ack-shell-injection').click();
+      await expect(approve).toBeEnabled();
+      await approve.click();
+      await expect(review).toHaveCount(0);
+      const now = ((await api(request, 'GET', '/v1/skills')).body['skills'] as { name: string; approved: boolean }[]).find((s) => s.name === name);
+      expect(now?.approved).toBe(true);
+    } finally {
+      await clean(request, name);
+    }
+  });
+}
+
+test('a skill on a box says whether this dashboard put it there, and offers to remove only its own', async ({ page, request }) => {
+  const name = 'own-origin';
+  await clean(request, name);
+  try {
+    const added = await api(request, 'POST', '/v1/skills', { files: { 'SKILL.md': md(name, 'Hi.') } });
+    const hash = added.body['hash'] as string;
+    expect((await api(request, 'POST', `/v1/skills/${name}/approve`, { hash })).status).toBe(200);
+    expect((await api(request, 'PUT', `/v1/boxes/alpha/skills/${name}`, { hash })).status).toBe(200);
+    const view = (await api(request, 'GET', '/v1/boxes/alpha/skills')).body as { skills: { name: string; places: { origin: string; pushed_by?: string; version?: string }[] }[] };
+    const place = view.skills.find((s) => s.name === name)?.places[0];
+    expect(place?.origin).toBe('dashboard');
+    // nothing the box's own record says is passed on as attribution
+    expect(place && 'pushed_by' in place).toBe(false);
+    expect(place && 'version' in place).toBe(false);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, '/skills');
+    const held = card(page, name).getByTestId('skill-box-hold');
+    await expect(held.getByTestId('skill-hold-origin')).toContainText('Put here from this dashboard');
+    await expect(held.getByRole('button', { name: 'Remove from alpha' })).toBeVisible();
+  } finally {
+    await clean(request, name);
+  }
 });

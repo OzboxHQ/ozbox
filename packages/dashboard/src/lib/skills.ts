@@ -1,4 +1,4 @@
-import type { BoxHold } from '../api/memory';
+import type { BoxHold, SkillAskKey } from '../api/memory';
 import type { MessageKey } from './i18n';
 import type { Problem } from './skill-compose';
 
@@ -13,12 +13,26 @@ export function skillScopeLabel(scope: string, t: (k: 'skills.scope_fleet' | 'sk
 }
 
 /** Whether a copy on a box is the library's, a different version, or no longer trustworthy. */
-export function holdKey(h: Pick<BoxHold, 'state' | 'matches_library'>): 'skills.hold_matches' | 'skills.hold_differs' | 'skills.hold_not_in_library' | 'skills.hold_modified' | 'skills.hold_missing' {
+export function holdKey(h: Pick<BoxHold, 'state' | 'matches_library' | 'origin'>): 'skills.hold_matches' | 'skills.hold_differs' | 'skills.hold_not_in_library' | 'skills.hold_not_in_library_box' | 'skills.hold_modified' | 'skills.hold_missing' {
   if (h.state === 'modified') return 'skills.hold_modified';
   if (h.state === 'missing') return 'skills.hold_missing';
-  if (h.matches_library === null) return 'skills.hold_not_in_library';
+  if (h.matches_library === null) return h.origin === 'box' ? 'skills.hold_not_in_library_box' : 'skills.hold_not_in_library';
   return h.matches_library ? 'skills.hold_matches' : 'skills.hold_differs';
 }
+
+/** Where a copy on a box came from, by this dashboard's own record. */
+export function originKey(h: Pick<BoxHold, 'origin'>): 'skills.origin_dashboard' | 'skills.origin_box' {
+  return h.origin === 'dashboard' ? 'skills.origin_dashboard' : 'skills.origin_box';
+}
+
+/** The message for each thing a skill can ask an agent program to do. */
+export const ASK_KEY = {
+  hooks: { what: 'skills.ask_hooks', ack: 'skills.ack_hooks' },
+  'allowed-tools': { what: 'skills.ask_allowed_tools', ack: 'skills.ack_allowed_tools' },
+  shell: { what: 'skills.ask_shell', ack: 'skills.ack_shell' },
+  agent: { what: 'skills.ask_agent', ack: 'skills.ack_agent' },
+  'shell-injection': { what: 'skills.ask_shell_injection', ack: 'skills.ack_shell_injection' },
+} as const satisfies Record<SkillAskKey, { what: MessageKey; ack: MessageKey }>;
 
 export const VIA_KEY = {
   page_upload: 'skills.via_page_upload',

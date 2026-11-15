@@ -64,7 +64,8 @@ export function InstallSheet({ skill, holdings, onClose, onDone }: { skill: Skil
   };
 
   const labels = agents.map((id) => folders.find((a) => a.id === id)?.label ?? id).join(', ');
-  const blocked = kind === 'disk' && !skill.approved;
+  const readOnly = kind === 'disk' && known?.can_write === false;
+  const blocked = kind === 'disk' && (!skill.approved || readOnly);
   return (
     <PanelSheet open onOpenChange={(o) => !o && onClose()}>
       <PanelSheetContent size="compact" data-testid="skill-install-sheet">
@@ -127,7 +128,8 @@ export function InstallSheet({ skill, holdings, onClose, onDone }: { skill: Skil
               ))}
             </fieldset>
           ) : null}
-          {blocked ? <Alert data-testid="skill-disk-not-approved"><AlertDescription>{t('skills.disk_not_approved')}</AlertDescription></Alert> : null}
+          {kind === 'disk' && !skill.approved ? <Alert data-testid="skill-disk-not-approved"><AlertDescription>{t('skills.disk_not_approved')}</AlertDescription></Alert> : null}
+          {readOnly ? <Alert data-testid="skill-disk-read-only"><AlertDescription>{t('skills.disk_read_only')}</AlertDescription></Alert> : null}
           {kind === 'disk' ? (
             <p className="text-sm" data-testid="skill-scope-says">{target && labels ? t('skills.disk_says', { name: skill.name, where: labels, box: target }) : ''}</p>
           ) : (
