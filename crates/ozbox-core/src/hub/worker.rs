@@ -35,7 +35,7 @@ impl HasCore for WorkerState {
 
 impl WorkerState {
     /// A new worker state: this worker's name and key fingerprint, and the hub it is pinned to (its name, key fingerprint and the
-    /// hub's epoch). The incarnation is fresh, so losing the state can never make an old message verify again (ADR 0042 H-2).
+    /// hub's epoch). The incarnation is fresh, so losing the state can never make an old message verify again.
     pub fn new(me: &str, my_fp: &str, hub: &str, hub_fp: &str, hub_epoch: u64) -> WorkerState {
         let mut core = Core::new(me, my_fp, my_fp, my_fp, super::engine::WORKER_EPOCH);
         core.pin(Link::new(hub, hub_fp, hub_fp, hub_fp, hub_epoch));

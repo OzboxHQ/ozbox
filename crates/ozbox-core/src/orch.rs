@@ -85,7 +85,7 @@ pub enum OrchState {
 
 /// How a feature was handed to its worker. Persisted, because state alone cannot tell a hub-route `Starting` (the task is
 /// already on the worker channel) from a laptop-route `Starting`: the server's tick, `claims_declare` and `reassign` must never
-/// send a hub-route feature down the laptop route (ADR 0042 section 12, review H-1). An older Book has no field and loads as `Ssh`.
+/// send a hub-route feature down the laptop route (ADR 0042 section 12). An older Book has no field and loads as `Ssh`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {

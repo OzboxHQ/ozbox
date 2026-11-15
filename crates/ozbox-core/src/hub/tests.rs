@@ -720,7 +720,7 @@ fn key_delivery_is_not_supported_and_the_worker_says_so() {
     );
 }
 
-// ---- incarnations, expiry and the session (ADR 0042 review H-2) --------------------------------------------------------
+// ---- incarnations, expiry and the session (ADR 0042) --------------------------------------------------------
 
 #[test]
 fn the_hub_offers_no_task_before_a_session_exists_and_starts_one() {
