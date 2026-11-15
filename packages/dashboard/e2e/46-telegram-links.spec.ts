@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { addVirtualAuthenticator, firstSignIn, startAuthServer, type AuthServer } from './auth-fixtures';
-import { expectNoSidewaysScroll, expectTouchTargets, WIDTHS } from './fixtures';
+import { axeScan, expectNoSidewaysScroll, expectTouchTargets, WIDTHS } from './fixtures';
 
 // Telegram links and delegations (ADR 0050, phase P1), tier A: a dashboard behind a passkey sign-in with a virtual authenticator,
 // and the server's own stand-in for Telegram (OZBOX_DEMO_TELEGRAM=1), which speaks the Bot API on the server's HTTP client. A
@@ -135,6 +135,10 @@ test('with chat delegated on alpha the phone follows a session, gets its answers
 });
 
 test('lock reads only, a passkey lifts it, and unlink ends the link on the next message', async () => {
+  // the earlier journeys have spent this chat's messages for the minute: the bridge answers a flood with "Too many messages"
+  // (it should), so let the window pass rather than test the limiter by accident
+  test.setTimeout(150_000);
+  await page.waitForTimeout(62_000);
   await phoneWrites('/lock');
   await expect.poll(async () => (await botSaid()).some((t) => t.startsWith('Locked.')), { timeout: 30_000 }).toBe(true);
   await page.goto(`${server.origin}/account`);
@@ -154,18 +158,37 @@ test('lock reads only, a passkey lifts it, and unlink ends the link on the next 
   expect((await botSaid()).length).toBe(before);
 });
 
-test('the Account page and the link sheet fit at three widths with touch targets on touch screens', async () => {
-  for (const w of WIDTHS.filter((x) => x !== 1024)) {
+test('the Account page and the link sheet fit at every width, pass the accessibility scan, and have touch targets on touch screens', async () => {
+  for (const w of WIDTHS) {
     await page.setViewportSize({ width: w, height: 900 });
     await page.goto(`${server.origin}/account`);
     const card = page.getByTestId('tg-links-card');
     await expect(card).toBeVisible();
     await expectNoSidewaysScroll(page);
+    const onPage = await axeScan(page, '[data-testid="tg-links-card"]');
+    expect(onPage.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical'), `card at ${w}`).toEqual([]);
     await card.getByTestId('tg-link-open').click();
     const sheet = page.getByTestId('tg-link-sheet');
     await expect(sheet.getByTestId('tg-open-window')).toBeInViewport();
+    const inSheet = await axeScan(page, '[data-testid="tg-link-sheet"]');
+    expect(inSheet.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical'), `sheet at ${w}`).toEqual([]);
     if (w < 1024) await expectTouchTargets(page, sheet);
     await sheet.getByRole('button', { name: 'Close' }).first().click();
     await expect(sheet).toBeHidden();
   }
+});
+
+test('when the server cannot read the links the card says so, and never claims there are none', async () => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // only the read fails: a 500 on the status call, everything else on the page is the real server's
+  await page.route('**/v1/telegram', (route) => (route.request().method() === 'GET' ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The links could not be read.' }) }) : route.continue()));
+  await page.goto(`${server.origin}/account`);
+  const card = page.getByTestId('tg-links-card');
+  await expect(card.getByRole('alert')).toBeVisible();
+  // an empty state here would be a lie: the page does not know there are no links, and it must not offer to link on a guess
+  await expect(card.getByTestId('tg-no-links')).toHaveCount(0);
+  await expect(card.getByTestId('tg-link-open')).toHaveCount(0);
+  await page.unroute('**/v1/telegram');
+  await page.goto(`${server.origin}/account`);
+  await expect(page.getByTestId('tg-links-card').getByTestId('tg-no-links')).toBeVisible();
 });
