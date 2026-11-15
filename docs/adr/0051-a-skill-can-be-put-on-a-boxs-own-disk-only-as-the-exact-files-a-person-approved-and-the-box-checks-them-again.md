@@ -63,7 +63,7 @@ skills of their own from the page.
    replaced by a notice instead of run; it does not touch `hooks` or `allowed-tools`, which the acknowledgement covers). It is on
    by default for every box made, or upgraded with `ozbox upgrade`, from this release (user data is not re-applied to a box
    that already exists); to opt out of it on one box, delete or edit that root-owned file as root on the box. A second layer
-   is written to the box user's own `~/.claude/settings.json` at first boot of a disk (only when there is none); an agent
+   is written to the box user's own `~/.claude/settings.json` when a disk is first set up (the box's start script finds no `.profile` in the home folder, and the file does not exist), **by the box user, never by root**: no-clobber, no link followed (a link a box user planted is skipped, not written through), and skipped if `.claude` is a link. An agent
    running as the box user can edit that file, so only the root-owned one counts as a guard. **Condition:** Claude Code uses the
    highest-ranked managed source, so server-managed settings from an organisation's claude.ai console rank above the file and,
    when they exist, the file is not read; the key is not on Claude Code's list of keys honoured across sources. An
@@ -88,7 +88,7 @@ skills of their own from the page.
   flight; the answer is then 409 `recorded_unapproved` (the copy is on the box and recorded, approve again before pushing
   again), and only a copy that could not be recorded is 500 `not_recorded`. If the answer to a push is lost, the page reads
   the box and records a copy that hashes to what was sent, or says it is not known. "Seen on a box" notes are budgeted per box
-  per day (64, then one summary line). Staging and set-aside folders live in a work folder beside the agents' folders, never inside
+  per day (64, and 256 across all boxes), then one summary line, written at the next sighting after the day rolls over. Staging and set-aside folders live in a work folder beside the agents' folders, never inside
   one, and are swept at start. The box's own record is read as a plain file of at most 1 MiB, and what a look reads is opened
   without following a link or waiting on a pipe. A library folder that cannot be read, and a copy a box holds under a name from
   before the format, are listed and can be removed. The list of other folders in an agent's folder is a best-effort look.
