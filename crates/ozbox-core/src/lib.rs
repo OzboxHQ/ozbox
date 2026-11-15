@@ -17,6 +17,7 @@ pub mod approvals;
 pub mod audit;
 pub mod audit_remote;
 pub mod backup_scope;
+pub mod chat_policy;
 pub mod claude_code;
 pub mod daemon_scope;
 pub mod engine;

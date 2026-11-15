@@ -204,10 +204,13 @@ interface ChatDoc {
 }
 const chatsOf = async (api: Api) => (await api.json<{ telegram: { chats: ChatDoc[] } }>('GET', '/v1/apps')).telegram.chats;
 
-/** Pair a chat to a person the way a person would: ask for a code, say it to the bot. */
+/**
+ * Put a chat on the list that receives alerts, for a person. Linking a real account is a passkey flow of its own (see
+ * `46-telegram-links.spec.ts`), which this token-mode server cannot do, so the demo bot's route puts the chat there the way a chat
+ * linked before passkey links is: it is told things and reads, nothing more.
+ */
 async function pairChat(api: Api, who: string, chatId: number, name: string) {
-  const { code } = await api.json<{ code: string }>('POST', '/v1/apps/telegram/pairing', { person: who });
-  await api.json('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: code, name });
+  await api.json('POST', '/v1/demo/telegram/legacy-chat', { chat_id: chatId, name, person: who });
   await expect.poll(async () => (await chatsOf(api)).some((c) => c.id === chatId && c.person === who), { timeout: 20_000 }).toBe(true);
 }
 
@@ -229,7 +232,7 @@ test.describe('Telegram linking, the background test send and alert outcomes', (
   });
 
   for (const width of WIDTHS) {
-    test(`pair a chat for a person, see it under their rules and on the Telegram card, unlink it, at ${width}px`, async ({ page }) => {
+    test(`a chat on the list for a person shows under their rules and on the Telegram card, and is unlinked, at ${width}px`, async ({ page }) => {
       const api = makeApi(page);
       const chatId = 7000 + width;
       await page.setViewportSize({ width, height: 900 });
@@ -242,21 +245,19 @@ test.describe('Telegram linking, the background test send and alert outcomes', (
       const chats = sheet.getByTestId('routing-chats');
       await expect(chats.getByText('No chat is paired with the bot yet.')).toBeVisible();
 
-      // The pairing sheet for this person shows the one-time code.
-      await chats.getByRole('button', { name: 'Pair a chat for this person' }).click();
-      const pairing = page.getByTestId('pairing-sheet');
-      const code = (await pairing.getByTestId('pairing-code').textContent())?.trim() ?? '';
-      expect(code).toMatch(/^[A-Z2-9]{8}$/);
-      await expect(pairing).toContainText('@oz_demo_bot');
-      // the sheet has a close icon too: the footer's button is the last of the two
-      await expect(pairing.getByRole('button', { name: 'Close' }).last()).toBeInViewport();
+      // Linking an account is the person's own, with their passkey: this sheet sends them to their Account page.
+      const toAccount = chats.getByTestId('routing-chat-link-account');
+      await expect(toAccount).toHaveAttribute('href', '/account');
+      // the sheet's body scrolls on its own: bring the link into view the way a person would, then it must be reachable
+      await toAccount.scrollIntoViewIfNeeded();
+      await expect(toAccount).toBeInViewport();
       await expectNoSidewaysScroll(page);
-      if (width < 1024) await expectTouchTargets(page, pairing);
-      await axeClean(page, '[data-testid="pairing-sheet"]');
+      if (width < 1024) await expectTouchTargets(page, sheet);
 
-      // Saying it to the bot pairs the chat, and the sheet closes by itself.
-      await api.json('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: code, name: 'Ada phone' });
-      await expect(pairing).toBeHidden({ timeout: 20_000 });
+      // A chat that is on the list for this person (the demo bot's route stands in for the old pairing).
+      await api.json('POST', '/v1/demo/telegram/legacy-chat', { chat_id: chatId, name: 'Ada phone', person: 'qa-tg' });
+      await sheet.getByRole('button', { name: 'Cancel' }).click();
+      await row.getByRole('button', { name: 'Edit rules' }).click();
 
       // It is ticked under this person's rules.
       const tick = chats.getByRole('checkbox', { name: 'Ada phone' });
@@ -264,8 +265,8 @@ test.describe('Telegram linking, the background test send and alert outcomes', (
       await expectNoSidewaysScroll(page);
       if (width < 1024) await expectTouchTargets(page, sheet);
       await axeClean(page, '[data-testid="routing-sheet"]');
-      // The bot said hello in that chat.
-      await expect.poll(async () => JSON.stringify((await api.json<{ sent: { chat_id: number }[] }>('GET', '/v1/demo/telegram/sent')).sent)).toContain(`"chat_id":${chatId}`);
+      // A chat that is only on the list is not greeted: linking an account is what the bot answers.
+      expect(JSON.stringify((await api.json<{ sent: { chat_id: number }[] }>('GET', '/v1/demo/telegram/sent')).sent)).not.toContain(`"chat_id":${chatId}`);
       await sheet.getByRole('button', { name: 'Cancel' }).click();
 
       // The Telegram card lists it as theirs.

@@ -79,6 +79,22 @@ impl Links {
         Ok(token)
     }
 
+    /// Read a token without using it: what it names, for the person it was made for. Opening a link must not burn it (the
+    /// advised flow opens it twice, once in Telegram's browser and once in the real one, and a preview of a pasted copy must
+    /// not spend it); only an act that needs it consumes it, and a wrong person learns nothing.
+    pub fn peek(&self, token: &str, person: &str, now_ms: u64) -> Result<String, LinkError> {
+        if token.len() != 48 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(LinkError::Invalid);
+        }
+        let tag = self.tag(token);
+        self.live
+            .iter()
+            .find(|e| ct_eq(&e.tag, &tag))
+            .filter(|e| e.expires_ms > now_ms && e.person == person)
+            .map(|e| e.approval_id.clone())
+            .ok_or(LinkError::Invalid)
+    }
+
     /// Use a token once: the approval it names, for the person it was made for.
     pub fn redeem(&mut self, token: &str, person: &str, now_ms: u64) -> Result<String, LinkError> {
         if token.len() != 48 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {

@@ -59,6 +59,7 @@ import { createMemoryApi, type MemoryApi } from './memory';
 import { createApprovalRequestsApi, type ApprovalRequestsApi } from './approval-requests';
 import { createSecretsApi, type SecretsApi } from './secrets';
 import { createTasksApi, type TasksApi } from './tasks';
+import { createTelegramApi, type TelegramApi } from './telegram';
 import { createToolsApi, type ToolsApi } from './tools';
 
 export { ApiError };
@@ -85,6 +86,8 @@ export interface ApiClient {
   memory: MemoryApi;
   /** Chat with coding agents: the person's transcript, sessions, approvals and linked chats. */
   chat: ChatApi;
+  /** Telegram links and delegations (ADR 0050): a passkey opens a pairing window, confirms a link and delegates. */
+  telegram: TelegramApi;
   /** The tool catalog, a box's tools, install jobs, agent requests and profiles. */
   tools: ToolsApi;
   /** How the dashboard is reached from outside, and its tunnel. */
@@ -242,6 +245,7 @@ export function createApiClient(opts: ClientOptions): ApiClient {
     tasks: createTasksApi(request),
     secrets: createSecretsApi(request),
     approvalRequests: createApprovalRequestsApi(request),
+    telegram: createTelegramApi(request),
     orch: createOrchApi(request),
     perm: createPermApi(request),
     people: createPeopleApi(request),
