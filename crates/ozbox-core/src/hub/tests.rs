@@ -653,7 +653,7 @@ fn a_forged_or_damaged_report_is_rejected_and_quarantines_nobody() {
     assert!(hs
         .peers
         .get("worker-1")
-        .map_or(true, |p| p.quarantined.is_none()));
+        .is_none_or(|p| p.quarantined.is_none()));
 }
 
 #[test]
