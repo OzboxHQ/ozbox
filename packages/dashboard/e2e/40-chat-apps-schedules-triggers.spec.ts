@@ -122,8 +122,15 @@ test('a chat app does not stop a run: /stop from Telegram is refused and the run
   try {
     // a chat that is on the list (linked the old way: told things, reads), and a run started from the dashboard's own chat
     await call(request, 'POST', '/v1/demo/telegram/legacy-chat', { chat_id: CHAT, name: 'R4 phone' });
-    const started = await json<{ messages: { text: string }[] }>(await call(request, 'POST', '/v1/chat/messages', { text: `/new ${BOX} r4stop` }));
-    taskId = /Started (t\d+) on/.exec(JSON.stringify(started))?.[1] ?? '';
+    // the dashboard chat answers later: the run it started is the one the chat now follows
+    await call(request, 'POST', '/v1/chat/messages', { text: `/new ${BOX} r4stop` });
+    await expect
+      .poll(async () => {
+        const o = await json<{ bound: { kind: string; id?: string } | null }>(await call(request, 'GET', '/v1/chat'));
+        taskId = o.bound?.kind === 'task' ? (o.bound.id ?? '') : '';
+        return taskId;
+      }, { timeout: 20_000 })
+      .toMatch(/^t\d+$/);
     expect(taskId).not.toBe('');
     await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: '/stop' });
     await expect.poll(async () => (await sent()).some((m) => m.text.includes('run is stopped in the dashboard')), { timeout: 20_000 }).toBe(true);

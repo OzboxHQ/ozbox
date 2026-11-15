@@ -248,6 +248,8 @@ test.describe('Telegram linking, the background test send and alert outcomes', (
       // Linking an account is the person's own, with their passkey: this sheet sends them to their Account page.
       const toAccount = chats.getByTestId('routing-chat-link-account');
       await expect(toAccount).toHaveAttribute('href', '/account');
+      // the sheet's body scrolls on its own: bring the link into view the way a person would, then it must be reachable
+      await toAccount.scrollIntoViewIfNeeded();
       await expect(toAccount).toBeInViewport();
       await expectNoSidewaysScroll(page);
       if (width < 1024) await expectTouchTargets(page, sheet);
@@ -263,8 +265,8 @@ test.describe('Telegram linking, the background test send and alert outcomes', (
       await expectNoSidewaysScroll(page);
       if (width < 1024) await expectTouchTargets(page, sheet);
       await axeClean(page, '[data-testid="routing-sheet"]');
-      // The bot said hello in that chat.
-      await expect.poll(async () => JSON.stringify((await api.json<{ sent: { chat_id: number }[] }>('GET', '/v1/demo/telegram/sent')).sent)).toContain(`"chat_id":${chatId}`);
+      // A chat that is only on the list is not greeted: linking an account is what the bot answers.
+      expect(JSON.stringify((await api.json<{ sent: { chat_id: number }[] }>('GET', '/v1/demo/telegram/sent')).sent)).not.toContain(`"chat_id":${chatId}`);
       await sheet.getByRole('button', { name: 'Cancel' }).click();
 
       // The Telegram card lists it as theirs.

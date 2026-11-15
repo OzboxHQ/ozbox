@@ -82,7 +82,7 @@ function Marks({ production, hub, reload }: { production: string[]; hub: string 
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="tg-marks-hub">{t('tg.marks_hub')}</Label>
-        <Input id="tg-marks-hub" value={hubName} onChange={(e) => setHubName(e.target.value)} data-testid="tg-marks-hub" />
+        <Input id="tg-marks-hub" value={hubName} onChange={(e) => setHubName(e.target.value)} data-testid="tg-marks-hub" className="max-lg:h-11" />
       </div>
       <Button size="sm" className="max-lg:h-11" disabled={busy} onClick={() => void save()} data-testid="tg-marks-save">{t('tg.marks_save')}</Button>
     </section>

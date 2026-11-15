@@ -135,7 +135,7 @@ export function TelegramLinkSheet({ open, onOpenChange, status, boxes, reload }:
               </p>
               <div className="space-y-1.5">
                 <Label htmlFor="tg-code">{t('tg.code_label')}</Label>
-                <Input id="tg-code" data-testid="tg-code" value={code} autoComplete="off" autoCapitalize="characters" spellCheck={false} onChange={(e) => setCode(e.target.value)} />
+                <Input id="tg-code" data-testid="tg-code" value={code} autoComplete="off" autoCapitalize="characters" spellCheck={false} onChange={(e) => setCode(e.target.value)} className="max-lg:h-11" />
               </div>
             </section>
           ) : null}
@@ -146,7 +146,7 @@ export function TelegramLinkSheet({ open, onOpenChange, status, boxes, reload }:
               <p className="rounded-md border bg-muted p-3 text-sm" data-testid="tg-account">{t('tg.account', { tail: account.id_tail, name: account.first_name || '—' })}</p>
               <div className="space-y-1.5">
                 <Label htmlFor="tg-label">{t('tg.label_label')}</Label>
-                <Input id="tg-label" data-testid="tg-label" value={label} maxLength={40} onChange={(e) => setLabel(e.target.value)} />
+                <Input id="tg-label" data-testid="tg-label" value={label} maxLength={40} onChange={(e) => setLabel(e.target.value)} className="max-lg:h-11" />
               </div>
               <div className="space-y-2">
                 <div className="flex items-start gap-3">
@@ -170,7 +170,7 @@ export function TelegramLinkSheet({ open, onOpenChange, status, boxes, reload }:
                     </ul>
                     <div className="space-y-1.5">
                       <Label htmlFor="tg-days">{t('tg.days_label')}</Label>
-                      <Input id="tg-days" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="tg-days" />
+                      <Input id="tg-days" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="tg-days" className="max-lg:h-11" />
                     </div>
                     {hubPicked ? (
                       <div className="flex items-start gap-3">

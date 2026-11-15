@@ -68,7 +68,7 @@ function DelegationSheet({ link, boxes, status, onClose, onDone }: { link: TgLin
           </ul>
           <div className="space-y-1.5">
             <Label htmlFor="tgd-days">{t('tg.days_label')}</Label>
-            <Input id="tgd-days" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="tgd-days" />
+            <Input id="tgd-days" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="tgd-days" className="max-lg:h-11" />
           </div>
           {hubPicked ? (
             <div className="flex items-start gap-3">
