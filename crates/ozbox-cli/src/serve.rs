@@ -317,6 +317,8 @@ pub struct App {
     activity: VecDeque<ActivityEntry>,
     /// Who the request being answered is from (`Automation` between requests).
     current_actor: Actor,
+    /// Skills seen on a box that this dashboard has no push record for (`box:skill:hash`), so each is audited once, not on every look.
+    unrecorded_skills: std::collections::BTreeSet<String>,
     /// Changes to boxes that run in the background (see `apply_jobs`).
     apply_jobs: apply_jobs::Jobs,
     version: Arc<AtomicU64>,
@@ -467,6 +469,7 @@ impl App {
             backup_rt: backups::Runtime::default(),
             activity: VecDeque::new(),
             current_actor: Actor::Automation,
+            unrecorded_skills: std::collections::BTreeSet::new(),
             apply_jobs: apply_jobs::Jobs::default(),
             version: Arc::new(AtomicU64::new(0)),
             streams: Arc::new(AtomicUsize::new(0)),

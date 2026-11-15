@@ -5,7 +5,7 @@
 //! provider answers from [`SimulatedAgent`]. The shapes mirror what the daemon returns.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ozboxd::files::{FilesConfig, FilesService};
@@ -355,6 +355,16 @@ pub trait BoxAgent: Send + Sync {
     ) -> Result<FileReply, AgentError> {
         Err(AgentError::Unsupported(NoTransport::REASON.into()))
     }
+    /// The demo box's private folder (its `home` and `state`), so a test can do to it what the box user could.
+    #[cfg(test)]
+    fn demo_box_dir(&self, _box_name: &str) -> Option<PathBuf> {
+        None
+    }
+    /// Can this dashboard put a skill on a box's disk, or take one off? Only a dashboard that runs on the box has the socket
+    /// that carries it; any other reaches the box socket, which refuses both. The page says so before it offers the choice.
+    fn skill_writes(&self) -> bool {
+        false
+    }
     /// One call to the box's skills API (`sub` is what follows `/v1/skills`: empty to list, `/<name>` to put or take away one).
     /// The daemon's answer, whatever its status; only a box that cannot be reached is an error. A daemon from before this
     /// existed answers `501` with the code `agent_too_old`.
@@ -455,6 +465,8 @@ pub struct SimulatedAgent {
     host_is_box: bool,
     base: PathBuf,
     files: Mutex<HashMap<String, Arc<FilesService>>>,
+    /// The demo's own folder is made once, by this process, private to its user (mode 0700); `Err` says why it could not be.
+    base_made: std::sync::OnceLock<Result<(), String>>,
     /// Each demo box's skills service, over a private home folder: the real code over a pretend disk.
     skills: Mutex<HashMap<String, Arc<ozboxd::skills::SkillsService>>>,
     tools: Mutex<HashMap<String, super::tools::SimTools>>,
@@ -493,6 +505,7 @@ impl SimulatedAgent {
             host_is_box,
             base: std::env::temp_dir().join(format!("ozbox-demo-{id}")),
             files: Mutex::new(HashMap::new()),
+            base_made: std::sync::OnceLock::new(),
             skills: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
             repo: super::sim_restic::SimRepo::default(),
@@ -511,7 +524,10 @@ impl SimulatedAgent {
 
 impl Drop for SimulatedAgent {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.base);
+        // only a folder this process made: never one that was already there
+        if matches!(self.base_made.get(), Some(Ok(()))) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
     }
 }
 
@@ -537,6 +553,30 @@ impl SimulatedAgent {
         self.base.exists()
     }
 
+    /// The demo's folder under the system's shared temp folder, made private: created here (never reused if something is
+    /// already there), mode 0700, so no other user of a shared machine can read or plant files in a demo box's home.
+    fn private_base(&self) -> Result<&Path, AgentError> {
+        self.base_made
+            .get_or_init(|| {
+                let mut b = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    b.mode(0o700);
+                }
+                b.create(&self.base).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        "the demo's folder already exists, so it is not used".to_string()
+                    } else {
+                        "the demo's folder could not be made".to_string()
+                    }
+                })
+            })
+            .as_ref()
+            .map(|()| self.base.as_path())
+            .map_err(|e| AgentError::Unreachable(e.clone()))
+    }
+
     /// The same skills service a real box runs, over a private home folder for this box.
     fn skills_for(&self, name: &str) -> Result<Arc<ozboxd::skills::SkillsService>, AgentError> {
         self.refuse_on_a_box("skills")?;
@@ -547,7 +587,7 @@ impl SimulatedAgent {
         if let Some(s) = map.get(name) {
             return Ok(Arc::clone(s));
         }
-        let root = self.base.join(name);
+        let root = self.private_base()?.join(name);
         let svc = Arc::new(ozboxd::skills::SkillsService::new(
             root.join("home"),
             root.join("state"),
@@ -567,7 +607,7 @@ impl SimulatedAgent {
         if let Some(s) = map.get(name) {
             return Ok(Arc::clone(s));
         }
-        let root = self.base.join(name).join("work");
+        let root = self.private_base()?.join(name).join("work");
         let seed = || -> std::io::Result<()> {
             std::fs::create_dir_all(root.join("exchange"))?;
             std::fs::create_dir_all(root.join("projects/demo/src"))?;
@@ -903,7 +943,7 @@ impl BoxAgent for SimulatedAgent {
                 .lock()
                 .map_err(|_| AgentError::Unreachable("the demo terminal is unavailable".into()))?;
             if !map.contains_key(name) {
-                let dir = self.base.join(name).join("work");
+                let dir = self.private_base()?.join(name).join("work");
                 let _ = std::fs::create_dir_all(&dir);
                 let cfg = ozboxd::config::TerminalSection {
                     tmux: false,
@@ -950,7 +990,7 @@ impl BoxAgent for SimulatedAgent {
         body: &[u8],
     ) -> Result<(u16, serde_json::Value), AgentError> {
         let name = rec.spec.name.as_str();
-        let dir = self.base.join(name).join("restic");
+        let dir = self.private_base()?.join(name).join("restic");
         let svc =
             {
                 let mut map = self.restic.lock().map_err(|_| {
@@ -1015,6 +1055,16 @@ impl BoxAgent for SimulatedAgent {
             .call(request))
     }
 
+    #[cfg(test)]
+    fn demo_box_dir(&self, box_name: &str) -> Option<PathBuf> {
+        self.private_base().ok().map(|b| b.join(box_name))
+    }
+
+    /// The demo stands in for a dashboard that runs on the box, so its writes go through.
+    fn skill_writes(&self) -> bool {
+        true
+    }
+
     fn skills(
         &self,
         rec: &BoxRecord,
@@ -1024,7 +1074,7 @@ impl BoxAgent for SimulatedAgent {
     ) -> Result<(u16, serde_json::Value), AgentError> {
         Ok(self
             .skills_for(rec.spec.name.as_str())?
-            .route(method, sub, body))
+            .route(method, sub, body, true))
     }
 
     fn files(

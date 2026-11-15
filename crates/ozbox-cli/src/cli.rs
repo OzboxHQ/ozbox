@@ -2297,8 +2297,15 @@ pub enum SkillsCommand {
         #[arg(long, default_value = "fleet")]
         scope: String,
     },
-    /// Approve the skill's current files (shown first; the hash is what you approve).
-    Approve { name: String },
+    /// Approve the skill's current files (shown first; the hash is what you approve). A skill that runs commands or widens
+    /// what an agent may do (hooks, allowed-tools, shell, agent, a `!` command in its text) needs each one acknowledged: you
+    /// are asked, or pass `--ack <what>` for each one (`--yes` alone never acknowledges them).
+    Approve {
+        name: String,
+        /// Acknowledge one of the things the skill asks for (`hooks`, `allowed-tools`, `shell`, `agent`, `shell-injection`).
+        #[arg(long = "ack")]
+        ack: Vec<String>,
+    },
     /// Withdraw every approval of a skill.
     Revoke { name: String },
 }

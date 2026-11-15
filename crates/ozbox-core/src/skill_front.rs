@@ -300,9 +300,9 @@ pub fn shell_injection_lines(body: &str) -> Vec<String> {
 
 /// What a `SKILL.md` asks of an agent program. `Err` is a front matter that is not valid.
 pub fn asks_of(skill_md: &str) -> Result<Asks, String> {
-    let (pairs, body) = match split(skill_md)? {
-        Some((fm, body)) => (parse(fm)?, body),
-        None => (Vec::new(), skill_md),
+    let pairs = match split(skill_md)? {
+        Some((fm, _body)) => parse(fm)?,
+        None => Vec::new(),
     };
     let mut out = Asks::default();
     for (k, v) in &pairs {
@@ -331,7 +331,8 @@ pub fn asks_of(skill_md: &str) -> Result<Asks, String> {
             _ => out.unknown.push(clip(k)),
         }
     }
-    let inj = shell_injection_lines(body);
+    // the whole file, not only the body: a miss would run a command, a false flag costs one tick
+    let inj = shell_injection_lines(skill_md);
     if !inj.is_empty() {
         out.acknowledge.push(Ask {
             key: "shell-injection",

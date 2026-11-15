@@ -4,7 +4,9 @@
 //! A skill is content an agent will follow, so every route here keeps the same gate: nothing reaches an agent unless a
 //! person approved its exact hash. A push is refused unless the hash the page was looking at is the library's current one and
 //! is approved; the box's daemon then re-checks the files and the hash before it writes anything. What a box holds is read
-//! from the box (its files are hashed again on every look), never from a record kept here.
+//! from the box (its files are hashed again on every look). Who put a skill there is read from this dashboard's own push
+//! record, never from the box's: the box user can edit the box's record, so a skill counts as pushed from this dashboard
+//! only when this record names the same hash, and anything else is shown as put there on the box.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{unix_ms, App, Req, Resp};
+
+/// The most "seen on a box" lines kept as already noted.
+const MAX_UNRECORDED_NOTED: usize = 500;
 
 fn skill_error(e: SkillError) -> Resp {
     match e {
@@ -198,26 +203,94 @@ impl App {
             .map(|c| (c.name, c.hash))
             .collect();
         let mut skills = Vec::new();
+        let mut unrecorded = Vec::new();
+        let mut reported: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
         for s in v["skills"].as_array().into_iter().flatten() {
             let n = s["name"].as_str().unwrap_or_default();
+            // What this dashboard recorded putting there: the only thing that makes a skill "pushed from this dashboard". What
+            // the box's own record says (who, which version, when) is text the box user can edit, so none of it is passed on.
+            let ours = host.skills.pushed_places(n, name);
             let places: Vec<Value> = s["places"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .map(|p| {
-                    let mut p = p.clone();
-                    p["matches_library"] = match library.get(n) {
-                        Some(h) => json!(p["state"] == "intact" && p["hash"] == h.as_str()),
-                        None => Value::Null,
-                    };
-                    p
+                    let agent = p["agent"].as_str().unwrap_or_default();
+                    let state = p["state"].as_str().unwrap_or("modified");
+                    let hash = p["hash"].as_str().unwrap_or_default();
+                    let disk = p["disk_hash"].as_str();
+                    let pushed_here = ours.get(agent).is_some_and(|h| h == hash);
+                    reported.insert((n.to_string(), agent.to_string()));
+                    if !pushed_here {
+                        unrecorded.push(format!("{n}:{agent}"));
+                    }
+                    json!({
+                        "agent": agent,
+                        "state": state,
+                        "hash": hash,
+                        "disk_hash": disk,
+                        "origin": if pushed_here { "dashboard" } else { "box" },
+                        "matches_library": library.get(n).map(|h| state == "intact" && h == hash),
+                    })
                 })
                 .collect();
             skills.push(
                 json!({ "name": n, "in_library": library.contains_key(n), "places": places }),
             );
         }
-        json!({ "box": name, "state": "ok", "agents": v["agents"], "skills": skills, "others": v["others"] })
+        // What this dashboard recorded putting there, that the box does not report (its record was deleted, or the folder is
+        // gone), still shows, as changed or missing: the box cannot make a copy disappear from the page by leaving it out.
+        let others = v["others"].clone();
+        for (skill, places) in host.skills.pushed_to(name) {
+            for (agent, hash) in places {
+                if reported.contains(&(skill.clone(), agent.clone())) {
+                    continue;
+                }
+                let on_disk = others[&agent]
+                    .as_array()
+                    .is_some_and(|l| l.iter().any(|x| x == skill.as_str()));
+                let place = json!({
+                    "agent": agent,
+                    "state": if on_disk { "modified" } else { "missing" },
+                    "hash": hash,
+                    "disk_hash": Value::Null,
+                    "origin": "dashboard",
+                    "matches_library": library.get(&skill).map(|_| false),
+                });
+                match skills.iter_mut().find(|x| x["name"] == skill.as_str()) {
+                    Some(x) => {
+                        if let Some(l) = x["places"].as_array_mut() {
+                            l.push(place);
+                        }
+                    }
+                    None => skills.push(json!({
+                        "name": skill,
+                        "in_library": library.contains_key(&skill),
+                        "places": [place],
+                    })),
+                }
+            }
+        }
+        // A skill on a box that this dashboard did not put there is worth a line in the record, once per box, skill and
+        // folder, and never more than a few hundred: the box user chooses what its box reports, so it does not get to fill
+        // the record by changing a file or inventing names.
+        for u in unrecorded {
+            let skill = u.split_once(':').map_or(u.as_str(), |(s, _)| s);
+            let key = format!("{name}:{u}");
+            if skill_name_ok(skill)
+                && self.unrecorded_skills.len() < MAX_UNRECORDED_NOTED
+                && self.unrecorded_skills.insert(key)
+            {
+                self.log_activity(
+                    "skill seen on box",
+                    name,
+                    None,
+                    "not pushed by this dashboard",
+                );
+            }
+        }
+        json!({ "box": name, "state": "ok", "can_write": self.agent.skill_writes(), "agents": v["agents"], "skills": skills, "others": v["others"] })
     }
 
     /// Every box: what it holds, or why that is not known.
@@ -297,7 +370,10 @@ impl App {
             .map(|(p, bytes)| (p.clone(), String::from_utf8_lossy(bytes).to_string()))
             .collect();
         let who = self.who(req);
-        let body = json!({ "hash": b.hash, "pushed_by": who, "agents": b.agents, "files": files })
+        // The dashboard names, per folder, the hash it recorded putting there: that is what lets the box replace a folder that
+        // is already there. A folder it has no record of is never replaced.
+        let claims = host.skills.pushed_places(skill, box_name);
+        let body = json!({ "hash": b.hash, "agents": b.agents, "claims": claims, "files": files })
             .to_string();
         let (status, mut v) =
             match self
@@ -338,12 +414,33 @@ impl App {
             Ok(r) => r,
             Err(r) => return r,
         };
-        let (status, v) = match self.agent.skills(&rec, "DELETE", &format!("/{skill}"), &[]) {
-            Ok(x) => x,
-            Err(e) => return Self::agent_error(&e),
+        // Only what this dashboard recorded putting there is taken away: it names those hashes, and the box leaves anything
+        // else alone (`not_claimed`; `not_found` when it has nothing of that name at all).
+        let claims = host.skills.pushed_places(skill, box_name);
+        let body = json!({ "claims": claims }).to_string();
+        let (status, v) =
+            match self
+                .agent
+                .skills(&rec, "DELETE", &format!("/{skill}"), body.as_bytes())
+            {
+                Ok(x) => x,
+                Err(e) => return Self::agent_error(&e),
+            };
+        // Forget only what the box says it took away. A box that answers "nothing here" does not make this dashboard forget
+        // what it recorded: the record is the dashboard's, and the box user can change what the box says.
+        let gone: Vec<String> = if status == 200 {
+            claims.keys().cloned().collect()
+        } else {
+            v["results"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["ok"] == true)
+                .filter_map(|r| r["agent"].as_str().map(str::to_string))
+                .collect()
         };
-        if status == 200 || (status == 404 && v["code"] == "not_found") {
-            let _ = host.skills.forget_push(skill, box_name);
+        if !gone.is_empty() {
+            let _ = host.skills.forget_places(skill, box_name, &gone);
         }
         self.log_activity(
             "skill remove from box",

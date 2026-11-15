@@ -34,6 +34,8 @@ use super::agent::{
 use crate::sshconfig::{self, RouteInputs};
 use crate::state::format_rfc3339;
 
+/// Why a dashboard that is not running on the box cannot put a skill there.
+pub const SKILL_WRITE_FROM_THE_BOX: &str = "a skill is put on a box's disk, or taken off it, from that box's own dashboard (open it through the box's address). A dashboard on another computer can see what the box holds but not change it, because the box's other socket is open to every program running on it.";
 pub const DAEMON_SOCKET: &str = "/run/ozboxd/ozboxd.sock";
 /// The dashboard user's own socket to the box daemon (ADR 0040, decision 3). systemd (root) binds it in a folder root owns
 /// (`ozboxd-supervisor.socket`), `root:ozbox-supervisor 0660`, and hands it to the daemon; see `ozbox_core::daemon_scope`.
@@ -1495,6 +1497,10 @@ impl BoxAgent for SshAgent {
         Ok((status, v))
     }
 
+    fn skill_writes(&self) -> bool {
+        self.local.is_some()
+    }
+
     fn skills(
         &self,
         rec: &BoxRecord,
@@ -1505,6 +1511,12 @@ impl BoxAgent for SshAgent {
         // On a box's own dashboard this goes through the table of routes its scoped socket carries (`skills_read`, `skill_push`,
         // `skill_remove`), like a run or a file write; a path off the table is refused there.
         let path = format!("/v1/skills{sub}");
+        // Only the dashboard's own socket may put a skill on a disk or take one away. A dashboard that is not on the box
+        // reaches the box socket, which every process of the box user can open and which therefore refuses both, so it is
+        // not even tried: reading is all a remote dashboard does here.
+        if self.local.is_none() && method != "GET" {
+            return Err(AgentError::Unsupported(SKILL_WRITE_FROM_THE_BOX.into()));
+        }
         let sock = self.socket_route(rec, method, &path)?;
         let (status, raw) = request_with_body(&sock, method, &path, body)?;
         let v: Value = serde_json::from_slice(&raw).map_err(|_| {
@@ -2087,11 +2099,11 @@ mod tests {
         let rec = aws_box("dev")?;
         let (st, v) = a.skills(&rec, "GET", "", &[])?;
         assert_eq!((st, v["skills"].is_array()), (200, true));
-        let (st, v) = a.skills(&rec, "PUT", "/demo", b"{}")?;
-        assert_eq!((st, v["ok"].as_bool()), (200, Some(true)));
-        // a skill that is not there is the daemon's own answer, passed on
-        let (st, v) = a.skills(&rec, "DELETE", "/gone", &[])?;
-        assert_eq!((st, v["code"].as_str()), (404, Some("not_found")));
+        // a dashboard that is not on the box never sends a write to the box socket, which would refuse it
+        for (m, sub) in [("PUT", "/demo"), ("DELETE", "/gone")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(e.contains("from that box's own dashboard"), "{m}: {e}");
+        }
         // a daemon from before skills answers "not found" for the route itself
         let (st, v) = a.skills(&rec, "GET", "/older", &[])?;
         assert_eq!((st, v["code"].as_str()), (501, Some("agent_too_old")));

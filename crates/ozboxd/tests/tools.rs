@@ -626,6 +626,7 @@ fn call(
             serde_json::to_vec(&body).unwrap()
         },
         capability: None,
+        dashboard: false,
     });
     (
         r.status,

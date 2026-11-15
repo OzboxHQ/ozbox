@@ -1215,6 +1215,20 @@ mod daemon {
         sd: Arc<AtomicBool>,
     ) {
         use ozbox_core::daemon_scope::passwd_ids;
+        // A DEBUG build only: the browser tests of this repository have no systemd and no `ozbox-supervisor` user, so with
+        // `OZBOXD_TEST_DASHBOARD_SOCKET=<path>` the daemon binds that path itself and serves it as the dashboard's socket (every
+        // peer admitted). A release build has no such code. The transport's own debug hook (`OZBOX_DAEMON_SUPERVISOR_SOCKET`)
+        // is the dashboard's half of the same arrangement.
+        #[cfg(debug_assertions)]
+        let (inherited, test_peer) = match std::env::var_os("OZBOXD_TEST_DASHBOARD_SOCKET") {
+            Some(p) if inherited.is_none() => {
+                let _ = std::fs::remove_file(&p);
+                (Some(std::os::unix::net::UnixListener::bind(&p)), true)
+            }
+            _ => (inherited, false),
+        };
+        #[cfg(not(debug_assertions))]
+        let test_peer = false;
         let listener = match inherited {
             Some(Ok(l)) => l,
             Some(Err(e)) => {
@@ -1238,9 +1252,15 @@ mod daemon {
                     .map(|(uid, _)| uid)
             }
         };
-        let gate = Arc::new(api::SupervisorGate::new(api::peer_uid, ids, |line| {
-            eprintln!("ozboxd: audit {line}")
-        }));
+        let gate = Arc::new(if test_peer {
+            api::SupervisorGate::new(
+                |_| Some(1),
+                || Some(1),
+                |line| eprintln!("ozboxd: audit {line}"),
+            )
+        } else {
+            api::SupervisorGate::new(api::peer_uid, ids, |line| eprintln!("ozboxd: audit {line}"))
+        });
         log(&format!(
             "the dashboard user's socket is up (from systemd, {})",
             ozbox_listenfd::DAEMON_MARKER

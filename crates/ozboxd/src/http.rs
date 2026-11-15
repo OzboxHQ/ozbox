@@ -12,10 +12,11 @@ pub const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_HEADERS: usize = 64;
 
-/// The most a request to this path may carry. Everything is 64 KiB except a skill push, whose files may be up to
-/// `ozbox_core::skill_pack::MAX_PACK_BODY` as JSON.
-pub fn body_limit(method: &str, path: &str) -> usize {
-    if method == "PUT" && path.starts_with("/v1/skills/") {
+/// The most a request to this path may carry. Everything is 64 KiB except a skill push on the dashboard's own socket, whose
+/// files may be up to `ozbox_core::skill_pack::MAX_PACK_BODY` as JSON. The box socket (every process of the box user can open
+/// it) never takes the larger body, and refuses a skill push outright.
+pub fn body_limit(method: &str, path: &str, dashboard: bool) -> usize {
+    if dashboard && method == "PUT" && path.starts_with("/v1/skills/") {
         ozbox_core::skill_pack::MAX_PACK_BODY
     } else {
         MAX_BODY
@@ -31,6 +32,9 @@ pub struct Request {
     /// The `X-Ozbox-Run-Capability` header: the secret a controlled run's starter was given (see
     /// `RunManager::start_controlled`). Never logged; the only header kept besides the length.
     pub capability: Option<String>,
+    /// True only when the request came in on the dashboard's own socket (behind the supervisor gate). A request read by
+    /// [`read_request`], or taken from the box socket, is never the dashboard's.
+    pub dashboard: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,7 +245,7 @@ pub fn read_head<R: Read>(r: &mut R, deadline: Instant) -> Result<Head, HttpErro
 pub fn read_request<R: Read>(r: &mut R, deadline: Instant) -> Result<Request, HttpError> {
     let h = read_head(r, deadline)?;
     let want = h.content_length;
-    let limit = body_limit(&h.method, &h.path);
+    let limit = body_limit(&h.method, &h.path, false);
     if want > limit {
         return Err(HttpError::BodyTooLarge);
     }
@@ -259,6 +263,7 @@ pub fn read_request<R: Read>(r: &mut R, deadline: Instant) -> Result<Request, Ht
         query: h.query,
         body,
         capability: h.capability,
+        dashboard: false,
     })
 }
 

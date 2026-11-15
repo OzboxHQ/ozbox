@@ -451,3 +451,58 @@ fn the_kernel_names_the_peer_of_a_real_connection() {
     let (s, _) = l.accept().unwrap();
     assert_eq!(ozboxd::api::peer_uid(&s), Some(mine));
 }
+
+fn skill_body() -> String {
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        "SKILL.md".to_string(),
+        b"---\nname: demo\ndescription: Does a thing.\n---\nDo it.\n".to_vec(),
+    );
+    let p = ozbox_core::skill_pack::SkillPack::from_files(files).unwrap();
+    serde_json::json!({ "hash": p.hash(), "files": { "SKILL.md": String::from_utf8(p.files["SKILL.md"].clone()).unwrap() } }).to_string()
+}
+
+#[test]
+fn a_skill_is_put_on_the_disk_only_through_the_dashboards_socket() {
+    let home = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let svc = ozboxd::skills::SkillsService::new(
+        home.path().to_path_buf(),
+        state.path().to_path_buf(),
+        Arc::new(FakeClock::new(T0)),
+    );
+    ozboxd::skills::install_global(Arc::new(svc));
+    let s = server(SUPERVISOR);
+    let body = skill_body();
+    let target = home.path().join(".claude/skills/demo");
+    // the box socket is every process of the box user's: it may read, never write, and a big body is refused the same way
+    let (st, v) = call(&s.sock, "PUT", "/v1/skills/demo", &body);
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (403, Some("skills_write_not_here")),
+        "{v}"
+    );
+    let big = format!("{body}{}", " ".repeat(100 * 1024));
+    let (st, v) = call(&s.sock, "PUT", "/v1/skills/demo", &big);
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (403, Some("skills_write_not_here")),
+        "{v}"
+    );
+    let (st, v) = call(&s.sock, "DELETE", "/v1/skills/demo", "{}");
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (403, Some("skills_write_not_here")),
+        "{v}"
+    );
+    assert_eq!(call(&s.sock, "GET", "/v1/skills", "").0, 200);
+    assert!(!target.exists());
+    // the dashboard's socket takes the push, audits it by route name, and takes a body past the usual 64 KiB
+    let (st, v) = call(&s.sup, "PUT", "/v1/skills/demo", &body);
+    assert_eq!(st, 200, "{v}");
+    assert!(target.join("SKILL.md").exists());
+    let (st, v) = call(&s.sup, "PUT", "/v1/skills/demo", &big);
+    assert_ne!(st, 413, "{v}");
+    let a = s.audit.lock().unwrap().join("\n");
+    assert!(a.contains("route=skill_push"), "{a}");
+}

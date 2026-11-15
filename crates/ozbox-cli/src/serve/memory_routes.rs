@@ -89,8 +89,12 @@ struct ScopeBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HashBody {
+struct ApproveBody {
     hash: String,
+    /// The commands and permissions the person acknowledged, each on its own (`hooks`, `allowed-tools`, `shell`, `agent`,
+    /// `shell-injection`). Without every one the skill asks for, it cannot be approved.
+    #[serde(default)]
+    acknowledged: Vec<String>,
 }
 
 impl App {
@@ -305,11 +309,14 @@ impl App {
                 }
             }
             ("POST", [name, "approve"]) => {
-                let b: HashBody = match parse(&req.body) {
+                let b: ApproveBody = match parse(&req.body) {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match host.skills.approve(name, &b.hash, &who, now) {
+                match host
+                    .skills
+                    .approve(name, &b.hash, &who, now, &b.acknowledged)
+                {
                     Ok(()) => {
                         self.log_activity(
                             "skill approve",
@@ -836,5 +843,350 @@ mod tests {
                 "{m} {p}"
             );
         }
+    }
+
+    fn demo_box(a: &mut App, name: &str) {
+        use ozbox_core::{BoxName, BoxSpec, Operation, Size};
+        let spec = BoxSpec::new(BoxName::new(name).unwrap(), Size::M);
+        let p = a.provider.plan(&Operation::Create { spec }).unwrap();
+        a.provider.apply(&p).unwrap();
+    }
+
+    fn skill_files(name: &str, body: &str) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "SKILL.md".into(),
+            json!(format!(
+                "---\nname: {name}\ndescription: Does a thing.\n---\n{body}\n"
+            )),
+        );
+        m
+    }
+
+    /// Who put a skill on a box is this dashboard's own record, never the box's: a skill an agent put there itself is shown as
+    /// put there on the box, noted once, and never removed or replaced by this dashboard.
+    #[test]
+    fn a_skill_counts_as_pushed_from_this_dashboard_only_when_its_own_record_agrees() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path()).with_agent(Box::new(
+            crate::serve::agent::SimulatedAgent::with_host_is_box(false),
+        ));
+        demo_box(&mut a, "dev");
+        // one skill added, approved and pushed from the dashboard
+        let (s, item) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            json!({ "files": skill_files("mine", "Do it.") }),
+        );
+        assert_eq!(s, 200, "{item}");
+        let hash = item["hash"].as_str().unwrap().to_string();
+        let (s, _) = call(
+            &mut a,
+            "POST",
+            "/v1/skills/mine/approve",
+            json!({ "hash": hash }),
+        );
+        assert_eq!(s, 200);
+        let (s, v) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/dev/skills/mine",
+            json!({ "hash": hash }),
+        );
+        assert_eq!(s, 200, "{v}");
+        // another is put on the box by something else: the box's own daemon takes it (the demo's agent plays the box user)
+        let (_, other) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            json!({ "files": skill_files("hand", "Hi.") }),
+        );
+        let rec = a.record("dev").unwrap();
+        let files = skill_files("hand", "Hi.");
+        let h2 = other["hash"].as_str().unwrap();
+        let (st, v) = a
+            .agent
+            .skills(
+                &rec,
+                "PUT",
+                "/hand",
+                json!({ "hash": h2, "files": files }).to_string().as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(st, 200, "{v}");
+        let (s, view) = call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        assert_eq!(s, 200, "{view}");
+        let find = |n: &str| {
+            view["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["name"] == n)
+                .unwrap()["places"][0]
+                .clone()
+        };
+        assert_eq!(
+            (
+                find("mine")["origin"].as_str(),
+                find("mine")["state"].as_str()
+            ),
+            (Some("dashboard"), Some("intact"))
+        );
+        assert_eq!(find("hand")["origin"], "box");
+        // nothing from the box's record is passed on as attribution
+        for p in [find("mine"), find("hand")] {
+            assert!(
+                p.get("pushed_by").is_none() && p.get("version").is_none(),
+                "{p}"
+            );
+        }
+        // seen once in the record, however often it is looked at
+        call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        call(&mut a, "GET", "/v1/skills/holdings", Value::Null);
+        let seen = a
+            .activity
+            .iter()
+            .filter(|e| e.action == "skill seen on box")
+            .count();
+        assert_eq!(seen, 1);
+        // this dashboard takes away only what it put there
+        let (s, v) = call(&mut a, "DELETE", "/v1/boxes/dev/skills/hand", Value::Null);
+        assert_eq!((s, v["code"].as_str()), (409, Some("not_claimed")));
+        let (s, _) = call(&mut a, "DELETE", "/v1/boxes/dev/skills/mine", Value::Null);
+        assert_eq!(s, 200);
+        let (_, view) = call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        let names: Vec<&str> = view["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["hand"]);
+        // and a push over the box's own copy of a name it did not make is refused
+        let hash_hand = h2.to_string();
+        let (s, _) = call(
+            &mut a,
+            "POST",
+            "/v1/skills/hand/approve",
+            json!({ "hash": hash_hand }),
+        );
+        assert_eq!(s, 200);
+        let (s, v) = call(
+            &mut a,
+            "PUT",
+            "/v1/boxes/dev/skills/hand",
+            json!({ "hash": hash_hand }),
+        );
+        assert_eq!((s, v["code"].as_str()), (409, Some("not_ours")), "{v}");
+    }
+
+    #[test]
+    fn a_skill_that_runs_commands_cannot_be_approved_without_each_acknowledgement() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        let mut f = serde_json::Map::new();
+        f.insert(
+            "SKILL.md".into(),
+            json!("---\nname: risky\ndescription: Does a thing.\nallowed-tools: Bash\n---\nRun !`ls`.\n"),
+        );
+        let (s, item) = call(&mut a, "POST", "/v1/skills", json!({ "files": f }));
+        assert_eq!(s, 200, "{item}");
+        let hash = item["hash"].as_str().unwrap().to_string();
+        let (_, r) = call(&mut a, "GET", "/v1/skills/risky/review", Value::Null);
+        let keys: Vec<&str> = r["asks"]["acknowledge"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, ["allowed-tools", "shell-injection"]);
+        for body in [
+            json!({ "hash": hash }),
+            json!({ "hash": hash, "acknowledged": ["allowed-tools"] }),
+            json!({ "hash": hash, "acknowledged": ["allowed-tools", "nonsense"] }),
+        ] {
+            let (s, v) = call(&mut a, "POST", "/v1/skills/risky/approve", body);
+            assert!(s == 409 || s == 400, "{s} {v}");
+        }
+        let (_, l) = call(&mut a, "GET", "/v1/skills", Value::Null);
+        assert_eq!(
+            l["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["name"] == "risky")
+                .unwrap()["approved"],
+            false
+        );
+        let (s, v) = call(
+            &mut a,
+            "POST",
+            "/v1/skills/risky/approve",
+            json!({ "hash": hash, "acknowledged": ["allowed-tools", "shell-injection"] }),
+        );
+        assert_eq!(s, 200, "{v}");
+        let (_, l) = call(&mut a, "GET", "/v1/skills", Value::Null);
+        assert_eq!(
+            l["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["name"] == "risky")
+                .unwrap()["approved"],
+            true
+        );
+    }
+
+    /// The box user can delete the box's record of a skill and edit its folder, or delete the folder. Neither makes the copy
+    /// disappear from the page, and neither makes the dashboard forget that it put it there.
+    #[test]
+    fn a_box_cannot_hide_a_copy_from_the_page_or_make_the_dashboard_forget_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path()).with_agent(Box::new(
+            crate::serve::agent::SimulatedAgent::with_host_is_box(false),
+        ));
+        demo_box(&mut a, "dev");
+        let (_, item) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            json!({ "files": skill_files("mine", "Do it.") }),
+        );
+        let hash = item["hash"].as_str().unwrap().to_string();
+        call(
+            &mut a,
+            "POST",
+            "/v1/skills/mine/approve",
+            json!({ "hash": hash }),
+        );
+        assert_eq!(
+            call(
+                &mut a,
+                "PUT",
+                "/v1/boxes/dev/skills/mine",
+                json!({ "hash": hash })
+            )
+            .0,
+            200
+        );
+        let root = a.agent.demo_box_dir("dev").unwrap();
+        let place = |a: &mut App| {
+            let (_, v) = call(a, "GET", "/v1/boxes/dev/skills", Value::Null);
+            v["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["name"] == "mine")
+                .map(|x| x["places"][0].clone())
+        };
+        // the record is deleted and the folder edited: the card still shows it, as changed, and as this dashboard's
+        std::fs::remove_file(root.join("state/skills.json")).unwrap();
+        let folder = root.join("home/.claude/skills/mine");
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\nname: mine\ndescription: x\n---\nevil\n",
+        )
+        .unwrap();
+        let p = place(&mut a).unwrap();
+        assert_eq!(
+            (p["state"].as_str(), p["origin"].as_str()),
+            (Some("modified"), Some("dashboard")),
+            "{p}"
+        );
+        // removing it asks about the hash this dashboard recorded: the edited folder is not that, so it is left alone and kept on record
+        let (s, r) = call(&mut a, "DELETE", "/v1/boxes/dev/skills/mine", Value::Null);
+        assert_eq!(s, 409, "{r}");
+        assert!(folder.exists());
+        assert_eq!(
+            a.memory_host()
+                .unwrap()
+                .skills
+                .pushed_places("mine", "dev")
+                .len(),
+            1
+        );
+        // the folder is deleted too: missing, and still recorded
+        std::fs::remove_dir_all(&folder).unwrap();
+        let p = place(&mut a).unwrap();
+        assert_eq!(p["state"], "missing");
+        assert_eq!(
+            a.memory_host()
+                .unwrap()
+                .skills
+                .pushed_places("mine", "dev")
+                .len(),
+            1
+        );
+        // asking the box to take away what is already gone forgets it, because it is gone
+        let (s, _) = call(&mut a, "DELETE", "/v1/boxes/dev/skills/mine", Value::Null);
+        assert_eq!(s, 200);
+        assert!(a
+            .memory_host()
+            .unwrap()
+            .skills
+            .pushed_places("mine", "dev")
+            .is_empty());
+    }
+
+    /// What the box reports is the box user's to change, so it cannot fill the record by editing a file or inventing names.
+    #[test]
+    fn a_box_cannot_flood_the_record_with_skills_it_says_it_holds() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path()).with_agent(Box::new(
+            crate::serve::agent::SimulatedAgent::with_host_is_box(false),
+        ));
+        demo_box(&mut a, "dev");
+        let (_, item) = call(
+            &mut a,
+            "POST",
+            "/v1/skills",
+            json!({ "files": skill_files("hand", "Hi.") }),
+        );
+        let h = item["hash"].as_str().unwrap();
+        let rec = a.record("dev").unwrap();
+        let push = |a: &App, body: &str| {
+            a.agent
+                .skills(
+                    &rec,
+                    "PUT",
+                    "/hand",
+                    json!({ "hash": h, "files": skill_files("hand", body) })
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap()
+                .0
+        };
+        assert_eq!(push(&a, "Hi."), 200);
+        let seen = |a: &App| {
+            a.activity
+                .iter()
+                .filter(|e| e.action == "skill seen on box")
+                .count()
+        };
+        for _ in 0..5 {
+            call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        }
+        assert_eq!(seen(&a), 1);
+        // the files change under it (a different hash on disk) and a record is forged with a hundred names: nothing new is written
+        let root = a.agent.demo_box_dir("dev").unwrap();
+        std::fs::write(root.join("home/.claude/skills/hand/notes.md"), "edited").unwrap();
+        let entries: Vec<Value> = (0..100).map(|i| json!({ "name": format!("n{i}"), "agent": "claude-code", "hash": "ab", "version": "1", "pushed_ms": 1 })).collect();
+        std::fs::write(
+            root.join("state/skills.json"),
+            json!({ "entries": entries }).to_string(),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        }
+        // at most one line per box, skill and folder, and no more than the daemon follows in one look
+        assert!(seen(&a) <= 1 + 64, "{}", seen(&a));
+        let before = seen(&a);
+        for _ in 0..5 {
+            call(&mut a, "GET", "/v1/skills/holdings", Value::Null);
+        }
+        assert_eq!(seen(&a), before);
     }
 }
