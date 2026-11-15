@@ -11,7 +11,9 @@ cloud box. The design is in [ADR 0025](../adr/0025-skills-are-folders-usable-onl
 [ADR 0051](../adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again.md).
 
 **A skill is content an agent will follow with the authority of the box it runs on.** Read every file, including anything that
-talks to the agent. A skill is guidance, not security: a limit the server enforces holds whatever a skill says.
+talks to the agent. A skill is guidance, not security: Oz Box applies its own rules to what Oz Box does, but not to what an
+agent program does with a skill. Claude Code in particular acts on some of what a `SKILL.md` declares (see
+[what a skill can run](#2-review-and-approve-before-any-agent-sees-it)).
 
 ---
 
@@ -28,12 +30,19 @@ The same thing from the command line, on the computer that runs the dashboard: `
 must match the `name:` in its `SKILL.md`). The page says which folder your skills are kept in.
 
 What a skill may hold: a `SKILL.md` and up to 49 more text files (`md`, `txt`, `json`, `yaml`, `yml`, `toml`, `sh`, `py`, `js`,
-`ts`, `rs`, `sql`, `html`, `css`, `csv`), at most 128 KB each and 512 KB in all, in folders at most four deep. Refused: a path
-that escapes the folder, a link, a file that is not text, a file that looks like it holds a key or a token, and any hidden or
-direction-changing character (so what you read is what the agent reads). Scripts are allowed as text; they are marked in the
-review, an agent may run them, and they are never made executable on a box.
+`ts`, `rs`, `sql`, `html`, `css`, `csv`), at most 128 KB each and 512 KB in all, in folders at most four deep. The skill's name
+is lower-case letters and digits with single dashes (`my-skill`, at most 64 characters), and the `SKILL.md` front matter must
+be valid YAML (no anchors or aliases, no repeated key). Refused: a path that escapes the folder, a link, a file that is not text,
+a file that looks like it holds a key or a token, and any hidden character: control, format, separator, private-use and
+unassigned characters, variation selectors, the Hangul fillers and the like (so what you read is what the agent reads). Scripts
+are allowed as text; they are marked in the review and written without the executable bit, which does not stop an agent running
+one by name (`bash run.sh`).
 
 **Status:** Preview.
+
+> **If a skill of yours disappeared.** A skill whose name has capitals or an underscore, or whose `SKILL.md` front matter is not
+> valid YAML (an unquoted colon in the description, for example), is no longer listed. Rename its folder and its `name:` line, or
+> fix the YAML (put the description in quotes), then add it again.
 
 ## 2. Review and approve before any agent sees it
 
@@ -44,6 +53,15 @@ what to look for (instructions to ignore rules, to hide what the agent did, to s
 every file as plain text, with a **Script** mark on files an agent may run. **Approve these files** records you as the reviewer
 of exactly those files. Change one byte anywhere and the skill needs approving again.
 
+**What a skill can run.** At the top of the review, **What this skill asks for** lists what Claude Code acts on when the skill is
+used: `hooks` (shell commands registered for the rest of the session), `` !`command` `` or a ```` ```! ```` block in the text
+(run before the agent reads it; the file is marked **Runs commands**), `shell`, `allowed-tools` (tools used without asking) and
+`agent` (a subagent with its own tools). **You must tick an acknowledgement for each one before the skill can be approved,
+put on a box or used by an agent**; the acknowledgement is recorded with the approval of those exact files. Other documented
+fields (`model`, `context`, `paths`, ...) are shown, and fields nothing reads are named. This describes Claude Code; how Codex,
+Gemini CLI and OpenCode treat these fields has not been checked. On the command line, `ozbox skills approve <name>` asks the
+same question for each one, or takes `--ack <what>` (`--yes` alone never acknowledges them).
+
 **Status:** Preview.
 
 ## 3. Put an approved skill on a box's disk
@@ -52,18 +70,25 @@ of exactly those files. Change one byte anywhere and the skill needs approving a
 
 1. **Install**, then **On a box's disk**, then pick a running box and the folders. A box with Claude Code set up offers
    `~/.claude/skills`; Codex, Gemini CLI and OpenCode each document `~/.agents/skills` as a user-level skills folder.
-2. Choose **Put on the box**. It is refused until a person approved the exact files, and the box checks them again before it
-   writes anything.
+2. Choose **Put on the box**. It is refused until a person approved the exact files (and acknowledged everything they run),
+   and the box checks them again before it writes anything.
+
+This is done from **the box's own dashboard** (open it through the box's address). The box has two sockets: the dashboard's
+own, which carries the push, and the box user's, which every program running on the box can open, and which refuses a skill
+push or removal. A dashboard on another computer can see what a box holds but not change it, and the sheet says so instead of offering it.
 
 What happens on the box: the files are written into a new folder and swapped into place, so an agent never reads half a
 skill. A folder of the same name that you made by hand is left alone and the push is refused. **Remove from the box** deletes
-only what a push made.
+only what this dashboard put there, by its own record of what it pushed.
 
 The card then lists each box that holds the skill and says **Matches the library**, **Different from the library** (the library
 has moved on), **Changed on the box since it was put there** or **Missing from the box**. The box is asked every time (its
 files are hashed again); a box that is stopped or cannot be reached is shown as not known, never as holding nothing. An agent
 running as the box user can edit its own skills folder: Oz Box shows that it did, and pushing again puts the approved files
-back, but it does not stop the edit.
+back, but it does not stop the edit. Each copy also says where it came from: **Put here from this dashboard** only when this
+dashboard's own record names those files; anything else is **On the box, not pushed by this dashboard**, is noted once in the
+activity record, and is never replaced or removed from the page. What the box says about who put a skill there is never shown
+as fact: the program that keeps that record runs as the box user, so the box user can edit it.
 
 Only an owner can put a skill on a box, because a skill is guidance a box's agents will follow.
 
@@ -75,7 +100,8 @@ Only an owner can put a skill on a box, because a skill is guidance a box's agen
 
 Add a skill with the same name and the page asks you to confirm it replaces the one in your library (version shown); the new
 files are a new version that needs approval, and the old one is kept. **Earlier versions** lists the last twenty with who
-added each and how; **Read** shows its files, and **Restore** makes it current again, as a new addition that needs approval.
+added each and how; **Read** shows its files, and **Restore** makes it current again, as a new addition that always needs
+approval again, even if a box or an install still holds those same files.
 Two people editing at once cannot overwrite each other silently: a replace names the version it saw, and the library refuses if
 it changed.
 
@@ -87,6 +113,8 @@ you remove them.
 
 ## What is not built
 
-- Signing by a publisher, or a shared skill hub.
-- Putting a skill on several boxes in one step, and `ozbox` commands to put a skill on a box (use the dashboard).
+- Signing by a publisher, or a shared skill hub. Without it, whoever controls the dashboard's socket to a box can put files on
+  that box; the box's re-check guards against a stale page and corruption, not against that.
+- Putting a skill on several boxes in one step, putting one on a box from a dashboard on another computer, and `ozbox` commands
+  to put a skill on a box (use the box's own dashboard).
 - Proof on a real cloud box for every coding agent's folder.

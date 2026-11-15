@@ -2,8 +2,10 @@
 
 Skills are plain-language guidance an agent follows, in the open Agent Skills format: a folder named for the skill, holding a
 `SKILL.md` (a front matter with `name`, `description` and an optional `version`, then the instructions) and, if needed, a few
-text files beside it. They are not security: what an agent may do is enforced by the server (limits, claims, approvals),
-whatever a skill says.
+text files beside it. A skill's name is lower-case letters and digits with single dashes (`my-skill`). They are not security:
+Oz Box applies its own rules (limits, claims, approvals) to what Oz Box does, but an agent program such as Claude Code acts on
+some of what a `SKILL.md` declares (`hooks`, `allowed-tools`, `!` commands), so a skill that asks for any of that needs each
+one acknowledged before it can be approved.
 
 **A skill is unusable until a person approves its exact files.** These folders ship inside the program and appear in the
 dashboard's Skills page (and `ozbox skills list`) as *bundled*. Install one for the whole fleet, a box or a project, read its
