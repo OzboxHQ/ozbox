@@ -46,6 +46,7 @@
               "use-cases/agentic-fleet",
               "use-cases/orchestrating-a-fleet",
               "use-cases/secure-agent-workspace",
+              "use-cases/telegram-control",
               "use-cases/chat",
               "use-cases/models-and-routing",
               "use-cases/keeping-boxes-healthy",

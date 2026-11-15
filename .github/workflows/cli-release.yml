@@ -82,6 +82,12 @@ jobs:
                 exit 1
               fi
             fi
+            # The changelog says when each change shipped, so a real release carries no placeholder date: stamp them first
+            # (`npm run stamp-release` in docs-site/). The validator needs only Node, which the runner has.
+            ( cd docs-site && node scripts/validate-docs.mjs . --strict-dates ) || {
+              echo "the changelog still has [Release date] entries: run npm run stamp-release in docs-site/, merge, then tag" >&2
+              exit 1
+            }
             # `ozbox --version` prints the version in Cargo.toml; a release that says otherwise confuses everyone.
             cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
             if [ "$cargo_version" != "$version" ]; then

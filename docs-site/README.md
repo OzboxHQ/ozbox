@@ -50,8 +50,9 @@ npm run links     # offline link, anchor and image check (the hard gate; no netw
 exist. CI (`.github/workflows/docs-site.yml`) also runs `mint broken-links` as an informational extra step, because it needs
 the network; the offline check is the one that blocks.
 
-Entries in `changelog/index.mdx` are dated `[Release date]` while the work is built. On a pull request into `main` and on
-`main` itself CI refuses any left over. At release time run:
+Entries in `changelog/index.mdx` are dated `[Release date]` while the work is built, and keep it after they merge into `main`
+until the release that ships them: the date a reader sees is the day the change shipped, not the day it merged. A real release
+refuses any left over (`.github/workflows/cli-release.yml`), so right before tagging run:
 
 ```bash
 npm run stamp-release                          # today

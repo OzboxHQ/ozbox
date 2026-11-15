@@ -17,7 +17,19 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 
   - **It checks creating tagged resources**, the way Oz Box creates them, and looks at the setup state bucket by name instead of listing every bucket in the account. A bucket that is not there yet counts as allowed.
   - **A refusal says who grants it.** Each denied line names the operator-policy statement to apply, or says the permission belongs to the setup identity (OzBoxSetup). The setup state bucket is the setup identity's, so it is reported but never stops setup.
-  - **Not yet run against a real AWS account.** The check is tested against the policy file; a run with a real least-privilege role is still to come.
+  - **Checked on a real account.** The new permission check passed every line with a least-privilege operator role on a real AWS account; a full setup run with the `OzBoxSetup` permission set is still to come.
+</Update>
+
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Telegram (Preview)">
+  ## Link your Telegram account with a passkey, and allow a phone to talk to agents on boxes you choose
+
+  - **Linking is a passkey, both ways.** On your **Account** page you open a ten-minute pairing window with your passkey, send `/link` to the bot, type the code it answers with into the dashboard, and confirm with a second passkey. The bot says nothing to anyone while no window is open. See [Control your boxes from Telegram](/use-cases/telegram-control).
+  - **Allow chat on boxes, for a few days at a time.** In the same confirmation, or later, you can let a link talk to coding agents on the boxes you pick. It is per box, never for a Production box, lapses after 72 hours unused, and is judged against your role each time. A member's also needs an owner's passkey.
+  - **Lock it or cut it any time.** `/lock` makes a link read-only until a passkey lifts the lock, `/unlink` cuts it, and the Account page has both, with an owner's **Lock every link**. A link lasts 30 days and is renewed with a passkey.
+  - **A chat still never approves anything.** Approving, denying, stopping a run, raising a spending limit and anything about secrets are refused from a chat; when something needs your passkey the chat sends one link to the dashboard that opens nothing by itself.
+  - **What was said is kept in a sealed transcript** an owner can read for 30 days, and every act or refusal is an audit entry by you.
+  - **The bridge stops when something is wrong**: another program reading the bot, a webhook set for it, or bot settings that allow groups or inline queries. It stays stopped until an owner confirms.
+  - A chat you linked before this release keeps receiving alerts and can read; link it again to do more. Starting and pausing boxes and `/run` from a chat are not in this release. Preview: not yet run on a real phone.
 </Update>
 
 <Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security", "Platform"]} description="0.2.0-beta.0: the first public Beta">

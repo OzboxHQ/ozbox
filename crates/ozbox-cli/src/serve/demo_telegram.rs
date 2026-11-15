@@ -40,6 +40,18 @@ pub struct State {
     fail_sends: u32,
     /// The pause between tries of a failed delivery, in milliseconds (0: the default below).
     retry_ms: u64,
+    /// How many of the next `getUpdates` calls answer 409 (another reader, or a webhook), and 429 with `retry_after`.
+    conflicts: u32,
+    rate_limited: u32,
+    /// A webhook "somebody set": `getWebhookInfo` names it.
+    webhook: Option<String>,
+    /// The flags `getMe` reports (all off, as the bridge requires, unless a test turns one on).
+    can_join_groups: bool,
+    can_read_all_group_messages: bool,
+    supports_inline_queries: bool,
+    /// The ids of the messages the bridge asked to delete.
+    deleted: Vec<i64>,
+    next_message_id: i64,
 }
 
 /// The pause between tries when the demo server is asked for none: long enough for a browser to see "retrying".
@@ -80,8 +92,41 @@ impl HttpClient for DemoTelegram {
         };
         match method {
             "answerCallbackQuery" => json_ok(&json!({ "ok": true, "result": true })),
-            "getMe" => json_ok(&json!({ "ok": true, "result": { "username": "oz_demo_bot" } })),
+            "getMe" => json_ok(&json!({ "ok": true, "result": {
+                "id": 7_000_000_002_i64, "is_bot": true, "username": "oz_demo_bot",
+                "can_join_groups": st.can_join_groups,
+                "can_read_all_group_messages": st.can_read_all_group_messages,
+                "supports_inline_queries": st.supports_inline_queries,
+            } })),
+            "getWebhookInfo" => json_ok(
+                &json!({ "ok": true, "result": { "url": st.webhook.clone().unwrap_or_default() } }),
+            ),
+            "deleteMessage" => {
+                let body: Value = req
+                    .body
+                    .as_deref()
+                    .and_then(|b| serde_json::from_slice(b).ok())
+                    .unwrap_or(Value::Null);
+                st.deleted
+                    .push(body.get("message_id").and_then(Value::as_i64).unwrap_or(0));
+                json_ok(&json!({ "ok": true, "result": true }))
+            }
             "getUpdates" => {
+                if st.conflicts > 0 {
+                    st.conflicts -= 1;
+                    return Ok(HttpResponse {
+                        status: 409,
+                        body: r#"{"ok":false,"error_code":409}"#.into(),
+                    });
+                }
+                if st.rate_limited > 0 {
+                    st.rate_limited -= 1;
+                    return Ok(HttpResponse {
+                        status: 429,
+                        body: r#"{"ok":false,"error_code":429,"parameters":{"retry_after":1}}"#
+                            .into(),
+                    });
+                }
                 let offset: i64 = query
                     .split('&')
                     .find_map(|p| p.strip_prefix("offset="))
@@ -127,7 +172,8 @@ impl HttpClient for DemoTelegram {
                     .push((chat, text.chars().take(400).collect(), buttons));
                 let over = st.sent.len().saturating_sub(KEEP);
                 st.sent.drain(..over);
-                json_ok(&json!({ "ok": true, "result": {} }))
+                st.next_message_id += 1;
+                json_ok(&json!({ "ok": true, "result": { "message_id": st.next_message_id } }))
             }
             _ => Ok(HttpResponse {
                 status: 404,
@@ -191,8 +237,10 @@ impl App {
                 "message": { "chat": { "id": b.chat_id, "type": "private" } } } })
         } else {
             let mut m = json!({
+                "message_id": id,
+                "date": super::unix_ms() / 1000,
                 "chat": { "id": b.chat_id, "type": "private" },
-                "from": { "first_name": b.name.unwrap_or_else(|| "Demo user".into()) },
+                "from": { "id": b.chat_id, "is_bot": false, "first_name": b.name.unwrap_or_else(|| "Demo user".into()) },
                 "text": b.text,
             });
             if b.forwarded {
@@ -283,6 +331,93 @@ impl App {
             st.retry_ms = m;
         }
         Resp::json(200, &json!({ "failing": b.count }))
+    }
+
+    /// `POST /v1/demo/telegram/legacy-chat`: put a chat on the list that receives alerts, the way a chat linked before passkey
+    /// links was. Linking a real account needs a signed-in person and a passkey, which a token-mode demo does not have; this is
+    /// how a browser test gets a chat that is told things. Such a chat reads and is notified, and nothing more. Absent on a real
+    /// server.
+    pub(super) fn demo_telegram_legacy_chat(&mut self, body: &[u8]) -> Resp {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct B {
+            chat_id: i64,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            person: Option<String>,
+        }
+        if self.demo_telegram.is_none() {
+            return Resp::error(404, "not_found", "no such endpoint");
+        }
+        let b: B = match serde_json::from_slice(body) {
+            Ok(b) => b,
+            Err(e) => return Resp::error(400, "bad_request", &format!("invalid request: {e}")),
+        };
+        self.state.telegram.chats.retain(|c| c.id != b.chat_id);
+        self.state.telegram.chats.push(crate::state::TelegramChat {
+            id: b.chat_id,
+            name: b
+                .name
+                .unwrap_or_else(|| "Demo user".into())
+                .chars()
+                .take(40)
+                .collect(),
+            person: b.person,
+        });
+        self.save_state();
+        self.schedule.next_telegram_ms = 0;
+        Resp::json(200, &json!({ "chats": self.state.telegram.chats }))
+    }
+
+    /// `POST /v1/demo/telegram/script`: make the demo bot misbehave the way the real one can, so the bridge's stops can be tried:
+    /// answer 409 or 429 to the next polls, say a webhook is set, or report a bot flag as on. Absent on a real server.
+    pub(super) fn demo_telegram_script(&mut self, body: &[u8]) -> Resp {
+        #[derive(Deserialize, Default)]
+        #[serde(deny_unknown_fields, default)]
+        struct B {
+            conflicts: Option<u32>,
+            rate_limited: Option<u32>,
+            webhook: Option<String>,
+            clear_webhook: bool,
+            can_join_groups: Option<bool>,
+            can_read_all_group_messages: Option<bool>,
+            supports_inline_queries: Option<bool>,
+        }
+        let Some(state) = self.demo_telegram.clone() else {
+            return Resp::error(404, "not_found", "no such endpoint");
+        };
+        let b: B = match serde_json::from_slice(body) {
+            Ok(b) => b,
+            Err(e) => return Resp::error(400, "bad_request", &format!("invalid request: {e}")),
+        };
+        let Ok(mut st) = state.lock() else {
+            return Resp::error(500, "internal", "the demo bot is unavailable");
+        };
+        if let Some(c) = b.conflicts {
+            st.conflicts = c.min(MAX_FAILS);
+        }
+        if let Some(c) = b.rate_limited {
+            st.rate_limited = c.min(MAX_FAILS);
+        }
+        if b.clear_webhook {
+            st.webhook = None;
+        }
+        if let Some(w) = b.webhook {
+            st.webhook = Some(w.chars().take(200).collect());
+        }
+        if let Some(v) = b.can_join_groups {
+            st.can_join_groups = v;
+        }
+        if let Some(v) = b.can_read_all_group_messages {
+            st.can_read_all_group_messages = v;
+        }
+        if let Some(v) = b.supports_inline_queries {
+            st.supports_inline_queries = v;
+        }
+        drop(st);
+        self.schedule.next_telegram_ms = 0;
+        Resp::json(200, &json!({ "scripted": true }))
     }
 
     /// `GET /v1/demo/telegram/sent`: what the server sent to the demo bot's chats (a count and the first words).

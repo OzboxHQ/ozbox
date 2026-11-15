@@ -8,6 +8,7 @@ export type Route =
   | { page: 'tools'; name: string }
   | { page: 'terminal'; name: string }
   | { page: 'account' }
+  | { page: 'go' }
   | { page: 'tasks' }
   | { page: 'orchestrations' }
   | { page: 'memory' }
@@ -65,6 +66,7 @@ export function parseRoute(pathname: string): Route {
     }
   }
   if (a === 'account' && parts.length === 1) return { page: 'account' };
+  if (a === 'go' && parts.length === 1) return { page: 'go' };
   if (a === 'costs' && b === 'bill' && parts.length === 2) return { page: 'bill' };
   if (a === 'boxes' && b && parts.length === 3 && parts[2] === 'tools') {
     try {

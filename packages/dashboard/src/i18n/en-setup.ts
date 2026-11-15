@@ -218,7 +218,7 @@ export const enSetup = {
   'guide.telegram_1': 'In Telegram, open a chat with @BotFather (the official bot for making bots).',
   'guide.telegram_2': 'Send /newbot and answer the two questions: a display name, then a user name that ends in bot.',
   'guide.telegram_3': 'BotFather replies with a token that looks like 123456:ABC. Copy it.',
-  'guide.telegram_4': 'In Apps and alerts, choose Add bot token and paste it. Then choose Pair a chat and send the one-time code to your bot from a private chat.',
+  'guide.telegram_4': 'In Apps and alerts, choose Add bot token and paste it. Then link your account from your Account page: a passkey opens a pairing window, you send /link to your bot from a private chat, and a second passkey confirms.',
   'guide.slack_title': 'Slack: your own incoming webhook',
   'guide.slack_1': 'Go to api.slack.com/apps and choose Create New App, then From scratch. Pick your workspace.',
   'guide.slack_2': 'In the app\'s menu choose Incoming Webhooks and switch it on.',
