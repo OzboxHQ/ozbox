@@ -20,6 +20,24 @@ use serde_json::{json, Value};
 
 use super::{unix_ms, App, Req, Resp};
 
+const NOTES_PER_BOX_PER_DAY: usize = 64;
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// What a push that landed on the box answers when recording it did not go cleanly: the status, the code, the audit words and
+/// the message. `NotApproved` means the copy IS recorded but its approval is no longer current (409, `recorded_unapproved`);
+/// anything else means it is not recorded (500, `not_recorded`).
+fn record_failure(e: &SkillError) -> (u16, &'static str, &'static str, String) {
+    match e {
+        SkillError::NotApproved(m) => (409, "recorded_unapproved", "recorded; approval no longer current", m.clone()),
+        _ => (
+            500,
+            "not_recorded",
+            "put on the box, not recorded",
+            "the skill was put on the box but this dashboard could not record it, so it will show as not pushed from here".to_string(),
+        ),
+    }
+}
+
 fn skill_error(e: SkillError) -> Resp {
     match e {
         SkillError::NotFound => Resp::error(404, "not_found", "there is no such skill"),
@@ -271,12 +289,11 @@ impl App {
                 }
             }
         }
-        // A skill on a box that this dashboard did not put there is worth a line in the record, once per box, skill and
-        // folder, and never more than a few hundred: the box user chooses what its box reports, so it does not get to fill
-        // the record by changing a file or inventing names.
-        // Keys are `box:skill:folder`. What the box no longer reports is forgotten, so the set is never more than what a box
-        // reports right now (and a daemon follows at most a few dozen places), and a copy that goes away and comes back is
-        // noted again.
+        // A skill on a box that this dashboard did not put there is worth a line in the record. Keys are `box:skill:folder`;
+        // what the box no longer reports is forgotten (so the set is only what the box reports now, and a copy that goes away
+        // and comes back is noted again), but the lines themselves are budgeted per box per day: the box user chooses what its
+        // box reports, and a record that changes every poll must not be able to push real events out of the activity ring or
+        // fill the audit chain. Over the budget, sightings are counted and summarised once.
         let now_seen: std::collections::BTreeSet<String> =
             unrecorded.iter().map(|u| format!("{name}:{u}")).collect();
         let prefix = format!("{name}:");
@@ -286,12 +303,7 @@ impl App {
             let skill = u.split_once(':').map_or(u.as_str(), |(s, _)| s);
             let key = format!("{name}:{u}");
             if legacy_name_ok(skill) && self.unrecorded_skills.insert(key) {
-                self.log_activity(
-                    "skill seen on box",
-                    name,
-                    None,
-                    "not pushed by this dashboard",
-                );
+                self.note_unrecorded(name);
             }
         }
         json!({ "box": name, "state": "ok", "can_write": self.agent.skill_writes(), "agents": v["agents"], "skills": skills, "others": v["others"] })
@@ -341,6 +353,46 @@ impl App {
         }
     }
 
+    /// One "seen on box" line, within the budget: at most [`NOTES_PER_BOX_PER_DAY`] per box per day, then a single summary
+    /// line (with the count) when the day ends.
+    fn note_unrecorded(&mut self, box_name: &str) {
+        let now = unix_ms();
+        let e = self
+            .unrecorded_budget
+            .entry(box_name.to_string())
+            .or_insert((now, 0, 0));
+        let mut summary = None;
+        if now.saturating_sub(e.0) >= DAY_MS {
+            if e.2 > 0 {
+                summary = Some(e.2);
+            }
+            *e = (now, 0, 0);
+        }
+        let write = if e.1 < NOTES_PER_BOX_PER_DAY {
+            e.1 += 1;
+            true
+        } else {
+            e.2 += 1;
+            false
+        };
+        if let Some(n) = summary {
+            self.log_activity(
+                "skill seen on box",
+                box_name,
+                None,
+                &format!("{n} more sightings were not noted"),
+            );
+        }
+        if write {
+            self.log_activity(
+                "skill seen on box",
+                box_name,
+                None,
+                "not pushed by this dashboard",
+            );
+        }
+    }
+
     fn skill_push(&mut self, box_name: &str, skill: &str, req: &Req) -> Resp {
         let host = match self.memory_host() {
             Ok(h) => h,
@@ -379,14 +431,65 @@ impl App {
         let claims = host.skills.pushed_places(skill, box_name);
         let body = json!({ "hash": b.hash, "agents": b.agents, "claims": claims, "files": files })
             .to_string();
-        let (status, mut v) =
-            match self
-                .agent
-                .skills(&rec, "PUT", &format!("/{skill}"), body.as_bytes())
-            {
-                Ok(x) => x,
-                Err(e) => return Self::agent_error(&e),
-            };
+        let (status, mut v) = match self.agent.skills(
+            &rec,
+            "PUT",
+            &format!("/{skill}"),
+            body.as_bytes(),
+        ) {
+            Ok(x) => x,
+            // refused before anything was sent (a dashboard that cannot write): nothing could have landed
+            Err(e @ super::agent::AgentError::Unsupported(_)) => return Self::agent_error(&e),
+            Err(_) => {
+                // The request may have landed before the answer was lost: look at the box. What it holds that hashes to
+                // exactly what was sent is recorded; anything else is said plainly, never as a failure that changed nothing.
+                let landed: Vec<String> = self
+                    .agent
+                    .skills(&rec, "GET", "", &[])
+                    .ok()
+                    .map(|(_, v)| agents_holding(&v, skill, &b.hash))
+                    .unwrap_or_default();
+                if landed.is_empty() {
+                    return Resp::error(
+                            502,
+                            "may_have_landed",
+                            "the connection to the box was lost, so it is not known whether the skill was put there; reload to see what the box holds",
+                        );
+                }
+                let short: String = b.hash.chars().take(12).collect();
+                return match host.skills.record_push(
+                    skill,
+                    box_name,
+                    &b.hash,
+                    landed,
+                    &who,
+                    unix_ms(),
+                ) {
+                    Ok(()) => {
+                        self.log_activity(
+                            "skill push",
+                            box_name,
+                            None,
+                            &format!("{skill} {short}"),
+                        );
+                        Resp::json(
+                            200,
+                            &json!({ "ok": true, "name": skill, "hash": b.hash, "results": [], "recovered": true, "source": self.data_source() }),
+                        )
+                    }
+                    Err(e) => {
+                        let (st, code, audit, msg) = record_failure(&e);
+                        self.log_activity(
+                            "skill push",
+                            box_name,
+                            None,
+                            &format!("{skill} {short} {audit}"),
+                        );
+                        Resp::error(st, code, &msg)
+                    }
+                };
+            }
+        };
         let short: String = b.hash.chars().take(12).collect();
         if status == 200 {
             let agents: Vec<String> = v["results"]
@@ -406,17 +509,14 @@ impl App {
                     self.log_activity("skill push", box_name, None, &format!("{skill} {short}"))
                 }
                 Err(e) => {
+                    let (code_status, code, audit, msg) = record_failure(&e);
                     self.log_activity(
                         "skill push",
                         box_name,
                         None,
-                        &format!("{skill} {short} put on the box, not recorded"),
+                        &format!("{skill} {short} {audit}"),
                     );
-                    let msg = match e {
-                        SkillError::NotApproved(m) => m,
-                        _ => "the skill was put on the box but this dashboard could not record it, so it will show as not pushed from here".to_string(),
-                    };
-                    return Resp::error(500, "not_recorded", &msg);
+                    return Resp::error(code_status, code, &msg);
                 }
             }
         } else {
@@ -472,5 +572,47 @@ impl App {
             &format!("{skill} {status}"),
         );
         Resp::json(status, &v)
+    }
+}
+
+/// The agent folders in a box's status where `skill` is held and its files on the box's disk hash to exactly `hash`.
+fn agents_holding(status: &Value, skill: &str, hash: &str) -> Vec<String> {
+    status["skills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["name"] == skill)
+        .flat_map(|s| s["places"].as_array().cloned().unwrap_or_default())
+        .filter(|p| p["disk_hash"] == hash)
+        .filter_map(|p| p["agent"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_push_that_landed_answers_for_what_was_recorded() {
+        let (st, code, audit, _) = record_failure(&SkillError::NotApproved("x".into()));
+        assert_eq!((st, code), (409, "recorded_unapproved"));
+        assert!(audit.starts_with("recorded"), "the copy IS recorded");
+        let (st, code, audit, _) = record_failure(&SkillError::Refused("gone".into()));
+        assert_eq!((st, code), (500, "not_recorded"));
+        assert!(audit.contains("not recorded"));
+        let (st, code, _, _) = record_failure(&SkillError::Io("disk".into()));
+        assert_eq!((st, code), (500, "not_recorded"));
+    }
+
+    #[test]
+    fn only_a_copy_that_hashes_to_what_was_sent_counts_as_having_landed() {
+        let status = json!({ "skills": [
+            { "name": "mine", "places": [
+                { "agent": "claude-code", "disk_hash": "aa" },
+                { "agent": "agents", "disk_hash": "bb" },
+                { "agent": "other", "disk_hash": null } ] },
+            { "name": "yours", "places": [ { "agent": "claude-code", "disk_hash": "aa" } ] } ] });
+        assert_eq!(agents_holding(&status, "mine", "aa"), ["claude-code"]);
+        assert!(agents_holding(&status, "mine", "cc").is_empty());
     }
 }

@@ -1189,4 +1189,43 @@ mod tests {
         }
         assert_eq!(seen(&a), before);
     }
+
+    /// A box record that alternates between two sets of invented entries on every poll must not be able to write a line per
+    /// entry per poll into the activity record.
+    #[test]
+    fn a_record_that_flips_between_two_sets_cannot_flood_the_activity_record() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path()).with_agent(Box::new(
+            crate::serve::agent::SimulatedAgent::with_host_is_box(false),
+        ));
+        demo_box(&mut a, "dev");
+        let root = a.agent.demo_box_dir("dev").unwrap();
+        let set = |prefix: &str| {
+            let e: Vec<Value> = (0..64)
+                .map(|i| json!({ "name": format!("{prefix}{i}"), "agent": "claude-code", "hash": "ab", "version": "1", "pushed_ms": 1 }))
+                .collect();
+            std::fs::create_dir_all(root.join("state")).unwrap();
+            std::fs::write(
+                root.join("state/skills.json"),
+                json!({ "entries": e }).to_string(),
+            )
+            .unwrap();
+        };
+        // a real event before the flood
+        a.log_activity("test marker", "dev", None, "first");
+        for round in 0..20 {
+            set(if round % 2 == 0 { "a" } else { "b" });
+            call(&mut a, "GET", "/v1/boxes/dev/skills", Value::Null);
+        }
+        let seen = a
+            .activity
+            .iter()
+            .filter(|e| e.action == "skill seen on box")
+            .count();
+        assert!(seen <= 64 + 1, "{seen} lines for a record that only flips");
+        assert!(
+            a.activity.iter().any(|e| e.action == "test marker"),
+            "a real event was pushed out"
+        );
+    }
 }

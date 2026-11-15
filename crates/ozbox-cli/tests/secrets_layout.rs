@@ -350,3 +350,28 @@ fn the_image_carries_the_ingress_account_with_no_key_and_nothing_in_a_user_writa
         }
     }
 }
+
+/// The managed Claude Code setting that turns off commands written in a skill's text ships on every new box, root-owned and
+/// not writable by the box user, with exactly this content; and the box user's own settings carry it as a second layer.
+#[test]
+fn the_box_ships_claude_codes_managed_setting_that_stops_skill_commands() {
+    let t = repo("infra/cloud-init/box.yaml.tftpl");
+    let entry = t
+        .split("  - path: /etc/claude-code/managed-settings.json\n")
+        .nth(1)
+        .expect("the managed settings file is written")
+        .split("\n  - path:")
+        .next()
+        .unwrap_or_default();
+    assert!(entry.contains("permissions: \"0644\""), "{entry}");
+    assert!(entry.contains("owner: root:root"), "{entry}");
+    assert!(
+        entry.contains("{\"disableSkillShellExecution\": true}"),
+        "{entry}"
+    );
+    // a second layer in the box user's own settings, made only when there is none
+    assert!(t.contains("/work/home/ozbox/.claude/settings.json"));
+    assert!(t.contains("[ -e /work/home/ozbox/.claude/settings.json ] ||"));
+    // it must not be the only copy a skill could switch off: the root-owned file is not under /work
+    assert!(!entry.contains("/work/"));
+}

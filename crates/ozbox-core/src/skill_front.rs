@@ -280,18 +280,18 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// Does this line hold a way to run a shell command before the agent reads the page? `` !` `` anywhere, or a run of three or
-/// more backticks or tildes (a code fence, however it is introduced: after a list marker or a quote, mid-line, or indented)
-/// followed by optional spaces and a `!`. A true superset of what Claude Code runs: a false flag costs one tick, a miss runs
-/// a command.
-fn runs_a_command(line: &str) -> bool {
-    if line.contains("!`") {
-        return true;
-    }
+/// Where in this line (a character index) a command starts, if one does: `` !` `` anywhere, or a run of three or more
+/// backticks or tildes (a code fence, however it is introduced: after a list marker or a quote, mid-line, or indented) followed
+/// by optional whitespace of any kind (a space, a tab, a no-break or ideographic space) and a `!`. A true superset of what
+/// Claude Code runs: a false flag costs one tick, a miss runs a command.
+fn command_at(line: &str) -> Option<usize> {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if c == '!' && chars.get(i + 1) == Some(&'`') {
+            return Some(i);
+        }
         if c == '`' || c == '~' {
             let mut j = i;
             while j < chars.len() && chars[j] == c {
@@ -299,11 +299,11 @@ fn runs_a_command(line: &str) -> bool {
             }
             if j - i >= 3 {
                 let mut k = j;
-                while k < chars.len() && chars[k] == ' ' {
+                while k < chars.len() && chars[k].is_whitespace() {
                     k += 1;
                 }
                 if chars.get(k) == Some(&'!') {
-                    return true;
+                    return Some(i);
                 }
             }
             i = j;
@@ -311,15 +311,29 @@ fn runs_a_command(line: &str) -> bool {
             i += 1;
         }
     }
-    false
+    None
 }
 
-/// The lines of a `SKILL.md` that run a command. A line ends at `\n`, `\r\n` or a bare `\r` (a skill with a bare `\r` is
-/// refused outright, but this reads as a program would).
+/// A window of the line around the command (not the first 240 characters, which a long lead-in could fill), with the
+/// whitespace collapsed.
+fn window(line: &str, at: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let from = at.saturating_sub(60);
+    let to = (from + CLIP).min(chars.len());
+    let part: String = chars[from..to].iter().collect();
+    let one = part.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "{}{one}{}",
+        if from > 0 { "…" } else { "" },
+        if to < chars.len() { "…" } else { "" }
+    )
+}
+
+/// The lines of a `SKILL.md` that run a command, each as a window around the command. A line ends at `\n`, `\r\n` or a
+/// bare `\r` (a skill with a bare `\r` is refused outright, but this reads as a program would).
 pub fn shell_injection_lines(body: &str) -> Vec<String> {
     body.split(['\n', '\r'])
-        .filter(|l| runs_a_command(l))
-        .map(clip)
+        .filter_map(|l| command_at(l).map(|at| window(l, at)))
         .collect()
 }
 

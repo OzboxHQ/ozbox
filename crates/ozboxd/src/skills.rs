@@ -1240,6 +1240,18 @@ mod tests {
         assert_eq!(v["skills"][0]["places"][0]["state"], "intact");
         // nothing new goes under such a name, but the old copy goes away on the dashboard's claim
         assert_eq!(s.route("PUT", "/Old_Name", b"{}", true).0, 400);
+        // Claude Code's own folders are never something this removes, whatever claim comes with the request
+        assert_eq!(
+            s.route(
+                "DELETE",
+                "/synced",
+                br#"{"claims":{"claude-code":"00"}}"#,
+                true
+            )
+            .0,
+            400
+        );
+        assert_eq!(s.route("DELETE", "/trash", b"{}", true).0, 400);
         let (st, _) = s.route(
             "DELETE",
             "/Old_Name",

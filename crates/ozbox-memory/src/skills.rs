@@ -955,7 +955,7 @@ impl SkillStore {
             Ok(())
         } else {
             Err(SkillError::NotApproved(
-                "the approval was withdrawn while the skill was being put on the box; the copy is recorded and can be removed".into(),
+                "the copy is on the box and recorded, but its approval is no longer current (the library changed or the approval was withdrawn); approve the files again before pushing them again".into(),
             ))
         }
     }
@@ -1034,24 +1034,39 @@ impl SkillStore {
     /// names were lower case, one whose front matter is no longer valid, one that was edited by hand).
     pub fn unreadable(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
+        let mut other = 0usize;
         for e in fs::read_dir(self.root.join("library"))
             .into_iter()
             .flatten()
             .flatten()
         {
             let n = e.file_name().to_string_lossy().to_string();
-            if n.starts_with('.') || !e.path().is_dir() {
+            // a real folder only (never followed through a link), and only a name the delete can act on
+            let real = fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir());
+            if n.starts_with('.') || !real {
                 continue;
             }
-            if let Err(why) = SkillPack::from_dir(&e.path()) {
-                out.push((
-                    n.chars().take(64).collect(),
-                    why.to_string().chars().take(200).collect(),
-                ));
+            if SkillPack::from_dir(&e.path()).is_ok() {
+                continue;
             }
+            if !name_ok(&n) {
+                other += 1;
+                continue;
+            }
+            let why = SkillPack::from_dir(&e.path())
+                .err()
+                .map(|w| w.to_string())
+                .unwrap_or_default();
+            out.push((n, why.chars().take(200).collect()));
         }
         out.sort();
         out.truncate(50);
+        if other > 0 {
+            out.push((
+                String::new(),
+                format!("{other} more folder(s) have names this page cannot act on; delete them on the computer that runs the dashboard"),
+            ));
+        }
         out
     }
 
@@ -1846,5 +1861,12 @@ mod tests {
         assert!(u[0].1.contains("name"), "{}", u[0].1);
         s.remove_from_library("Old_Name").unwrap();
         assert!(s.unreadable().is_empty());
+        // a link is never followed, and a name the delete cannot act on is only counted
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.path(), s.root().join("library").join("linked")).unwrap();
+        fs::create_dir_all(s.root().join("library").join("bad name")).unwrap();
+        let u = s.unreadable();
+        assert_eq!(u.len(), 1, "{u:?}");
+        assert!(u[0].0.is_empty() && u[0].1.starts_with("1 more"));
     }
 }

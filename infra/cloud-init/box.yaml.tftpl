@@ -125,6 +125,8 @@ write_files:
       # Starter dotfiles only on first use of this disk.
       if [ ! -e /work/home/ozbox/.profile ]; then
         cp -n /etc/skel/.profile /etc/skel/.bashrc /etc/skel/.bash_logout /work/home/ozbox/ 2>/dev/null || true
+        install -d -m 0755 -o ozbox -g ozbox /work/home/ozbox/.claude
+        [ -e /work/home/ozbox/.claude/settings.json ] || printf '{"disableSkillShellExecution": true}\n' > /work/home/ozbox/.claude/settings.json
         chown -R ozbox:ozbox /work/home/ozbox
       fi
 
