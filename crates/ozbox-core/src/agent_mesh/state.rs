@@ -132,7 +132,7 @@ fn task_bytes(t: &Task) -> u64 {
 /// and no string in it looks like a key. A body that fails is never written down.
 pub fn check_body(screen: &dyn Screen, body: &Body) -> Result<(), &'static str> {
     let id_ok = |s: &str| word_ok_len(s);
-    let opt_ok = |o: &Option<String>| o.as_deref().map_or(true, word_ok_len);
+    let opt_ok = |o: &Option<String>| o.as_deref().is_none_or(word_ok_len);
     match body {
         Body::Task {
             title,
