@@ -53,6 +53,7 @@ export function problemMessage(p: Problem): { key: MessageKey; vars?: Record<str
     case 'file_type':
     case 'file_name':
     case 'hidden':
+    case 'bare_cr':
       return { key: `skills.p_${p.code}` as MessageKey, vars: { path: p.path } };
     default:
       return { key: `skills.p_${p.code}` as MessageKey };

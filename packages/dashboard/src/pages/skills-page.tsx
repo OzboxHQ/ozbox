@@ -101,6 +101,25 @@ export function SkillsPage() {
           {t('skills.holdings_unknown', { boxes: unknown.map((b) => `${b.box} (${b.reason ?? b.state})`).join('; ') })}
         </p>
       ) : null}
+      {(list.data?.unreadable ?? []).length > 0 ? (
+        <section className="space-y-2 rounded-md border p-3" aria-label={t('skills.unreadable_title')} data-testid="skills-unreadable">
+          <h2 className="text-sm font-semibold">{t('skills.unreadable_title')}</h2>
+          <p className="text-xs text-muted-foreground">{t('skills.unreadable_desc')}</p>
+          <ul className="space-y-2">
+            {(list.data?.unreadable ?? []).map((u) => (
+              <li key={u.name} className="flex flex-wrap items-center gap-2" data-testid="skill-unreadable" data-skill={u.name}>
+                <span className="text-sm font-medium">{u.name}</span>
+                <span className="text-xs text-muted-foreground">{u.reason}</span>
+                {write ? (
+                  <Button variant="outline" className={TAP_ACTION_DEFAULT} onClick={() => setDeleting(u.name)}>
+                    {t('skills.delete')}
+                  </Button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       {list.data && skills.length === 0 ? <EmptyState title={t('skills.none')} /> : null}
       <ul className="space-y-3" aria-label={t('skills.list_label')} data-testid="skills-list">
         {skills.map((s) => {

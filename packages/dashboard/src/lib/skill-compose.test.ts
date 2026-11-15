@@ -61,6 +61,11 @@ describe('checkSkill', () => {
     expect(checkSkill({ ...ok, 'n.md': 'a\u0000b' }).some((q) => q.code === 'hidden')).toBe(true);
     expect(checkSkill({ ...ok, 'n.md': 'tab\tand\r\nnewline' }).some((q) => q.code === 'hidden')).toBe(false);
   });
+  it('refuses a bare carriage return and a SKILL.md that is not at the top', () => {
+    expect(checkSkill({ ...ok, 'n.md': 'a\rb' }).some((q) => q.code === 'bare_cr')).toBe(true);
+    expect(checkSkill({ ...ok, 'n.md': 'a\r\nb' }).some((q) => q.code === 'bare_cr')).toBe(false);
+    for (const p of ['a/SKILL.md', 'synced/x/skill.md']) expect(checkSkill({ ...ok, [p]: 'x' }).some((q) => q.code === 'file_name'), p).toBe(true);
+  });
   it('enforces the limits', () => {
     expect(checkSkill({ ...ok, 'big.md': 'x'.repeat(128 * 1024 + 1) }).some((q) => q.code === 'file_too_big')).toBe(true);
     const many = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}.md`, 'x']));

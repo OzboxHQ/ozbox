@@ -20,6 +20,7 @@ export function fileKind(path: string): FileKind {
 
 // The open Agent Skills format: lower-case letters and digits with single hyphens between them. Mirrors `skill_name_ok`.
 const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const RESERVED = ['synced', 'trash'];
 const COMPONENT = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
 // Characters a reviewer cannot see or that change how text reads: control characters other than newline, return and tab, every
 // format character (zero-width, direction marks, tags, variation selectors, Hangul fillers, ...), line and paragraph separators,
@@ -42,7 +43,7 @@ export const hasHidden = (text: string): boolean => {
   return false;
 };
 
-export const skillNameOk = (n: string): boolean => n.length <= 64 && NAME.test(n);
+export const skillNameOk = (n: string): boolean => n.length <= 64 && NAME.test(n) && !RESERVED.includes(n);
 
 export interface Fields {
   name: string;
@@ -75,7 +76,8 @@ export type Problem =
   | { code: 'file_too_big'; path: string; max: number }
   | { code: 'file_type'; path: string }
   | { code: 'file_name'; path: string }
-  | { code: 'hidden'; path: string };
+  | { code: 'hidden'; path: string }
+  | { code: 'bare_cr'; path: string };
 
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
@@ -93,6 +95,10 @@ export function checkFiles(files: Record<string, string>): Problem[] {
     const text = files[p] ?? '';
     if (bytes(text) > MAX_FILE_BYTES) out.push({ code: 'file_too_big', path: p, max: MAX_FILE_BYTES / 1024 });
     if (hasHidden(text)) out.push({ code: 'hidden', path: p });
+    // only \r\n is a line ending: a bare \r reads as a line break to a program and as nothing to a raw review
+    if (/\r(?!\n)/.test(text)) out.push({ code: 'bare_cr', path: p });
+    // Claude Code loads a SKILL.md wherever it finds one, and only the top one is read for what it runs
+    if (p !== 'SKILL.md' && /(^|\/)skill\.md$/i.test(p)) out.push({ code: 'file_name', path: p });
   }
   if (!('SKILL.md' in files)) out.push({ code: 'no_skill_md' });
   return out;

@@ -219,7 +219,7 @@ export function createMemoryApi(request: Req) {
     edit: (noteId: string, b: EditNote) => request<MemNote>('PUT', `/v1/memory/${id(noteId)}`, b),
     approve: (noteId: string) => request<MemNote>('POST', `/v1/memory/${id(noteId)}/approve`),
     forget: (noteId: string) => request<{ forgotten: string }>('DELETE', `/v1/memory/${id(noteId)}`),
-    skills: (s?: AbortSignal) => request<{ skills: SkillItem[]; store?: StoreInfo }>('GET', '/v1/skills', undefined, s),
+    skills: (s?: AbortSignal) => request<{ skills: SkillItem[]; unreadable?: { name: string; reason: string }[]; store?: StoreInfo }>('GET', '/v1/skills', undefined, s),
     review: (name: string, s?: AbortSignal, hash?: string) => request<SkillReview>('GET', `/v1/skills/${id(name)}/review${hash ? `?hash=${id(hash)}` : ''}`, undefined, s),
     install: (name: string, scope: string) => request<SkillInstall>('POST', `/v1/skills/${id(name)}/install`, { scope }),
     uninstall: (name: string, scope: string) => request<{ removed: string }>('POST', `/v1/skills/${id(name)}/uninstall`, { scope }),
