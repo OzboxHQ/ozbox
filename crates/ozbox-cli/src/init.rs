@@ -3104,6 +3104,128 @@ mod tests {
         assert!(sent_tag(&untagged, "volume").is_none());
     }
 
+    /// The probes are run by whoever runs `ozbox init`: the person signed in as the setup identity (`OzBoxSetup`,
+    /// `infra/aws/setup-policy.json`). So every probe, the operator ones too, must be a call that permission set allows, in the
+    /// shape it allows it: an Allow that names the action, reaches the resource the call acts on, and whose conditions the
+    /// probe meets (it sends the `ozbox-managed=true` tag), with no Deny on it. Without this a person set up exactly as the
+    /// guide says would be refused by init's own check.
+    #[test]
+    fn every_probe_is_a_call_the_setup_policy_allows() {
+        let text = include_str!("../../../infra/aws/setup-policy.json");
+        let policy: serde_json::Value = serde_json::from_str(text).unwrap();
+        let stmts = policy["Statement"].as_array().unwrap();
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(x) => vec![x.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+                _ => vec![],
+            }
+        };
+        let action_matches = |pat: &str, action: &str| {
+            let (p, a) = (pat.to_ascii_lowercase(), action.to_ascii_lowercase());
+            match p.split_once('*') {
+                None => p == a,
+                Some((h, t)) => a.starts_with(h) && a.ends_with(t) && a.len() >= h.len() + t.len(),
+            }
+        };
+        let glob = |pattern: &str, text: &str| -> bool {
+            let parts: Vec<&str> = pattern.split('*').collect();
+            let mut rest = text;
+            for (i, part) in parts.iter().enumerate() {
+                if i == 0 {
+                    if !rest.starts_with(part) {
+                        return false;
+                    }
+                    rest = &rest[part.len()..];
+                } else if i == parts.len() - 1 {
+                    return rest.ends_with(part);
+                } else {
+                    match rest.find(part) {
+                        Some(at) => rest = &rest[at + part.len()..],
+                        None => return false,
+                    }
+                }
+            }
+            rest.is_empty()
+        };
+        let account = "123456789012";
+        let region = "us-east-1";
+        // the resource each probe acts on
+        let arn_of = |d: &ProbeDef| -> String {
+            match (d.tag_resource, d.id) {
+                (Some("snapshot"), _) => format!("arn:aws:ec2:{region}::snapshot/snap-0"),
+                (Some(r), _) => format!("arn:aws:ec2:{region}:{account}:{r}/x-0"),
+                (None, "s3_state_bucket") => {
+                    format!("arn:aws:s3:::{}", Init::bucket_name(account, region))
+                }
+                (None, _) => "*".to_string(),
+            }
+        };
+        // a request-tag condition is met only because the probe sends the tag: the one condition shape these statements use
+        let condition_met = |s: &serde_json::Value, sends_tag: bool| -> bool {
+            let Some(c) = s.get("Condition").and_then(|c| c.as_object()) else {
+                return true;
+            };
+            c.iter().all(|(op, keys)| {
+                op == "StringEquals"
+                    && keys.as_object().is_some_and(|k| {
+                        k.keys()
+                            .all(|key| key == "aws:RequestTag/ozbox-managed" && sends_tag)
+                    })
+            })
+        };
+        let defs = probe_defs(region, Some(account));
+        assert!(defs.len() >= 6);
+        for d in &defs {
+            let arn = arn_of(d);
+            let reaches = |s: &serde_json::Value| {
+                list(&s["Resource"])
+                    .iter()
+                    .any(|r| glob(&r.replace("${account_id}", account), &arn))
+            };
+            let on_action = |s: &serde_json::Value| {
+                list(&s["Action"])
+                    .iter()
+                    .any(|p| action_matches(p, d.action))
+            };
+            assert!(
+                stmts.iter().any(|s| s["Effect"] == "Allow"
+                    && on_action(s)
+                    && reaches(s)
+                    && condition_met(s, d.tag_resource.is_some())),
+                "{}: no statement of setup-policy.json allows {} on {arn} (with the tag the probe sends)",
+                d.id,
+                d.action
+            );
+            assert!(
+                !stmts
+                    .iter()
+                    .any(|s| s["Effect"] == "Deny" && on_action(s) && reaches(s)),
+                "{}: setup-policy.json denies {}",
+                d.id,
+                d.action
+            );
+        }
+        // negative control: the bucket probe fails against a policy with the state-bucket statements removed, which is what
+        // this test exists to catch (the setup identity could not even reach the bucket it must make)
+        let bucket = defs.iter().find(|d| d.id == "s3_state_bucket").unwrap();
+        let arn = arn_of(bucket);
+        let without: Vec<&serde_json::Value> = stmts
+            .iter()
+            .filter(|s| !list(&s["Action"]).iter().any(|a| a.starts_with("s3:")))
+            .collect();
+        assert!(!without.iter().any(|s| s["Effect"] == "Allow"
+            && list(&s["Action"])
+                .iter()
+                .any(|p| action_matches(p, bucket.action))
+            && list(&s["Resource"])
+                .iter()
+                .any(|r| glob(&r.replace("${account_id}", account), &arn))));
+    }
+
     #[test]
     fn expired_credentials_during_probes_read_as_not_signed_in() {
         let e = Env::new();
