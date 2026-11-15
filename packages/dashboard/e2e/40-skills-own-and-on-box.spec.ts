@@ -75,10 +75,16 @@ for (const width of WIDTHS) {
       const hash = ((await api(request, 'GET', '/v1/skills')).body['skills'] as { name: string; hash: string }[]).find((s) => s.name === name)?.hash ?? '';
       const refused = await api(request, 'PUT', `/v1/boxes/alpha/skills/${name}`, { hash });
       expect([refused.status, refused.body['code']]).toEqual([409, 'not_approved']);
-      // the library is read again after an approval; hold that read back so Install is opened BEFORE the page knows the skill is
-      // approved (what a slow machine does by itself). The sheet must still come to see it approved.
-      const slowList = (route: import('@playwright/test').Route) =>
-        route.request().method() === 'GET' ? new Promise<void>((done) => setTimeout(() => void route.continue().then(done), 2000)) : route.continue();
+      // the library is read again after an approval; hold the FIRST read back so Install is opened BEFORE the page knows the skill
+      // is approved (what a slow machine does by itself). Only the first: a read that is cancelled and asked again (the page does
+      // that on every change it hears of) must then be answered at once, or the page would never learn anything.
+      let listHeld = false;
+      const slowList = async (route: import('@playwright/test').Route) => {
+        if (route.request().method() !== 'GET' || listHeld) return route.continue();
+        listHeld = true;
+        await new Promise((done) => setTimeout(done, 2000));
+        return route.continue().catch(() => undefined);
+      };
       await page.route((u) => u.pathname === '/v1/skills', slowList);
       await review.getByRole('button', { name: 'Approve these files' }).click();
       await expect(review).toHaveCount(0);
