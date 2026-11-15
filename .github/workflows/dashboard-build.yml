@@ -1,0 +1,72 @@
+name: Dashboard build
+
+# Builds the web dashboard once and hands `packages/dashboard/dist` to the jobs that compile the `ozbox` program for a
+# release (image.yml, cli-release.yml), as the artifact `dashboard-dist`. The program embeds that directory at compile time
+# (crates/ozbox-cli/build.rs), and a release build refuses to compile without it, so a program that serves the placeholder
+# page can not be built. The output `sha256` is the content hash of the build: the program records the same value.
+
+on:
+  workflow_call:
+    outputs:
+      sha256:
+        description: Content hash of the built dashboard (every file, in path order)
+        value: ${{ jobs.build.outputs.sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    defaults:
+      run:
+        working-directory: packages/dashboard
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: packages/dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: It has an entry page
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          ! grep -rq "The dashboard is not built" dist
+      - id: hash
+        name: Content hash
+        run: |
+          set -euo pipefail
+          # the same shape build.rs computes: each file's URL and bytes, length-prefixed, in path order, sha256
+          h="$(python3 - <<'PY'
+          import hashlib, os, struct
+          root = "dist"
+          files = []
+          for d, _, names in os.walk(root):
+              for n in names:
+                  p = os.path.join(d, n)
+                  files.append(("/" + os.path.relpath(p, root).replace(os.sep, "/"), p))
+          files.sort(key=lambda f: f[0].split("/"))
+          h = hashlib.sha256()
+          for url, p in files:
+              b = open(p, "rb").read()
+              u = url.encode()
+              h.update(struct.pack(">Q", len(u))); h.update(u)
+              h.update(struct.pack(">Q", len(b))); h.update(b)
+          print(h.hexdigest())
+          PY
+          )"
+          echo "sha256=$h" >>"$GITHUB_OUTPUT"
+          echo "dashboard content hash: $h"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dashboard-dist
+          path: packages/dashboard/dist
+          if-no-files-found: error
+          retention-days: 7

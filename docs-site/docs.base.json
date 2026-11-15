@@ -1,0 +1,134 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Oz Box",
+  "description": "Open-source cloud workstations for AI coding agents, and fleets of them, in your own cloud account.",
+  "repoUrl": "https://github.com/OzboxHQ/ozbox",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#60A5FA",
+    "dark": "#1D4ED8"
+  },
+  "favicon": "/logo/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/OzboxHQ/ozbox"
+      }
+    ]
+  },
+  "defaultSection": "guides",
+  "placement": {
+    "architecture": "architecture",
+    "roadmap": "project",
+    "releasing": "project",
+    "security": "security",
+    "security-policy": "security",
+    "telemetry": "security",
+    "plugins": "guides",
+    "mesh": "guides"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "install"
+            ]
+          },
+          {
+            "group": "Use cases",
+            "pages": [
+              "$use-cases"
+            ]
+          },
+          {
+            "group": "CLI reference",
+            "pages": [
+              "cli-reference"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "$section:guides"
+            ]
+          },
+          {
+            "group": "Changelog",
+            "pages": [
+              "changelog/index"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture & decisions",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": [
+              "$section:architecture"
+            ]
+          },
+          {
+            "group": "Decision records",
+            "pages": [
+              "$adr"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "$section:project"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Security",
+        "groups": [
+          {
+            "group": "Security",
+            "pages": [
+              "$section:security"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "links": [
+      {
+        "header": "Licences",
+        "items": [
+          {
+            "label": "Documentation: CC BY 4.0",
+            "href": "https://creativecommons.org/licenses/by/4.0/"
+          },
+          {
+            "label": "Code: Apache-2.0",
+            "href": "https://www.apache.org/licenses/LICENSE-2.0"
+          },
+          {
+            "label": "Which paths each covers",
+            "href": "https://github.com/OzboxHQ/ozbox/blob/main/DOCS-LICENSE.md"
+          }
+        ]
+      }
+    ]
+  }
+}

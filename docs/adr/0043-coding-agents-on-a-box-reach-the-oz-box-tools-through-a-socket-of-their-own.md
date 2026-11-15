@@ -1,0 +1,117 @@
+# 0043 — Coding agents on a box reach the Oz Box tools through a socket of their own
+
+**Status.** Accepted and built on `feat/agent-mcp-on-box` (2026-11-12); revised the same day after review (a terminal agent is
+its own actor with no standing permission, below). **Not yet proven on a real box.** Related: ADR 0017
+(per-run tokens), 0020 (the tool host), 0037 (the browser), 0039 (roles), 0040 decision 3 (the dashboard's scoped socket).
+
+**Owner's goal.** Claude Code started by a person in a terminal on `main` uses the Oz Box tools, the browser included, end to end.
+
+## Context
+
+The Oz Box tool host (`crate::mcp`: shell, git, files, CI, Staging reads, and the browser tools) answered only runs that Oz
+Box started. Each got `OZBOX_MCP_URL` and `OZBOX_MCP_TOKEN` in its environment. An agent a person starts in a terminal got
+nothing, and `ozbox orch mcp-config` printed a `.mcp.json` to paste by hand. The dashboard cannot be the door: behind a public
+tunnel it answers only its own public host, and it is the one process that holds the box's sign-in and the right to approve.
+
+## Decision
+
+1. **A socket of its own, not the dashboard's.** `ozbox serve` on a box also listens on `/run/ozbox-agent-mcp/mcp.sock`. It
+   speaks two paths and nothing else: `POST /v1/enrol` and `POST /mcp`. It shares no route, cookie or token with the dashboard
+   API, so nothing on it can reach that API; there is no loopback port and no tunnel route. The folder is systemd's
+   `RuntimeDirectory` of the dashboard's user, so the box user cannot replace the socket.
+   *Why a socket and not a loopback port with a token:* any process on the box can connect to a port, and a port's token has to
+   be stored somewhere the agent reads. A socket lets the kernel say who is asking.
+2. **The kernel names the caller, once per connection.** `SO_PEERCRED`: only the box user (`ozbox`) is let in, and the
+   connection is dropped at accept for anyone else, so a stranger cannot hold a slot. The setting is read on every request. A
+   process inside one of Oz Box's own runs (`run-<id>.scope` in its cgroup) is refused as a courtesy: it stops an honest run's
+   own engine from taking a second token. **It is not a wall and nothing rests on it.** A hostile run is the same user in the same
+   mount namespace and can leave its scope (move itself to a sibling cgroup, start a process through the user manager, leave
+   a line in a startup file). So the next decision makes escaping worthless instead of trying to parse cgroups better. A caller
+   whose process the kernel did not name is refused the same way. The socket's mode is `0666` because the dashboard's user
+   cannot give a group it is not in; the peer check, not the mode, decides.
+3. **A token nobody stores.** The engines' settings are static (`ozbox agent-mcp bridge`, no secret). The bridge (a stdio MCP
+   server, because no engine speaks HTTP over a Unix socket) enrols over the socket and keeps a 30-minute token in its own
+   memory, enrolling again before it ends and whenever the dashboard answers 401. The token store is a second `McpServer`
+   that never listens on a port, with its own key, so a token from this door is worth nothing on the loopback port a run
+   uses, and the reverse. Nothing is written to a file, so there is nothing to leak, to expire on disk, or to lose when the
+   dashboard restarts.
+4. **A terminal agent is its own actor, with no standing permission.** Anything running as the box user can enrol (an escaped
+   run, a script, Claude Code), and the kernel cannot tell them apart. So the token is a session of the tool host with role
+   `Agent` (its tools, no orchestration tools), acting on this box only, and actor **`Terminal`**, which is not the "agent for
+   owner" a run uses and not the person's own laptop agent. For the permission engine (ADR 0039) a `Terminal` actor has **no
+   `auto` mode** (it reads as `ask`) and **no box grant covers it**; production writes are refused for want of a grant, and the refusal says so: "turn on standing permission for coding agents on the box page", not "grant access". Every
+   risky act asks, with one exception the engine's own rules make: **your allow rules and `accept-edits` mode still apply** to a terminal agent (a run gets the same). An `allow` rule you wrote for a command, or `accept-edits` for a file write, lets it through without a card; "every risky act asks" means everything that `auto` mode or a grant would let through. Reads on allowed sites and ordinary navigation stay unprompted (the browser's own baseline), so Claude Code
+   just works. The browser's submit, payment, send, upload and new-domain approvals apply unchanged. The approval card and
+   the audit say plainly who asked: "a program that calls itself claude (pid 4242, session K7Q2XA), in this box's terminal, for <person>", worded as a claim (below). An escaped run that enrols gains
+   nothing it did not have: the worst it can do is ask.
+   - **Each program has a key of its own** (`terminal-<pid>-<start time>-<epoch>`), read by the door from the kernel: the peer's pid
+     and the process's start time from `/proc/<pid>/stat` (field 22), never from the caller. It keys its approvals and its audit
+     actor (`mcp:terminal-<pid>-<start>-<epoch>[<program>:<program pid>]`, the same program and pid the card shows: the key holds the bridge's pid, the card and the label the engine's). **The key is stable across renewals**: the same process enrolling again
+     (its token was about to end, or the dashboard restarted) gets the same key, so a renewal in the middle of a browser task
+     keeps its browser sessions and its pending approvals; a new process that reuses a pid has another start time and gets
+     nothing of the old one's. A process the kernel cannot describe is given no session. Two programs on the box never share
+     an approval: one program's approved request is not spent by another making the same call. Nor do they share the person's
+     own agent's key. **The key has an epoch** that goes up on a turn-off and a change of person (it starts from a random number each time the dashboard starts). Turning standing permission ON or extending it, and ending it early, revoke the tokens but do not move the epoch (reviews S5, T2): giving more must not cut off an agent in the middle of a browser task, and ending it early is the same as it running out, which never moved the epoch either. A browser session's allowed hosts are read from the box's settings when it opens, and each new request is decided again under the actor of the moment. Two things DO depend on standing permission, and are handled where they matter (reviews T12, T13). On a production box a plain terminal agent can open nothing (opening is a changing call), so a session that a standing enrolment opened there is marked, and once standing has ended the same key, now a plain terminal agent, is refused every tool on it (reads included); a person can close it from the dashboard, and it ends by itself when its time is up. And a call that was already waiting for a person's answer when the door changed is ended with its card (turning the door off, ending standing early, or another person taking either: the card is withdrawn and the call refused, and the refusal says the person changed what agents may do, not that they said no), and a standing call whose permission ran out while it waited is refused when the answer arrives (its card is spent, so the same call asked again is a new question). Each call carries the door's generation from when its token was issued, and the generation moves every time the door ends what waiting calls asked under; a call that wakes with a stale generation is refused and its card, approved or not, is ended (Denied by the door, spent, audited), so a card filed after the sweep, or approved just before it, cannot run either. The check is made again immediately before anything runs, whichever gate allowed the call (an approved card can be spent at the first gate with no wait), and the generation moves inside the same step, under the same lock, that changes the setting, so no token carries the new setting with the old generation. Limit: a call that is already running when the door changes finishes under the old terms, as it would have a moment earlier; and standing that is extended while a call waits does not extend that call's own window, so it may be refused and asked again. When the epoch moves, the browser sessions the old key opened are closed, on a thread of their own so the click that moved the epoch is answered at once even if a browser has hung, since nobody can drive them any more; a session that was still starting when the epoch moved (a browser takes seconds) is looked at again once it is in the table and closed if its key is no longer current; and the epoch and the setting change under the same lock an enrolment holds while it reads them and issues its token, so no token is made under an epoch that a change has already ended. After the off switch the same process starts from nothing: approvals it was given and browser sessions it opened under the old key cannot be spent or driven. **A connection belongs to the process that opened it**: the door reads the peer's start time at accept and again on every request, and closes the connection if it changed (a pid reused after the opener handed the socket on and exited). Reading the pid from `SO_PEERCRED` at accept is a small window; `SO_PEERPIDFD` (Linux 6.5+) would close it and is not used yet. **The card and the audit name the program as a claim**: the peer is the engine's bridge (`ozbox agent-mcp bridge`), whose own name is always "ozbox", so the door reads the bridge's PARENT (`ppid` in `/proc/<bridge>/stat`, then that process's `comm`, which is readable across users where `exe` is not) and cleans it to a short word. That word is the program's own choice (any program can set its `comm`), so the card never says what the program is: "a program that calls itself claude (pid 4242, session K7Q2XA), in this box's terminal, for <person>". **The session code** (`K7Q2XA`, six characters from an alphabet with nothing easy to misread, 30 bits) is what makes the claim checkable. It is a keyed hash (HMAC-SHA256) of the process's identity, its pid and start time, under a secret that only the door holds: made at the dashboard's start and kept in its memory, never written down, never shown, never part of a key or a note. So a program that knows its own code, its own pid and start time, and even the person's pid and start time (`/proc` is public), cannot work out the person's code, and cannot pick a pid or a start time that lands on it; every guess costs an enrolment, which the rate limit counts. The code does not depend on the epoch, so it stays the same for as long as the engine's process lives, through turn-off and on and changes of standing permission; a dashboard restart makes a new secret and so new codes. The code is shown where the person reads it: on the card, and in the text of every tool result that says a call is waiting for approval ("The card names this session K7Q2XA."), which the person reads in their own engine's transcript at the moment the card appears. The bridge also puts it in the MCP server instructions and the engine's log, but this ADR does not claim any engine shows those to the person; the tool result is the place that is checked. A script that runs its own bridge is a different process with a different code, and one that names itself "claude" has only its own code to show. A note a terminal program proposes to memory is credited to its session (`terminal-<code>`, the session code above), not to the person's agent. A browser session is tied to the enrolment
+     that opened it: a terminal agent drives only its own sessions, never a run's or a person's, and nobody else drives
+     a terminal agent's.
+   - **The engine is named through the bridge's real parent chain**. The bridge is often started through a wrapper (`sh -c`, a version manager's shim), so the door walks up from the bridge's parent, skips `sh`, `bash`, `dash`, `zsh`, `fish`, `ash` and `ksh`, and names the first program that is not a shell (its `comm`, cleaned), with that program's pid; the walk stops after eight steps. If it ends at systemd or init, at a process it cannot read, or at the cap, the card says "a program that does not say what it is": it is never given a name that is not the engine's. What a real engine's parent is on each of the four engines is checked on a box, not here.
+   - **Admission is at accept, and the first request has one deadline**. The kernel names the peer and the setting is known, so the door admits before it reads a byte of a request: a caller that is not the box user is dropped without a word; one that is in a run, or turned away by the off switch, is answered once and closed and holds no slot; only a caller that is let in takes a slot, and then has ten seconds for its whole first request (head and body), so a caller that trickles a byte at a time is cut off.
+   - **Standing permission is a separate, explicit, short opt-in.** Under the setting there is "Let coding agents use my
+     standing permissions for N minutes" (default 30, at most 4 hours). Turning it on is a loosening: the same passkey step-up
+     as the setting, refused on a box with no sign-in, and warned on the card (it says it covers `auto` mode and box grants).
+     It is time-limited, not session-limited: a token never outlives it, setting or clearing it revokes every token, and turning
+     the tools off clears it. During it the actor is `TerminalStanding`, which the engine treats as the person's own agent
+     (`auto` and grants apply). It is off by default, and both changes are in the audit chain.
+   - **What the door exposes is what a run gets.** The same tool list (`Role::Agent` with a box scope: shell, git, files, CI,
+     Staging reads, the browser, and the memory read and propose tools). Nothing is offered without asking that a run lacks, and
+     the browser's sessions start fresh with no saved sign-ins (there is no profile or cookie store to inherit).
+   - **Skipped on purpose:** an "allow for this session" button on the approval card. Standing permission is the one opt-in, and
+     a per-session allow would be a second, unreviewed way to loosen.
+5. **A setting, on by default, revocable at once, and failing closed.** "Coding agents on this box can use Oz Box tools" (box
+   page). Default on: the tools are the box's own and every risky one asks. Turning it on is a loosening (passkey step-up behind
+   a sign-in); turning it off needs nothing. **Off is put in force and every token revoked first, then saved**, so a full or
+   read-only disk cannot leave the door open: the page then says it is off only until the dashboard restarts. On a **box with no
+   sign-in** the door starts on (nobody chose it, and a risky act still asks), turning it off works, and turning it back on is
+   refused there like the browser's settings are: it needs the sign-in set up from the person's computer
+   (`ozbox dashboard install`), or root deleting `agent-mcp.json` in the dashboard's state folder and restarting the dashboard.
+   The default is written to that file at first start, so a later reset of the folder is the only way to lose a choice. An
+   unreadable setting file means off. Every change is in the audit chain.
+   - **Bounds, per process.** Each process (by its key) may enrol 4 times a minute and hold 2 live tokens (its oldest goes first),
+     so one process cannot spend another's budget or push its token out. The door's own ceiling is 30 enrolments a minute and 16
+     live tokens; past it a process that holds no token is refused with a 429 (retry after 60 seconds) and one that holds a token gives up its own oldest, so no process pushes out another's. A process holds at most 4 connections, a
+     connection that has sent nothing is let go after 10 seconds, a connection is closed after the door refuses it, and another
+     user's connection never holds a slot. The bridge relays the door's reason on a 429. Anything the box user runs can still
+     cross the door's ceiling by being many processes, which costs it nothing it could not already do to the person's own agent.
+   - **This box, by its own name.** The door acts on the machine's own identity (the name the box page uses), and opens only
+     when the dashboard runs as the box's own (no provider configured). A dashboard that lists a fleet keeps it shut: the first
+     box of a fleet is not the machine an agent is sitting on.
+6. **Writing the engines' settings is the box user's job.** The dashboard cannot and must not touch the box user's home. `ozbox
+   agent-mcp install` (run as the box user by the supervisor setup script, and by hand) adds one `ozbox` entry to Claude Code
+   (`~/.claude.json`), Gemini CLI, OpenCode and Codex, merging, never touching another server, refusing links and files it
+   does not understand, and written atomically with the file's mode kept (a new file is created private, never wider, even for
+   a moment). It re-reads the file just before the rename and starts over if another program (Claude Code rewrites
+   `~/.claude.json` while it runs) changed it. For Codex it parses the result as TOML before writing and refuses (leaving the
+   file exactly as it was) if the entry would break it. `remove` takes only our entry out. A refused engine makes the command
+   exit non-zero and the setup step says so.
+7. **A program upgrade brings the door.** `ozbox admin <box> -- reinstall-ozboxd` runs the supervisor setup's `--socket-only`
+   step, which now also brings an already-moved dashboard's unit up to date (the `RuntimeDirectory` the door's socket needs),
+   restarts the dashboard once if it changed, and only then writes the engines' settings. **The new `ozbox` program is installed
+   before that step runs** (it is skipped, and says so, if the install failed), so the step is the new program's, not the old one's.
+   What the re-render reads back from the unit (port, host, tunnel) is checked the way the first move's is, and a unit with
+   anything else on its line is left alone; it is written beside the unit and moved into place, and if the dashboard will not
+   start with it (it is asked after a few seconds whether it is running, because `restart` succeeds once the process forks) the old unit
+   is put back. A failed install makes `reinstall-ozboxd` fail and restarts nothing. A box made before this release needs
+   no extra step. The setup step says when it skips anything (no program, no home folder, a refused engine).
+
+## What it does not do
+
+- **Runs are not contained by this door.** A process in a run scope is refused as a courtesy, and a hostile one can leave its
+  scope. What stops it gaining anything is decision 4. Containing runs better (a delegated cgroup they cannot write, hiding the
+  user manager's bus) is the daemon's job, not this door's, and is not done here.
+- **The browser cannot be driven on a box with no Chromium.** The image has none yet (see the browser guide).
+- **A process the box user starts outside a run, which is the box user, is a terminal agent.** The kernel cannot tell Claude
+  Code from a script; the name on the card is a claim and the session code is how a person checks it. At the door's cap of live tokens (16) a newcomer is refused with a 429 and a retry-after, and nobody who holds a token is pushed out; a holder that renews replaces its own token, and a holder whose process has gone gives its place up. A program that enrols over and over cannot push the person out, only wait. That is why it has no standing permission by default: the permission engine asks for every risky step.
+- **Turning it off ends sessions; it does not stop a call already running.**
+- **Benchmark.** Nothing here is on a benchmark headline metric (the `realworld` suites start no engines). Every engine the
+  box user starts, runs included, now spawns one bridge process and makes one socket round trip at start-up (milliseconds), and
+  a run's engine is refused there. The hop adds one socket write and read per call over an open connection; the test in `crates/ozbox-cli/src/agent_mcp/tests.rs` prints it (laptop-shaped; not a 4 vCPU box measurement).

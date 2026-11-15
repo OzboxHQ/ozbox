@@ -1,0 +1,13 @@
+# The npm packages published to the public registry when a release is tagged (.github/workflows/publish-npm.yml).
+#
+# One package directory per line, optionally followed by " :: " and a smoke command. The smoke command runs in a clean
+# directory in which the packed tarball (npm pack) has been installed, so it proves the artefact a user would download
+# works, not the source tree. Example:
+#
+#   packages/plugin-sdk :: node -e "require('@ozbox/plugin-sdk')"
+#
+# Rules: the package's version in package.json must equal the release version (the tag vX.Y.Z publishes X.Y.Z), its name
+# must be the one the registry's trusted publisher is configured for (docs/releasing.md), and it must not be private.
+# packages/dashboard is NOT listed: it is built into the program, not published.
+#
+# Empty at the moment on purpose: nothing is published to npm until a package is listed here.

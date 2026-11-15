@@ -1,0 +1,291 @@
+# 0045 — The box memory guard: swap in compressed RAM and never on a disk, the box's own services protected from the OOM killer, and every heavy job capped
+
+**Status.** Accepted (owner, 2026-11-13). Built and tested in CI (unit tests, helper-script tests, the first-boot module tests); **not yet
+proven on a real box**. The proof is `scripts/real-box-memory-proof.sh`, run once on a fresh S box, and until it has run the status is
+Preview. A release gate: no release ships without it. The first review (2026-11-13) found that the first proof would have passed on a
+box where the incident still happened; the proof was rebuilt to reproduce the incident (see "The proof"), and the review's fixes are
+in this text: the killed build dies alone (section 3, `OOMPolicy=continue`), the live install reaches the box user's manager
+(section 5), IDE terminals rank as terminals (section 2), and the helper is refreshed from the installed release (section 5).
+
+**Why now.** On 2026-11-13 at 00:30 UTC the owner's box (15.7 GB of RAM, no swap) ran out of memory. A browser test run was going in a
+tmux session: a production build with up to 6 GB of heap, a server, Playwright and Chromium, and a coding agent. The kernel's OOM
+killer ended the whole tmux scope (`tmux-spawn-<uuid>.scope`), and the coding agent's session with it. In the stall before the kill,
+the box user's tunnel (`oz-cloudflared.service`) missed its QUIC keep-alives and the web IDE (`oz-code-server.service`) was
+unreachable for about a minute. Nothing said the box was short of memory until it was over. A box an open-source user makes must not
+fail like this.
+
+**Decision.** Four mechanisms, each tightening only (so none needs an approval, like the metadata guard of ADR 0029), installed on a
+new box by first boot and **never restarting a tunnel, the IDE, a terminal or a run**. **A box made before this release gets the guard
+through one machine replace** (its root helper is written once, at first boot, and predates the guard: it cannot install it on a running
+box), which restarts that box once, as any replace does; the release note and `ozbox upgrade` say so. A box made from this release
+also runs `host-guard helper refresh` on every `ozbox upgrade`, which replaces its root helper with the one its installed `ozbox`
+program carries only when that is a strictly newer revision (section 5). That is not a live path for new helper code on its own: the
+program on a box moves only when its release is installed (a reinstall of the pinned release, or a machine replace).
+
+1. **Swap is compressed RAM and only that.**
+2. **The box's own services are protected from the OOM killer, and the workloads never inherit it.**
+3. **Every heavy job is capped, by default, from the box's own size.**
+4. **The box says so before anything is killed.**
+
+## 1. Swap: zram, never a disk
+
+- **What.** A kernel zram device (`/dev/zram0`) made at boot by a small root-owned unit, `ozbox-memory.service`, which runs
+  `ozbox host-guard memory boot`. No new package: the module is the kernel's. Compression is **zstd** (the kernel's `lzo-rle` if zstd is
+  refused), priority **100**, `swapon` on that one device.
+- **How big.** `disksize` is **50 % of RAM, at most 16 GiB**. It is computed from the RAM the box has at that boot, so a resize never
+  leaves a stale number in a file (a size change is a reboot or a resize through `ozbox`, and the unit runs again). `mem_limit` is
+  **40 % of RAM**: past it a page-out fails and the page stays where it was, so an incompressible load cannot turn the device into
+  the thing that fills RAM. With zstd's typical 3:1, a full device costs about a sixth of RAM and holds a box's worth of idle pages.
+  On the 4 vCPU / 8 GiB benchmark shape that is a 4 GiB device, at most 3.2 GiB of RAM.
+- **`vm.swappiness = 100`, `vm.page-cluster = 0`.** At the kernel's default of 60 the reclaimer prefers to drop file cache, which a
+  build is about to read again, over compressing an idle anonymous page. With zram a page-out is a compression and a page-in a
+  decompression, both in RAM: an idle anonymous page costs about what a cache page does, and 100 tells the kernel to weigh them
+  evenly. It acts only under reclaim, so a box with enough memory does not swap at all. `page-cluster = 0` stops swap read-ahead, which
+  would decompress pages nobody asked for. Written to `/etc/sysctl.d/60-ozbox-memory.conf` and applied live.
+- **Never a swap file or partition.** The secrets service keeps keys in memory, and a swapped page that reaches a disk is a secret on a
+  disk. So: nothing in first boot, the image build or the guard makes a swap file or a swap partition (`box_scripts` scans `infra/`
+  for it, and the guard's tests check that every `mkswap` and `swapon` names `/dev/zram*`); the secrets service also gets
+  `MemorySwapMax=0`, so its pages stay out of even the compressed device; the self-test **fails** on any swap that is not
+  `/dev/zram*` (a person's own swap file, say), naming it. A kernel without the module (a cloud kernel whose zram lives in the
+  extra-modules package) gets **no swap and a clear sentence**, `unknown` in the self-test, never a disk in its place.
+
+## 2. OOM protection: a root-side applier, because the user manager cannot lower a score
+
+A process can raise its own `oom_score_adj` without privilege and can lower it only with `CAP_SYS_RESOURCE`. So a
+`OOMScoreAdjust=` in a `systemd --user` unit of the box user cannot protect that unit, and a lowered score on the whole user manager
+(`user@1500.service`) would be inherited by everything the person runs, protecting the workloads exactly as much as the tunnel.
+**Neither is done.** Instead:
+
+- **System units Oz Box owns** get a drop-in `OOMScoreAdjust=-900`: `ozbox-secrets`, `ozbox-cloudflared`, `ozbox-code-connector`,
+  `ozbox-dashboard` and `ozboxd`. Written only for a unit the box has.
+- **The box user's own units, and the SSH daemon, are set live** by a root-owned timer (`ozbox-oom-apply.timer`, every 30 seconds
+  and 20 seconds after boot) that runs `ozbox host-guard memory apply`: it reads each unit's `MainPID` or its control group's
+  `cgroup.procs` and writes `oom_score_adj`, only ever downward. A tunnel that restarts is protected again within half a minute.
+  The same command runs at install, so a running process is protected at once. **The box user owns the control groups the timer
+  reads** (they are delegated to its manager), so a unit's name proves nothing: the box user could name a unit of its own after one of
+  ours and put any process in it. So the timer (a) protects the unit's **main process only**, as the unit's manager says
+  (`systemctl --user show -p MainPID`; a manager that cannot be asked leaves the first process, which must still pass (b)), (b) checks
+  that process's binary: the tunnel must be a **root-owned, not group- or world-writable** `cloudflared`; the IDE must be `node` or
+  `code-server` (it is installed per user, so its binary is the box user's and the check is its name), and (c) writes the score
+  through a `/proc/<pid>` directory it opened once, so a process id reused between the check and the write fails with ESRCH instead of
+  landing on a stranger. What is left (the IDE's name check) lets the box user reorder its own processes at most, never reach another
+  user's or a system process.
+- **Which units.** A fixed, root-owned list, never taken from a request. It covers both what Oz Box ships and what the box that failed
+  had: `oz-cloudflared.service` and `ozbox-cloudflared.service` (**-900**, the main process),
+  `oz-code-server.service` and `ozbox-ide.service` (**-500**, the main process and the editor server, see below), `ssh.service`
+  (-900, live only). Adding a name
+  is a change to the program, reviewed like any other.
+- **The IDE is protected less, on purpose, and its terminals rank as terminals.** The IDE's terminals are its children and run the
+  person's work; a child inherits the score, so a build started in an IDE terminal began at -500, below the coding agent in a tmux
+  pane (200): by the kernel's arithmetic a 6 GB build at -500 scores about 0.25 of RAM against 0.26 for a 500 MB agent at 200, so the
+  agent would have been killed first. The timer therefore **raises** every process below the IDE's pty host
+  (`--type=ptyHost`, the process that starts a terminal's shell) to **200**, the same as a tmux pane, within 30 seconds; the IDE's
+  main process stays at -500 and its other helpers (the extension host) keep the editor's order. **The editor server is protected
+  too.** code-server's main process is a wrapper that starts the server as its child within milliseconds, so the process
+  that must survive is that child, and it would keep the user manager's score. The timer therefore also lowers to -500 the main
+  process's **direct children** that pass the same binary check and carry no `--type=` argument (the pty host and the extension host
+  carry one and keep the editor's order). The terminals below the pty host stay at 200, raised only upwards. Raising is always safe, even if the
+  box user spoofs it. The 30-second window is the honest limit: the caps are the first line and this is the second.
+- **The daemon is protected and its children are not.** `ozboxd` runs at -900, and everything it starts puts itself back up before
+  it does anything: a run (`sh -c '{ echo 500 >/proc/self/oom_score_adj; } 2>/dev/null; read _gate; exec "$@"'`), a terminal and a
+  tool-install step (200). A process may raise its own score and never undo that, so the daemon's protection cannot reach a
+  workload. The short helpers it starts (git, systemctl) inherit -900 for their few seconds, which is harmless. The sshd case works
+  the same way: a score written live after the daemon started is not what it hands its sessions (it restores the value it read at
+  start), which the real-box proof checks.
+- **Not done: Systems Manager's agent.** Oz Box does not own its configuration, and its session shells would inherit a protected score.
+  It is small (tens of MB, a late victim) and restarts itself (`Restart=always`). The proof checks it is still running after the OOM
+  steps. If it is ever killed, the same "main lowered, descendants raised" mode as the IDE is the way (its snap unit is
+  `snap.amazon-ssm-agent.amazon-ssm-agent.service`).
+
+## 3. Caps: every heavy job in its own scope, throttled before it is killed
+
+The numbers come from one pure module, `ozbox_core::memory_plan`, used by the root helper, the daemon and `ozbox capped`:
+
+| | Formula | 8 GiB | 15.7 GB |
+|---|---|---|---|
+| the box's reserve | one eighth of RAM, 1 to 4 GiB | 1 GiB | 1.96 GB |
+| one job's `memory.max` | RAM minus the reserve | 7 GiB | 13.7 GB |
+| `memory.high` (throttle) | 90 % of `memory.max` | 6.3 GiB | 12.3 GB |
+| `memory.swap.max` | a quarter of RAM | 2 GiB | 3.9 GB |
+| `memory.oom.group` | 1: a job is killed whole, never half | | |
+
+- **Not divided by the number of runs.** An S box runs two at once, and RAM divided by two would starve the one big build the box
+  exists for. The daemon's admission already shares memory by what each run asks for (`memory_request_bytes`); the cap only ensures
+  that **no single job can take the reserve**. Several jobs that each fit can still exceed the box together, which is the second
+  mechanism's reason to exist: the kernel then picks a job (capped, disposable, score +500) and never a tunnel.
+- **Daemon runs.** `ozboxd` already put a run in its own cgroup scope with limits when the request carried `memory_max_bytes`; it did
+  not otherwise. Now a run that sets none gets the default above (`[runs] default_memory_cap = true`; `false` is for a box whose
+  owner chose to run uncapped). A request's own `memory_max_bytes` is kept, and the default is never lower than the run's own `memory_request_bytes`. The
+  self-test's 64 MiB sample run is unchanged. A backup (restic reads a whole folder) is run by the secrets service, which is protected, so
+  it puts its own score back up to 500, as a run does, before it starts: it is picked before any protected service (L5).
+- **A person or an agent in a terminal: `ozbox capped [--max-gib N] [--soft] -- <command>`.** It runs the command in a
+  `systemd-run --user --scope` with the same numbers, the command's own exit code comes back, and it **never runs the command
+  uncapped** if the scope cannot be made. `--max-gib` can only lower the cap; `--soft` is `MemoryHigh` alone (throttle, never kill). An
+  agent hook wraps its build and test commands with it. Written as an argv array: the command's words are arguments, never text for a
+  shell. A command ended by a signal exits with 128 plus the signal, as a shell reports it: an OOM kill is **137**, never 1, so a
+  caller can tell it from the command failing by itself (L4).
+- **The person's own tmux and login sessions get a soft limit.** A root-owned drop-in on `tmux-spawn-.scope` (the user manager's
+  scopes) and `session-.scope` (login sessions) sets `MemoryHigh` to the job throttle: past it the scope is slowed, never killed, so
+  a runaway build makes the box slow instead of stalling it. It is not put on `user-1500.slice` as a whole, which would throttle the
+  tunnel and the IDE with the build.
+- **A build the kernel kills dies alone (`OOMPolicy=continue`).** The kernel kills one process; it is **systemd** that stops a whole
+  scope when the kernel killed one of its processes (`OOMPolicy=` defaults to `stop`; scopes support it since systemd 253, the image
+  has 255). That is what ended the owner's tmux scope on 2026-11-13: the build, its siblings and the agent that started it. A soft
+  limit alone does not change it. So the same drop-in carries `OOMPolicy=continue` (on the login-session scope too, where it is already
+  the default), and root-owned user drop-ins give `oz-code-server.service` and `ozbox-ide.service` the same, so a build killed in an IDE
+  terminal does not stop the editor. `ozbox capped` scopes keep the default `stop`: there a job dies whole and its caller is outside
+  the scope. `ozboxd.service` has `Delegate=yes`, whose default is `continue`, so a run's kill never stops the daemon.
+- **The memory controller must reach the user manager.** `user@.service` gets `Delegate=pids memory cpu` in a drop-in (a recent
+  systemd already does; a box without it takes effect at the manager's next start, never by restarting it). `host-guard memory
+  status` and the self-test report whether the controller is there.
+
+## 4. Early warning: before the kill
+
+- **On the box**, the daemon reads `/proc/pressure/memory` every five seconds. Two samples in a row at **some ≥ 10 %** or
+  **full ≥ 3 %** of the last ten seconds record one `memory_pressure` incident (re-armed after thirty calm seconds and at most every
+  five minutes). The incident goes out through the existing alert path to chat: "Box main: short of memory (stalling, before anything
+  is killed)". The earlier alert needs 25 % for five minutes in a row, which is slower than the stall that preceded the 2026-11-13
+  kill; it stays, as the sustained-pressure alert.
+- **The self-test** has a `memory_guard` check: it **fails** on swap on a disk, **fails** when the last minute's pressure averaged
+  25 % or more, is `unknown` without compressed swap (a box not yet upgraded, or a kernel without zram), and passes otherwise. A
+  box without the guard is therefore never reported fully verified.
+
+## 5. Install and upgrade: first boot, a machine replace for an older box, live afterwards
+
+- **A new box** gets the guard from first boot: **one** `runcmd` line and no script (user data is held to a size, and a script would
+  not fit), placed after the metadata guard and before the box user's manager starts, so the manager reads the drop-ins at its start.
+- **A running box made from this release** takes `ozbox upgrade` live, through the root helper: after a replace, and **also when there
+  is nothing to upgrade** (never on a dry run), `ozbox upgrade` first asks the helper for `host-guard helper refresh`, then for
+  `host-guard memory install`. Neither is gated: they only tighten or write the program's own text. The install writes units and
+  drop-ins, asks systemd to reload, restarts its own one-shot `ozbox-memory.service` (the only unit it restarts), enables the timer and
+  writes scores to running processes. The tunnel, the IDE, every terminal and every run keep running; a test asserts that no other
+  restart, stop or kill is issued. A failure is a step in the report with the command to retry; it never fails the upgrade.
+- **The box user's manager is reloaded from a root unit, not from the helper**. The helper runs under `ProtectHome=true`,
+  which hides `/run/user`, so a reload from it failed and the failure was swallowed; and systemd reads a prefix drop-in folder made
+  after it started only when it reloads. `ozbox-memory.service` has no `ProtectHome`, so its `boot` command reloads the manager:
+  root becomes the box user and talks to its own bus (`runuser -u ozbox -- systemctl --user daemon-reload`, with the runtime folder
+  named), and if that fails, `systemctl --user -M ozbox@ daemon-reload` through machined. Both failing makes the unit fail, which
+  `install` reports ("the files are written, but its unit failed: read `journalctl -u ozbox-memory`") instead of "in place". A manager
+  that is not running reads the files when it starts. The proof's step G checks the reload reached the manager (its load timestamp
+  moves) and that a pane opened right after has the soft limit.
+- **A box made before this release gets the guard through one machine replace**. The helper is plain shell written once,
+  at first boot, so a box made before the guard has a helper that does not know `memory`, and a live install on it is refused. The
+  upgrade recognises that refusal and says plainly, as a skipped step and not a failure, that the box gets the guard when
+  `ozbox upgrade` replaces its machine (which restarts it once, as any replace does), instead of printing retry advice that would fail
+  the same way. The first-boot hash changes with the guard, so the existing replace path applies to it.
+- **The helper refresh** (`ozbox host-guard helper refresh`, reachable through the helper's `host-guard` word and run by
+  `reinstall-ozboxd` and by `ozbox upgrade`) replaces the helper with the one compiled into the `ozbox` program on the box, **only
+  when that one is a strictly newer revision**. **Where the text comes from is the whole design:** the helper's text is
+  compiled into that program from the same file first boot installs, and the program is root-owned, installed from the signed
+  release. The box user can ask for the refresh, as it can ask for a memory install, but it names no file and no text. The new text is
+  written beside the old one, must pass `bash -n`, the old one is kept as `ozbox-admin.sh.prev`, and one rename puts it in place; a
+  helper that is running finishes on its old text, and the next request uses the new one.
+  - **It never downgrades.** The helper carries a monotonic revision in its **code** (`helper_rev=N`, a line first boot keeps: it
+    strips only comment lines). A helper with no such line is revision 0. An older or an equal revision changes nothing: the
+    program says so ("the root helper was not changed: it is revision N and this program carries an older revision"), and both
+    revisions are appended to `/var/log/ozbox-helper-refresh.log` with every install. The upgrade treats that refusal as normal and
+    goes on to the memory install. Without this, the usual development flow (a newer CLI, an image whose program is older) would
+    replace a newer helper with an older one on every upgrade, undoing a fix that tightens a gate, with no approval.
+  - **What this does and does not bring live.** It brings a helper addition to a box whose installed program already carries it (for
+    example after a reinstall of the pinned release). It does not carry a new program to the box: a box whose program is older than
+    its helper keeps the helper it has. A box made before this release has a helper that does not know the word at all, so it still
+    needs the machine replace once. Raise `helper_rev` in the same change as any edit to the helper's code.
+
+## Benchmark (owner, 2026-11-12: build to hpc-sandbox-benchmarks)
+
+**What this moves.** Nothing on the measured paths when memory is enough: the swap and the caps act only under reclaim and past a
+cap.
+
+- **`lifecycle` (cold boot):** first boot runs one more command, the install (writes a dozen small files, a `modprobe`, a `mkswap`,
+  three `systemctl` calls): expected to be well under a second against a minute of boot. **To measure.**
+- **`realworld` (Mastra cold install, Better-Auth build, OpenClaw):** the default job cap on an 8 GiB box is 7 GiB throttled at
+  6.3 GiB; these builds are expected to need a few GiB. **To measure the peak memory of each on the 4/8/40 shape**, and confirm none
+  is throttled; if one is, the cap or the reserve is wrong. Swap at `swappiness = 100` can compress idle pages while a build reads
+  the file cache hard: **to measure** build and cold-install times against a box with swap off. A regression of a headline metric
+  (Mastra cold install, Better-Auth build) is not shipped without the owner's yes.
+- **`cpu`, `memory` (STREAM), `disk`, `network`, `system`:** unaffected unless reclaim happens. The memory suite's Triad working set
+  is checked against the compressed device so it does not swap.
+- **`economics`:** none: zram uses RAM already paid for, and the guard adds no resource.
+- **The 4 vCPU / 8 GiB / 40 GB shape.** The size catalogue has none yet (S is 4 vCPU / 16 GB); the measurements above are run on it
+  when it exists, and until then on S, **labelled as a different shape**, never as comparable.
+- **What must be measured, and when (a release gate).** It cannot be measured today, because no 4/8 size exists, and an
+  unmeasured likely cost to a headline build is not shipped. The release gate includes, once that size exists, each with the guard on
+  and with it off: the **Mastra cold install**, the **Better-Auth build** and the **OpenClaw build** (wall time and `memory.peak` of
+  each, run through daemon runs so they get the default cap, which is to be confirmed for the benchmark's `exec` path), **STREAM
+  Triad** (its working set against the compressed device) and the cold-boot time. On that shape every daemon run is throttled at
+  6.3 GiB (`memory.high`), and a TypeScript monorepo build can peak there: throttling means reclaim into zram plus sleeps, and
+  `swappiness = 100` compresses idle anonymous pages while `pnpm install` churns the file cache (CPU on 4 vCPU). Any headline
+  regression needs the owner's yes, and the answer may be a higher `memory.high` fraction or a lower swappiness, never gaming: nothing
+  in the guard is keyed on a repository or a command. Until then the proof's step M prints the S numbers labelled not comparable.
+
+## The proof (`scripts/real-box-memory-proof.sh`), and what it replaced
+
+The first version passed on a box where the incident still happened: its hog was capped at 3 GiB so the box never ran out of memory,
+it accepted exit status 1, it never checked that the tmux pane was in a `tmux-spawn-` scope, it compared units before the fill and
+never after, its hogs wrote one byte per page (which compresses to almost nothing), and its live-install step ran on a box whose first
+boot had done everything. The script now: fills memory with incompressible data (`os.urandom`); runs an uncapped hog and a sentinel in
+a real `tmux-spawn-` scope under a real global out-of-memory kill and requires the sentinel, the pane's scope and every unit (with its
+main process) to survive; does the same inside the web IDE's own cgroup; checks the secrets service's `memory.swap.max`; runs a daemon
+run past its default cap and requires `ozboxd` to keep its main process; accepts only **137** from a capped hog sized above the scope's own `memory.max` plus `memory.swap.max` (read from its
+cgroup; a hog that fits under them is throttled, not killed) with a wrapper that ignores TERM so the scope's stop cannot turn 137
+into 143, and the same for a daemon run, requiring the scope's `oom_kill`; checks that `sleep 4321` is in the IDE's cgroup, that
+the IDE's main process AND its editor server are at -500 and that the terminal's process is at 200; asserts the system tunnel's
+`cloudflared` child at -900; reads the user manager's reload from `UnitsLoadTimestampMonotonic` where systemd has it; installs live through the helper and requires the box user's manager to
+have reloaded; refreshes the helper; checks `systemd-oomd` is off and that zram loads; checks the SSM agent is still running after the
+OOM steps (a missing SSM agent on an AWS box is a failure); and **exits non-zero if any step fails**, with a step that cannot run (no IDE, no terminal) a failure, never a skip.
+
+## Left as they are, and why (and one fixed in passing)
+
+- **The root timer's capability set (L6).** The unit is now `ProtectSystem=strict`, `ProtectKernelModules`, `LogLevelMax=warning`
+  (the journal no longer fills with about 5,800 start/finish lines a day). Narrowing `CapabilityBoundingSet` is not done: the timer
+  needs `CAP_SETUID`, `CAP_SETGID` (to ask the box user's manager), `CAP_SYS_PTRACE` (to read another user's `/proc/<pid>/exe`),
+  `CAP_SYS_RESOURCE` and `CAP_DAC_OVERRIDE`, and a set guessed without a real box could silently stop the protection; the proof's
+  step C would catch it, so it is for the release after the first real run.
+- **The pressure thresholds (L9).** The calm run is now literal (a sample between calm and pressured breaks it). The thresholds
+  themselves (some >= 10 %, the self-test's 25 % over a minute) are not changed without a measurement of a normal throttled build,
+  which is M4's run; until then an alert during a heavy build is possible noise, and the self-test can fail during one. The counts
+  are in samples and the sample interval is a constant (5 s), so nothing scales with a setting.
+- **The IDE's binary check** is by name, not by owner: the IDE is installed per user (see section 2).
+- **The binary-name check after a package upgrade** is fixed. `/proc/<pid>/exe` reads `.../cloudflared (deleted)` until the unit
+  restarts; the guard strips that one trailing ` (deleted)` before the name match, so a replaced package keeps its live score. The
+  owner and mode check already follows the link. A look-alike name with the suffix still fails the name match (test
+  `a_binary_replaced_by_a_package_upgrade_keeps_its_score_but_a_lookalike_name_does_not`).
+- **The live apply inside the helper's sandbox (N7, follow-up).** `install()` calls `apply()` under the helper's `ProtectHome`, where
+  the manager cannot be asked and the main process falls back to the lowest pid (which must still pass the binary check). It is
+  harmless for the binary check and ends within 30 seconds when the timer runs; the cleaner answer is to leave the live scores of the
+  box user's units to the timer. Not done in this round.
+- **The write to `zram-control/hot_add` (L10)** did nothing: the kernel adds a device when the file is read. It is now a read.
+
+## What this does not do
+
+- It does not make memory unlimited: a job that needs more than the box has is killed on its own (its own cap, its own scope), and
+  the early warning says so. A bigger size is the answer, and the message says that.
+- It does not stop an agent from running something outside `ozbox capped`: an uncapped command in a terminal is throttled at the soft
+  limit and protected only by the order of the OOM scores. Making `ozbox capped` the only way a coding agent runs a build is a
+  hook the person sets.
+- The IDE's terminals inherit its score (section 2).
+
+## Open questions (each is a step of the real-box proof)
+
+1. **Do prefix drop-ins (`tmux-spawn-.scope.d`, `session-.scope.d`) apply to transient scopes?** systemd documents prefix drop-ins for
+   units; it loads them for a transient unit when it is created, which the proof checks with `systemctl --user show` on a fresh scope.
+   If not, `ozbox capped` is the way and the drop-ins are dead files, said so in the next amendment.
+2. **Is the memory controller delegated to `user@1500.service`** on the image's systemd? Read from `cgroup.controllers`.
+3. **Is `zram` in the image's kernel?** `modprobe zram` on a fresh box.
+4. Do sshd's login sessions come up at score 0 when the daemon has been set to -900 live?
+5. **Does `OOMPolicy=continue` in a prefix drop-in apply to a transient `tmux-spawn-` scope?** Step D reads `systemctl --user show
+   <scope> -p OOMPolicy`, and step K kills a build in such a scope and requires the sentinel beside it to survive.
+6. **Which way reloads the box user's manager from root, `runuser` or `-M ozbox@`?** Step G requires the manager's load timestamp to
+   move after a live install; the unit tries the first and falls back to the second.
+7. **Which timestamp moves on a reload?** Step G reads `UnitsLoadTimestampMonotonic` (systemd 255 and later) and otherwise
+   `UnitsLoadFinishTimestampMonotonic`, which may be set only when the manager starts. Confirm by hand before the run
+   (`systemctl --user show -p UnitsLoadTimestampMonotonic`, `systemctl --user daemon-reload`, again). Also: its "a pane after the
+   install has the soft limit" check is vacuous on a box whose drop-in folder existed at the manager's start.
+8. **What does the editor's process tree look like?** The step I prints `ps --forest`; the editor-server protection assumes
+   code-server's wrapper-and-child shape and falls back to the main process when there is no such child.
+9. **Does a run that is a unit of the box user's manager (ADR 0038, runs that outlive the daemon) get all four protections?** The
+   daemon works the plan out once (`ozbox_core::memory_plan::run_limits`) and gives it to both ways of running: files in a
+   cgroup scope, properties on a unit (`MemoryMax=`, `MemoryHigh=`, `MemorySwapMax=`, `OOMPolicy=kill`, `OOMScoreAdjust=`). Tests
+   compare the two and fail if any is missing from a unit's start. The real-box proof must be run once on the unit way too: with a
+   daemon run past its cap, read `memory.max`, `memory.high`, `memory.swap.max`, `memory.oom.group` (does `OOMPolicy=kill` set it?)
+   and `/proc/<pid>/oom_score_adj` (does the user manager accept 500?) of the run's unit cgroup.

@@ -1,0 +1,6 @@
+name = "python-tunnel"
+kind = "tunnel"
+api_version = 1
+license = "Apache-2.0"
+program = "python_tunnel.py"
+description = "An example tunnel plugin written in Python. It only records that it was started."

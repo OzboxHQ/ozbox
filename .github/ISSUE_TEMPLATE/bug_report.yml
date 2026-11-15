@@ -1,0 +1,65 @@
+name: Bug report
+description: Something does not work as the documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Never paste a key, a token, a dashboard address with its token, or private data.**
+        A security problem is not a bug report: use the private route in SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: Oz Box version
+      description: The output of `ozbox --version`, and the image version if a box is involved.
+      placeholder: ozbox 0.2.0-beta.0
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - AWS
+        - Hetzner Cloud
+        - Demo (file-backed, no cloud)
+        - Not applicable
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Where you ran the command
+      description: Your operating system, or "on a box" if it ran on the box itself.
+      placeholder: macOS 15, Ubuntu 24.04, on a box
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command or page, and the full message. Use `--json` output if it helps, with any secret removed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps. Say if it only happens on a real box and not with the demo provider.
+    validations:
+      required: true
+  - type: dropdown
+    id: preview
+    attributes:
+      label: Is the feature marked Preview?
+      description: Features marked Preview are built and tested but not yet proven on a real box, so a report on one is especially useful.
+      options:
+        - "Yes"
+        - "No"
+        - "I do not know"

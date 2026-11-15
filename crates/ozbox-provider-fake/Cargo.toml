@@ -1,0 +1,20 @@
+[package]
+name = "ozbox-provider-fake"
+description = "A file-backed fake provider for Oz Box, and the shared provider conformance suite."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ozbox-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

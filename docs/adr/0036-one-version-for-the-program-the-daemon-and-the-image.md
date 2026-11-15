@@ -1,0 +1,105 @@
+# 0036 — One version for the program, the box daemon and the image
+
+**Decision.** The `ozbox` program, the box daemon (`ozboxd`) and the machine image share one version, the workspace version in
+`Cargo.toml`, written `MAJOR.MINOR.PATCH` and kept below 1.0 for now (`0.3.0`). A program release is the tag `vX.Y.Z`; the
+image of the same product version is `image-vX.Y.Z`. The build date is recorded in the signed manifest and is never part of a
+version.
+
+- **Pre-1.0 a minor release may break anything; a patch never does.** So the program refuses to upgrade a box to an image
+  whose major and minor version differ from its own, whatever its signature says, and tells the person which side to upgrade:
+  the program if the image is newer, the image if it is older. A different patch is fine. An image that still carries a date
+  version, from before this scheme, cannot be compared and is allowed with a note.
+- **Both release workflows insist on it.** A release (program or image) must equal the version in `Cargo.toml`, so changing the
+  version is the first step of a release and a build cannot be made under a number the code does not carry. A test fails if a
+  crate takes a version of its own, if the version is not `MAJOR.MINOR.PATCH`, or if a workflow stops checking.
+- **Every release has a changelog entry**, which is what the documentation site's changelog shows.
+- **The earlier tag `cli-vX.Y.Z` is still read** wherever a release is named by a person, so older instructions keep working.
+
+**Why.** Two version numbers (a date for images, a number for the program) cannot say whether a program and an image belong
+together, and the question is the first thing that goes wrong after an upgrade. One number can be compared by a machine.
+
+**Cost.** An image cannot be rebuilt under the same version: a rebuild is a patch release. A fix to the image that the program
+must know about is a minor release, and so makes every older image refuse until it is upgraded; that is the point.
+
+## Amendment — which releases are supported
+
+A minor release is made every month, patches when needed. The latest minor gets features and fixes; the previous minor gets
+security patches for three months after the next minor ships. `ozbox upgrade` moves one supported step at a time, and the
+compatibility refusal names the supported releases (`docs/releases.md`).
+
+
+## Amendment — the box modules and the first-boot configuration belong to the program
+
+**What went wrong.** The first upgrade of a real box used a program and an image of the same version, and still gave the new
+machine an older first boot: the configuration file pointed `module_dir` at a copy of the box modules and `infra/cloud-init`
+made by hand from an earlier commit. Nothing compared that copy with the program, so the one-version rule held for the program,
+the daemon and the image, and silently not for the files that decide what a machine is given at first boot. Running the
+upgrade again then said "Nothing to do", because the box was already on that image.
+
+**Decision.**
+
+- **The program carries its own modules.** `ozbox` embeds `infra/tofu/modules/*` and `infra/cloud-init/**` at build time, as it
+  embeds the dashboard, extracts them to a folder keyed by version and content hash (`$OZBOX_INFRA_DIR`, else
+  `$XDG_DATA_HOME/ozbox/infra`, else `~/.local/share/ozbox/infra`) and checks that folder by hash before every use. A copy
+  changed by hand is set aside, never deleted, and written again. `ozbox infra` prints the version, the hashes and the folder.
+- **`module_dir` is a developer override.** It is used only when its files are exactly the program's, or when the person says
+  so (`dev_modules = true` under the provider's section, or `--dev-modules`); then every plan says which folder and which
+  first-boot hash are rendered. A `module_dir` that points anywhere else is ignored with a warning that names the folder, the
+  two hashes and both ways forward, and the program's own copy is used. Box state an older version kept inside that folder is
+  copied out first (copy, verify, never delete).
+- **One hash, one rule.** The *first-boot hash* is the SHA-256 of the `sha256sum` listing (sorted by path, hidden files and
+  `tests` folders left out) of the `.tf`, `.tftpl` and `.sh` files of `infra/cloud-init/**`, `infra/tofu/modules/aws-box/**`
+  and `infra/tofu/modules/hcloud-box/**`. The same rule over all of `cloud-init` and `tofu/modules` is the *bundle hash*,
+  which says whether a folder is the program's copy. Only those three kinds of file are carried: the build refuses a tree
+  with OpenTofu state, variables or a saved plan in it, rather than carry it into every binary. `scripts/first-boot-hash.sh`
+  reproduces the rule with standard tools; tests keep the program, the build and the script equal.
+- **The image and the program are checked together.** The image workflow records the first-boot hash in the signed manifest
+  (`first_boot`), after running the program of every architecture it publishes (arm64 under emulation) and comparing; an
+  architecture whose program was not checked is not published. `ozbox create` and `ozbox upgrade` refuse an image whose verified
+  release records a different one, unless `--allow-first-boot-mismatch` is given, and then the plan carries the warning. A
+  release that records none (every release before 0.1.1) cannot be compared and is allowed with a note, so a box made by an
+  older program can still be repaired from its own image.
+- **The provider records which first boot a machine had; the box only cross-checks.** The modules pass the hash they render
+  to the machine. On AWS it becomes an instance tag, `ozbox-first-boot`, set when the machine is created and never changed in
+  place (an in-place apply such as a resize leaves it as it was, since the machine keeps its old user data); the box's role
+  cannot change tags. That tag, read from the provider, is the authority. First boot also writes the hash to the root-owned
+  `/etc/ozbox/first-boot`. That file cannot be rewritten by the box user, but the answer about it travels over SSH through
+  the box user's shell, whose rc files live on `/work`, so it is a cross-check only: it can ask for a repair, never prevent
+  one. The command reading it runs in a fresh `sh` with an empty environment, and an answer with more than one record line,
+  or one that is not a hash, counts as malformed.
+- **A stale first boot is repaired from the same image.** `ozbox upgrade` to the image a box already runs replaces its machine
+  (`/work` is kept), with a line that says why, instead of "Nothing to do", when the provider's record names another first
+  boot or none (every machine made before 0.1.1), or when the box's own answer is missing, malformed or different. Only when
+  the record AND the box both say this program's hash is there nothing to do; a box that cannot be asked follows the
+  record. `--reprovision` asks for the replace in any case. Every other upgrade check applies to it unchanged: the image's
+  signature and version, the first-boot gate, the secrets store's fate, the checkpoint, the SSH entry and the self-test.
+- **An unfinished upgrade is finished first.** A box marked as upgrading to the image it already runs is finished (the cheap
+  step it is waiting for), never replaced again in the same run, whatever its first boot; the next run looks at the first
+  boot. This holds in the engine as well as in the command, on every provider.
+- **A provider that cannot do it says so.** On Hetzner an upgrade to a newer image now replaces the server through OpenTofu
+  (0.1.2), so the new server is made with the first-boot configuration this program renders and records its hash, as `create`
+  does. A server already on the image is still not replaced to repair its first boot: Hetzner holds no record of which first
+  boot a server was made with that the program can compare (a label value holds 63 characters; the hash has 64), and without
+  one every upgrade to the same image would replace the server again. `ozbox upgrade` keeps "Nothing to do" with a note saying
+  that and what to do (upgrade to a newer image), and refuses `--reprovision` with the same explanation. Recording the hash
+  where a server can show it is the follow-up that lifts this.
+
+**Not covered, and follow-ups for 0.1.2** (from the review of 2026-11-11):
+
+- The dashboard checks the image's first-boot hash and has no override; it does not look at a box's first boot and does not
+  offer the same-image replace, though a request to it can carry `reprovision` and then goes through every gate (L5).
+- *M3.* The gate is open where nothing can be compared: an image whose signature was not verified (with
+  `--allow-unverified-image`), an image whose inspection failed, and every Hetzner or plugin image all pass with the note
+  that the release records nothing. The check applies to signed AWS releases from 0.1.1 on; the notes should say which case
+  it is, and `create` should consider refusing when the image cannot be inspected.
+- *M4.* The hash binds the files, not the variables the program computes into them (the approver pin, the secrets key,
+  `runs_max_active`). A release that changes only those has the same hash; fold a render-schema version into the value, or
+  keep this limit stated here.
+- *M5.* Box state left in a dropped `module_dir` is copied out only when that folder sits under `tofu/modules`, and in S3
+  state mode it is copied to local state anyway. Migrate from any configured folder that holds state; skip the local copy
+  (and warn) with S3 state.
+- *L1.* Extraction trusts its folder: refuse a destination not owned by the user, or writable by others, and a symbolic
+  link; create it 0700. *L2.* Sweep temporary extraction folders left by a crash. *L3.* `ozbox infra` should resolve without
+  extracting or migrating. *L4.* The Rust and shell rules differ on file names with a backslash or newline, a plain file
+  named `tests`, and names that are not UTF-8; refuse such names in both. *L6.* The record is the last first-boot step, so a
+  first boot cut short leaves none and the next upgrade replaces the machine (errs toward repair; worth knowing).

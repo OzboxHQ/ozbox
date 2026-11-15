@@ -1,0 +1,22 @@
+# Real-tool test vectors
+
+Output: real_tool_vectors.json (groups: ssh_sk_ed25519 x8, ssh_ecdsa_sk x8, webauthn_assertion x8, notes). Every byte comes from the tool named in each entry's "tool".
+
+## Tools
+- OpenSSH portable 10.6p2 built from https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz (sha256 9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b; no published sha256 listing found, only .asc, PGP not checked), OpenSSL 3.6.3 (Homebrew openssl@3), macOS x86_64.
+- sk-dummy.so from the same tree. Google Chrome 157.0.8103.51, puppeteer-core (npm), python 3.11 venv with cryptography 48.0.1 (binary wheel).
+
+## Commands
+    ./configure --prefix=$V/inst --with-ssl-dir=/usr/local/opt/openssl@3 --without-zlib-version-check
+    make -j6; make regress/misc/sk-dummy/sk-dummy.so; make install-nokeys
+    $V/venv/bin/python $V/gen_ssh.py $V       # keygen -t {ed25519-sk,ecdsa-sk} [-O verify-required|application=ssh:work|no-touch-required], ssh-add, raw agent SIGN_REQUEST flags 0 (2 messages per key), self-verify
+    node $V/gen_webauthn.mjs $V                # Chrome headless + CDP WebAuthn virtual authenticator on http://localhost:<port>
+    $V/venv/bin/python $V/assemble.py $V      # merges work/ssh.json + work/webauthn.json, verifies webauthn sigs
+($V = this directory.) ssh-agent was run with -a agent.sock (relative, cwd work/, because macOS sun_path is too short for the scratchpad path) and -P <sk-dummy.so>; killed at the end.
+
+## Reviewer notes
+- sk-dummy returns a CONSTANT counter 0x12345678, so counter progression is not visible in the ssh vectors (webauthn counters do progress: 2,3,4,...). Flags: default 0x01, verify-required 0x05, no-touch-required 0x00.
+- Real agent sk signature layout: string(alg) || string(sig) || byte flags || uint32 counter (flags and counter are at the top level, not inside a wrapped blob). ecdsa-sk: sig = mpint r || mpint s; the entry also holds r, s (hex) and the DER.
+- signed_payload = SHA256(application)||flags||counter||SHA256(M); all signatures verified in python (field self_verified).
+- Not a hardware token: sk-dummy and Chrome's virtual authenticator are software. No vectors omitted.
+- Credential A registered with UV required, B with discouraged; assertion flags 0x05 (UV) or 0x01 (no UV). attestation fmt packed.

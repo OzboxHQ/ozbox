@@ -1,0 +1,789 @@
+{
+ "vectors": [
+  {
+   "name": "setup-code",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "setup-code",
+    "challenge": "00112233445566778899aabbccddeeff"
+   },
+   "digest": "2a9ff4ec4b6f13144c0098809c97b7b77106fc2ac773982bb7319f5435daea55"
+  },
+  {
+   "name": "kek-export",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "kek-export",
+    "challenge": "00112233445566778899aabbccddeeff"
+   },
+   "digest": "3ab1bd6020eda4468bfb027eec71408f220d39e92ed9ea511b5633a8bdebd598"
+  },
+  {
+   "name": "import: two names listed out of order",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "99c754a5bf4961f4639b183f57d5e6c3b2d72c19ace163bcb0c9648fdf7fc9c6"
+  },
+  {
+   "name": "import: the same two names in order (the same digest)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "99c754a5bf4961f4639b183f57d5e6c3b2d72c19ace163bcb0c9648fdf7fc9c6"
+  },
+  {
+   "name": "import: a public mark is another digest",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "A",
+      "classification": "public",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "652002556503e63cf3b4fd38de356f0fd4070b054981d67bc9abdd6d9e4d1974"
+  },
+  {
+   "name": "import: another store generation is another digest",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 4
+   },
+   "digest": "5096a9272e54bf3fab4bd2b92ca9b72fdbc3ddae7b0382e2ecec56f8d0670340"
+  },
+  {
+   "name": "import: the filer says production",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": true,
+    "names": [
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "0022005e5ad10949a283d7463e219d998905f8a99af4de6110f946129f87c061"
+  },
+  {
+   "name": "tunnel-token",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "tunnel-token",
+    "kind": "ide",
+    "token_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "account_tag": "acct1",
+    "tunnel_id": "tun1"
+   },
+   "digest": "809b441c62471fc54a53925d1fd71c36da006cd5051cda4db1e882332841ad39"
+  },
+  {
+   "name": "tunnel-token: a field moved across a boundary (account ab, tunnel c)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "tunnel-token",
+    "kind": "ide",
+    "token_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "account_tag": "ab",
+    "tunnel_id": "c"
+   },
+   "digest": "8de5c9ce994546e0bf034eff9f655fb9a850ad79e39cde8e4777ba49fc986cd7"
+  },
+  {
+   "name": "tunnel-token: the same characters the other way (account a, tunnel bc)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "tunnel-token",
+    "kind": "ide",
+    "token_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "account_tag": "a",
+    "tunnel_id": "bc"
+   },
+   "digest": "993bd84eca87652052658264ec9461f867c8e5d3407bdc58749fffeeb34a58b4"
+  },
+  {
+   "name": "tunnel-token: empty account tag",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "tunnel-token",
+    "kind": "ide",
+    "token_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "account_tag": "",
+    "tunnel_id": "tun1"
+   },
+   "digest": "708b4a153b8a4748bf34a03fd2a3967b3b71fa678f565fc0bb2a97a384f06cea"
+  },
+  {
+   "name": "tunnel-token: empty tunnel id",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "tunnel-token",
+    "kind": "ide",
+    "token_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "account_tag": "acct1",
+    "tunnel_id": ""
+   },
+   "digest": "0f2fb5657f433a2c128fd308ac29155a9a5a5604902c7b13bfcb8e0ad282831e"
+  },
+  {
+   "name": "policy",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "policy",
+    "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "predecessor_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "sensitivity": "ordinary"
+   },
+   "digest": "5852d0e5861fc629dd058374f2ab5e4c9067620240ae98971e41a0babc953f1a"
+  },
+  {
+   "name": "policy: widens a guarded scope",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "policy",
+    "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "predecessor_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "sensitivity": "widens-guarded"
+   },
+   "digest": "4481224012248702bd43383f9498183ae89d1c9cba115f7bbdc1c1c81bdeef10"
+  },
+  {
+   "name": "guard-override commit: one match",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "commit",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "hook_kind": "pre-commit",
+    "tree_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "matches": [
+     {
+      "path": "src/a.rs",
+      "line": 3,
+      "rule": "stored-value",
+      "key_id": "k1"
+     }
+    ],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "d4eb3b18d0094c1b87e0d904c2a7749b61a6440bda0cd9926c4d8d4212ea3a07"
+  },
+  {
+   "name": "guard-override commit: two matches out of order",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "commit",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "hook_kind": "pre-commit",
+    "tree_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "matches": [
+     {
+      "path": "src/b.rs",
+      "line": 9,
+      "rule": "stored-value",
+      "key_id": "k2"
+     },
+     {
+      "path": "src/a.rs",
+      "line": 3,
+      "rule": "stored-value",
+      "key_id": "k1"
+     }
+    ],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "45ec19273fa39ee291231fc78a9e06bd852aabb295b8f66e05c41736be07497c"
+  },
+  {
+   "name": "guard-override commit: the same two in order (the same digest)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "commit",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "hook_kind": "pre-commit",
+    "tree_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "matches": [
+     {
+      "path": "src/a.rs",
+      "line": 3,
+      "rule": "stored-value",
+      "key_id": "k1"
+     },
+     {
+      "path": "src/b.rs",
+      "line": 9,
+      "rule": "stored-value",
+      "key_id": "k2"
+     }
+    ],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "45ec19273fa39ee291231fc78a9e06bd852aabb295b8f66e05c41736be07497c"
+  },
+  {
+   "name": "guard-override commit: a lying path is another digest",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "commit",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "hook_kind": "pre-commit",
+    "tree_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "matches": [
+     {
+      "path": "src/c.rs",
+      "line": 3,
+      "rule": "stored-value",
+      "key_id": "k1"
+     }
+    ],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "12180f51fd2ccded0af4c629370857ef8364e482285fc13d8829d23001ab9beb"
+  },
+  {
+   "name": "guard-override push",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://example.test/r.git",
+    "refs": [
+     {
+      "ref_name": "refs/heads/main",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "c0ef5bac23a716a1c953316ed81524a2b7376f69b496bacd88df56ce9cb6cb3e"
+  },
+  {
+   "name": "guard-override push: another remote url",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://evil.test/r.git",
+    "refs": [
+     {
+      "ref_name": "refs/heads/main",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "fc922f3aceacb0c3a90adb3d6dec5f73dc900d92e6674af1b4d94c11cadbd7cd"
+  },
+  {
+   "name": "guard-override push: a lookalike letter in the url (Cyrillic a)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://ex\u0430mple.test/r.git",
+    "refs": [
+     {
+      "ref_name": "refs/heads/main",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "5fb65a8f84e9884eb646830771ed28cf3e1c1142f3e9266a09d9b3075791b6ac"
+  },
+  {
+   "name": "guard-override push: two refs out of order",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://example.test/r.git",
+    "refs": [
+     {
+      "ref_name": "refs/heads/z",
+      "old": "cccccccccccccccccccccccccccccccccccccccc",
+      "new": "dddddddddddddddddddddddddddddddddddddddd"
+     },
+     {
+      "ref_name": "refs/heads/a",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [
+     {
+      "path": "src/b.rs",
+      "line": 9,
+      "rule": "stored-value",
+      "key_id": "k2"
+     },
+     {
+      "path": "src/a.rs",
+      "line": 3,
+      "rule": "stored-value",
+      "key_id": "k1"
+     }
+    ],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   "digest": "dfdfc209e617b2e34457d19218ac6c660a41d7d95e2c525b598abb9e5c3d5c97"
+  },
+  {
+   "name": "box-secrets: set",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "box-secrets",
+    "address": "a1",
+    "action": "set",
+    "change_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "first_setting": false
+   },
+   "digest": "121cfd9e98b244d2bf43de689f77c50a18d2d5309f4c137d117840d065015a1d"
+  },
+  {
+   "name": "box-secrets: set, a first setting",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "box-secrets",
+    "address": "a1",
+    "action": "set",
+    "change_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "first_setting": true
+   },
+   "digest": "6d6298ca2c064cf67615b7d79348c9ec27520b21a0f9c1619cc6d4ab90bbc896"
+  },
+  {
+   "name": "box-secrets: remove",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "box-secrets",
+    "address": "a1",
+    "action": "remove",
+    "change_digest": "",
+    "first_setting": false
+   },
+   "digest": "6d68be1bca18bb380aaa431d05ebddb1c34af00f28a7b700a6f24736bbbeae53"
+  },
+  {
+   "name": "host-guard: a loosening with two fields",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "host-guard",
+    "action": "open-port",
+    "loosening": true,
+    "fields": [
+     [
+      "port",
+      "8080"
+     ],
+     [
+      "proto",
+      "tcp"
+     ]
+    ]
+   },
+   "digest": "dd516cd1d0e99411a25bcb1dabf21c11539308a40bb2e9e4a19619eb5fcb7f61"
+  },
+  {
+   "name": "signer-enroll: enrol a software key",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "signer-enroll",
+    "action": "enrol",
+    "key_name": "laptop-2",
+    "key_type": "ed25519",
+    "public_half": "9999999999999999999999999999999999999999999999999999999999999999",
+    "attestation_digest": ""
+   },
+   "digest": "3f2003da91beec6578e9c0e8f6e5d49d52f572ee6c45a9dc04f3c0c26f65d4e1"
+  },
+  {
+   "name": "signer-enroll: enrol a presence key with its attestation",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "signer-enroll",
+    "action": "enrol",
+    "key_name": "yubi",
+    "key_type": "sk-ssh-ed25519",
+    "public_half": "9999999999999999999999999999999999999999999999999999999999999999",
+    "attestation_digest": "7777777777777777777777777777777777777777777777777777777777777777"
+   },
+   "digest": "e0f99f6b6bc810be4565ed26db07a81551aef16d6532befddb7d2a8d8067d373"
+  },
+  {
+   "name": "signer-enroll: revoke",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "signer-enroll",
+    "action": "revoke",
+    "key_name": "laptop-2",
+    "key_type": "ed25519",
+    "public_half": "9999999999999999999999999999999999999999999999999999999999999999",
+    "attestation_digest": ""
+   },
+   "digest": "5f812f530447d0509e58280decabe523a379218fee4968938e8f43998d41b261"
+  },
+  {
+   "name": "worker-keys: names out of order",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "worker-keys",
+    "orchestration_id": "orch-1",
+    "names": [
+     "B",
+     "A"
+    ],
+    "environment": "staging",
+    "max_workers": 4,
+    "ttl_s": 3600
+   },
+   "digest": "56d22d6e4166483210b286f007a036e66fa7e98263e09c5bda82b6de600d8c62"
+  },
+  {
+   "name": "import on another box",
+   "box_id": "box-2",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "e5d7dd18dd0896355effa4fe2d5dbd6c3d6758c5e38836bb462263f56a9081fa"
+  },
+  {
+   "name": "import on another store",
+   "box_id": "box-1",
+   "store_id": "store-2",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   },
+   "digest": "bf3d114bf9964dbe4f4d6e97aa897da2967f107393fe39e9e812de7e613987f3"
+  }
+ ],
+ "refused": [
+  {
+   "name": "import: a duplicate name",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "A",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     },
+     {
+      "name": "A",
+      "classification": "public",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   }
+  },
+  {
+   "name": "import: a lookalike letter in a name (Cyrillic a)",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "\u0430pp",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   }
+  },
+  {
+   "name": "import: a name with a separator",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "import",
+    "project": "app",
+    "environment": "staging",
+    "production": false,
+    "names": [
+     {
+      "name": "A B",
+      "classification": "secret",
+      "value_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     }
+    ],
+    "store_generation": 3
+   }
+  },
+  {
+   "name": "host-guard: tightening is not filed",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "host-guard",
+    "action": "open-port",
+    "loosening": false,
+    "fields": []
+   }
+  },
+  {
+   "name": "worker-keys: production is a secret-use",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "worker-keys",
+    "orchestration_id": "orch-1",
+    "names": [
+     "A"
+    ],
+    "environment": "production",
+    "max_workers": 4,
+    "ttl_s": 3600
+   }
+  },
+  {
+   "name": "worker-keys: an unlisted environment",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "worker-keys",
+    "orchestration_id": "orch-1",
+    "names": [
+     "A"
+    ],
+    "environment": "qa",
+    "max_workers": 4,
+    "ttl_s": 3600
+   }
+  },
+  {
+   "name": "guard-override push: a newline in the url",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://example.test/r.git\nHost: evil",
+    "refs": [
+     {
+      "ref_name": "refs/heads/main",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   }
+  },
+  {
+   "name": "guard-override push: a direction override in the url",
+   "box_id": "box-1",
+   "store_id": "store-1",
+   "subject": {
+    "scope": "guard-override",
+    "hook": "push",
+    "repo_path_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "remote_url": "https://example.test/\u202er.git",
+    "refs": [
+     {
+      "ref_name": "refs/heads/main",
+      "old": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "new": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    ],
+    "matches": [],
+    "scanned_text_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+   }
+  }
+ ],
+ "challenges": [
+  {
+   "name": "decide challenge: approve",
+   "kind": "decide",
+   "request_id": "REQ1",
+   "digest_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+   "outcome": "approve",
+   "expect": "544c755eb3a4cacf9f22451399e9eb5804853678eebb60ffceaa221c92e071be",
+   "message": "ozbox-approval-decide\n544c755eb3a4cacf9f22451399e9eb5804853678eebb60ffceaa221c92e071be"
+  },
+  {
+   "name": "decide challenge: deny",
+   "kind": "decide",
+   "request_id": "REQ1",
+   "digest_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+   "outcome": "deny",
+   "expect": "1a5a51cbd4f094a25a20cdbf16bd748484354a15c4341450399af2f784094789",
+   "message": "ozbox-approval-decide\n1a5a51cbd4f094a25a20cdbf16bd748484354a15c4341450399af2f784094789"
+  },
+  {
+   "name": "decide challenge: revoke",
+   "kind": "decide",
+   "request_id": "REQ1",
+   "digest_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+   "outcome": "revoke",
+   "expect": "cdbc4a98543e62ee81c88882625edb84559d612074da34fa8a48689022135adf",
+   "message": "ozbox-approval-decide\ncdbc4a98543e62ee81c88882625edb84559d612074da34fa8a48689022135adf"
+  },
+  {
+   "name": "key enrolment challenge",
+   "kind": "key-enrol",
+   "request_id": "REQ1",
+   "digest_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+   "expect": "a0a7509e81e4540330d2cd1e4726ed4e64b3d9c675e0c2345697db800f7cb346"
+  }
+ ],
+ "envelope": {
+  "canonical": "{\"box_id\":\"box-1\",\"store_id\":\"store-1\",\"origin\":\"local\",\"id\":\"REQ1\",\"scope\":\"guard-override\",\"subject\":{\"scope\":\"guard-override\",\"hook\":\"commit\",\"repo_path_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"hook_kind\":\"pre-commit\",\"tree_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"matches\":[{\"path\":\"src/b.rs\",\"line\":9,\"rule\":\"stored-value\",\"key_id\":\"k2\"},{\"path\":\"src/a.rs\",\"line\":3,\"rule\":\"stored-value\",\"key_id\":\"k1\"}],\"scanned_text_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"},\"subject_digest\":\"45ec19273fa39ee291231fc78a9e06bd852aabb295b8f66e05c41736be07497c\",\"requester\":{\"kind\":\"box-user\",\"uid\":1000,\"key_id\":null,\"run_id\":null,\"engine\":null,\"claimed\":null},\"expires_at_ms\":1700000900000,\"state\":\"pending\",\"epoch\":\"epoch-1\"}",
+  "message": "ecbc5ee1855f5c926178bdae224db62c3a6e9f2eb6462bd150b0e0154390528d"
+ }
+}

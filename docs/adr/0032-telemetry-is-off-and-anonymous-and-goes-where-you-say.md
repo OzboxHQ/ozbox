@@ -1,0 +1,23 @@
+# 0032 — Telemetry is off, anonymous, and goes only where you say
+
+**Decision.** `ozbox` can send one small usage event a day, but only after the person runs `ozbox telemetry on --endpoint
+<https address>`, to an address they choose. Oz Box hosts no collector and ships no default endpoint. Until then nothing is
+read, written or sent: a test asserts that no network call and no file write happens while it is off.
+
+- **The event is the whole contract.** A schema number, the program's version, the operating system and CPU family, the day
+  (UTC), the provider's kind (`fake`, `hcloud`, `aws`, `plugin`, or `unset`) and a bucket for the fleet's size (`0`, `1`,
+  `2-5`, `6-20`, `21+`). Free text cannot enter it: the provider and the bucket are matched against fixed lists, and
+  anything else is cut at the first character outside a plain set. There is no box name, host name, path, prompt, key, account, or identifier of
+  the installation.
+- **You see it first.** `ozbox telemetry preview` prints the exact bytes `send` posts, built by the same function, and `on`
+  shows them before it asks.
+- **At most one a day, never in the way.** A failure is ignored and retried with the next command; the request is short, uses
+  the same outbound guard as every other call, and cannot change a command's result.
+- **`off` forgets.** It turns the setting off and deletes the one small file of facts it kept.
+
+**Why.** A project of this kind needs to know whether anyone uses what it ships, but trust in a tool that runs people's
+agents and holds their cloud credentials is worth more than the numbers. Opt-in, with the data visible and a destination the
+person controls, is the only version we can defend.
+
+**Cost.** Few people will turn it on, so the numbers undercount. The receiving server sees the sender's network address, as any
+server does; that is why the address is the person's to choose. Fields are only ever added, under a new schema number.

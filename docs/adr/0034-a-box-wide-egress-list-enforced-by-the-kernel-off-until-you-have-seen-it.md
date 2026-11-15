@@ -1,0 +1,67 @@
+# 0034 — A box-wide egress list, enforced by the kernel, logged before it is enforced
+
+**Decision.** ADR 0023 closed the network of a project's *commands*. It did not cover the box user's shell, an agent's own
+network, or the machine as a whole. This adds an optional, declared list for the whole box.
+
+1. **Declared, off by default, three modes.** `off` installs nothing. `log` allows everything and notes what is not on the
+   list. `enforce` drops what is not on the list, for every program on the box, and notes it. `ozbox box-egress <box> --mode
+   log --preset github --preset anthropic --host api.example.com`; with no `--mode` it prints what the list has seen. Going to
+   `enforce` is refused unless the box is already in `log` (or `enforce`), so a list is built from what the box really does
+   before it can lock anything; `--skip-log-first` is the owner's explicit override.
+2. **Presets, hosts, and hooks.** The list is named presets (package mirrors, git hosts, model providers, the tunnel connector,
+   the box's AWS management endpoints), plus extra names reached on port 443. Another part of the box (the tunnel connector, a
+   private mesh agent) declares what it needs by dropping a root-owned JSON fragment in `/etc/ozbox/egress.d/`; nothing of theirs
+   is hardcoded here. A box that has a region always keeps the AWS management endpoints (Session Manager), because enforcing
+   without them would cut off the only way into a box with no inbound port.
+3. **Enforced by nftables with a resolved-address set, not a proxy.** A name is resolved to addresses and the kernel allows those
+   addresses; every refresh rebuilds the table and replaces it in one step, so there is no moment with an open or half-built list.
+   An address stays allowed for a day after its name last returned it (a name that rotates its answers would otherwise block the
+   program that resolved it), and an outage of the resolver shrinks nothing. A ruleset is checked with `nft -c` before it is
+   loaded; `enforce` is refused while a name the management path needs has no address. DNS is allowed only to the system's real
+   name servers, the metadata and time services and DHCP always. Why not a transparent proxy: the original destination of a
+   redirected connection cannot be read without `unsafe` or a new dependency (the project forbids the first and keeps the second
+   small), it covers only TLS, and a proxy in the path is a new way for the management path to fail. What this gives up, and
+   ADR 0023 explains why it matters: an address shared with other tenants (a content network, a cloud gateway) is reachable by
+   anything on the box, not only by the host's name, and a wildcard name cannot be expressed. The list is the coarse net for the
+   machine; the per-command proxy that checks the name in the TLS hello stays the fine one.
+4. **One declaration channel.** The declaration travels as a short line of plain words through the same root path as `ozbox
+   admin` (action `host-guard`), is validated again on the box, and is kept in `/etc/ozbox/box-egress.json`. Instance tags were
+   rejected: AWS limits a tag value to 256 characters and Hetzner a label to 63, and Hetzner has no metadata for labels. The root
+   helper gains one `case`, the first-boot configuration stays under its size limit, and the logic is in the program.
+5. **What was blocked can be read.** A timer every two minutes refreshes the addresses and reads the kernel log; the destinations
+   attempted (address, port, protocol, count, last seen) are kept in a world-readable file with no content, and shown by `ozbox
+   box-egress <box>` or `ozbox host-guard egress report`. In `log` mode this is the list of what `enforce` would have blocked.
+
+**Not covered.** A program that tunnels through an allowed host; DNS as a side channel to the real resolver; the first seconds of
+a box before the timer's first run (the table from the last refresh is loaded at boot by the same unit); a root compromise.
+Recovery from a list that is too tight on a box with no way in is to replace the machine from the image (`/work` is kept).
+
+## Amendment 1 (security review, 2026-11-10): the list cannot be loosened by the program it guards, and a bad declaration keeps the last good rules
+
+A security review (2026-11-10) found two ways round the list. Both are fixed.
+
+1. **Loosening needs a fresh approval the box user cannot make.** The root helper takes any request the box user files, and
+   the box user is also where an agent runs, so `host-guard egress set off` (or `enforce` with an extra host) was a request
+   the agent could make and root would carry out. Now the box's program compares the new declaration with the one in force
+   and, when the new one lets the box do or hide more, spends an approval of scope `host-guard` (project `egress`) through
+   the secrets service's admin socket before it writes anything. "More" is: turning the list `off`; `enforce` stepping down
+   to `log`; and, within `log` or `enforce` (or from `log` to `enforce`), any destination that was not listed already (in
+   `log` a wider list hides attempts from the report a person builds the `enforce` list from). The approval is bound to the
+   first 16 hex digits of the SHA-256 of the change's own words (its `env` field), so a code seen on its way to the box
+   cannot be spent on a different change; the plan prints that digest and the exact `ozbox secrets approve` command (the
+   dashboard's Settings, Secret approvals makes the same approval from the digest after a passkey), and `ozbox box-egress`
+   takes `--approval CODE`. **A box with no second factor enrolled refuses a loosening change outright**: there the secrets
+   service allows anything as `bootstrap`, which would only mean "the box user asked". The service still records that
+   bootstrap pass in its own log; the helper's log records the refusal.
+2. **Tightening needs none, on purpose.** Turning the list on from `off`, removing destinations, or going from `log` to
+   `enforce` with no new destination can only take something away from whoever asks, so it is not gated, and a person can
+   always make a box stricter at once. The cost: on a box with no second factor, a list an agent tightened can be loosened
+   again only after a factor is enrolled. That is the recovery path already named above (or replacing the machine).
+3. **A declaration that cannot be read, parsed or validated is never `off`.** Before, the timer read it as `off` and deleted
+   every rule, so an upgrade that tightened the checks (or a damaged file) opened a box that was enforcing. Now no file is
+   `off` (nothing was ever declared); anything else that is unusable keeps the rules of the last good refresh (the ruleset
+   file is checked with `nft -c` and loaded again, which also covers a restart), records `error` in the state file, shows a
+   `PROBLEM:` line first in `ozbox box-egress <box>`, and makes the refresh fail so its unit shows as failed. Turning the list
+   `off` deletes that ruleset file, so nothing stale can come back.
+
+**Still not covered.** The same as above; and a person who approves a loosening they did not mean to.

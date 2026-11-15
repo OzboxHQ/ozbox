@@ -1,0 +1,19 @@
+# 0009 — Apache License 2.0
+
+**Decision.** The project is licensed under Apache-2.0; the copyright holder is named in `NOTICE`.
+
+**Why.** A permissive license with an explicit patent grant, widely accepted by companies that would run or contribute to it.
+
+**Cost.** Anyone may build on it, including commercially.
+
+## Amendment, 2026-11 — one licence for the code, one for the words, the author's for skills and plugins
+
+- **The project stays Apache-2.0**, with no open-core or enterprise edition: everything is open, and no feature is reserved for a
+  paid version. `LICENSE`, `NOTICE` and the README say the same thing.
+- **The documentation is CC BY 4.0** (the README and the guides, `docs/`, the decision records, and the documentation site's
+  text). `DOCS-LICENSE.md` lists exactly which paths it covers; the code and the code samples remain Apache-2.0, and the name
+  and logo are covered by `TRADEMARKS.md`.
+- **Skills and plugins: the author chooses the licence.** A plugin's manifest has a required `license` field (an SPDX
+  identifier) and a skill's `SKILL.md` may state one; the command line shows it before a plugin is added or approved and when a
+  skill is reviewed. The skills and plugins bundled with Oz Box are Apache-2.0.
+

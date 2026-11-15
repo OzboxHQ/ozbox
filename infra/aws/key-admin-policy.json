@@ -1,0 +1,145 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListKeysAndAliases",
+      "Effect": "Allow",
+      "Action": ["kms:ListKeys", "kms:ListAliases"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateOnlyOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": "kms:CreateKey",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-managed": "true"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": ["ozbox-*", "purpose", "team"]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnlyKeysThatAreAlreadyOzBoxKeys",
+      "Effect": "Allow",
+      "Action": "kms:TagResource",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true",
+          "aws:RequestTag/ozbox-managed": "true"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": ["ozbox-*", "purpose", "team"]
+        }
+      }
+    },
+    {
+      "Sid": "AdministerOnlyOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListResourceTags",
+        "kms:EnableKeyRotation",
+        "kms:PutKeyPolicy",
+        "kms:UpdateKeyDescription",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "arn:aws:kms:*:${account_id}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "AliasesOnlyUnderTheOzBoxPrefix",
+      "Effect": "Allow",
+      "Action": ["kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias"],
+      "Resource": "arn:aws:kms:*:${account_id}:alias/ozbox-*"
+    },
+    {
+      "Sid": "AliasesPointOnlyAtOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": ["kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias"],
+      "Resource": "arn:aws:kms:*:${account_id}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverUseAKey",
+      "Effect": "Deny",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:CreateGrant",
+        "kms:RetireGrant",
+        "kms:RevokeGrant",
+        "kms:ImportKeyMaterial",
+        "kms:ReplicateKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverChangeTheProductionKey",
+      "Effect": "Deny",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:CreateGrant",
+        "kms:TagResource",
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-production": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverAliasTheProductionKey",
+      "Effect": "Deny",
+      "Action": ["kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-production": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverUseTheProductionAliasName",
+      "Effect": "Deny",
+      "Action": ["kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias"],
+      "Resource": "arn:aws:kms:*:${account_id}:alias/ozbox-*-production"
+    },
+    {
+      "Sid": "NeverRemoveTheOzBoxTag",
+      "Effect": "Deny",
+      "Action": "kms:UntagResource",
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverLockOutTheKeyPolicy",
+      "Effect": "Deny",
+      "Action": ["kms:CreateKey", "kms:PutKeyPolicy"],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "kms:BypassPolicyLockoutSafetyCheck": "true"
+        }
+      }
+    }
+  ]
+}

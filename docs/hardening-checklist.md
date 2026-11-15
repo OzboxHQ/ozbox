@@ -1,0 +1,60 @@
+# Hardening review checklist for v1.0
+
+Public-safe: what Oz Box defends against, the controls that exist and where they are decided, and what is still open. It is a
+checklist for a reviewer. Oz Box describes controls and makes no claim of certification or compliance; see
+[shared responsibility](shared-responsibility.md) for what the software does and what stays with you.
+
+## Threat model in short
+
+| Who or what | Assumed capability | What we rely on |
+|---|---|---|
+| A coding agent on a box | runs arbitrary code as the box user, reads anything that user can read | no sudo ([0011](adr/0011-no-sudo-one-audited-root-path.md)); secrets held by another user ([0018](adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md)); per-run tokens ([0017](adr/0017-credential-broker-per-run-tokens.md)); egress approvals and the commit barrier ([0023](adr/0023-the-supervisor-egress-approvals-and-the-commit-barrier.md)) |
+| A stranger on the internet | scans for open ports, replays web requests | no inbound ports on a box ([0005](adr/0005-no-inbound-network.md)); loopback-only dashboard behind a tunnel you bring ([0010](adr/0010-bring-your-own-tunnels.md)) |
+| A malicious or mistaken skill, memory entry, plugin | tries to run code or steer an agent | skills approved by hash ([0025](adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md)); memory reviewed before agents read it ([0024](adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md)); plugins approved by hash ([0031](adr/0031-plugins-are-programs-that-speak-a-versioned-protocol.md)) |
+| A compromised machine of the person | has their session | passkeys and a second lock ([0012](adr/0012-code-access-and-the-second-lock.md)); risky approvals by passkey ([0021](adr/0021-chat-with-coding-agents.md)) |
+| A tampering insider or malware | edits history or the audit trail | tamper-evident audit log and a permission engine ([0022](adr/0022-permission-engine-and-tamper-evident-audit-log.md)); every tool call decided and recorded ([0026](adr/0026-the-tool-host-every-tool-call-is-decided-and-recorded.md)) |
+| A tampered release | swaps a program or image | signed releases, a signed manifest and sha256 checks, verified before install (`docs/releasing.md`, [0010](adr/0010-bring-your-own-tunnels.md)) |
+| A cloud or network provider | sees metadata and traffic | out of scope beyond ADR 0005; encrypt what matters |
+
+## Controls to verify
+
+Tick each against the current code and tests before a release.
+
+- [ ] Every mutation is planned, shown, confirmed and fenced against stale state ([0002](adr/0002-plan-then-apply.md)); `--dry-run` changes nothing.
+- [ ] Infrastructure modules have zero ingress and a test fails on any inbound rule (`infra/tofu/check-no-ingress.sh`).
+- [ ] The dashboard listens on loopback only; sign-in is a passkey or a verified proxy token; host, origin and cookie scope derive from one address.
+- [ ] No secret appears in an argument, a log, a plan, an answer, a URL or an error; every secret path has a sentinel test.
+- [ ] Secrets are encrypted at rest; internal tokens are stored only as HMAC and compared in constant time.
+- [ ] Agents get per-run, short-lived, scoped tokens, never a long-lived vendor key.
+- [ ] A box's first approver is never enrolled from a socket the box user can reach (it is pinned by `ozbox create`); each secrets-service socket is in its directory's group and the self-test connects to it as the box user ([0028](adr/0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker.md), Amendment 1).
+- [ ] The broker relays only each provider's inference endpoints and model list; a store's key file is never on `/work` and backups leave out the secrets service's private folder ([0029](adr/0029-production-secrets-have-no-standing-access.md), Amendment 7).
+- [ ] The box user has no sudo; the root path is a short, fixed list of actions enforced twice, and each action declares whether it needs an approval in one table the helper and the program share (a test compares them; [0028](adr/0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker.md), Amendment 2).
+- [ ] What a box with no approver may do is one table, scope by scope; naming an approver and loosening a guard are refused there ([0028](adr/0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker.md), Amendment 2).
+- [ ] `ozbox upgrade` names the secrets store's fate in every plan and refuses to lose a store without the person's acceptance; a store is set aside only when the secrets service itself recorded it lost with no escrow, and only with the pinned key's signature ([0029](adr/0029-production-secrets-have-no-standing-access.md), Amendment 8).
+- [ ] The dashboard on a box runs as the supervisor user from a system unit with the root-owned program, from its install on; a failed move starts nothing as the box user ([0023](adr/0023-the-supervisor-egress-approvals-and-the-commit-barrier.md), Amendment 1).
+- [ ] The root path does not take the box user's word as the owner's ([0011](adr/0011-no-sudo-one-audited-root-path.md), amendment 1): turning the egress list off or widening it, and any restart rule, needs a fresh approval bound to the change, and a box with no second factor refuses it; `reown` never takes a system id or one of the box's own service accounts; a token file is read once through one descriptor.
+- [ ] A computer reaches a box's secrets service only through the `ozbox-ingress` account (a forced command, a root-owned key file, no terminal or forwarding), every payload sealed to a key the service made and this computer pinned; the box user's import socket takes no keys ([0029](adr/0029-production-secrets-have-no-standing-access.md), Amendment 9).
+- [ ] The dashboard's first-time setup code is read on your own computer (`ozbox secrets ingress setup-code`) and is not in a log the box user can read.
+- [ ] Only root and the machine's own services reach the instance metadata service, in every egress mode ([0029](adr/0029-production-secrets-have-no-standing-access.md), amendment 6 §2).
+- [ ] A box-wide egress declaration that cannot be read or validated keeps the last good rules and says so ([0034](adr/0034-a-box-wide-egress-list-enforced-by-the-kernel-off-until-you-have-seen-it.md)).
+- [ ] Skills, memory and plugins do nothing until a person approves the exact content.
+- [ ] Outbound requests to addresses a person supplied go through the SSRF guard (https, public addresses, no redirects followed).
+- [ ] Commands are argument lists, never shell strings; values placed in a script are checked first.
+- [ ] Dependencies: `cargo deny` (advisories, licences, sources) and `npm audit` pass in CI.
+- [ ] Releases: built from a tagged commit, the dashboard embedded and hash-checked, signed keylessly, manifest signed, installer verifies before it installs; each registry publish needs a person's approval.
+- [ ] Telemetry is off by default and sends nothing until turned on and is never asked about in `init` or any other flow (a test fails if setup mentions it); the event is the documented one ([0032](adr/0032-telemetry-is-off-and-anonymous-and-goes-where-you-say.md)).
+- [ ] Reaching a box over your own tailnet denies box-to-box traffic by default, and a box joins only while those rules are loaded ([0030](adr/0030-a-tailnet-you-run-yourself.md)).
+- [ ] The session-log bucket's policy denies replacing or deleting itself, and the security-services policy denies unlocking or removing a log ([0035](adr/0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use.md)).
+- [ ] `SECURITY.md` names two private ways to report (a GitHub advisory and a security address), promises an acknowledgement in 3 business days and a fix and coordinated disclosure within 90 days, credits reporters and offers no bounty; the placeholder address has been replaced with a monitored one before the repository is public.
+- [ ] Contributions need a DCO sign-off on every commit and no Contributor License Agreement (`CONTRIBUTING.md`); the `DCO` workflow fails a pull request with an unsigned commit (automated dependency updates are exempt, recognised by the address GitHub gives the bot, not by its name).
+- [ ] No public text claims compliance with, or certification against, a standard (`scripts/public-safety.sh` and the docs checks fail on it); controls are described instead.
+- [ ] Public text names no private deployment (`scripts/public-safety.sh`, `scripts/no-build-docs.sh`).
+
+## Open items
+
+- A real-cloud end-to-end run of create, pause, resize, snapshot and destroy has been done only by hand; CI is simulated.
+- The Headscale and user-space Tailscale steps of the tailnet option have not been run against a real server and box.
+- The release pipeline has not yet produced a release; the first run is a dry run, then a pre-release.
+- Plugins run with the person's permissions; approval by hash is the only gate. A sandbox is future work.
+- A box's tailnet node key is readable by the box user (as an on-box tunnel token is); it is bounded by deny-by-default rules.
+- No independent security review or penetration test has been done. Report problems as `SECURITY.md` describes.

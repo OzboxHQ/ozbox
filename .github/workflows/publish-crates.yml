@@ -1,0 +1,92 @@
+name: Publish crates
+
+# Publishes the Rust crates to crates.io with Trusted Publishing (GitHub OIDC: no registry token is stored anywhere).
+#
+# DISABLED. This does nothing until the owner decides to publish (docs/releasing.md, "crates.io") by setting the repository
+# variable OZBOX_PUBLISH_CRATES to true. Even then it refuses to publish while any of these is still true:
+#   - a crate is `publish = false` (an owner decision; nothing here changes it);
+#   - the ozbox-cli package does not carry the dashboard (a crates.io build would otherwise serve the placeholder page).
+# A real publish also waits for the owner's approval of the `crates-io` environment.
+#
+# crates.io setup (once, by the owner): add this repository, the workflow file name publish-crates.yml and the environment
+# crates-io as a trusted publisher of each crate (crates.io -> the crate -> Settings -> Trusted Publishing). A crate must
+# exist before a trusted publisher can be added, so the very first version of each crate is published by hand.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dashboard:
+    name: Dashboard
+    if: vars.OZBOX_PUBLISH_CRATES == 'true'
+    uses: ./.github/workflows/dashboard-build.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: dashboard
+    if: vars.OZBOX_PUBLISH_CRATES == 'true'
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: The tag is a stable program release of the version in Cargo.toml
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          [ "$REF_TYPE" = "tag" ] || { echo "publish from a v tag only" >&2; exit 1; }
+          version="${REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          [ "$version" = "$cargo_version" ] || { echo "tag $version but Cargo.toml says $cargo_version" >&2; exit 1; }
+          # the same rule as the program's release: a tag that is not on main is not a release
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tag $REF_NAME is not on main: merge first, then tag" >&2; exit 1; }
+      - name: Every crate to publish is publishable
+        run: |
+          set -euo pipefail
+          blocked="$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[] | select(.publish == []) | .name] | join(", ")')"
+          if [ -n "$blocked" ]; then
+            echo "::error title=Not publishable yet::these crates are publish = false: $blocked. See docs/releasing.md (crates.io)."
+            exit 1
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dashboard-dist
+          path: crates/ozbox-cli/dashboard-dist
+      - name: The ozbox-cli package carries the dashboard
+        run: |
+          set -euo pipefail
+          cargo package --list --allow-dirty --locked -p ozbox-cli | grep -q 'dashboard-dist/index.html' || {
+            echo "::error title=No dashboard in the package::the ozbox-cli package does not include dashboard-dist; a crates.io build would serve the placeholder. See docs/releasing.md (crates.io)."
+            exit 1
+          }
+      # Pinned to the commit of v1.0.6 (2026-10-21), like every other action here. OWNER: review that commit before the first use.
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          # cargo waits for each crate to appear in the index before the next one needs it
+          for c in $(scripts/release/crates-package-list.sh | sed -n 's/^crates-package-list: publish order: //p'); do
+            echo "publishing $c"
+            cargo publish --locked -p "$c" --allow-dirty
+          done

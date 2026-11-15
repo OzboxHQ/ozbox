@@ -1,0 +1,27 @@
+/target/
+node_modules/
+# also a node_modules SYMLINK (agent worktrees link the shared one; a trailing slash does not match a link)
+node_modules
+/target-*/
+dist/
+.env
+.env.*
+!.env.example
+*.pem
+# public CA certificates pinned for hardware-key attestation (no private keys); they must be in the repo to build
+!crates/ozbox-cli/src/attestation/pinned-roots.pem
+!crates/ozbox-cli/src/attestation/pinned-intermediates.pem
+*.key
+.terraform/
+*.tfstate
+*.tfstate.*
+.DS_Store
+.terraform.lock.hcl
+
+# Local agent instructions (kept private)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# Docs site (Mintlify local state)
+docs-site/.mint/

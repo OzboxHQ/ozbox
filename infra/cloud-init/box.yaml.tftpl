@@ -1,0 +1,573 @@
+#cloud-config
+# Shared first-boot configuration for every Oz Box provider module. Variables: box_name, work_device, provider,
+# work_encrypted, scripts_dir (helper scripts: plain on AWS, gzipped once as a whole; gzip+base64 on Hetzner, 32 KB), agent_release_repo, agent_release_tag, secrets_kms_key_id, secrets_kms_region ("" for none), runs_max_active,
+# ingress_key ("" for none: the person's SSH public key, lowercase base32), box_secrets_env ("" for none): the loader's settings file text, for a provider with no instance tags. Names and an address, never a secret (user data is readable on the box).
+# Rules: never reformat a volume that holds a filesystem; never open an inbound port; install no heavy software here.
+hostname: ${box_name}
+manage_etc_hosts: true
+ssh_pwauth: false
+package_update: true
+package_upgrade: false
+packages:
+  - tmux
+  - python3
+  - git
+  - curl
+  - acl
+  - unattended-upgrades
+
+users:
+  - default
+  - name: ozbox
+    # The same fixed id the Oz image gives this user (infra/packer/ozbox-image/scripts/provision.sh).
+    uid: 1500
+    gecos: Oz Box user
+    shell: /bin/bash
+    homedir: /work/home/ozbox
+    create_groups: false
+    no_create_home: true
+    lock_passwd: true
+
+write_files:
+  - path: /usr/local/sbin/ozbox-secrets-setup.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-secrets-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-secrets-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
+%{ if box_secrets_env != "" ~}
+  - path: /etc/ozbox/box-secrets.env
+    permissions: "0644"
+    owner: root:root
+    encoding: b64
+    content: ${base64encode(box_secrets_env)}
+
+%{ endif ~}
+  - path: /usr/local/sbin/ozbox-work-setup.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      # Format (only when empty) and mount the persistent /work volume.
+      set -euo pipefail
+      device="${work_device}"
+      mountpoint="/work"
+
+      # The volume may attach a little after first boot.
+      for _ in $(seq 1 60); do
+        [ -b "$device" ] && break
+        sleep 2
+      done
+      if [ ! -b "$device" ]; then
+        echo "ozbox-work-setup: $device did not appear" >&2
+        exit 1
+      fi
+
+      mkdir -p "$mountpoint"
+      # A volume is formatted only when it is certainly empty: the probe must say "nothing found" (exit 2) and no signature of
+      # any kind may be listed. A probe that failed for any other reason (an error, an I/O error while the volume attaches)
+      # stops here; it is never read as "empty". A volume that holds a filesystem is never formatted.
+      probe=0
+      blkid -p "$device" >/dev/null 2>&1 || probe=$?
+      if [ "$probe" = 2 ]; then
+        sigs="$(wipefs -n "$device")" || { echo "ozbox-work-setup: $device could not be checked, so it was not formatted" >&2; exit 1; }
+        [ -n "$sigs" ] || mkfs.ext4 -L ozbox-work "$device"
+      elif [ "$probe" != 0 ]; then
+        echo "ozbox-work-setup: $device could not be probed (status $probe), so it was not formatted" >&2
+        exit 1
+      fi
+
+      uuid="$(blkid -o value -s UUID "$device")"
+      if ! grep -q "UUID=$uuid" /etc/fstab; then
+        echo "UUID=$uuid $mountpoint ext4 defaults,nofail,x-systemd.device-timeout=30 0 2" >> /etc/fstab
+      fi
+      mountpoint -q "$mountpoint" || mount "$mountpoint"
+
+      # A disk that was made bigger while the box was off: grow the filesystem now, online. (While the box runs,
+      # ozbox-growfs.timer does the same within a minute.) A failure here must not stop the boot.
+      case "$(blkid -o value -s TYPE "$device")" in
+        ext2|ext3|ext4) resize2fs "$device" || true ;;
+        xfs) xfs_growfs "$mountpoint" || true ;;
+      esac
+
+      mkdir -p /work/home/ozbox
+      if ! id ozbox >/dev/null 2>&1; then
+        # The pinned id, unless something else already holds it.
+        pin_uid=""
+        if ! getent passwd 1500 >/dev/null && ! getent group 1500 >/dev/null; then pin_uid="--uid 1500"; fi
+        useradd $pin_uid --home-dir /work/home/ozbox --no-create-home --shell /bin/bash ozbox
+      fi
+      # Adopt files a disk carries from a box user that had another id, when nothing else holds that id.
+      disk_uid="$(stat -c %u /work/home/ozbox)"
+      disk_gid="$(stat -c %g /work/home/ozbox)"
+      if [ "$disk_uid" != 0 ] && [ "$disk_uid" != "$(id -u ozbox)" ] && ! getent passwd "$disk_uid" >/dev/null; then
+        if [ "$disk_gid" != 0 ] && [ "$disk_gid" != "$(id -g ozbox)" ] && ! getent group "$disk_gid" >/dev/null; then
+          groupmod -g "$disk_gid" ozbox
+        fi
+        usermod -u "$disk_uid" ozbox
+      fi
+      chown ozbox:ozbox /work/home/ozbox
+      chmod 0750 /work/home/ozbox
+      # Files below the top may still carry an old id: move them over once, before any service starts. A failure must
+      # not stop the boot: `ozbox admin <box> -- reown` can finish the job.
+      /usr/local/sbin/ozbox-reown.sh || echo "ozbox-work-setup: old files on /work could not be re-owned; run: ozbox admin <box> -- reown" >&2
+      # /work itself is root-owned, so the box user cannot create this. Checkpoints and git clones live here. Idempotent,
+      # and it also runs on an existing disk.
+      install -d -m 0750 -o ozbox -g ozbox /work/repos
+      # ozboxd's own state (metrics, file service, checkpoints, audit) lives here; ozboxd runs as the box user and cannot
+      # create it under the root-owned /work.
+      install -d -m 0750 -o ozbox -g ozbox /work/.ozbox
+      # Starter dotfiles only on first use of this disk.
+      if [ ! -e /work/home/ozbox/.profile ]; then
+        cp -n /etc/skel/.profile /etc/skel/.bashrc /etc/skel/.bash_logout /work/home/ozbox/ 2>/dev/null || true
+        chown -R ozbox:ozbox /work/home/ozbox
+      fi
+
+  # (comment lines are dropped from the helper scripts here: the user-data limit is 16 KB compressed)
+  - path: /usr/local/sbin/ozbox-reown.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-reown.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-reown.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
+  - path: /usr/local/sbin/ozbox-user-manager.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-user-manager.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-user-manager.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
+  - path: /usr/local/sbin/ozbox-install-agent.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-install-agent.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-install-agent.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
+  - path: /etc/ozbox/agent-release.env
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # Where a machine that is not the Oz image gets ozboxd (read by ozbox-install-agent.sh). No secrets.
+      OZBOX_RELEASE_REPO="${agent_release_repo}"
+      OZBOX_RELEASE_TAG="${agent_release_tag}"
+
+  - path: /usr/local/sbin/ozbox-admin.sh
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, replace(file("${scripts_dir}/ozbox-admin.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-admin.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
+%{ endif ~}
+
+  - path: /usr/local/bin/ozbox-admin-request
+    permissions: "0755"
+    owner: root:root
+%{ if provider == "aws" ~}
+    content: |
+      ${indent(6, file("${scripts_dir}/ozbox-admin-request.sh"))}
+%{ else ~}
+    encoding: gz+b64
+    content: ${base64gzip(file("${scripts_dir}/ozbox-admin-request.sh"))}
+%{ endif ~}
+
+  - path: /etc/tmpfiles.d/ozbox-admin.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # The hand-off between the box user and the admin helper (root). The box user can only create request files in a
+      # sticky directory; answers are written by root, where the box user cannot change them.
+      d /run/ozbox-admin          0755 root root -
+      d /run/ozbox-admin/requests 1770 root ozbox -
+      d /run/ozbox-admin/results  0755 root root -
+
+  - path: /etc/systemd/system/ozbox-admin.path
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Wait for an admin request from the box user
+      StartLimitIntervalSec=0
+
+      [Path]
+      DirectoryNotEmpty=/run/ozbox-admin/requests
+      Unit=ozbox-admin.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/ozbox-admin.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Run one allow-listed admin action as root
+      StartLimitIntervalSec=0
+
+      # It does not depend on ozboxd: it is how ozboxd is put back when it is missing. It takes no command and no path
+      # from a request, only an action from a short list (see /usr/local/sbin/ozbox-admin.sh), and records every request.
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/ozbox-admin.sh
+      User=root
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectHome=true
+      ProtectKernelModules=true
+      ProtectKernelLogs=true
+      ProtectClock=true
+      LockPersonality=true
+
+  - path: /etc/ssh/sshd_config.d/10-ozbox.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # No password logins, and sshd listens on loopback only. Shell access arrives through an
+      # outbound tunnel (SSM or a private mesh), never through an open port.
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      ListenAddress 127.0.0.1
+      # Only the box user can log in over SSH, and only with a key. On AWS the key is pushed for 60 seconds by
+      # EC2 Instance Connect (no key is stored on the box); the ozbox user's home is on the /work disk.
+      PubkeyAuthentication yes
+      AuthenticationMethods publickey
+      # The ingress account is the one other: it can run one forced command and nothing else (20-ozbox-ingress.conf).
+      AllowUsers ozbox ozbox-ingress
+
+  - path: /etc/systemd/system/ssh.socket.d/10-ozbox.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # Ubuntu starts sshd through socket activation, which ignores ListenAddress. Rebind it here.
+      [Socket]
+      ListenStream=
+      ListenStream=127.0.0.1:22
+
+  - path: /etc/ozbox/ozboxd.toml
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # Written by the box module. No secrets here: the backup repository, its password and the cloud keys live in the
+      # secrets service's encrypted store, and restic is run there as the secrets user.
+      box_name = "${box_name}"
+      provider = "${provider}"
+
+      [backup]
+      # The dashboard server owns the backup schedule (Settings -> Backups) and asks this box to run each backup, so the
+      # box's own timer stays OFF. Both on would back /work up twice. Written explicitly, so a new box and an upgraded
+      # one (whose system disk is built from this file again) can never start a second schedule by default.
+      enabled = false
+      service_socket = "/run/ozbox-secrets/broker/broker.sock"
+
+      [runs]
+      # XS 1, S 2, M 4, L 6, XL 8, XXL 16; the supervisor applies the same cap.
+      max_active = ${runs_max_active}
+
+      [selftest]
+      # A cloud volume's encryption is not visible from inside the box: this is the module's declaration,
+      # reported by the self-test as unverified.
+      work_encrypted = "${work_encrypted}"
+
+  - path: /etc/systemd/system/ozbox-growfs.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Grow the /work filesystem to fill its disk
+      RequiresMountsFor=/work
+
+      # Growing a mounted filesystem needs CAP_SYS_ADMIN, which ozboxd lacks: this one-shot has only that and
+      # CAP_SYS_RESOURCE, no network and a read-only system. /work stays writable: an online grow needs it.
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/ozbox-growfs.sh
+      ReadWritePaths=/work
+      User=root
+      CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_RESOURCE
+      NoNewPrivileges=true
+      PrivateNetwork=true
+      PrivateTmp=true
+      ProtectSystem=strict
+      ProtectHome=true
+      ProtectKernelModules=true
+      ProtectKernelLogs=true
+      ProtectClock=true
+      RestrictAddressFamilies=AF_UNIX
+      RestrictNamespaces=true
+      RestrictSUIDSGID=true
+      LockPersonality=true
+      MemoryDenyWriteExecute=true
+      SystemCallFilter=@system-service
+      # The result file the daemon reads (/run/ozbox-growfs/last.json); kept between runs, readable by everyone.
+      RuntimeDirectory=ozbox-growfs
+      RuntimeDirectoryMode=0755
+      RuntimeDirectoryPreserve=yes
+
+  - path: /usr/local/sbin/ozbox-growfs.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      # Grow the /work filesystem to fill its disk. With the box daemon installed it decides (and records what it
+      # did); on a plain image the same command is simply repeated: growing a filesystem that already fills its
+      # disk changes nothing.
+      set -euo pipefail
+      if [ -x /usr/local/bin/ozboxd ]; then
+        exec /usr/local/bin/ozboxd growfs
+      fi
+      dev="$(findmnt -n -o SOURCE /work || true)"
+      type="$(findmnt -n -o FSTYPE /work || true)"
+      [ -b "$dev" ] || exit 0
+      case "$type" in
+        ext2|ext3|ext4) resize2fs "$dev" >/dev/null 2>&1 || true ;;
+        xfs) xfs_growfs /work >/dev/null 2>&1 || true ;;
+      esac
+
+  - path: /etc/systemd/system/ozbox-growfs.timer
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Look for a disk that outgrew its filesystem
+
+      [Timer]
+      OnBootSec=45s
+      OnUnitActiveSec=60s
+      AccuracySec=5s
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /etc/profile.d/ozbox-path.sh
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # Tools installed from the catalog live in the box user's home. They go AFTER the system folders: the box user (and so
+      # an agent) can write to these two, and a program planted there as `ozbox`, `ssh` or `sudo` must not shadow the real
+      # one in a login shell. Never put them first.
+      export PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"
+
+  - path: /etc/tmpfiles.d/ozbox-tools.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # The hand-off between the box daemon (unprivileged) and the tool installer helper (root). The daemon can only
+      # create request files in a sticky directory; answers are written by root, where the daemon cannot change them.
+      d /run/ozbox-tools          0755 root root -
+      d /run/ozbox-tools/requests 1770 root ozbox -
+      d /run/ozbox-tools/results  0755 root root -
+      d /run/ozbox-tools/work     0700 root root -
+
+  - path: /etc/systemd/system/ozbox-tools.path
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Wait for a tool install step that needs the package manager
+      StartLimitIntervalSec=0
+
+      [Path]
+      DirectoryNotEmpty=/run/ozbox-tools/requests
+      Unit=ozbox-tools.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/ozbox-tools.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Run the package-manager steps of a tool install
+      StartLimitIntervalSec=0
+      ConditionPathExists=/usr/local/bin/ozboxd
+
+      # The only root part of the tool installer. It takes no commands: it rebuilds each plan from the catalog compiled
+      # into the daemon binary and runs a single package-manager step only if that plan says so (apt packages, or a
+      # package source whose signing key matches the fingerprint the vendor publishes). Memory is capped here.
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/ozboxd tools-root
+      User=root
+      MemoryMax=2G
+      TasksMax=512
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectHome=true
+      ProtectKernelModules=true
+      ProtectKernelLogs=true
+      ProtectClock=true
+      LockPersonality=true
+
+  - path: /etc/tmpfiles.d/ozbox-backup.conf
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # The hand-off between the box daemon (unprivileged) and the backup credentials helper (root). The daemon can only
+      # create request files in a sticky directory; answers are written by root, where the daemon cannot change them.
+      d /run/ozbox-backup          0755 root root -
+      d /run/ozbox-backup/requests 1770 root ozbox -
+      d /run/ozbox-backup/results  0755 root root -
+
+  - path: /etc/systemd/system/ozbox-backup.path
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Wait for new backup credentials from the box daemon
+      StartLimitIntervalSec=0
+
+      [Path]
+      DirectoryNotEmpty=/run/ozbox-backup/requests
+      Unit=ozbox-backup.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/ozbox-backup.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Hand the backup repository credentials the box daemon was given to the secrets service
+      After=ozbox-secrets.service
+      StartLimitIntervalSec=0
+      ConditionPathExists=/usr/local/bin/ozboxd
+
+      # Takes no command or path from a request; hands checked settings to the secrets service (no credentials file).
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/ozboxd backup-root
+      User=root
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectHome=true
+      ProtectSystem=strict
+      ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets
+      ProtectKernelModules=true
+      ProtectKernelLogs=true
+      ProtectClock=true
+      LockPersonality=true
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    owner: root:root
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  - path: /etc/systemd/system/ozboxd.service
+    permissions: "0644"
+    owner: root:root
+    content: |
+      [Unit]
+      Description=Oz Box daemon
+      # The filesystem grow runs once before the daemon on every boot, so a disk that was enlarged while the box was
+      # stopped is already filled when the boot self-test looks.
+      # After the box user's own service manager (uid 1500), which holds the runs that outlive this daemon (ADR 0038): a daemon that
+      # started first would have to fall back to cgroup scopes, and its runs would end with it at the next restart. The manager is
+      # held back until /work is a mount point, and a start that condition skips does not hold this daemon back.
+      After=network-online.target work.mount ozbox-growfs.service user@1500.service
+      Wants=network-online.target ozbox-growfs.service user@1500.service
+      ConditionPathExists=/usr/local/bin/ozboxd
+
+      [Service]
+      Type=simple
+      User=ozbox
+      Group=ozbox
+      ExecStart=/usr/local/bin/ozboxd
+      Restart=on-failure
+      RestartSec=5
+      # The API socket is /run/ozboxd/ozboxd.sock (mode 0660, group ozbox); systemd creates the directory.
+      RuntimeDirectory=ozboxd
+      RuntimeDirectoryMode=0750
+      # The dashboard user's own socket is NOT made here: root's systemd binds it from ozboxd-supervisor.socket in a folder
+      # the box user does not own, and hands it to this daemon (socket activation). Nothing root runs touches /run/ozboxd,
+      # which the box user owns (ADR 0040, decision 3; ozbox-supervisor-setup.sh writes the socket unit and the drop-in).
+      # ozboxd creates one cgroup scope per run, so the control-group tree must stay writable (no ProtectControlGroups).
+      Delegate=yes
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ReadWritePaths=/work
+      # Tool install steps that need the package manager are handed to the root helper through this directory.
+      ReadWritePaths=-/run/ozbox-tools/requests
+      # New backup credentials are handed to the root helper through this directory.
+      ReadWritePaths=-/run/ozbox-backup/requests
+      # /run/user must stay reachable: the daemon drives the box user's local-model service.
+      ProtectHome=read-only
+      # No private /tmp: ozboxd lists the box user's tmux sessions, whose socket is in /tmp/tmux-<uid>.
+      ReadWritePaths=/tmp
+      PrivateDevices=true
+      ProtectKernelModules=true
+      RestrictSUIDSGID=true
+      LockPersonality=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [bash, /usr/local/sbin/ozbox-work-setup.sh]
+  # A machine made from stock Ubuntu fetches ozboxd from the signed release (the Oz image does nothing here).
+  - [bash, -c, "/usr/local/sbin/ozbox-install-agent.sh || echo 'ozboxd could not be installed from the signed release' >&2"]
+  # The ingress account (ADR 0029): the one way a person's computer reaches the secrets service. Its key is the person's, pinned at create.
+  - [bash, -c, "/usr/local/bin/ozbox secrets ingress-setup '${ingress_key}' || echo 'the ingress account could not be made; the box still works, but ozbox secrets --box will not reach it' >&2"]
+  # /etc/ozbox is readable by the daemon's group only. It holds no credential.
+  - [install, -d, -m, "0750", -o, root, -g, ozbox, /etc/ozbox]
+  - [systemd-tmpfiles, --create, /etc/tmpfiles.d/ozbox-tools.conf]
+  - [systemd-tmpfiles, --create, /etc/tmpfiles.d/ozbox-backup.conf]
+  - [systemd-tmpfiles, --create, /etc/tmpfiles.d/ozbox-admin.conf]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, ozbox-tools.path]
+  - [systemctl, enable, --now, ozbox-backup.path]
+  - [systemctl, enable, --now, ozbox-admin.path]
+  - [bash, /usr/local/sbin/ozbox-secrets-setup.sh, "${box_name}", "${secrets_kms_key_id}", "${secrets_kms_region}", "${approval_key}"]
+  # The dashboard gets a user of its own (an existing box's dashboard is moved, idempotently; a failure must not stop the boot).
+  - [bash, -c, "/usr/local/bin/ozbox secrets supervisor-setup || echo 'the dashboard could not be moved to the supervisor user; run: ozbox admin <box> -- ensure-supervisor' >&2"]
+  # The browser gets a user of its own and a launcher only the dashboard's user may open (a failure must not stop the boot). The
+  # dashboard's step above already ran it; this runs it only when that did not leave the launcher's units (once per boot, not twice).
+  - [bash, -c, "[ -e /etc/systemd/system/ozbox-browser.socket ] || /usr/local/bin/ozbox browser-setup || echo 'the browser user could not be set up; upgrade the box or run: ozbox browser-setup' >&2"]
+  - [bash, -c, "if [ -x /usr/local/bin/ozboxd ]; then systemctl start ozbox-backup.service || true; fi"]
+  - [systemctl, enable, unattended-upgrades]
+  - [systemctl, enable, --now, ozbox-growfs.timer]
+%{ if provider == "aws" }
+  # Key pushes (EC2 Instance Connect) arrive through the instance metadata service; Ubuntu AMIs ship the package.
+  - [bash, -c, "dpkg -s ec2-instance-connect >/dev/null 2>&1 || apt-get install -y ec2-instance-connect"]
+%{ endif }
+  # Only root and the machine's own services reach the instance metadata service (ADR 0029 amendment 6); after Instance Connect, whose account is one.
+  - [bash, -c, "/usr/local/bin/ozbox host-guard metadata install ${provider} || echo 'metadata guard not installed; run: ozbox admin <box> -- host-guard metadata install' >&2"]
+  # Swap compressed in RAM (never a disk), the box's own services protected from the OOM killer, soft limits for terminals (ADR 0045).
+  - [bash, -c, "/usr/local/bin/ozbox host-guard memory install || echo 'memory guard not installed; run: ozbox admin <box> -- host-guard memory install' >&2"]
+  # The box user's own services (`systemd --user` units on /work) start here, once: /work is mounted and owned, linger is on
+  # (`loginctl enable-linger ozbox`), the secrets service is up and the metadata guard is in place. Its manager is held back
+  # until then by a drop-in (ConditionPathIsMountPoint=/work). A failure must not stop the boot: `ozbox admin <box> -- enable-linger`.
+  - [bash, -c, "/usr/local/sbin/ozbox-user-manager.sh || echo 'the box user services did not start; run: ozbox admin <box> -- enable-linger' >&2"]
+  - [systemctl, restart, ssh.socket]
+  - [systemctl, restart, ssh]
+  # Default-deny inbound if ufw exists; nothing is ever opened.
+  - [bash, -c, "if command -v ufw >/dev/null 2>&1; then ufw default deny incoming && ufw default allow outgoing && ufw --force enable; fi"]
+  - [systemctl, enable, --now, ozboxd.service]
+  # Which first-boot configuration made this machine (root-owned, readable). A cross-check only: `ozbox upgrade` trusts the
+  # provider's record (on AWS the machine's tag). Written last, so a first boot cut short leaves none, which reads as stale.
+  - [bash, -c, "printf 'first_boot_sha256=%s\n' '${first_boot_sha256}' >/etc/ozbox/first-boot && chmod 0644 /etc/ozbox/first-boot"]

@@ -1,0 +1,28 @@
+//! The command line's messages for permissions and the audit log, English first. `messages::t` looks here too.
+
+pub const EN: &[(&str, &str)] = &[
+    ("perm.bad_value", "{value} is not a valid {what}."),
+    ("perm.mode", "Default mode: {mode}"),
+    ("perm.rule", "  rule {id}: {effect} {action} ({scope})"),
+    ("perm.no_grants", "No active Production grants."),
+    ("perm.grant", "  grant {id} on {scope}: {minutes} more minute(s), given by {by} ({factor})"),
+    ("perm.dry_run", "Dry run: would {what}. Nothing was changed."),
+    ("perm.mode_set", "The default mode is now {mode}."),
+    ("perm.confirm", "A grant needs a typed confirmation here: pass --confirm {id} to say you mean it. (This is not a second factor; the dashboard asks for your passkey.)"),
+    ("perm.granted", "Grant {id} made. It ends in {minutes} minute(s) and cannot be extended; revoke it with `ozbox permissions revoke {id}`."),
+    ("perm.revoked", "Grant {id} is revoked."),
+    ("perm.decision", "{effect}: {why}"),
+    ("audit.none", "The audit log is empty."),
+    ("audit.row", "  #{seq}  {actor}  {action}  {subject}  {detail}"),
+    ("audit.sealed", "The audit log is sealed up to its last entry."),
+    ("audit.nothing_to_seal", "Nothing new to seal."),
+    ("audit.ok", "The audit log is intact: {entries} entries, head {head}..., {unsealed} not yet sealed."),
+    ("audit.broken", "The audit log does NOT verify."),
+    ("audit.altered", "  changed entries: {seqs}"),
+    ("audit.deleted", "  entries missing between #{after} and #{before}"),
+    ("audit.order", "  entries out of order: {seqs}"),
+    ("audit.seals", "  checkpoints that do not verify: {seqs}"),
+    ("audit.truncated", "  the log was sealed up to #{sealed} but ends at #{last}: the end was cut off"),
+    ("audit.unreadable", "  lines that cannot be read: {lines}"),
+    ("audit.failed", "The audit log failed its check."),
+];

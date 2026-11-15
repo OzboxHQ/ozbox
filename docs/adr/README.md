@@ -1,0 +1,51 @@
+# Architecture decision records
+
+Each record states one decision, why, and what it costs. A decision changes only through a new record that supersedes it.
+
+| # | Decision |
+|---|---|
+| [0001](0001-rust-and-typescript.md) | Rust for the CLI and daemons, TypeScript for engine adapters and the dashboard |
+| [0002](0002-plan-then-apply.md) | Every mutation is planned, shown, then applied; plans are idempotent and fenced against stale state |
+| [0003](0003-provider-interface.md) | One provider interface; a fake provider first; lifecycle through OpenTofu, runtime through provider APIs |
+| [0004](0004-provider-neutral-sizes.md) | A provider-neutral size catalogue |
+| [0005](0005-no-inbound-network.md) | No inbound network: every way in is a tunnel the box dials out to |
+| [0006](0006-grpc-inside-rest-outside.md) | gRPC between components, versioned REST and webhooks for integrations |
+| [0007](0007-opentofu-and-packer.md) | OpenTofu for infrastructure, Packer for images |
+| [0008](0008-light-dependencies.md) | Light dependencies in v0.1: shell out to provider CLIs instead of heavy SDKs |
+| [0009](0009-apache-2.md) | Apache License 2.0 |
+| [0010](0010-bring-your-own-tunnels.md) | The dashboard is reached through an outbound tunnel you bring yourself, with your own account and domain |
+| [0011](0011-no-sudo-one-audited-root-path.md) | The box user has no sudo; one narrow, audited root path, which never takes a box user's request as the owner's word (amendment 1) |
+| [0012](0012-code-access-and-the-second-lock.md) | The IDE and desktop: outbound only, behind a second lock of our own, and work survives a disconnect |
+| [0013](0013-schedules-and-triggers.md) | Schedules and triggers: one fire per slot, signed webhooks only, runs through one door |
+| [0015](0015-model-providers-and-local-ai.md) | Model providers use your keys or your cloud account, and local models stay on the box |
+| [0016](0016-the-real-bill-and-forgotten-resources.md) | The real bill is read with your own read access and shown beside the estimate; forgotten resources are listed, and only tagged ones can be deleted |
+| [0017](0017-credential-broker-per-run-tokens.md) | Runs never hold a provider key: a credential broker and per-run tokens |
+| [0018](0018-secrets-are-encrypted-and-out-of-the-agents-reach.md) | Secrets are encrypted at rest, held by a separate user, and out of an agent's reach |
+| [0019](0019-agent-runs-on-real-boxes.md) | Agent runs on a real box: the box daemon's run API, and a reverse forward for the broker |
+| [0020](0020-orchestration-conductor-and-worker-boxes.md) | Orchestration: a conductor hands features to worker boxes, with claims, contracts, a merge queue and the Oz Box tools over MCP |
+| [0021](0021-chat-with-coding-agents.md) | Chat with coding agents: one conversation model, only linked people, risky approvals by passkey |
+| [0022](0022-permission-engine-and-tamper-evident-audit-log.md) | One permission engine, time-boxed Production grants, and a hash-chained audit log |
+| [0023](0023-the-supervisor-egress-approvals-and-the-commit-barrier.md) | The supervisor has its own user; commands have a closed network; secret writes need a fresh second factor (amended 2026-11-11: the dashboard never runs as the box user) |
+| [0024](0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md) | Agent memory is Markdown in git, searched through SQLite, and reviewed before any agent reads it |
+| [0025](0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md) | Skills are folders, usable only after a person approves their exact hash |
+| [0026](0026-the-tool-host-every-tool-call-is-decided-and-recorded.md) | The tool host: every tool call is decided by the permission engine and recorded without its arguments |
+| [0027](0027-box-state-lives-outside-the-checkout-and-can-be-adopted-back.md) | A box's infrastructure state lives outside the source checkout, and can be adopted back from the cloud |
+| [0028](0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker.md) | The audit chain has a writer of its own, the secrets service is audited, cloud-account models go through the broker, and a laptop key can approve (amended 2026-11-10 and 2026-11-11: one rule for a box with no approver, gated root-helper actions) |
+| [0029](0029-production-secrets-have-no-standing-access.md) | Production secrets have no standing access: nothing usable at rest, nothing handed to a command, one approval per session from an issuer that is not the box (amended through 2026-11-11: an upgrade says what happens to the store; a recovery needs the service's word and the owner's key; 2026-11-11, phase 1 built: an ingress account, sealed delivery, the issuer's foundation) |
+| [0030](0030-a-tailnet-you-run-yourself.md) | A tailnet you run yourself (Headscale) as a way to reach a box: rules generated from the fleet, deny by default, one-use keys; a box joins only while those rules are loaded (amendment 1) |
+| [0031](0031-plugins-are-programs-that-speak-a-versioned-protocol.md) | Plugins are programs that speak a small, versioned protocol, approved by hash |
+| [0032](0032-telemetry-is-off-and-anonymous-and-goes-where-you-say.md) | Telemetry is off, anonymous and goes only where you say |
+| [0033](0033-box-state-can-live-in-the-encrypted-bucket-and-adopt-covers-hetzner.md) | A box's state can live in the encrypted bucket (copy, verify, plan, keep), and `ozbox adopt` covers Hetzner; switching refuses a stale copy (amendment 1) |
+| [0034](0034-a-box-wide-egress-list-enforced-by-the-kernel-off-until-you-have-seen-it.md) | A box-wide egress list enforced by the kernel, logged before it is enforced; loosening it needs a fresh approval, and a bad declaration keeps the last good rules (amendment 1) |
+| [0035](0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use.md) | Opt-in security services: runtime monitoring, locked session logs, patching that never restarts a box in use; the log bucket's policy cannot be replaced, and a second run changes nothing (amendment 1) |
+| [0036](0036-one-version-for-the-program-the-daemon-and-the-image.md) | One version for the program, the box daemon and the image; a different minor version is refused. Amended: the program carries its own box modules and first-boot configuration, checked by hash against the image's manifest and the box's own record |
+| [0037](0037-the-browser-on-the-box-one-door-a-person-can-take-over.md) | The browser on the box: agents drive Chromium through one tool, risky steps wait for a person, and a person can take over (amended 2026-11-11: one sealed control path, approvals bound to the page, judged at the destination; no take-over without a sign-in on a box) |
+| [0038](0038-upgrades-keep-the-box-up-live-update-or-blue-green-replace.md) | Upgrades keep the box up: a live update of the signed programs when the system disk can stay, chosen from the manifests' disk generation, and a rehearsed blue-green replace that moves `/work` when it cannot (design; phase 1, the manifest and the decision, is Preview; the rest is Planned) |
+| [0039](0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md) | Dashboard roles: owner, member and viewer, judged by the permission engine on every request; one rule for the second factor, so a dashboard with no sign-in on a box is refused everywhere; IDE proxies belong to a machine, not a name |
+| [0040](0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md) | A box's dashboard manages the fleet through a scoped role of its own: two roles assumed with short sessions, the supervisor alone reaches the metadata service, changes need the owner's passkey (and later the laptop), a managed state bucket, no IAM and no KMS (Proposed, design only) |
+| [0041](0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on.md) | One approval model for every gated request: the box files a request naming the exact change, a person decides it in the dashboard or on the laptop (chat only denies), the decision signs the change's digest and the box hands it to the waiting operation; no code is carried (design; Proposed) |
+| [0043](0043-coding-agents-on-a-box-reach-the-oz-box-tools-through-a-socket-of-their-own.md) | Coding agents on a box reach the Oz Box tools through a socket of their own: the kernel names the caller, a token nobody stores, the engines' settings written by the box user, nothing loosens (Accepted) |
+| [0045](0045-box-memory-guard.md) | The box memory guard: swap in compressed RAM and never on a disk, the box's own services protected from the OOM killer (workloads never inherit it), every heavy job capped from the box's size, memory pressure said before anything is killed; installed live by `ozbox upgrade`, nothing restarted |
+| [0049](0049-sessions-come-back-after-a-stop-the-session-not-the-process.md) | Sessions come back after a stop: a session record on `/work` (removed when you end the session or close the window), only the record hooks installed at boot, a user unit the daemon writes, and the agents reopened with their own resume, at most six per boot; the session returns, the process does not (Preview, not yet proven on a real box) |
+| [0050](0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md) | Telegram is a control surface: a closed table of acts delegated in advance by a passkey (read, converse, start and pause opted-in boxes, run a short argv list), handoff links for everything gated, and never an approver (Proposed, design only) |
+| [0052](0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest.md) | Public images from one account: a client takes only an image owned by the publisher account that the signed release manifest lists (its own account's image first), published only after the manifest is signed, the last three versions kept, the build role reachable from one GitHub environment (Preview; not yet built) |

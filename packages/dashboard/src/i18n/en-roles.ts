@@ -1,0 +1,32 @@
+/** Who can do what: the three roles, the people card and the notices where a page is read-only. */
+export const enRoles = {
+  'roles.owner': 'Owner',
+  'roles.member': 'Member',
+  'roles.viewer': 'Viewer',
+  'roles.owner_help': 'Everything, including settings, permissions, secrets, costs and who has which role.',
+  'roles.member_help': 'Work: start runs, approve, use the browser, terminal, files and IDE. Not settings, permissions, secrets, costs or people.',
+  'roles.viewer_help': 'Look only: boxes, runs, costs and the audit log. Nothing that acts, and no browser pictures, files or terminal.',
+  'roles.your_role': 'Your role: {role}',
+  'roles.read_only': 'You are signed in as a {role}, so this page is read-only. Ask an owner to change something.',
+  'roles.cannot': 'You are signed in as a {role}, and a {role} cannot {what}. Ask an owner.',
+  'roles.cannot_mem': 'add, edit, approve or forget notes',
+  'roles.cannot_skills': 'install, remove, review or approve a skill',
+  'roles.cannot_usage': 'change a box, so a suggestion is only shown',
+  'roles.cannot_bill': 'ask the provider for the bill or look for forgotten resources',
+  'roles.cannot_orph': 'delete forgotten resources',
+  'roles.cannot_orch': 'start or change an orchestration',
+  'roles.cannot_watch_title': 'Browser sessions are for members and owners',
+  'roles.cannot_watch_body': 'The pictures of a browser show what is on a person\'s screen, so a viewer cannot look at them. Ask an owner for the member role.',
+
+  'roles.cannot_approve_hint': 'A viewer cannot decide approvals. A member or an owner can.',
+
+  'people.title': 'People and roles',
+  'people.body': 'Everyone who may sign in, and what each person may do. The first person is the owner. Changing a role needs a passkey, and is recorded in the audit log.',
+  'people.you': 'you',
+  'people.role_label': 'Role for {name}',
+  'people.changed': 'Role changed',
+  'people.last_owner': 'This dashboard must keep at least one owner. Make someone else an owner first.',
+  'people.failed': 'The role could not be changed.',
+  'people.local_only': 'This dashboard has no sign-in, so it has one operator, who may do everything. Roles belong to a dashboard on a shared machine or a box, where people sign in: set one up with `ozbox dashboard install`.',
+  'people.owner_only': 'Only an owner can change roles.',
+} as const;

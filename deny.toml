@@ -1,0 +1,46 @@
+# cargo-deny policy. Run: cargo deny check advisories bans licenses sources
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Permissive licences that are compatible with distributing under Apache-2.0.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  # Weak (file-level) copyleft, used unmodified as a dependency; no obligation on our code.
+  "MPL-2.0",
+  # Permissive data licence of the bundled TLS root certificate list (webpki-roots).
+  "CDLA-Permissive-2.0",
+  # Permissive (OSI-approved, Apache-2.0 compatible): foldhash, through hashbrown, through rusqlite (memory index).
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path.
+allow-wildcard-paths = true
+# ADR 0008: light dependencies, no async runtime, no TLS stacks that need a C toolchain.
+deny = [
+  { crate = "openssl-sys" },
+  { crate = "openssl" },
+  { crate = "native-tls" },
+  { crate = "tokio" },
+  { crate = "hyper" },
+  { crate = "aws-lc-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

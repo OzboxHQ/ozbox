@@ -1,0 +1,131 @@
+name: Release dry run
+
+# Exercises the whole release machinery on every change to it, so a first real release is not also its first run: the real
+# build pipeline (release-build.yml, the same one cli-release.yml calls), the install script and its tests, the Homebrew
+# formula generator, the crates.io file lists and the npm pack-and-install smoke test.
+#
+# It never creates a release, a tag, a package or a signature, and holds no write permission and no secret.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/cli-release.yml"
+      - ".github/workflows/release-*.yml"
+      - ".github/workflows/publish-*.yml"
+      - ".github/workflows/dashboard-build.yml"
+      - "scripts/install.sh"
+      - "scripts/release/**"
+      - "packaging/**"
+      - "Cross.toml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cli-release.yml"
+      - ".github/workflows/release-*.yml"
+      - ".github/workflows/publish-*.yml"
+      - ".github/workflows/dashboard-build.yml"
+      - "scripts/install.sh"
+      - "scripts/release/**"
+      - "packaging/**"
+      - "Cross.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  scripts:
+    name: Install script, formula generator, npm smoke (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: The scripts parse
+        run: |
+          set -euo pipefail
+          sh -n scripts/install.sh
+          for f in scripts/release/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+      - name: shellcheck
+        run: shellcheck scripts/install.sh scripts/release/*.sh
+      - name: install.sh against a local release directory
+        run: bash scripts/release/test-install.sh
+      - name: Homebrew formula generator
+        run: node scripts/release/test-homebrew-formula.mjs
+      - name: npm package list and smoke test (a no-op while nothing is listed)
+        run: bash scripts/release/test-npm-packages.sh
+      - name: The release workflow files are valid YAML
+        run: |
+          set -euo pipefail
+          for f in .github/workflows/cli-release.yml .github/workflows/release-*.yml .github/workflows/publish-*.yml; do
+            python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$f"
+          done
+
+  build:
+    name: The release pipeline (build, assemble, test the artefact)
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: 0.0.0-dryrun.1
+      # The macOS builds did not start on this repository's runners (the jobs were cancelled before running a step), so the dry
+      # run proves the Linux pipeline, the manifest and the packed artefact; a real release builds macOS too.
+      include_macos: false
+
+  cosign:
+    name: The pinned cosign accepts the signing flags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: "v2.5.3"
+      - run: scripts/release/cosign-smoke.sh
+
+  formula:
+    name: Homebrew formula from the built manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-out
+          path: out
+      - name: Render the formula (a stable version is needed, so the dry-run version is replaced in a copy)
+        run: |
+          set -euo pipefail
+          # the dry run builds no macOS program, so the manifest gets stand-in darwin entries copied from the Linux ones
+          jq '.version = "0.0.0" | .binaries += [.binaries[] | select(.os == "linux") | .os = "darwin" | .asset |= sub("linux"; "darwin")]' out/ozbox-cli-manifest.json >manifest-stable.json
+          node scripts/release/gen-homebrew-formula.mjs manifest-stable.json --out ozbox.rb
+          cat ozbox.rb
+          grep -q 'license "Apache-2.0"' ozbox.rb
+          ruby -c ozbox.rb
+
+  crates:
+    name: crates.io file lists (nothing is published)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: scripts/release/crates-package-list.sh
+
+  npm:
+    name: npm pack and install smoke test (a no-op while nothing is listed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: scripts/release/npm-packages.sh dry-run

@@ -1,0 +1,190 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Oz Box",
+  "description": "Open-source cloud workstations for AI coding agents, and fleets of them, in your own cloud account.",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#60A5FA",
+    "dark": "#1D4ED8"
+  },
+  "favicon": "/logo/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/OzboxHQ/ozbox"
+      }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "install"
+            ]
+          },
+          {
+            "group": "Use cases",
+            "pages": [
+              "use-cases/index",
+              "use-cases/one-box",
+              "use-cases/coding-from-anywhere",
+              "use-cases/fleets",
+              "use-cases/agentic-fleet",
+              "use-cases/orchestrating-a-fleet",
+              "use-cases/secure-agent-workspace",
+              "use-cases/chat",
+              "use-cases/models-and-routing",
+              "use-cases/keeping-boxes-healthy",
+              "use-cases/alerts-costs-guardrails",
+              "use-cases/browser-on-the-box",
+              "use-cases/business-operations",
+              "use-cases/finance",
+              "use-cases/creatives",
+              "use-cases/education"
+            ]
+          },
+          {
+            "group": "CLI reference",
+            "pages": [
+              "cli-reference"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "hardening-checklist",
+              "mesh",
+              "plugins",
+              "releases",
+              "shared-responsibility",
+              "tools"
+            ]
+          },
+          {
+            "group": "Changelog",
+            "pages": [
+              "changelog/index"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture & decisions",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture"
+            ]
+          },
+          {
+            "group": "Decision records",
+            "pages": [
+              "adr/index",
+              "adr/0001-rust-and-typescript",
+              "adr/0002-plan-then-apply",
+              "adr/0003-provider-interface",
+              "adr/0004-provider-neutral-sizes",
+              "adr/0005-no-inbound-network",
+              "adr/0006-grpc-inside-rest-outside",
+              "adr/0007-opentofu-and-packer",
+              "adr/0008-light-dependencies",
+              "adr/0009-apache-2",
+              "adr/0010-bring-your-own-tunnels",
+              "adr/0011-no-sudo-one-audited-root-path",
+              "adr/0012-code-access-and-the-second-lock",
+              "adr/0013-schedules-and-triggers",
+              "adr/0014-supervised-agent-runs",
+              "adr/0015-model-providers-and-local-ai",
+              "adr/0016-the-real-bill-and-forgotten-resources",
+              "adr/0017-credential-broker-per-run-tokens",
+              "adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach",
+              "adr/0019-agent-runs-on-real-boxes",
+              "adr/0020-orchestration-conductor-and-worker-boxes",
+              "adr/0021-chat-with-coding-agents",
+              "adr/0022-permission-engine-and-tamper-evident-audit-log",
+              "adr/0023-the-supervisor-egress-approvals-and-the-commit-barrier",
+              "adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it",
+              "adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash",
+              "adr/0026-the-tool-host-every-tool-call-is-decided-and-recorded",
+              "adr/0027-box-state-lives-outside-the-checkout-and-can-be-adopted-back",
+              "adr/0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker",
+              "adr/0029-production-secrets-have-no-standing-access",
+              "adr/0030-a-tailnet-you-run-yourself",
+              "adr/0031-plugins-are-programs-that-speak-a-versioned-protocol",
+              "adr/0032-telemetry-is-off-and-anonymous-and-goes-where-you-say",
+              "adr/0033-box-state-can-live-in-the-encrypted-bucket-and-adopt-covers-hetzner",
+              "adr/0034-a-box-wide-egress-list-enforced-by-the-kernel-off-until-you-have-seen-it",
+              "adr/0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use",
+              "adr/0036-one-version-for-the-program-the-daemon-and-the-image",
+              "adr/0037-the-browser-on-the-box-one-door-a-person-can-take-over",
+              "adr/0038-upgrades-keep-the-box-up-live-update-or-blue-green-replace",
+              "adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box",
+              "adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own",
+              "adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on",
+              "adr/0043-coding-agents-on-a-box-reach-the-oz-box-tools-through-a-socket-of-their-own",
+              "adr/0045-box-memory-guard",
+              "adr/0049-sessions-come-back-after-a-stop-the-session-not-the-process",
+              "adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver",
+              "adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "releasing",
+              "roadmap"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Security",
+        "groups": [
+          {
+            "group": "Security",
+            "pages": [
+              "security-policy",
+              "telemetry"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "links": [
+      {
+        "header": "Licences",
+        "items": [
+          {
+            "label": "Documentation: CC BY 4.0",
+            "href": "https://creativecommons.org/licenses/by/4.0/"
+          },
+          {
+            "label": "Code: Apache-2.0",
+            "href": "https://www.apache.org/licenses/LICENSE-2.0"
+          },
+          {
+            "label": "Which paths each covers",
+            "href": "https://github.com/OzboxHQ/ozbox/blob/main/DOCS-LICENSE.md"
+          }
+        ]
+      }
+    ]
+  }
+}

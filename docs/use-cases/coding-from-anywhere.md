@@ -1,0 +1,241 @@
+# Coding from anywhere
+
+Your code and everything running on it stay on the box. You reach it from a browser, your desktop editor or a terminal,
+from any computer, tablet or phone. Every way in goes **out** from the box, never through an open port.
+
+See [how to read the status](README.md#how-to-read-the-status).
+
+---
+
+## 1. VS Code in the browser, on this computer
+
+**You want:** the full editor without installing anything.
+
+```
+ozbox ide main          # sets up the box's web IDE, opens http://localhost:<port> in your browser
+```
+
+**Underneath:** the web IDE runs on the box as a service of the box user, bound to the box's loopback only, with its
+own password. Your browser reaches it through the same outbound route as SSH. The password is handed over once through
+a one-time local link and is never shown or stored in a command line.
+**Status:** Preview (the web IDE itself runs on a real box today).
+
+## 2. Your usual desktop editor, working on the box
+
+**You want:** VS Code, Cursor, Antigravity, Windsurf, Zed or JetBrains, with files and builds on the box.
+
+```
+ozbox open main --in vscode           # or cursor, antigravity, windsurf, zed, jetbrains
+ozbox open main --in zed --print      # print the link instead of opening it
+```
+
+**Underneath:** it writes or refreshes the box's SSH entry, then opens the editor's remote link on `/work/repos`.
+VS Code and Zed links follow their documented forms; for JetBrains it prints the steps.
+**Status:** Works (VS Code Remote-SSH on a real box); others Preview.
+
+## 3. Agents that keep running when your laptop sleeps
+
+**You want:** to start a long agent session, close the lid, and find it still running.
+
+Open a terminal in the web IDE or over SSH: it opens **inside tmux** by default. Start your agent there and close the
+tab. Next time, the next terminal you open reattaches to the session nobody is viewing. `tmux ls` lists them.
+
+**Underneath:** terminals run in tmux sessions owned by the box user; the web IDE also keeps a dropped connection for
+seven days and restores your windows and unsaved edits. A reboot or upgrade of the box does end running processes —
+files on `/work` are always kept.
+**Status:** Works (proven on a real box).
+
+**After the box restarts (a resize, a stop and start, an upgrade that reboots, a crash that reboots):** sessions are meant to come
+back; running programs end. Each coding agent you run in tmux leaves a small record on `/work` (which agent, its session id, the
+folder under `/work` and the tmux window; never your prompts or any secret). When the box starts again it recreates those tmux
+windows and reopens Claude Code with its own resume, at most six at one start, the most recent first. The conversation returns.
+What does not: the turn in flight, background programs such as dev servers, shell variables and scrollback, and a permission
+question that was waiting. Oz Box does not type anything into the agent: it shows a line in the window and you tell the agent to
+continue. A session you end with `/exit` or `/clear`, or a window you close, is forgotten, and so is one not used for seven
+days. It does not run when a single agent is killed on a box that keeps running. Other agents (Codex, Gemini CLI, Aider and the
+rest) get their window back in the right folder with a line saying resume is not supported for them. Only the record is added to
+your agent's settings: nothing new is asked or denied. A `claude -p` that an agent runs inside its own pane is not recorded over the real session, and a pane whose agent died and left a shell is forgotten after three minutes. **To turn it off:** `mkdir -p ~/.config/ozbox && touch ~/.config/ozbox/session-resume.off` (hooks, boot unit, sweeps and resume all stop; delete the file to turn it back on). `systemctl --user disable ozbox-session-resume.service` stops only the boot unit, and stays disabled.
+**Status:** Preview (covered by tests; **not yet proven on a real box**).
+
+**Before a resize or an upgrade that stops the box:** `ozbox resize` and `ozbox upgrade` list what will end (supervised runs,
+coding-agent sessions, everything else) in the plan, before you confirm. After you confirm, runs are asked to end and stopped
+after ten seconds if they have not, and uncommitted work in each git repository under `/work` (up to four folders deep, the home
+folder and nested repositories included; folders starting with a dot and `node_modules` are skipped) is saved as a hidden snapshot
+under `refs/ozbox/wip/`, new files that are not ignored too. Nothing of yours is touched (working tree, index, branch, stash,
+remotes), nothing is pushed (also not when the box itself stops), and nothing is typed into your terminals. A repository that is
+your home folder or holds a credentials folder (`.ssh`, `.aws`, ...) is not saved, a new file over 50 MB is left out, and snapshots
+older than 14 days are removed; the result says what was left out. **To get a snapshot back without touching newer work**, in
+the repository: `mkdir ../recovered && git archive <ref> | tar -x -C ../recovered` copies everything it held into a separate
+folder; `git diff HEAD <ref>` shows what differs; `git show <ref>:<file>` prints one file. Do not run
+`git restore --source=<ref> --worktree -- .` over a folder you kept working in: it replaces every file the snapshot holds and removes
+files it does not. A box whose agent is older cannot do any of this: the plan says so, uncommitted work is **not** snapshotted, and
+you are asked again before the box is stopped (`--legacy-checkpoint` uses that agent's own checkpoint, which writes a visible branch
+and pushes it if the box has a push remote). A snapshot that fails is reported and you are asked again, since `/work` is kept;
+`--strict-checkpoint` refuses to stop the box unless it was fully ready. **Status:** Preview (**not yet proven on a real box**).
+
+## 4. See and stop what you left running
+
+**You want:** to find yesterday's dev server or agent and stop it.
+
+```
+ozbox ps main                          # sessions, coding agents, listening servers
+ozbox ps main --stop-session term-2
+```
+
+In the dashboard: the box page's **Code** panel → **Running on this box**; **Open** attaches the session in the
+dashboard's terminal.
+
+**Underneath:** read and stopped through the box daemon, only for the box user's own processes; a stop is re-checked
+against a fresh read first.
+**Status:** Preview.
+
+## 5. A full Linux desktop with Firefox, in the browser
+
+**You want:** to click through the web app you are building, as a user would, on the box.
+
+```
+ozbox desktop main
+```
+
+**Underneath:** KasmVNC on the box, loopback only, with its own sign-in.
+**Status:** Preview.
+
+## 6. Your web IDE on your own domain
+
+**You want:** to open the IDE from any device at `https://ide.example.com`, no SSH needed.
+
+```
+ozbox ide main --public-url https://ide.example.com --tunnel cloudflare
+```
+
+Then add the host name to your tunnel (the command prints the steps for your provider).
+
+**Underneath:** two locks. Your tunnel provider's access rule (for Cloudflare, an Access policy for your email) is the
+first; the second is your **Oz Box sign-in**: nothing reaches the IDE, not even its live connection, without a valid
+dashboard session ([ADR 0012](../adr/0012-code-access-and-the-second-lock.md)).
+**Status:** Preview.
+
+## 7. The dashboard on your own domain
+
+**You want:** the Oz Box dashboard at `https://ozbox.example.com`, signed in with a passkey.
+
+```
+ozbox auth init --origin https://ozbox.example.com --person you,label=You,access=you@example.com
+printf '%s\n' "$TUNNEL_TOKEN" | ozbox tunnel setup cloudflare --public-url https://ozbox.example.com --token-stdin
+ozbox serve --public-url https://ozbox.example.com --tunnel cloudflare
+```
+
+Open the address, enter the one-time setup code the server prints, and register a passkey.
+
+**Underneath:** the server still listens on loopback only; the tunnel dials out. Sign-in supports passkeys, GitHub or
+Google (your own OAuth app) plus an authenticator code, or your identity-aware proxy's signed token
+([ADR 0010](../adr/0010-bring-your-own-tunnels.md)).
+
+**More than one person:** give each person on the list a role with `--person` (`role=owner`, `role=member` or `role=viewer`). The
+first person is the owner and the rest are members unless their entry says otherwise. An **owner** can do everything,
+including the settings, permissions, secrets, costs and roles. A **member** does the work: starts runs, approves, watches
+and takes over a browser, and uses a box's terminal, files and IDE. A **viewer** only looks: boxes, runs, costs and the audit
+log. An owner changes a role in Settings → Members & roles with a passkey, and it is recorded in the audit log; the dashboard
+always keeps one owner ([ADR 0039](../adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md)).
+**Limits:** roles are for the dashboard only (not per box or per project); people are added in the settings file, not invited
+from the dashboard.
+**Status:** Preview.
+
+## 8. Pick the tunnel that suits you
+
+**You want:** a way in that fits your setup.
+
+| Provider | Good for |
+|---|---|
+| `cloudflare` | your own domain on Cloudflare, with Cloudflare Access in front |
+| `tailscale-serve` | private: only devices on your tailnet |
+| `tailscale-funnel` | a public `ts.net` name without owning a domain |
+| `caddy` | your own small VPS with a certificate, the box dials out to it |
+| `ngrok` | quick to try (a custom domain needs a paid plan) |
+
+```
+ozbox tunnel setup tailscale-serve --public-url https://main.your-tailnet.ts.net
+ozbox tunnel status
+```
+
+**Status:** Preview.
+
+## 9. Run the dashboard on a box, always on
+
+**You want:** the dashboard reachable even when your laptop is off.
+
+```
+printf '%s\n' "$TUNNEL_TOKEN" | ozbox dashboard install ops --public-url https://ozbox.example.com \
+  --tunnel cloudflare --person you,access=you@example.com --token-stdin
+```
+
+**Underneath:** stages the dashboard's settings and its tunnel on the box, then asks the box's root helper to run it as a
+user of its own (`ozbox-supervisor`), from the box's own root-owned program, so no agent on the box can read its sign-in
+state or keys. The helper first checks that the staged sign-in settings are the ones your computer sent, and the command
+reports success only once the dashboard runs that way; it never runs as the box user. The program sent or checked for the
+old way (the one the box's image carries when its hash is in the image release's signed manifest, otherwise the release's
+signed program) is kept only as a fallback. Read the first-time setup code on your own computer with `ozbox secrets ingress setup-code --box ops`
+(it is handed to the box's secrets service and sent back through the sealed route, so it is not in a log the box user can read; on a
+box made before the ingress account, `ozbox upgrade` it first) and sign in at once. A box made before this release does not know the helper's new check
+and the install stops there, with the dashboard staged but not running: upgrade the box first (an upgrade on Hetzner now replaces the
+server, so it brings the current helper too). Upgrading or pausing that box takes the dashboard down, so do that from another computer.
+**Status:** Preview.
+
+**What the dashboard on a box shows.** The box it runs on, read from the box's own agent: its health, sessions, runs,
+usage, files and terminal, as for any box. The dashboard runs as a user of its own (`ozbox-supervisor`), which is not in the box user's group, and reaches the box's agent through a socket that only that user can open. That socket offers only what the dashboard needs: reading health, usage, sessions, runs and files, starting, following and stopping runs and chat sessions, uploading and editing files, taking a checkpoint, and the terminal. The box user's agents cannot use it. Backups, installing tools and local models are not available from a box's own dashboard; use your own computer for those. Be clear about what this protects: starting a run and the terminal act as the box user, so someone who controls the dashboard can do anything the box user can through them. What the setup guards is the other direction: the box user and its agents cannot reach the dashboard, its sign-in or its secrets. A box made before this release gets the socket when its program and agent are both upgraded; until then the dashboard cannot reach its agent and says its socket is missing (an agent older than this release says nothing itself, so upgrade both). What needs a connection from outside the box (upgrade checks, the secrets
+service's state, root-helper actions, starting or stopping the web IDE) says it is not available there. It does not show your other boxes, and it never shows made-up ones: a box has no
+cloud credentials by design, so only your own computer can create, resize, pause, clone, snapshot or destroy boxes, or
+price them across the fleet. Those places say "Fleet not connected: this dashboard sees only this box" and do nothing; do
+them with `ozbox` on your computer. (Made-up demo boxes appear only when you ask for the demo provider on purpose, with
+`provider = "fake"`, and then every page carries a "Demo data" banner, and the demo refuses to open a terminal, files, a
+browser or a stand-in server on the box itself: it says "This is demo data, and a box has no demo terminal" rather than hand
+you a shell on the box that is not the box user's.) Every page says plainly what is not connected, not built or not
+permitted in the same way, and none shows demo data on a box. A dashboard that manages the fleet from a box is
+designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md) and is not built.
+
+**The terminal, Files and Tools say what they are.** The terminal names its box before it connects ("Connecting to main…"),
+and once the shell is up it says "Connected to main, as the box user". That shell is started by the box's own agent, never by
+the dashboard's program, which runs as a different user. The demo's terminal, files and tools carry a **Simulated** badge and
+a sentence saying they are made up, on the computer that runs the dashboard and not on a box. If a page cannot read something
+(a folder, the tool list, the profiles) it says so and why; it does not show an empty list. The file browser, the terminal and
+the sign-in pages now share one way of talking to the dashboard's server, so a session that has ended sends you back to the
+sign-in page from any of them.
+
+**Settings says what is real.** **Settings → Providers** asks the provider just now and says **Connected** only when it
+answered; the demo says **Demo**, and a box's own dashboard says **This box** because there is no cloud account behind it.
+**Settings → Backups** and the local AI card carry a **Simulated** badge when the server runs the demo. Behind a sign-in,
+replacing a tunnel token, loosening the approval policy (asking about fewer actions, fewer branches or commands, a wider
+list of people who can decide) and raising or removing a spend limit (the fleet's, a person's or a model provider's monthly limit) each need a passkey shown a moment ago; asking for
+more does not. On a box with no sign-in those changes are refused and say why.
+
+**A new tunnel token later.** Run the same command again with the new token. The dashboard's program and sign-in settings
+stay as they are, and so does its public address; only the token changes. What happens next depends on the box:
+
+- **No passkey or authenticator code enrolled yet:** the token is changed, no code needed.
+- **A second factor is enrolled:** the command stops and says so, with what to run. On the computer that made the box,
+  pipe the new token in and ask for a code for that token: `printf '%s' "$TOKEN" | ozbox secrets approve --box ops --scope
+  tunnel-token --project cloudflare --token-stdin`. Then run the install again with `--approval CODE` (or
+  `--approval-stdin`, which reads the code from the line after the token and keeps it out of your shell history). The code
+  works once, for a few minutes, and only for that token.
+- **A box made from an image before this release:** it changes the token the same way, but its root helper checks the code
+  and not which token it is for. The command says so: get the code without `--token-stdin` and use it right away. A code
+  made that way works for any token until it is used, so do not leave one lying around. A newer image closes this.
+
+The code now comes back to your computer through an SSH forward that starts no shell on the box, so the box user's start-up files
+cannot sit in front of it. The code is still tied to the token it was made for, as a second guard: a code taken some other way
+cannot store a different token. Carrying the code to the box's root helper (the last step of `dashboard install --approval`) still
+goes through the box user's shell, which an agent on the box can in principle wrap; a forced command in the box's SSH daemon, in a
+later image, closes that.
+
+## 10. Copy and paste that just works
+
+**You want:** normal copy and paste in the browser IDE's editor and terminal.
+
+Chrome, Edge and Brave ask once for clipboard access — allow it. In Firefox, use Cmd/Ctrl+V; to select text in a tmux
+terminal, hold Option (macOS) or Shift while dragging. Chromium browsers can also install the IDE as an app with its own
+window.
+
+**Underneath:** Oz Box ships editor settings and terminal key bindings that let the browser's own paste reach the
+terminal, and tmux defaults that pass copies to your clipboard. It merges them into your settings and never overwrites
+your own keys.
+**Status:** Works (Firefox and Chromium on a real box).

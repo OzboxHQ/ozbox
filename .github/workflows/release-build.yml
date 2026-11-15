@@ -1,0 +1,270 @@
+name: Release build
+
+# Builds every `ozbox` program of a release (Linux x86_64 and aarch64 statically linked with musl, macOS arm64 and x86_64),
+# assembles the manifest and the checksums into one artifact `release-out`, and then tests the packed artefact for real:
+# runs the Linux program in clean containers and installs it with scripts/install.sh from a local release directory.
+#
+# It signs nothing and publishes nothing, and holds no write permission. cli-release.yml calls it and then signs and
+# uploads exactly what it built (the signing job lives there so the certificate names that file); release-dry-run.yml
+# calls it on every change to the release machinery, so the pipeline is exercised long before a tag.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version being built, for example 0.1.0 or 0.1.0-rc.1"
+        required: true
+        type: string
+      include_macos:
+        description: "Also build the two macOS programs. A real release does; the dry run can leave them out when the macOS runners are not available to the repository."
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: Dashboard
+    uses: ./.github/workflows/dashboard-build.yml
+
+  build-linux:
+    name: Build linux ${{ matrix.arch }}
+    needs: dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dashboard-dist
+          path: packages/dashboard/dist
+      - name: The dashboard is where the program's build looks for it (cross mounts this workspace into its container)
+        run: |
+          set -euo pipefail
+          test -f packages/dashboard/dist/index.html
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cross (builds inside a musl container, so nothing is linked against this runner)
+        run: cargo install cross --locked --version 0.2.5
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          # makes crates/ozbox-cli/build.rs refuse to build without the dashboard (passed into cross by Cross.toml)
+          OZBOX_RELEASE: "1"
+        run: cross build --release --locked --target "$TARGET" -p ozbox-cli
+      - name: The program serves the real dashboard, not the placeholder page
+        env:
+          TARGET: ${{ matrix.target }}
+          DASH: ${{ needs.dashboard.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          f="target/$TARGET/release/ozbox"
+          if grep -aq "The dashboard is not built" "$f"; then
+            echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
+            exit 1
+          fi
+          grep -aq "$DASH" "$f"
+      - name: Check it is one self-contained file, and (where this runner can) that it starts
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          cp "target/$TARGET/release/ozbox" "out/ozbox-linux-$ARCH"
+          file "out/ozbox-linux-$ARCH" | grep -Eq 'statically linked|static-pie linked'
+          if [ "$ARCH" = "x86_64" ]; then
+            "./out/ozbox-linux-$ARCH" --version
+          fi
+          (cd out && sha256sum "ozbox-linux-$ARCH" >"ozbox-linux-$ARCH.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ozbox-linux-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build darwin ${{ matrix.arch }}
+    if: ${{ inputs.include_macos }}
+    needs: dashboard
+    # Both on the arm64 runner: the x86_64 program is cross-compiled by Apple's linker (native cargo, no emulation).
+    # macOS runners are charged at a higher rate, which is why this is two jobs and not more.
+    runs-on: macos-14
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dashboard-dist
+          path: packages/dashboard/dist
+      - name: Toolchain (from rust-toolchain.toml) and the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          OZBOX_RELEASE: "1"
+          # the oldest macOS the program is asked to run on
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          test -f packages/dashboard/dist/index.html
+          cargo build --release --locked --target "$TARGET" -p ozbox-cli
+      - name: The program serves the real dashboard, not the placeholder page
+        env:
+          TARGET: ${{ matrix.target }}
+          DASH: ${{ needs.dashboard.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          f="target/$TARGET/release/ozbox"
+          if grep -aq "The dashboard is not built" "$f"; then
+            echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
+            exit 1
+          fi
+          grep -aq "$DASH" "$f"
+      - name: Check it is a macOS program for the right processor, and (where this runner can) that it starts
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          cp "target/$TARGET/release/ozbox" "out/ozbox-darwin-$ARCH"
+          file "out/ozbox-darwin-$ARCH"
+          if [ "$ARCH" = "aarch64" ]; then
+            file "out/ozbox-darwin-$ARCH" | grep -q 'Mach-O 64-bit executable arm64'
+            "./out/ozbox-darwin-$ARCH" --version
+          else
+            file "out/ozbox-darwin-$ARCH" | grep -q 'Mach-O 64-bit executable x86_64'
+            # runs under Rosetta when the runner has it; not having it is not a failure of the program
+            arch -x86_64 "./out/ozbox-darwin-$ARCH" --version || echo "::notice::could not run the x86_64 program on this runner (no Rosetta?)"
+          fi
+          (cd out && shasum -a 256 "ozbox-darwin-$ARCH" >"ozbox-darwin-$ARCH.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ozbox-darwin-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Manifest and checksums
+    needs: [dashboard, build-linux, build-macos]
+    # runs when the Linux programs built and the macOS ones either built or were left out on purpose
+    if: ${{ !cancelled() && needs.build-linux.result == 'success' && (needs.build-macos.result == 'success' || (needs.build-macos.result == 'skipped' && !inputs.include_macos)) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ozbox-*
+          path: parts
+          merge-multiple: true
+      - name: Build the manifest (unsigned) and the checksums
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ github.sha }}
+          DASHBOARD_SHA256: ${{ needs.dashboard.outputs.sha256 }}
+          WITH_MACOS: ${{ inputs.include_macos }}
+        run: |
+          set -euo pipefail
+          mkdir out entries
+          oses="linux"
+          if [ "$WITH_MACOS" = "true" ]; then oses="linux darwin"; fi
+          want=2
+          if [ "$WITH_MACOS" = "true" ]; then want=4; fi
+          for os in $oses; do
+            for arch in x86_64 aarch64; do
+              asset="ozbox-$os-$arch"
+              cp "parts/$asset" "parts/$asset.sha256" out/
+              (cd out && sha256sum --check --strict "$asset.sha256")
+              sha="$(cut -d' ' -f1 "out/$asset.sha256")"
+              jq -n --arg os "$os" --arg arch "$arch" --arg asset "$asset" --arg sha "$sha" \
+                '{os: $os, arch: $arch, asset: $asset, sha256: $sha}' >"entries/$asset.json"
+            done
+          done
+          # the entries are read from a file (a slurped process substitution is not portable to every shell)
+          jq -s '.' entries/*.json >entries.json
+          jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg dashboard "$DASHBOARD_SHA256" --slurpfile binaries entries.json \
+            '{version: $version, source_commit: $commit, built_at: $built, dashboard: $dashboard, binaries: $binaries[0]}' \
+            >out/ozbox-cli-manifest.json
+          jq -e --argjson want "$want" '.binaries | length == $want' out/ozbox-cli-manifest.json >/dev/null
+          jq -e --arg v "$VERSION" '.version == $v' out/ozbox-cli-manifest.json >/dev/null
+          jq -e '.dashboard | test("^[0-9a-f]{64}$")' out/ozbox-cli-manifest.json >/dev/null
+          # `ozbox dashboard install` finds its program by arch and the name ozbox-linux-<arch>; keep that true
+          jq -e '[.binaries[] | select(.asset == ("ozbox-linux-" + .arch))] | length == 2' out/ozbox-cli-manifest.json >/dev/null
+          (cd out && for f in ozbox-linux-* ozbox-darwin-*; do case "$f" in *.sha256|'ozbox-darwin-*') ;; *) sha256sum "$f" ;; esac; done >SHA256SUMS)
+          cat out/SHA256SUMS
+          echo "--- ozbox-cli-manifest.json (unsigned) ---"
+          cat out/ozbox-cli-manifest.json
+          ls -l out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-out
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-artefact:
+    name: Test the packed artefact for real
+    needs: assemble
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-out
+          path: out
+      - name: Run the Linux x86_64 program in clean containers
+        run: |
+          set -euo pipefail
+          chmod +x out/ozbox-linux-x86_64
+          want="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          for image in debian:stable-slim alpine:3; do
+            echo "--- $image ---"
+            docker run --rm -v "$PWD/out:/rel:ro" "$image" /rel/ozbox-linux-x86_64 --version | tee version.txt
+            grep -qF "$want" version.txt
+            docker run --rm -v "$PWD/out:/rel:ro" "$image" /rel/ozbox-linux-x86_64 --help >/dev/null
+          done
+      - name: Install it with scripts/install.sh from a local release directory, then run the installed program
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          rel="$PWD/rel"
+          mkdir -p "$rel/download/v$VERSION"
+          cp out/* "$rel/download/v$VERSION/"
+          # the manifest is unsigned here, so this is the sha256 path; the signature path is exercised on a real release
+          OZBOX_RELEASE_BASE_URL="file://$rel" sh scripts/install.sh --version "$VERSION" --skip-signature --prefix "$PWD/prefix"
+          "$PWD/prefix/bin/ozbox" --version
+          test "$(stat -c '%a' "$PWD/prefix/bin/ozbox")" = "755"
+          # a damaged program must not install
+          printf 'x' >>"$rel/download/v$VERSION/ozbox-linux-x86_64"
+          if OZBOX_RELEASE_BASE_URL="file://$rel" sh scripts/install.sh --version "$VERSION" --skip-signature --prefix "$PWD/prefix2"; then
+            echo "a damaged program was installed"
+            exit 1
+          fi
+          test ! -e "$PWD/prefix2/bin/ozbox"

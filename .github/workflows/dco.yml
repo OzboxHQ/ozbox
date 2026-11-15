@@ -1,0 +1,62 @@
+name: DCO
+
+# Every commit must carry a Signed-off-by line (see CONTRIBUTING.md). No Contributor License Agreement.
+# It runs on pull requests AND on pushes, so `main`'s ruleset can require it: main only moves to a commit whose
+# sign-off check already passed on a branch.
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  signoff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Check sign-off on every commit in the pull request
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PR_HEAD" ]; then
+            BASE_SHA="$PR_BASE"; HEAD_SHA="$PR_HEAD"
+          else
+            HEAD_SHA="$PUSH_AFTER"
+            # A new branch has no "before": check what it adds on top of the default branch. A first push of the
+            # default branch itself checks every commit it holds.
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+              if git rev-parse -q --verify "origin/$DEFAULT_BRANCH" >/dev/null && \
+                 [ "$(git rev-parse "origin/$DEFAULT_BRANCH")" != "$HEAD_SHA" ]; then
+                BASE_SHA="$(git merge-base "origin/$DEFAULT_BRANCH" "$HEAD_SHA")"
+              else
+                BASE_SHA=""
+              fi
+            else
+              BASE_SHA="$PUSH_BEFORE"
+            fi
+          fi
+          range="$HEAD_SHA"; [ -n "$BASE_SHA" ] && range="$BASE_SHA..$HEAD_SHA"
+          bad=0
+          for c in $(git rev-list --no-merges "$range"); do
+            author="$(git log -1 --format='%an <%ae>' "$c")"
+            # Automated dependency updates cannot sign off; a person reviews and merges them. Only these bots, by the
+            # address GitHub gives them: a name with "[bot]" in it is anyone's to choose.
+            case "$(git log -1 --format='%ae' "$c")" in
+              "49699333+dependabot[bot]@users.noreply.github.com"|"41898282+github-actions[bot]@users.noreply.github.com") continue ;;
+            esac
+            if ! git log -1 --format=%B "$c" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              echo "::error::commit ${c:0:12} by $author has no Signed-off-by line (use git commit -s)"
+              bad=1
+            fi
+          done
+          exit $bad

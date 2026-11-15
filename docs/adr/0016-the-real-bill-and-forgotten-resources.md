@@ -1,0 +1,27 @@
+# 0016 — The real bill is read with your own read access and shown beside the estimate; forgotten resources are listed, and only tagged ones can be deleted
+
+**Decision.** Oz Box keeps its live estimate (hours times the public price, plus disks) and also reads what the provider really
+billed, so the difference is visible and explained. It never invents a figure to fill a gap.
+
+1. **Read-only, with the person's own access.** On AWS the bill is read through the `aws` CLI (`aws ce get-cost-and-usage`),
+   filtered to what carries the `ozbox-managed=true` tag and grouped by the `ozbox-box` tag and the service. The only
+   permissions are `ce:GetCostAndUsage` and `ce:GetTags`, both in the operator policy; a test pins that nothing else of billing
+   is granted. Hetzner Cloud has no invoice or usage API, so there the estimate is all there is, and the product says so.
+2. **Two things the account must do, which Oz Box cannot.** Turn on Cost Explorer, and activate the tags as cost-allocation
+   tags. AWS reports by a tag only from activation onwards and trails usage by about a day. The page says both, with the steps,
+   instead of showing an empty bill that looks like zero spend. The two newest days are shown but never compared or alerted on.
+3. **Read once a day, in the background.** Each Cost Explorer request costs a cent, so the server reads on a daily worker job
+   (and on request, not more often than every few minutes), keeps the answer, and a page view only reads what is kept.
+4. **Drift has a threshold and a cause.** A finished day is flagged when the two figures differ by a share and an amount (both
+   settable, 25% and 2.00 by default). Each flagged day names its likely cause from what is known: spend with no box tag, a
+   service the estimate does not model, snapshots or transfer beyond the disks, a stale or hand-entered price, a day the server
+   was only partly watching, or a lower bill from a discount or spot. A recent flagged day is an alert through the normal
+   routing, once; older history from a first read is remembered, not announced.
+5. **The budget uses the real figure when there is one.** The month is the bill for finished days plus the estimate for the days
+   since, and every alert and the page say which it was. Model and API spend stays an estimate from token counts and is labelled
+   so, because no model provider's own bill is read here.
+6. **Forgotten resources are listed; only tagged ones can be deleted.** The scan is read-only and sees what is not tagged
+   (resources that look like ours by tag key or name) and what Oz Box made that no box uses. Deleting is plan, then apply with
+   typed words, and the apply looks at each resource again and leaves it alone if it is no longer tagged `ozbox-managed` or is
+   in use. An untagged resource, an image, an interrupted upgrade's disk and a restore waiting for an answer are never deleted
+   from here.

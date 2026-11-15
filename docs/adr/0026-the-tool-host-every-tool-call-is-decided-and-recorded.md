@@ -1,0 +1,57 @@
+# 0026 — The tool host: every tool call is decided by the permission engine and recorded without its arguments
+
+**Decision.** A coding agent on a box gets its working tools from Oz Box over MCP: a shell, git, files, a browser, CI and
+Staging reads. They are the same server, token and transport as the orchestration tools (ADR 0020); a run is handed the
+address and a per-run token with its environment and the token stops working when the run ends. Every call to every tool
+goes through the permission engine (ADR 0022) before it runs.
+
+1. **The surface is a list, and a test holds it.** `shell`, `git_status` `git_diff` `git_log` `git_branch` `git_commit`
+   `git_push`, `files_read` `files_write` `files_list` `files_search`, `browser_fetch` `browser_screenshot`, `ci_status`
+   `ci_logs` `ci_rerun`, `staging_read`. A tool nobody listed is a protocol error. No tool takes or returns a key.
+2. **A tool call is an action the engine decides**: `tool.call`, with the tool, its group (shell, git, files, browser, ci,
+   staging, orchestration), the box, the environment and whether it reads or writes. A tool whose effect is unknown counts
+   as a write. A write asks in the default mode; a read goes ahead; plan-only refuses every write; a production box refuses
+   every write without a grant (ADR 0022); a deny rule always wins; the most specific rule decides otherwise.
+   An *ask* becomes a request in the approvals inbox that shows the exact action, secrets removed, and the call waits for the
+   answer (two minutes, then the agent is told to call again and the call waits on the same request). One approval covers
+   one call. A denied or lapsed request is spent by being refused, so a repeat asks again. A request for production needs the
+   passkey like any other.
+3. **The commands that matter are found, not guessed.** A shell line is read just far enough to judge each command in it
+   (`ls && rm -rf x`, `env FOO=1 sudo ...`); anything it cannot read with confidence (command substitution, a nested
+   `sh -c`, `eval`) is treated as sensitive. A command on the approval policy's ask list, and a push to a protected branch,
+   ask even in Auto; only a rule that allows them lets them through. The rule is matched against the strictest command in
+   the line.
+4. **Everything is scoped to `/work`.** A path is lexical-checked, then resolved on the box with symlinks followed, and a
+   path whose real place is outside `/work` is refused. `.env`, keys and `.git` are not files an agent reads or writes through
+   these tools. A write is text, 32 KiB at most, in one call. A command has a time limit (default 60 s, at most 10 minutes)
+   and an output cap; the box daemon enforces the limit itself.
+5. **Where it runs.** On a real box, every operation is one short run through the box daemon's run API (ADR 0019): nothing
+   new listens on the box and there is no second way in. The demo provider has no daemon, so its boxes are a directory each
+   on this computer, and a command there runs with an empty environment; that backend is never chosen for a real box.
+6. **The browser** opens the box's own loopback and the hosts the person listed in Permissions, GET only, no redirects, size
+   capped, run on the box so `localhost` is the box's. **CI** uses the provider's own command-line tool in the repository
+   (GitHub for now); a re-run is a write. **Staging** reads start only a command the project *declared* with
+   `ozbox env run --named` (ADR 0018): the runner decides what it receives and removes every value from the output, and a
+   production environment is refused here and again by the engine. The tool host never sees a key.
+7. **The record.** Each decision is a `permission.allow|ask|deny` entry in the audit chain with the tool, the group, read
+   or write, the mode and the reason; a call that ran adds `tool.completed` with a word for how it ended. Never the command,
+   the path, the arguments or the output. The text of an ask lives on its approval request only.
+8. **The other call sites decide the same way.** The orchestration tools are decided too (a rule, plan-only, the
+   production gate and an explicit ask rule apply; the mode alone does not ask, because the orchestration's own policy
+   governs them). A schedule or trigger starting a run, and a chat typing into a terminal, attaching to one or deciding an
+   approval, go through the engine and are recorded. The stricter checks that decide *who may decide* an approval stay as
+   they are: a chat can never approve a risky request, and a conductor never decides a tool call.
+
+**Why.** An agent on a box needs a shell and files; the question is who decides, and what is written down. One door means a
+rule means the same thing for a person's agent, a scheduled run and a conductor, and an audit entry can be trusted to show a
+call without becoming a copy of the work.
+
+**Consequences and what is not covered.**
+- A tool call that asks holds an MCP request open while it waits. Clients with a short timeout will see the "call again"
+  answer; the pending request is reused, not duplicated.
+- A new ask sends no alert of its own; the approvals inbox shows it and the supervisor's reminders cover a long wait.
+- The Staging tool treats a declared command as a read because the project's declaration, not the agent, decides what it
+  can touch. A declaration that writes is the owner's to avoid.
+- On a real box the file tools shell out to coreutils through the run API, so a write is one run per call; large files are
+  written in parts.
+- The audit chain is as strong as ADR 0022 says: detect, not prevent, while the supervisor and the agents share a user.

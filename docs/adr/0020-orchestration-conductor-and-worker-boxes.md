@@ -1,0 +1,51 @@
+# 0020 — Orchestration: a conductor, worker boxes, claims, a merge queue, and the Oz Box tools over MCP
+
+**Decision.** One coding agent (the **conductor**, on the box that holds the main branch) can hand features to **worker
+boxes** and keep them from colliding. The server holds the state, enforces the policy and exposes a small set of tools; the
+agents do the engineering.
+
+1. **The tools are an MCP server in `ozbox serve`.** Streamable HTTP, `POST /mcp`, written against the MCP specification
+   revision **2026-07-28** (per-request metadata, `MCP-Protocol-Version` and `Mcp-Method` headers checked against the body, no
+   sessions); clients of **2025-11-25** and **2025-06-18** are served through `initialize`. Only tools are implemented. The
+   listener is on this computer's loopback, and a box reaches it through the same reverse-forwarded loopback path as the
+   credential broker (ADR 0019), so nothing new listens on a box (ADR 0005). Every call carries a per-session token
+   (`ozmt_...`), held only as an HMAC, bound to one run and one person, revoked when the run ends, rate limited; `Origin` is
+   refused and `Host` must be the loopback address. There is no tool that runs a command, opens a shell or returns a key; a
+   test holds the list.
+2. **Roles decide which tools exist.** The conductor (and the person's own agent) get the fleet and orchestration tools; a
+   worker gets six (ask, report, finish, claims, contracts). A box tool is plan-then-apply (ADR 0002) on the server's own
+   provider, inside the limits (worker count, names, a copy of the conductor's box or an orchestration's own box), and a
+   plan whose risk is high is refused: that is the person's to confirm.
+3. **Orchestrations live in the task store**, under the same lock as tasks, so a feature's state and its worker task change in
+   one step and everything resumes after a restart from the feature's branch, its `wip/` branch and its session id.
+4. **Policy can only be tightened.** The person's settings are the ceiling (three worker boxes, three sub-agents each, one
+   spend cap, merges approved by the person). A rules file (`ozbox.orchestration.md`: a small front-matter block and plain
+   guidance) and the request that starts an orchestration are folded over the settings and may lower a limit, shrink what the
+   conductor may decide, move a merge approval toward the person or switch a permission off, never the reverse. What a layer
+   tried to loosen is ignored and shown. The front matter is parsed, never run; a test command is a list of words.
+5. **The conductor decides only low-risk requests of its own workers.** Never one that needs a second factor or touches
+   production, and never a protected-branch push, a pull request into one, an outbound message or spend above the threshold,
+   whatever the settings say. A merge into the base branch is an ordinary approval request, so chat, the dashboard and the
+   passkey step-up apply. The conductor acts as `conductor:<id>`, never as the person; the person's own agent is held to the
+   same limits.
+6. **Conflicts are controlled three ways.** A branch per feature; **claims** (files or areas a feature owns) checked by one
+   function before an edit or a commit, an overlap refused or sequenced; and shared **contracts** agreed first, versioned, and
+   broadcast to the features that use them. A **merge queue** on the conductor's box rebases each feature in order in a
+   separate worktree (never the person's tree), runs the project's tests, asks for the approval the policy requires, and pushes
+   without force; a conflict or a failing test goes back to the worker that owns it.
+7. **One spend cap.** At the cap the orchestration pauses and every active worker's own cap is lowered to what it has spent,
+   so the supervisor's own cap logic saves its work to its branch and asks (ADR 0014); nothing is killed unsaved.
+8. **Workers are clones by default**, supervised tasks (ADR 0014, 0019). A box the orchestration made is paused when its
+   feature merges and destroyed after the person's number of days unless kept; a box the person made is never touched.
+
+**Why.** An agent that can start other agents is useful and dangerous in the same breath: the danger is spend, collisions and
+decisions taken by software that were the person's. Putting the limits, the claims, the queue and the approvals in the server,
+and giving the agents only tools that go through them, keeps the agents free to work and the person in charge. MCP is the
+interface most engines already speak.
+
+**Costs.** The merge queue fetches a feature from the repository's remote, so a worker must push its branch (a repository with
+no remote cannot be merged this way). A tool that needs the provider waits for the request loop (up to a second). A message
+reaches a worker that is mid-turn only when its run is a conversation (the session channel a chat session uses); a worker
+doing one job has the message delivered when it ends its turn, by resuming it from its branch with the answer in its prompt.
+Sub-agent limits are given to a worker
+as an instruction and bounded by the box's admission cap, not enforced inside the engine. The stdio transport is not offered.

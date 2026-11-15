@@ -1,0 +1,47 @@
+---
+title: "Oz Box documentation"
+description: "Open-source cloud workstations for AI coding agents, and fleets of them, in your own cloud account."
+mode: center
+---
+
+An Oz Box is a cloud machine built for AI coding agents and the people who work with them. It runs your agent sessions, builds, tests and browsers on cloud hardware instead of your laptop. You reach it from any device through tunnels the box dials out to, never an open port. You can pause it, resize it, clone it, throw it away, and run many of them together.
+
+Nothing is hosted by this project. There is no Oz Box cloud, account, relay or default domain: the boxes live in **your** cloud account, the dashboard runs on **your** computer or behind **your** domain, and the keys are **yours**.
+
+<Note>
+  Oz Box is in **Beta** (0.2.0-beta.0). Beta does not mean everything is proven: every worked example is marked **Works** (exercised on a real cloud box), **Preview** (built and tested, not yet proven on a real box; expect rough edges) or **Planned** (designed, not built). The [use cases](/use-cases) say where each one stands.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Install" icon="download" href="/install">
+    One verified command, a pinned version, and how to check the download.
+  </Card>
+  <Card title="Use cases" icon="list-check" href="/use-cases">
+    Worked examples: one box, fleets, supervised agents, a secure workspace.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/cli-reference">
+    Every command, grouped by what you are trying to do.
+  </Card>
+  <Card title="Architecture and decisions" icon="sitemap" href="/architecture">
+    How the pieces fit, and the records of why it is built this way.
+  </Card>
+</CardGroup>
+
+## The core ideas
+
+- **Plan, then apply.** Every change shows exactly what it will do, with cost and risk, and asks before it does it. `--dry-run` stops after the plan. See [ADR 0002](/adr/0002-plan-then-apply).
+- **Your account, your domain, your keys.** Boxes are created in your cloud account with your credentials, and the dashboard is reached through a tunnel you bring. See [ADR 0010](/adr/0010-bring-your-own-tunnels).
+- **No inbound ports.** A box has no open port, not even SSH. See [ADR 0005](/adr/0005-no-inbound-network).
+- **Agents are supervised, not trusted.** An agent runs without `sudo`; a permission engine decides what it may do and every decision goes into a tamper-evident audit log. See [ADR 0022](/adr/0022-permission-engine-and-tamper-evident-audit-log).
+- **A fleet, not a pet.** The system disk is rebuilt from a signed image; your work lives on a separate persistent `/work` disk that survives pausing, resizing and upgrading.
+
+## Where to go next
+
+| You want to | Read |
+|---|---|
+| Get the `ozbox` command on your machine | [Install](/install) |
+| Try it without a cloud account | [One box](/use-cases/one-box) |
+| Run coding agents under supervision | [Agentic fleet](/use-cases/agentic-fleet) and [A secure workspace for AI agents](/use-cases/secure-agent-workspace) |
+| Find a command | [CLI reference](/cli-reference) |
+| Understand the security model | [Security](/security-policy) and the [decision records](/adr) |
+| See what changed | [Changelog](/changelog) |

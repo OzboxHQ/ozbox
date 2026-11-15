@@ -1,0 +1,3 @@
+# Keep builds light: two parallel jobs. Override with CARGO_BUILD_JOBS on bigger machines.
+[build]
+jobs = 2

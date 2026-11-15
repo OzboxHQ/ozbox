@@ -1,0 +1,95 @@
+---
+title: "CLI reference"
+description: "Every ozbox command, grouped by what you are trying to do, with the options that matter."
+---
+
+Run `ozbox <command> --help` for every option of a command. This page lists what each command is for.
+
+## Options every change takes
+
+Every command that changes something follows [plan, then apply](/adr/0002-plan-then-apply): it shows the plan, with cost and risk, and asks before it acts.
+
+| Option | Effect |
+|---|---|
+| `--dry-run` | Show the plan and stop. Nothing changes. |
+| `--yes` | Skip the question and apply. Not enough for a change that cannot be undone: that still asks you to type the box name. |
+| `--json` | Print machine-readable output instead of text. |
+| `--provider <name>` | Which provider to use. The default is the file-backed demo provider; `aws` and `hcloud` (Hetzner Cloud) are real clouds. |
+
+## Boxes
+
+| Command | What it does |
+|---|---|
+| `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS; shown in the plan and created only when you approve), budget, alerts. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets. A budget is required before any box can be created on a real cloud (`--budget <dollars a month>`). |
+| `ozbox create <name>` | Create a box. Options: `--size` (XS, S, M, L, XL, XXL, GPU-S, GPU-L), `--disk <GB>` for `/work`, `--image <id>` (default, Preview: the newest verified Oz image, yours or the project's public one for your region), `--tools`, `--profile`, `--label key=value` (repeatable). |
+| `ozbox list` · `ozbox show <name>` | List boxes, or show one. |
+| `ozbox sizes` · `ozbox providers` | The size catalogue and the machine type each provider maps it to, and what each provider can do. |
+| `ozbox pause <name>` · `ozbox resume <name>` | Stop a box and keep `/work` (you pay only for storage), or start it again. |
+| `ozbox resize <name>` | Change the size, grow the `/work` disk, or both. A disk can grow, never shrink. (Preview) A resize that stops the box lists what will end, ends its runs cleanly and saves uncommitted work first (a hidden snapshot, nothing touched); `--strict-checkpoint` refuses to stop it unless it was fully ready; `--legacy-checkpoint` uses an older agent's own checkpoint, which writes a visible branch and pushes it where the box is set to push. |
+| `ozbox snapshot <name>` · `ozbox clone <name>` | Snapshot `/work`, or create a new box from another box's latest snapshot. |
+| `ozbox destroy <name>` | Delete a box and its `/work` disk. Asks you to type the name and keeps a final snapshot unless told not to. |
+| `ozbox upgrade <name>` | Replace the system disk from a newer signed image, keep `/work`, then run the self-test. The plan names the kind of upgrade the two signed releases call for (live update, replace, or in place for a stopped box) and why (`--json`: `upgrade_kind`, with `called_for` and `carried_out`); every upgrade is still carried out as a replace, so `carried_out` is always `replace`. An image whose signature cannot be verified is refused unless `--allow-unverified-image` is given. The plan says what happens to the box's secrets store; an upgrade that would lose it (a key kept in a file with no escrow), or a box that cannot be asked, is refused unless `--accept-new-secrets-store` is given. On AWS, a box already on the image has its machine replaced from the same image when the provider's record of its first boot (a tag the box cannot change) is not this program's, or is missing, or the box's own answer disagrees; `--reprovision` replaces it in any case, and an unfinished upgrade is finished first. On Hetzner an upgrade to a newer image replaces the server with this program's first boot; a box already on the image cannot have its first boot checked or repaired in place, and the upgrade says so. A signed AWS image whose release was built with a different first-boot configuration than this program renders is refused unless `--allow-first-boot-mismatch` is given (`ozbox create` checks the same). |
+| `ozbox infra` | The box modules and first-boot configuration this program renders: its version, their hashes (`--json`) and the folder in use. The program carries its own copy; `module_dir` in the config is for developing the modules and needs `dev_modules = true` (or `--dev-modules`). |
+| `ozbox adopt-fleet-key <name>` | AWS: move a box's secrets store from a key kept in a file on its system disk to your fleet's KMS key (`secrets_key_arn` and `fleet` under `[aws]`), in place, so an upgrade keeps the store and nothing is entered again. The box's role is allowed to use the key for the box's own secrets, the box re-wraps its own store (a copy while its service keeps running, then a short stop), and the box keeps its key file until the command has read the box's state as root through AWS Systems Manager (your AWS sign-in needs the policy the `aws-adopt-command` module outputs (`ozbox init` writes it to `operator-adopt-policy.json`): `ssm:SendCommand` for your fleet's one document, which the program pins by its SHA-256, and `ssm:GetCommandInvocation`; never a shell, and no `ssm:CancelCommand`) and written the label that `ozbox upgrade` reads; until then an upgrade is refused. `--dry-run` shows the change; run it again if it stops; `--cancel` has the box record the cancel and take its store back under the file key, and removes the grant only after the box says it has. On a box that lost its label, `--cancel` offers the copy made before the move (it loses what was saved since) only when the cloud's tag list shows no label and the key service itself refuses the box, and you type the box's name. A box whose program is older than the feature is refused before anything changes: upgrade it first. |
+| `ozbox adopt <name>` | Rebuild a box's infrastructure state from its cloud resources when the state is missing (AWS). It reads the cloud and never changes it. |
+| `ozbox admin <name> -- <action>` | The one root path: `reown`, `reinstall-ozboxd`, `restart-services`, `collect-logs`, `enable-linger`, `ensure-supervisor`, `configure-box-secrets`, `recover-secrets` or `host-guard` (`host-guard memory install` puts the memory guard on a box made from this release that is already running, with nothing restarted; an older box gets it through the machine replace of its upgrade; `host-guard helper refresh` brings the root helper in step with the installed release). There is no shell; each action is recorded on the box, and the ones that need an approval say so. `recover-secrets` signs the box's one-time challenge with the key this computer pinned when it made the box. See [ADR 0011](/adr/0011-no-sudo-one-audited-root-path). |
+| `ozbox capped [--max-gib N] [--soft] -- <command>` | On a box: run a command inside a memory cap (a production build, a test browser) so it can slow or end itself but never stall the box or kill your terminal. It never runs the command uncapped. See [ADR 0045](/adr/0045-box-memory-guard). |
+| `ozbox backup` | List, run, restore, delete and schedule backups of `/work`. |
+| `ozbox tools` · `ozbox profile` | Install tools from the catalogue; save a box's tools and settings as a profile and create boxes from it. |
+
+## Getting in
+
+| Command | What it does |
+|---|---|
+| `ozbox connect <name>` | Say how to reach a box. With `--ssh` it prints the SSH entry; with `--ssh --write` it adds it to your SSH configuration, so terminals and desktop editors reach the box through your provider's tunnel with no open port. |
+| `ozbox ide <name>` | The web IDE (VS Code in the browser), on `http://localhost` or on your own address behind your sign-in. |
+| `ozbox desktop <name>` | A desktop with Firefox, the same way. |
+| `ozbox open <name> --in <editor>` | Open `/work/repos` in a desktop editor over SSH: `vscode`, `cursor`, `antigravity`, `windsurf`, `zed` or `jetbrains`. |
+| `ozbox ps <name>` | What is running on a box: tmux sessions, coding agents, listening servers. Stopping one is a change and is confirmed first. |
+
+## Agents and their guardrails
+
+| Command | What it does |
+|---|---|
+| `ozbox run start\|list\|show\|logs\|cancel\|retry\|resume` | Supervised agent runs with time, token and spend caps. A run that hits a cap saves its work and asks. |
+| `ozbox approvals list\|approve\|deny` | What agents ask to do, and your answer. |
+| `ozbox permissions show\|mode\|grant\|revoke\|check` | The default mode, the active rules, and time-boxed Production grants. |
+| `ozbox audit list\|verify\|seal` | The tamper-evident audit log, and a check that nothing in it was changed. See [ADR 0022](/adr/0022-permission-engine-and-tamper-evident-audit-log). |
+| `ozbox memory` · `ozbox skills` | Notes in git that agents read once you approve them; skills usable only after you approve their exact files. |
+| `ozbox orch` | One conductor agent hands features to worker boxes, with claims, contracts, a mailbox and a merge queue. |
+| `ozbox agent-mcp install\|remove\|status` | Give the coding agents on a box (Claude Code, Codex, Gemini CLI, OpenCode) the Oz Box tools, browser included: one entry in each engine's settings in your home folder, safe to run again, your other servers untouched. A box's setup runs it for you. Turn it off for everyone in the dashboard (the box's page). See [use the browser from Claude Code](/use-cases/browser-on-the-box). |
+| `ozbox schedule` · `ozbox trigger` | Agent runs on a schedule in your time zone, or started by signed webhooks. |
+| `ozbox models` · `ozbox cost` | Your model providers and which engine uses which model; usage and prices; the real cloud bill beside the estimate, and what in the account nothing uses. |
+
+## Secrets
+
+| Command | What it does |
+|---|---|
+| `ozbox secrets` | Report on the encrypted secret store (names and ages, never values), rotate its keys, import a project's `.env` keys (`--public NAME`, repeatable, marks a public URL or anonymous key that a declared command may receive as plain environment; it is refused for anything that looks like a secret; any value is stored, including spaces, quotes, JSON and several lines; only a blank value, a NUL byte, a value over 96 KB or an unclosed quote is skipped and listed by name). `--dry-run` stops every `secrets` command that changes something: `import` shows its preview, `approve` makes no code. `ozbox secrets status` says how many values are stored encoded. `ozbox secrets ingress pin\|escrow\|setup-code --box <name>`: the sealed route to a box's secrets service. `ozbox secrets ingress requests --box <name> list\|show\|approve\|deny\|keys`: the change requests a box is waiting on, decided from this computer over the sealed route; `approve` needs the whole 64-digit digest `show` prints, and this computer's key is a software key, so it decides only what a member may, never an owner-only or Production change (use the dashboard and your passkey for those). See [ADR 0041](/adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on). |
+| `ozbox env run\|policy` | Run a named command with only the secrets a project declared it may receive, on a closed network except the hosts it declared. `--pass NAME=value` gives a declared plain value; `--start`, `--stop` and `--status` manage a declared service (one that receives a secret gets it as a systemd credential, under the rules of a secret command, and a route to the project's declared `egress` hosts through a proxy unit that ends with it; `tcp` destinations are not given to a service yet); a declaration's `public` names receive values marked with `ozbox secrets import --public NAME`; `env policy pin --dir DIR --commit SHA [--entry FILE] [--tree PATH] [--tool NAME[=DIR] --release VERSION] [--browser NAME --browser-cache DIR | --revision KIND=N ...] [--arch amd64|arm64] [FILE...]` prints the digests to pin: files, folders, a script's whole import closure, a tool (fetched from the catalog's Linux release and checked against its checksum), browser revisions (Playwright's Linux build). Run it on your computer, in a clean checkout at the commit the box reports; on a box it refuses unless you add `--on-box`. |
+| `ozbox guard install` | Git hooks that stop a commit or push containing a key, and say the file, the line and the rule. On a box, a stopped change files an approval request and waits for a person to decide it on the dashboard; a code made for that exact change (`ozbox secrets approve --scope guard-override --project ... --env ...`) also works. A public web address or a `NEXT_PUBLIC_*`-style value is not a key (unless it has a user name and password, a query, or is a chat webhook) (a bare `PUBLIC_*` name is not taken as public; mark such a value with `ozbox secrets import --public NAME`), and a stored value shorter than 12 characters is not looked for. The hooks read the lines a change adds (binary and renamed files, merges and type changes included), the names of its files and the messages and headers of its commits and tags; a push is read against the remote it goes to (only when it pushes to the address it fetches from), and pushes up to 768 MiB are read in batches. A box with no second factor enrolled refuses an override and says how to enrol one. `ozbox guard wait <request-id>` waits, on a box, for a change request to be decided (Ctrl-C stops waiting and leaves the request, which lasts 30 minutes from when it was filed; a restarting service is waited for about a minute) and prints its digest when it is approved. |
+| `ozbox box-secrets <name>` | Declare which non-production keys a box reads from your cloud's parameter store, into memory only. |
+
+## The dashboard
+
+| Command | What it does |
+|---|---|
+| `ozbox serve` | Serve the web dashboard on this computer only (loopback, with a random access token in the address). With `--public-url` and `--tunnel` it serves behind your own domain with sign-in instead of the token. |
+| `ozbox tunnel setup\|status\|remove` | The outbound tunnel that reaches the dashboard from outside, with your own account. Supported: `cloudflare`, `tailscale-funnel`, `tailscale-serve`, `caddy`, `ngrok`. On a box whose dashboard has a second factor, `tunnel setup --approval CODE` (or `--approval-stdin`, the code on the line after the token) changes the token; the code comes from `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin`. |
+| `ozbox auth role <id> <role>` | Set a person's role from the command line, for an operator who cannot do it at the dashboard (every owner lost their passkey). Stop the dashboard first and start it again after; it refuses to leave the dashboard with no owner. |
+| `ozbox auth init` | The sign-in settings for a dashboard on a shared machine: passkeys, or GitHub or Google followed by an authenticator code. Each `--person` can carry `role=owner`, `role=member` or `role=viewer`; the first person is the owner and the rest are members unless they say otherwise. |
+| `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own: it reports success only once the box's root helper runs it that way, never as the box user. It goes down whenever that box is paused or upgraded. A later run with a new tunnel token changes only the token; on a box with a second factor add `--approval CODE` (or `--approval-stdin`) from `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin`, with the same token piped in; a box from an image before this release takes a code made without `--token-stdin`. The public address is not changed by a later run. |
+| `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
+| `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
+| `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
+
+```bash
+ozbox auth init --origin https://dash.example.com --person you,label=You
+printf '%s\n' "$TUNNEL_TOKEN" | ozbox tunnel setup cloudflare --public-url https://dash.example.com --token-stdin
+ozbox serve --public-url https://dash.example.com --tunnel cloudflare
+```
+
+## See also
+
+- [Install](/install) for getting the command.
+- [Use cases](/use-cases) for each command in a worked example, marked Works, Preview or Planned.

@@ -1,0 +1,38 @@
+# gitleaks configuration: the default rules at full strength, plus reviewed exceptions.
+# Exceptions are keyed on the fixture VALUE (or one exact file), never on a commit hash, so a rebase or history
+# rewrite cannot silently stale them, and never on a directory. Every value below was read and is a made-up test
+# fixture, not a credential.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "reviewed exceptions (owner, 2026-11-13; fixture values 2026-11-14)"
+# Recorded test vectors from real OpenSSH and Chrome, signed with throwaway test keys. A credential_id is a public
+# identifier, not a secret, and the recorded signatures are bound to these values, so they cannot be rebuilt at run time.
+# Exactly this one file; any other file, including a new one in testdata/, is scanned as usual.
+paths = ['''^crates/ozbox-core/testdata/real_tool_vectors\.json$''']
+# Matched against the finding's secret, whole value. Anchored, so a real credential that merely starts like one of
+# these is still reported.
+regexes = [
+  # placeholder tokens in Rust unit tests and the dashboard e2e spec
+  '''^abcdef123456$''',
+  '''^abcdefgh-12345$''',
+  '''^pw0123456789abcdef$''',
+  '''^0123456789abcdef(0123)?$''',
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^abcdef0123456789abcdef0123456789$''',
+  '''^fedcba9876543210fedcba9876543210$''',
+  # Stripe-shaped strings used to prove redaction; the letters are a counting sequence, not a key
+  '''^sk_live_(abc123|abcdefghijklmnopqrstuvwx(yz0123)?|abcdef0123456789|0123456789abcdefghijklmn)$''',
+  # tokens carrying the word SENTINEL: planted so a test can prove they never leak
+  '''^hvs\.SENTINEL-0123456789abcdef$''',
+  '''^SENTINEL3abcdef$''',
+  '''^eyJhIjoiU0VOVElORUwiLCJ0IjoieCJ9$''',
+  '''^eyJhIjoiU0VOVElORUwtVE9LRU4iLCJ0IjoieCIsInMiOiJ5In0=$''',
+  # the WebSocket handshake sample nonce from RFC 6455 section 1.3
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',
+  # i18n message keys in the dashboard, not secrets at all
+  '''^policy\.expiry_[0-9]+[mh]$''',
+  # truncated PEM-shaped strings in unit tests (the body is a few made-up characters, not a key)
+  '''^-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC==\\n(abcdEFGH12345678|PEMBODYLINE0123456789abcdef)=\\n-----END PRIVATE KEY-----$''',
+]

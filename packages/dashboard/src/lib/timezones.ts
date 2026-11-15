@@ -1,0 +1,356 @@
+// Time zone options for the settings picker. Uses the runtime IANA database via
+// Intl.supportedValuesOf('timeZone') so the list is exhaustive and always current,
+// with a curated abbreviation map for friendlier labels (e.g. "America/New York
+// (EST/EDT)") and a static fallback for engines that lack supportedValuesOf.
+
+export interface TimezoneOption {
+  value: string
+  label: string
+}
+
+// Zone → common abbreviation shown as a suffix. Not every IANA zone needs an entry;
+// zones without one simply render as "Region/City" with no suffix. Kept broad but
+// pragmatic.
+const TZ_ABBREVIATIONS: Record<string, string> = {
+  // North America
+  "America/New_York": "EST/EDT",
+  "America/Detroit": "EST/EDT",
+  "America/Indiana/Indianapolis": "EST/EDT",
+  "America/Kentucky/Louisville": "EST/EDT",
+  "America/Chicago": "CST/CDT",
+  "America/Denver": "MST/MDT",
+  "America/Boise": "MST/MDT",
+  "America/Phoenix": "MST",
+  "America/Los_Angeles": "PST/PDT",
+  "America/Anchorage": "AKST/AKDT",
+  "America/Adak": "HST/HDT",
+  "Pacific/Honolulu": "HST",
+  "America/Toronto": "EST/EDT",
+  "America/Vancouver": "PST/PDT",
+  "America/Montreal": "EST/EDT",
+  "America/Winnipeg": "CST/CDT",
+  "America/Regina": "CST",
+  "America/Edmonton": "MST/MDT",
+  "America/Halifax": "AST/ADT",
+  "America/St_Johns": "NST/NDT",
+  "America/Whitehorse": "MST",
+  "America/Yellowknife": "MST/MDT",
+  "America/Mexico_City": "CST",
+  "America/Tijuana": "PST/PDT",
+  "America/Cancun": "EST",
+  "America/Monterrey": "CST",
+  // Caribbean & Central America
+  "America/Port_of_Spain": "AST",
+  "America/Barbados": "AST",
+  "America/Jamaica": "EST",
+  "America/Puerto_Rico": "AST",
+  "America/Nassau": "EST/EDT",
+  "America/Aruba": "AST",
+  "America/Curacao": "AST",
+  "America/Martinique": "AST",
+  "America/Guadeloupe": "AST",
+  "America/Grenada": "AST",
+  "America/St_Lucia": "AST",
+  "America/St_Vincent": "AST",
+  "America/St_Kitts": "AST",
+  "America/Antigua": "AST",
+  "America/Dominica": "AST",
+  "America/Tortola": "AST",
+  "America/Panama": "EST",
+  "America/Costa_Rica": "CST",
+  "America/Guatemala": "CST",
+  "America/El_Salvador": "CST",
+  "America/Tegucigalpa": "CST",
+  "America/Managua": "CST",
+  "America/Belize": "CST",
+  "America/Havana": "CST/CDT",
+  "America/Port-au-Prince": "EST/EDT",
+  "America/Santo_Domingo": "AST",
+  // South America
+  "America/Sao_Paulo": "BRT/BRST",
+  "America/Recife": "BRT",
+  "America/Fortaleza": "BRT",
+  "America/Manaus": "AMT",
+  "America/Cuiaba": "AMT",
+  "America/Belem": "BRT",
+  "America/Buenos_Aires": "ART",
+  "America/Argentina/Buenos_Aires": "ART",
+  "America/Bogota": "COT",
+  "America/Lima": "PET",
+  "America/Santiago": "CLT/CLST",
+  "America/Caracas": "VET",
+  "America/Guayaquil": "ECT",
+  "America/Guyana": "GYT",
+  "America/Paramaribo": "SRT",
+  "America/Cayenne": "GFT",
+  "America/Montevideo": "UYT",
+  "America/Asuncion": "PYT/PYST",
+  "America/La_Paz": "BOT",
+  // Europe
+  "Europe/London": "GMT/BST",
+  "Europe/Dublin": "GMT/IST",
+  "Europe/Lisbon": "WET/WEST",
+  "Europe/Reykjavik": "GMT",
+  "Europe/Paris": "CET/CEST",
+  "Europe/Berlin": "CET/CEST",
+  "Europe/Madrid": "CET/CEST",
+  "Europe/Rome": "CET/CEST",
+  "Europe/Amsterdam": "CET/CEST",
+  "Europe/Brussels": "CET/CEST",
+  "Europe/Zurich": "CET/CEST",
+  "Europe/Vienna": "CET/CEST",
+  "Europe/Stockholm": "CET/CEST",
+  "Europe/Oslo": "CET/CEST",
+  "Europe/Copenhagen": "CET/CEST",
+  "Europe/Warsaw": "CET/CEST",
+  "Europe/Prague": "CET/CEST",
+  "Europe/Budapest": "CET/CEST",
+  "Europe/Belgrade": "CET/CEST",
+  "Europe/Zagreb": "CET/CEST",
+  "Europe/Bratislava": "CET/CEST",
+  "Europe/Ljubljana": "CET/CEST",
+  "Europe/Luxembourg": "CET/CEST",
+  "Europe/Malta": "CET/CEST",
+  "Europe/Tirane": "CET/CEST",
+  "Europe/Sarajevo": "CET/CEST",
+  "Europe/Skopje": "CET/CEST",
+  "Europe/Helsinki": "EET/EEST",
+  "Europe/Bucharest": "EET/EEST",
+  "Europe/Athens": "EET/EEST",
+  "Europe/Kiev": "EET/EEST",
+  "Europe/Sofia": "EET/EEST",
+  "Europe/Riga": "EET/EEST",
+  "Europe/Tallinn": "EET/EEST",
+  "Europe/Vilnius": "EET/EEST",
+  "Europe/Chisinau": "EET/EEST",
+  "Europe/Istanbul": "TRT",
+  "Europe/Minsk": "MSK",
+  "Europe/Moscow": "MSK",
+  "Europe/Kaliningrad": "EET",
+  "Atlantic/Canary": "WET/WEST",
+  "Atlantic/Azores": "AZOT/AZOST",
+  "Atlantic/Reykjavik": "GMT",
+  // Africa
+  "Africa/Lagos": "WAT",
+  "Africa/Douala": "WAT",
+  "Africa/Kinshasa": "WAT",
+  "Africa/Brazzaville": "WAT",
+  "Africa/Luanda": "WAT",
+  "Africa/Libreville": "WAT",
+  "Africa/Malabo": "WAT",
+  "Africa/Bangui": "WAT",
+  "Africa/Ndjamena": "WAT",
+  "Africa/Niamey": "WAT",
+  "Africa/Porto-Novo": "WAT",
+  "Africa/Accra": "GMT",
+  "Africa/Dakar": "GMT",
+  "Africa/Abidjan": "GMT",
+  "Africa/Bamako": "GMT",
+  "Africa/Ouagadougou": "GMT",
+  "Africa/Conakry": "GMT",
+  "Africa/Freetown": "GMT",
+  "Africa/Monrovia": "GMT",
+  "Africa/Banjul": "GMT",
+  "Africa/Bissau": "GMT",
+  "Africa/Nouakchott": "GMT",
+  "Africa/Lome": "GMT",
+  "Africa/Casablanca": "WET",
+  "Africa/Algiers": "CET",
+  "Africa/Tunis": "CET",
+  "Africa/Tripoli": "EET",
+  "Africa/Cairo": "EET/EEST",
+  "Africa/Khartoum": "CAT",
+  "Africa/Juba": "CAT",
+  "Africa/Johannesburg": "SAST",
+  "Africa/Maseru": "SAST",
+  "Africa/Mbabane": "SAST",
+  "Africa/Windhoek": "CAT",
+  "Africa/Gaborone": "CAT",
+  "Africa/Nairobi": "EAT",
+  "Africa/Addis_Ababa": "EAT",
+  "Africa/Dar_es_Salaam": "EAT",
+  "Africa/Kampala": "EAT",
+  "Africa/Mogadishu": "EAT",
+  "Africa/Asmara": "EAT",
+  "Africa/Djibouti": "EAT",
+  "Africa/Kigali": "CAT",
+  "Africa/Bujumbura": "CAT",
+  "Africa/Lusaka": "CAT",
+  "Africa/Harare": "CAT",
+  "Africa/Blantyre": "CAT",
+  "Africa/Maputo": "CAT",
+  "Indian/Antananarivo": "EAT",
+  "Indian/Mauritius": "MUT",
+  // Middle East
+  "Asia/Dubai": "GST",
+  "Asia/Muscat": "GST",
+  "Asia/Riyadh": "AST",
+  "Asia/Qatar": "AST",
+  "Asia/Bahrain": "AST",
+  "Asia/Kuwait": "AST",
+  "Asia/Baghdad": "AST",
+  "Asia/Aden": "AST",
+  "Asia/Tehran": "IRST/IRDT",
+  "Asia/Amman": "EET/EEST",
+  "Asia/Beirut": "EET/EEST",
+  "Asia/Damascus": "EET/EEST",
+  "Asia/Gaza": "EET/EEST",
+  "Asia/Jerusalem": "IST/IDT",
+  // Caucasus & Central Asia
+  "Asia/Baku": "AZT",
+  "Asia/Yerevan": "AMT",
+  "Asia/Tbilisi": "GET",
+  "Asia/Kabul": "AFT",
+  "Asia/Ashgabat": "TMT",
+  "Asia/Dushanbe": "TJT",
+  "Asia/Tashkent": "UZT",
+  "Asia/Bishkek": "KGT",
+  "Asia/Almaty": "ALMT",
+  // South & Southeast Asia
+  "Asia/Karachi": "PKT",
+  "Asia/Kolkata": "IST",
+  "Asia/Colombo": "IST",
+  "Asia/Kathmandu": "NPT",
+  "Asia/Thimphu": "BTT",
+  "Asia/Dhaka": "BST",
+  "Asia/Yangon": "MMT",
+  "Asia/Bangkok": "ICT",
+  "Asia/Phnom_Penh": "ICT",
+  "Asia/Vientiane": "ICT",
+  "Asia/Ho_Chi_Minh": "ICT",
+  "Asia/Jakarta": "WIB",
+  "Asia/Makassar": "WITA",
+  "Asia/Jayapura": "WIT",
+  "Asia/Singapore": "SGT",
+  "Asia/Kuala_Lumpur": "MYT",
+  "Asia/Brunei": "BNT",
+  "Asia/Manila": "PHT",
+  "Asia/Dili": "TLT",
+  "Indian/Maldives": "MVT",
+  // East Asia
+  "Asia/Hong_Kong": "HKT",
+  "Asia/Macau": "CST",
+  "Asia/Shanghai": "CST",
+  "Asia/Taipei": "CST",
+  "Asia/Tokyo": "JST",
+  "Asia/Seoul": "KST",
+  "Asia/Pyongyang": "KST",
+  "Asia/Ulaanbaatar": "ULAT",
+  // Russia (Asian)
+  "Asia/Yekaterinburg": "YEKT",
+  "Asia/Omsk": "OMST",
+  "Asia/Novosibirsk": "NOVT",
+  "Asia/Krasnoyarsk": "KRAT",
+  "Asia/Irkutsk": "IRKT",
+  "Asia/Vladivostok": "VLAT",
+  "Asia/Magadan": "MAGT",
+  "Asia/Kamchatka": "PETT",
+  // Oceania
+  "Australia/Perth": "AWST",
+  "Australia/Darwin": "ACST",
+  "Australia/Adelaide": "ACST/ACDT",
+  "Australia/Brisbane": "AEST",
+  "Australia/Sydney": "AEST/AEDT",
+  "Australia/Melbourne": "AEST/AEDT",
+  "Australia/Hobart": "AEST/AEDT",
+  "Pacific/Auckland": "NZST/NZDT",
+  "Pacific/Chatham": "CHAST/CHADT",
+  "Pacific/Fiji": "FJT",
+  "Pacific/Guam": "ChST",
+  "Pacific/Saipan": "ChST",
+  "Pacific/Port_Moresby": "PGT",
+  "Pacific/Noumea": "NCT",
+  "Pacific/Tahiti": "TAHT",
+  "Pacific/Apia": "WSST",
+  "Pacific/Tongatapu": "TOT",
+  "Pacific/Pago_Pago": "SST",
+  "Pacific/Rarotonga": "CKT",
+  "Pacific/Palau": "PWT",
+  "Pacific/Norfolk": "NFT",
+}
+
+function formatLabel(tz: string): string {
+  if (tz === "UTC") return "UTC — Coordinated Universal Time"
+  const abbr = TZ_ABBREVIATIONS[tz]
+  return tz.replace(/_/g, " ") + (abbr ? ` (${abbr})` : "")
+}
+
+// Static fallback for JS engines without Intl.supportedValuesOf (older Safari, some
+// embedded runtimes). Broad regional coverage; the runtime path above is preferred.
+const FALLBACK_TIMEZONES: string[] = [
+  "UTC",
+  // Africa
+  "Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Cairo",
+  "Africa/Casablanca", "Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Douala", "Africa/Harare",
+  "Africa/Johannesburg", "Africa/Kampala", "Africa/Khartoum", "Africa/Kigali", "Africa/Kinshasa",
+  "Africa/Lagos", "Africa/Lusaka", "Africa/Maputo", "Africa/Nairobi", "Africa/Tripoli",
+  "Africa/Tunis", "Africa/Windhoek",
+  // North America
+  "America/Anchorage", "America/Cancun", "America/Chicago", "America/Denver", "America/Detroit",
+  "America/Edmonton", "America/Halifax", "America/Los_Angeles", "America/Mexico_City",
+  "America/Montreal", "America/New_York", "America/Phoenix", "America/Regina", "America/St_Johns",
+  "America/Tijuana", "America/Toronto", "America/Vancouver", "America/Winnipeg", "Pacific/Honolulu",
+  // Caribbean & Central America
+  "America/Aruba", "America/Barbados", "America/Belize", "America/Costa_Rica", "America/Curacao",
+  "America/El_Salvador", "America/Guadeloupe", "America/Guatemala", "America/Havana",
+  "America/Jamaica", "America/Managua", "America/Martinique", "America/Nassau", "America/Panama",
+  "America/Port-au-Prince", "America/Port_of_Spain", "America/Puerto_Rico", "America/Santo_Domingo",
+  "America/Tegucigalpa",
+  // South America
+  "America/Asuncion", "America/Bogota", "America/Buenos_Aires", "America/Caracas", "America/Cayenne",
+  "America/Guayaquil", "America/Guyana", "America/La_Paz", "America/Lima", "America/Manaus",
+  "America/Montevideo", "America/Paramaribo", "America/Recife", "America/Santiago", "America/Sao_Paulo",
+  // Europe
+  "Atlantic/Azores", "Atlantic/Canary", "Europe/Amsterdam", "Europe/Athens", "Europe/Belgrade",
+  "Europe/Berlin", "Europe/Brussels", "Europe/Bucharest", "Europe/Budapest", "Europe/Copenhagen",
+  "Europe/Dublin", "Europe/Helsinki", "Europe/Istanbul", "Europe/Kiev", "Europe/Lisbon",
+  "Europe/London", "Europe/Luxembourg", "Europe/Madrid", "Europe/Malta", "Europe/Minsk",
+  "Europe/Moscow", "Europe/Oslo", "Europe/Paris", "Europe/Prague", "Europe/Reykjavik",
+  "Europe/Riga", "Europe/Rome", "Europe/Sofia", "Europe/Stockholm", "Europe/Tallinn",
+  "Europe/Vienna", "Europe/Vilnius", "Europe/Warsaw", "Europe/Zurich",
+  // Middle East
+  "Asia/Amman", "Asia/Baghdad", "Asia/Bahrain", "Asia/Beirut", "Asia/Damascus", "Asia/Dubai",
+  "Asia/Jerusalem", "Asia/Kuwait", "Asia/Muscat", "Asia/Qatar", "Asia/Riyadh", "Asia/Tehran",
+  // Caucasus & Central Asia
+  "Asia/Almaty", "Asia/Ashgabat", "Asia/Baku", "Asia/Bishkek", "Asia/Dushanbe", "Asia/Kabul",
+  "Asia/Tashkent", "Asia/Tbilisi", "Asia/Yerevan",
+  // South & Southeast Asia
+  "Asia/Bangkok", "Asia/Brunei", "Asia/Colombo", "Asia/Dhaka", "Asia/Dili", "Asia/Ho_Chi_Minh",
+  "Asia/Jakarta", "Asia/Karachi", "Asia/Kathmandu", "Asia/Kolkata", "Asia/Kuala_Lumpur",
+  "Asia/Makassar", "Asia/Manila", "Asia/Phnom_Penh", "Asia/Singapore", "Asia/Thimphu",
+  "Asia/Vientiane", "Asia/Yangon",
+  // East Asia
+  "Asia/Hong_Kong", "Asia/Macau", "Asia/Pyongyang", "Asia/Seoul", "Asia/Shanghai", "Asia/Taipei",
+  "Asia/Tokyo", "Asia/Ulaanbaatar",
+  // Russia (Asian)
+  "Asia/Irkutsk", "Asia/Kamchatka", "Asia/Krasnoyarsk", "Asia/Magadan", "Asia/Novosibirsk",
+  "Asia/Omsk", "Asia/Vladivostok", "Asia/Yekaterinburg",
+  // Oceania
+  "Australia/Adelaide", "Australia/Brisbane", "Australia/Darwin", "Australia/Hobart",
+  "Australia/Melbourne", "Australia/Perth", "Australia/Sydney", "Pacific/Apia", "Pacific/Auckland",
+  "Pacific/Chatham", "Pacific/Fiji", "Pacific/Guam", "Pacific/Noumea", "Pacific/Pago_Pago",
+  "Pacific/Port_Moresby", "Pacific/Tahiti", "Pacific/Tongatapu",
+]
+
+// Build the full, sorted timezone option list. Prefers the runtime IANA database so
+// every supported zone is selectable; falls back to the curated static list.
+/** The zone suggested before the person has chosen: the browser's own, else UTC. */
+export function browserTimeZone(): string {
+  try {
+    const z = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return z || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+export function getTimezoneOptions(): TimezoneOption[] {
+  let zones: string[]
+  try {
+    zones = Intl.supportedValuesOf("timeZone")
+    if (!zones.includes("UTC")) zones = ["UTC", ...zones]
+  } catch {
+    zones = FALLBACK_TIMEZONES
+  }
+  return zones.map((tz) => ({ value: tz, label: formatLabel(tz) }))
+}

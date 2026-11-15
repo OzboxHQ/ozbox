@@ -1,0 +1,143 @@
+# 0039 — Roles at the dashboard: owner, member and viewer, decided by the permission engine; one rule for a dashboard with no sign-in on a box
+
+**Decision.** A person who can sign in to the dashboard has one of three roles, every request is judged by it on the server, and
+the page shows only what the role may do. Separately, one function decides whether a request counts as coming from a person who
+just proved who they are, and it is used by every route that asks for that.
+
+1. **Three roles.**
+
+   | Role | May |
+   |---|---|
+   | **owner** | everything: the settings, permissions, the secrets policy, costs, and who has which role |
+   | **member** | work: start and stop runs, approve what agents ask, watch and take over a browser, use a terminal, the IDE and the files of a box, change a box. Not the settings (the browser's included), permissions, the secrets policy, costs or people |
+   | **viewer** | look: boxes, runs, costs, the audit log. Nothing that acts, and not the pictures of a browser, the files or the terminal of a box |
+
+   Why these three: they are the three questions a team asks ("who sets the rules?", "who does the work?", "who may only
+   look?"), and each differs from the next by something that matters (money and policy; acting at all). There is no separate
+   admin: a second kind of owner would need its own line between what it and an owner may do, and nobody has asked for one. A
+   viewer cannot watch a browser because its pictures are what is on a person's screen: signed-in sessions, mail, a card form.
+
+2. **A role is a set of deny rules for the permission engine** (ADR 0022). `ozbox_core::roles` turns a role into rules and
+   asks `permissions::decide`, the same function every other actor goes through; a deny rule wins there, so the role is a
+   ceiling that nothing else (a mode, an allow rule) can lift. Only a deny refuses: an `ask` is for agents, and a person at the
+   dashboard is the one being asked. Three acts that only a person at the dashboard does are new actions (`browser.watch`,
+   `browser.control`, `people.manage`); they are kept out of `Action::ALL`, so the rule editor does not offer an agent's rule
+   for them. There is no second mechanism.
+
+3. **One gate, in the one place every request passes.** `App::guard` is called for the API, the file transfers and the terminal
+   streams. After the sign-in is checked it asks `roles::classify` what the request needs (only a sign-in, or one action) and
+   asks the role. A request that is not in the table needs an owner if it changes anything, so a route added later is closed
+   to members and viewers until somebody opens it; reading is open to every role. A refusal is `403 role_forbidden` and
+   names the role and the act ("you are signed in as a viewer, and a viewer cannot watch a browser session. Ask an owner").
+   A refused change is a `permission.deny` entry in the audit chain (the act, the role, the rule; no route, no id); a refused look
+   is not recorded, so a page that polls cannot fill the chain.
+   The code hosts (a box's IDE and desktop on their own addresses) are reached through the dashboard's sign-in and not through
+   the API, so they ask the same question: a viewer is not handed a ticket, and a role taken away stops the next request to a
+   host, not only the next sign-in.
+
+   Three kinds of request do not pass `guard`, and each is judged on its own terms, from an explicit list that a test holds:
+   - **`/auth/*`** is answered by the sign-in router before the guard. Every route it answers is on one table
+     (`AUTH_ROUTES`: public to sign in, a person's own account, or an owner's); a route not on the table is refused, and a
+     test fails if the router answers a route the table does not name. Changing how people sign in (the GitHub and Google
+     client ids and secret) is an owner's act with a fresh passkey, and the Account page offers the forms to owners only; the
+     accounts people sign in with are shown to owners only.
+   - **`/hooks/*`** (a signed trigger, WhatsApp) and the IDE hosts' entry have their own proof, and are on the list in
+     `roles.rs` with the reason; a test fails if `App::handle` answers anything else before the guard, or if an API route root
+     has not been decided in the table.
+   - **Chat channels** (Slack, WhatsApp, Telegram) act as the person they are linked to. Each chat act is judged by the
+     person's role as it is now (starting, sending, pausing or stopping a run needs the right to start runs; typing into a
+     session on a box needs the right to use a terminal; approving needs the right to decide approvals), and somebody who is no
+     longer on the list is refused outright, so a demotion or a removal applies to a chat at once.
+
+4. **Where roles live, and the migration.** The strongest wins: the role an owner gave a person from the dashboard (kept in the
+   dashboard's own state), then the `role` for the person in the settings file (`--person id,role=viewer`), then the default:
+   the first person on the list is the owner, the rest are members. A dashboard made before roles has neither of the first two,
+   so its first person, who set it up, is its owner and nobody is locked out by upgrading; anyone else it lists becomes a
+   member, who can no longer change settings, permissions, secrets or costs until an owner decides otherwise. There is always at
+   least one owner: a list with none gets its first person as one when it is read, a settings file that names none is refused,
+   and a role change that would leave none is refused (`409 last_owner`). A person who is no longer on the list has no role and
+   nothing is open to them (`401`): their sessions end at the next start, a role chosen for them at the dashboard is dropped
+   when the list is read without them (so adding them again later gives them what the file says, not an old owner's role), and
+   their chat links stop working (see 3). A role change that cannot be written to the state file is refused (`500 not_saved`),
+   not reported as made; a state file that exists and cannot be read stops the dashboard from starting rather than resetting
+   every chosen role. For an operator who has lost every owner's passkey or wants the file's role to win, `ozbox auth role
+   <id> <role>` writes the role into the state file (run it with the dashboard stopped, then start it again).
+
+5. **Changing a role is an owner's audited act and needs a passkey shown a moment ago.** `PUT /v1/people/<id>/role`; the
+   change is a `person.role` entry (`member->viewer`) and applies to the person's next request, in sessions they already have.
+   The Account page and Settings → Members & roles show everyone and let an owner change a role.
+
+6. **One function decides the second factor** (amends ADR 0028 Amendment 2 and ADR 0037 Amendment 2). `roles::step_up_gate`
+   answers: behind a sign-in, whether a passkey was shown a moment ago; on the person's own computer with no sign-in, yes (the
+   access token is in the address printed for them); **on a box with no sign-in, never**, because another process on the box
+   may hold the token. Every route that asks for a second factor uses it and one refusal builder (`step_up_refusal`), so the
+   answer and the words are the same everywhere: browser take-over, resume and settings; granting access to production and
+   changing the permission rules; applying a change that cannot be undone; deleting what the bill found; changing how the
+   dashboard is reached (the tunnel token and the access settings); changing a role; and **approving a request for
+   production or one that asks for a second factor**. An approval for production makes the one-use grant the action runs under,
+   so it is judged as making a grant is: only a role that may make a grant (an owner) may approve it, a member may still
+   deny it, and on a box with no sign-in it is refused. On a box with no sign-in each is refused with `sign_in_required` and
+   the reason; on the person's own computer nothing changes. An act that only reduces how far the dashboard is reached
+   (stopping or removing the tunnel, deleting its token) is the exception: it is allowed there, because refusing to turn
+   exposure off would be the wrong side to fail on.
+   Still outside the function, and listed so that nobody assumes otherwise: the `/auth/*` routes (which check the passkey
+   themselves, `require_fresh`) and the orchestration retention, which destroys boxes the orchestration itself made and passes
+   a fresh second factor on a box with no sign-in (it was so before this ADR and is limited to those boxes).
+
+7. **The page degrades to match.** The sign-in status carries the role and a `can` map (`watch_browser`, `control_browser`,
+   `approve`, `start_runs`, `use_boxes`, `change_settings`, `manage_costs`, `manage_people`). A page that a role may not change
+   is shown read-only with one line saying why; a button the role may not use is not offered; a viewer's Browser page says
+   browser sessions are for members and owners. The server refuses the same requests, so this is courtesy, not the boundary. A
+   dashboard with no sign-in has one operator, who has every capability.
+
+8. **The IDE and desktop proxies belong to a machine, not a name** (the local mode's **Open**). They, and the cached status of a
+   box's IDE, desktop and processes, are kept by the box's name **and** the provider's id for the machine, and a plan is bound
+   to the machine it was made for. Destroying a box from the dashboard removes everything kept for its name, and a box replaced
+   without this server being asked (destroyed from the command line) loses the old proxy the next time its name is looked up. Before,
+   a box destroyed and made again under the same name could be opened through the old proxy, whose connection and login belonged
+   to the old box.
+
+**Status.** Preview. Built and tested in CI with fakes (the role rules, the table, every role against the routes, the migration,
+the last-owner rule, the audit entries, the no-sign-in-on-a-box refusals, the proxies of a replaced box, and browser tests at three
+widths with passkey sign-in); not run on a real box.
+
+**Why.** Everyone who could sign in could do everything, including watch another person's browser and change what governs the
+dashboard (the "anyone signed in can watch" limit of ADR 0037); and three routes that ask for a second factor treated a
+dashboard with no sign-in on a box as its operator, which the browser's did not (ADR 0028 Amendment 2). A reused proxy let a
+new box be reached through an old box's connection.
+
+**Consequences and what is not covered.**
+- Roles are for the dashboard. The command line is run by the person at the machine, and agents are governed by the permission
+  engine's rules and modes, not by a role.
+- A person-scoped rule in the permission engine does not apply to a dashboard act: the role is the ceiling. Per-box and
+  per-project roles do not exist.
+- People are added in the sign-in settings file (`ozbox auth init`, `ozbox dashboard install --person`), not invited from the
+  dashboard; only the role of someone already on the list can be changed there.
+- A viewer can read a great deal: run logs, task text, chat transcripts, memory notes, the audit log and costs. "Look" is
+  deliberately broad; a run's output can hold anything an agent printed.
+- A role change does not end the person's sessions; their next request is judged by the new role. Two things outlive it and
+  are follow-ups: an IDE or desktop WebSocket that is already open (it is checked when it is opened, not while it is pumped),
+  and a `/dl/` download link a person made (it is not tied to its maker, is reusable until it expires, and lasts up to 24
+  hours; making one needs the right to change files, but using one needs nothing). Standing automations (a schedule or a trigger
+  a person made) are not re-judged against their creator's role when they fire.
+- The table is kept by hand. A new route that only reads is open to every role until someone lists it; a new route that changes
+  something is an owner's until someone opens it. A test pins the routes that matter.
+- Routes that never asked for a second factor (the settings, a secret other than a tunnel token, most box changes) still do
+  not, on a box with no sign-in: only the ones that already asked are refused there. A box with no sign-in remains a poor
+  place for a dashboard.
+- An ordinary approval (not for production, asking for no second factor) decided on a box with no sign-in is recorded as made
+  with no second factor (ADR 0022), not refused.
+- A viewer can see browser approvals (they carry page details) in the approvals list and in task logs, because "look" is
+  broad; the pictures are what a viewer cannot watch.
+- Whether a server runs on a box is decided at start from the markers the box's secrets service leaves; if it has not started
+  yet and the markers are missing, the server is treated as the person's own computer. Likewise a token-mode dashboard that a
+  person exposes through their own tunnel gives a fresh second factor to every caller holding the token.
+- Rolling back to a version before roles: its settings file reader refuses a `role =` key, so a file that has one must have it
+  removed first. It fails closed.
+
+**Follow-ups, from the 2026-11-11 review, not done here.** Close an open IDE or desktop WebSocket when its person is demoted;
+bind a `/dl/` link to its maker and revoke it when they are demoted; bind a push device to the person who registered it (a
+member can delete anyone's); re-judge a standing schedule or trigger against its creator's role; record a refused `/auth`
+change in the audit chain (the refusal is made, but only the guard writes `permission.deny`); two boxes made within one
+timestamp under the same name on a provider with no machine id would share an IDE proxy key.
+- Not proven on a real box.

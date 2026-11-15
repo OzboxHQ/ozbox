@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.2.0-beta.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/OzboxHQ/ozbox"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+ozbox-core = { path = "crates/ozbox-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+
+[profile.dev]
+debug = "line-tables-only"

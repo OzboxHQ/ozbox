@@ -1,0 +1,686 @@
+name: Image
+
+# Builds the Oz Box machine image with Packer inside the owner's AWS account and publishes a signed release manifest.
+# The image and its box daemon are ONE release: `ozboxd` is built here, from the same commit, for each architecture the
+# image is built for; Packer installs it at /usr/local/bin/ozboxd and the signed manifest records its SHA-256 (key
+# `ozboxd`), so an image without its agent, or with a different one, is detectable. The `ozbox` program (the one the secrets
+# units run as the secrets user, installed root-owned at /usr/local/bin/ozbox) is built the same way and recorded under
+# the manifest key `ozbox`.
+# Never run locally. The build role (AWS_IMAGE_ROLE_ARN) trusts this repository's `image` ENVIRONMENT through GitHub OIDC
+# (infra/aws/image-build-trust-policy.json: pinned to the repository's immutable ids and `environment:image`, nothing else)
+# and may create and delete only resources tagged ozbox-managed=true, so every resource Packer creates is tagged at creation.
+# The jobs that sign in to AWS or sign the manifest (build, manifest, publish) run in the environment `image`; put the required reviewer and the branch
+# rule on that environment, because the role's trust is only as strong as who may run a job in it.
+#
+# What a release is (ADR 0052): build in us-east-1 and copy to the other regions -> the manifest is built and SIGNED, and
+# records every image id per region and architecture -> only then are the images made public and the old ones retired. A
+# client trusts the signed manifest, never an image's visibility, so an image is never public before its release is signed.
+# Whether the images are made public at all is the repository variable OZBOX_IMAGE_PUBLIC (default: no, so a fork that
+# runs this workflow gets private, encrypted images in its own account and nothing is shared by surprise).
+#
+# Repository secrets / variables this workflow expects (set them in the repository settings; none is printed):
+#   secret   AWS_IMAGE_ROLE_ARN       the role to assume
+#   secret or variable  AWS_BUILD_SUBNET_ID   the subnet for the build instance
+#   secret or variable  AWS_BUILD_SG_ID       a tagged security group with NO inbound rule
+#   variable (optional) AWS_BUILD_PUBLIC_IP   "true" when the subnet is public and the build instance needs a public address
+#                                              (default false: a private subnet). Never an inbound path either way.
+#   variable (optional) AWS_BUILD_INSTANCE_PROFILE   an instance profile with the SSM core policy (else Packer makes one)
+#   variable (optional) OZBOX_IMAGE_PUBLIC     "true" to publish the release's images (see above). A pre-release is public only through the input
+#                                              publish_prerelease_version (one `-beta.N`, exactly the version built); never rc, alpha or dev.
+#
+# A manual run with `republish` publishes (and retires after) an existing release again, from the manifest of its release,
+# which is downloaded and verified against the signing identity first; nothing is built.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version, which must equal the product version in Cargo.toml (default: that version), for example 0.3.0"
+        required: false
+        default: ""
+      copy_regions:
+        description: Regions the image is also copied to, comma separated (the build region is us-east-1)
+        required: false
+        default: eu-west-1,ap-southeast-1
+      republish:
+        description: Publish an EXISTING release again (the version below) from its signed manifest; builds nothing
+        required: false
+        type: boolean
+        default: false
+      publish_prerelease_version:
+        description: "Make ONE beta public: set to exactly the version being built, which must end in -beta.N (blank: a pre-release stays private and encrypted)"
+        required: false
+        default: ""
+      retire_old:
+        description: After publishing, retire images older than the last 3 versions (false = only list them)
+        required: false
+        type: boolean
+        default: true
+      arch:
+        description: Architectures to build
+        required: false
+        type: choice
+        default: both
+        options: [both, amd64, arm64]
+  push:
+    tags: ["image-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    name: Decide what to build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      copy_regions: ${{ steps.v.outputs.copy_regions }}
+      copy_regions_json: ${{ steps.v.outputs.copy_regions_json }}
+      all_regions: ${{ steps.v.outputs.all_regions }}
+      public: ${{ steps.v.outputs.public }}
+      republish: ${{ steps.v.outputs.republish }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      archs: ${{ steps.v.outputs.archs }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_COPY: ${{ inputs.copy_regions }}
+          IN_REPUBLISH: ${{ inputs.republish }}
+          IN_PUBPRE: ${{ inputs.publish_prerelease_version }}
+          PUBLIC_VAR: ${{ vars.OZBOX_IMAGE_PUBLIC }}
+          IN_ARCH: ${{ inputs.arch }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          # ONE version for the program, the box daemon and the image: the workspace version in Cargo.toml. The image
+          # release carries that number (tag image-v<version>); the build date is only recorded in the manifest.
+          product="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          version="$IN_VERSION"
+          if [ "$REF_TYPE" = "tag" ]; then version="${REF_NAME#image-v}"; fi
+          if [ -z "$version" ]; then version="$product"; fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$'; then
+            echo "the version must look like 0.3.0 or 0.3.0-rc.1" >&2
+            exit 1
+          fi
+          republish=false
+          [ "$IN_REPUBLISH" = "true" ] && republish=true
+          if [ "$republish" = "true" ]; then
+            # publishing again: the release must already exist (its manifest is what is published); nothing is built
+            if ! gh release view "image-v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "release image-v$version does not exist, so there is nothing to publish again" >&2
+              exit 1
+            fi
+          else
+            if [ "$version" != "$product" ]; then
+              echo "the image version ($version) must be the product version in Cargo.toml ($product): the program, the box daemon and the image share one version. Change Cargo.toml first." >&2
+              exit 1
+            fi
+            # Never reuse a version: the release and its signed manifest are what a box was verified against.
+            if gh release view "image-v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "release image-v$version already exists; raise the product version in Cargo.toml (a patch release) to build again" >&2
+              exit 1
+            fi
+          fi
+          copy="${IN_COPY:-eu-west-1,ap-southeast-1}"
+          copy_json="[]"
+          all="us-east-1"
+          for r in ${copy//,/ }; do
+            if ! printf '%s' "$r" | grep -Eq '^[a-z]{2}-[a-z]+-[0-9]$'; then
+              echo "the copy regions must be region names, comma separated" >&2
+              exit 1
+            fi
+            [ "$r" = "us-east-1" ] && continue
+            copy_json="$(jq -c --arg r "$r" '. + [$r] | unique' <<<"$copy_json")"
+            all="$all,$r"
+          done
+          public=false
+          [ "$PUBLIC_VAR" = "true" ] && public=true
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          # A pre-release is public ONLY through an explicit opt-in that equals the version being built and is a beta
+          # (-beta.N): never rc, alpha or dev. Every other pre-release is private and encrypted. The same rule on a republish.
+          if [ -n "$IN_PUBPRE" ]; then
+            if [ "$IN_PUBPRE" != "$version" ] || ! printf '%s' "$version" | grep -Eq -- '-beta\.[0-9]+$'; then
+              echo "publish_prerelease_version ($IN_PUBPRE) must equal the version being built ($version) and end in -beta.N" >&2
+              exit 1
+            fi
+          fi
+          if [ "$prerelease" = "true" ]; then
+            if [ -n "$IN_PUBPRE" ] && [ "$IN_PUBPRE" = "$version" ]; then :; else public=false; fi
+          fi
+          if [ "$prerelease" = "true" ] && [ "$public" = "true" ] && [ "$IN_PUBPRE" != "$version" ]; then
+            echo "a pre-release would be public without the exact opt-in; refusing" >&2
+            exit 1
+          fi
+          case "${IN_ARCH:-both}" in
+            amd64) archs='["amd64"]' ;;
+            arm64) archs='["arm64"]' ;;
+            *) archs='["amd64","arm64"]' ;;
+          esac
+          {
+            echo "version=$version"
+            echo "copy_regions=$copy"
+            echo "copy_regions_json=$copy_json"
+            echo "all_regions=$all"
+            echo "public=$public"
+            echo "republish=$republish"
+            echo "prerelease=$prerelease"
+            echo "archs=$archs"
+          } >>"$GITHUB_OUTPUT"
+
+  dashboard:
+    name: Dashboard
+    needs: plan
+    if: needs.plan.outputs.republish != 'true'
+    uses: ./.github/workflows/dashboard-build.yml
+
+  agent:
+    name: Box daemon and program (${{ matrix.arch }})
+    needs: [plan, dashboard]
+    if: needs.plan.outputs.republish != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cross (builds inside a musl container, so nothing is linked against this runner)
+        run: cargo install cross --locked --version 0.2.5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dashboard-dist
+          path: packages/dashboard/dist
+      - name: The dashboard is where the program's build looks for it (cross mounts this workspace into its container)
+        run: |
+          set -euo pipefail
+          test -f packages/dashboard/dist/index.html
+      - name: Build ozboxd and ozbox from this commit
+        env:
+          TARGET: ${{ matrix.target }}
+          # makes crates/ozbox-cli/build.rs refuse to build without the dashboard (passed into cross by Cross.toml)
+          OZBOX_RELEASE: "1"
+        run: cross build --release --locked --target "$TARGET" -p ozboxd -p ozbox-cli
+      - name: The program serves the real dashboard, not the placeholder page
+        env:
+          TARGET: ${{ matrix.target }}
+          DASH: ${{ needs.dashboard.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          f="target/$TARGET/release/ozbox"
+          if grep -aq "The dashboard is not built" "$f"; then
+            echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
+            exit 1
+          fi
+          # it records the hash of the dashboard it embedded, and it is the one that was built
+          grep -aq "$DASH" "$f"
+      - name: The box daemon carries the marker the setup script looks for
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # ozbox-supervisor-setup.sh decides whether to make the dashboard's socket by finding this text in the installed
+          # daemon (a daemon that does not take its socket from systemd must never be handed one). Never reword it (G1 F8).
+          grep -aq 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
+            || { echo "::error title=Missing marker::the release ozboxd does not carry ozbox-listenfd-protocol-1, so no box would make its dashboard socket"; exit 1; }
+      - name: One self-contained file, and a start check where this runner can
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          cp "target/$TARGET/release/ozboxd" "out/ozboxd-linux-$ARCH"
+          cp "target/$TARGET/release/ozbox" "out/ozbox-linux-$ARCH"
+          for f in ozboxd ozbox; do
+            file "out/$f-linux-$ARCH" | grep -Eq 'statically linked|static-pie linked'
+            if [ "$ARCH" = "amd64" ]; then
+              "./out/$f-linux-$ARCH" --version
+            fi
+            (cd out && sha256sum "$f-linux-$ARCH" | cut -d' ' -f1 >"$f-linux-$ARCH.sha256")
+          done
+      - name: The program carries this commit's box modules (every architecture, run here or under emulation)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          want="$(sh scripts/first-boot-hash.sh infra)"
+          printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$'
+          case "$ARCH" in
+            amd64) run=() ;;
+            arm64)
+              sudo apt-get update -qq
+              # Ubuntu 26.04 replaced qemu-user-static; install whichever this runner offers, then use the binary it ships.
+              sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                echo "::error title=No first-boot check::no qemu-aarch64 is available, so the arm64 program cannot be checked"
+                exit 1
+              fi
+              run=("$q")
+              ;;
+            *)
+              echo "::error title=No first-boot check::there is no way to run the $ARCH program here, so its modules cannot be checked"
+              exit 1
+              ;;
+          esac
+          got="$(OZBOX_INFRA_DIR="$(mktemp -d)" OZBOX_CONFIG=/dev/null "${run[@]}" "./out/ozbox-linux-$ARCH" infra --json | jq -r .first_boot_sha256)"
+          if [ "$got" != "$want" ]; then
+            echo "::error title=Wrong first boot::the $ARCH program's embedded first boot ($got) is not this commit's ($want)"
+            exit 1
+          fi
+          # the release job requires this file for every architecture it publishes
+          printf '%s\n' "$got" >"out/ozbox-linux-$ARCH.first-boot"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ozboxd-${{ matrix.arch }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: [plan, agent]
+    if: needs.plan.outputs.republish != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The role's trust names this environment, so a job outside it cannot sign in to AWS at all.
+    environment: image
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.archs) }}
+    env:
+      PKR_VAR_image_version: ${{ needs.plan.outputs.version }}
+      PKR_VAR_arch: ${{ matrix.arch }}
+      PKR_VAR_aws_region: us-east-1
+      PKR_VAR_aws_copy_regions: ${{ needs.plan.outputs.copy_regions_json }}
+      PKR_VAR_aws_associate_public_ip: ${{ vars.AWS_BUILD_PUBLIC_IP == 'true' && 'true' || 'false' }}
+      # An encrypted image can never be made public, so a release that will be public is built unencrypted (every box made
+      # from it has an encrypted root volume: the aws-box module encrypts it at launch).
+      PKR_VAR_aws_encrypt_boot: ${{ needs.plan.outputs.public == 'true' && 'false' || 'true' }}
+      PKR_VAR_aws_subnet_id: ${{ secrets.AWS_BUILD_SUBNET_ID || vars.AWS_BUILD_SUBNET_ID }}
+      PKR_VAR_aws_security_group_id: ${{ secrets.AWS_BUILD_SG_ID || vars.AWS_BUILD_SG_ID }}
+      PKR_VAR_aws_instance_profile: ${{ vars.AWS_BUILD_INSTANCE_PROFILE }}
+      PKR_VAR_source_commit: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ozboxd-${{ matrix.arch }}
+          path: infra/packer/ozbox-image/agent
+      - name: The box daemon Packer installs (this run's build, checked against its own SHA-256)
+        working-directory: infra/packer/ozbox-image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          want="$(cat "agent/ozboxd-linux-$ARCH.sha256")"
+          printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$'
+          echo "$want  agent/ozboxd-linux-$ARCH" | sha256sum --check --strict -
+          echo "PKR_VAR_ozboxd_binary=$PWD/agent/ozboxd-linux-$ARCH" >>"$GITHUB_ENV"
+          echo "PKR_VAR_ozboxd_sha256=$want" >>"$GITHUB_ENV"
+          cli_want="$(cat "agent/ozbox-linux-$ARCH.sha256")"
+          printf '%s' "$cli_want" | grep -Eq '^[0-9a-f]{64}$'
+          echo "$cli_want  agent/ozbox-linux-$ARCH" | sha256sum --check --strict -
+          echo "PKR_VAR_ozbox_binary=$PWD/agent/ozbox-linux-$ARCH" >>"$GITHUB_ENV"
+          echo "PKR_VAR_ozbox_sha256=$cli_want" >>"$GITHUB_ENV"
+      - name: The first boot this image is built for (one part of its disk generation, ADR 0038)
+        run: |
+          set -euo pipefail
+          fb="$(sh scripts/first-boot-hash.sh infra)"
+          printf '%s' "$fb" | grep -Eq '^[0-9a-f]{64}$'
+          echo "PKR_VAR_first_boot_sha256=$fb" >>"$GITHUB_ENV"
+          # and the recipe it is built with: a change to how the image is made moves the generation even when the package
+          # map does not show it
+          build="$(sh scripts/packer-build-hash.sh infra/packer/ozbox-image)"
+          printf '%s' "$build" | grep -Eq '^[0-9a-f]{64}$'
+          echo "PKR_VAR_build_sha256=$build" >>"$GITHUB_ENV"
+      - name: Check the sign-in can work before it is tried
+        env:
+          ROLE: ${{ secrets.AWS_IMAGE_ROLE_ARN }}
+          SUBJECT: repo:${{ github.repository }}:environment:image
+        run: |
+          set -euo pipefail
+          if [ -z "$ROLE" ]; then
+            echo "::error title=No build role::The repository secret AWS_IMAGE_ROLE_ARN is not set, so there is nothing to sign in to. See infra/README.md (Building an image)."
+            exit 1
+          fi
+          # Not a secret: the claim GitHub will present, so a refusal below can say exactly what the role must trust. (An
+          # organization that sets GitHub's immutable-id subject form presents repo:<org>@<id>/<repo>@<id>:environment:image.)
+          echo "This run will present the OIDC subject: $SUBJECT (or its immutable-id form)"
+      - id: aws
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_IMAGE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: ozbox-image-${{ github.run_id }}
+      - name: If AWS refused the sign-in, say why and stop
+        if: steps.aws.outcome == 'failure'
+        env:
+          SUBJECT: repo:${{ github.repository }}:environment:image
+        run: |
+          echo "::error title=AWS refused the OIDC sign-in::The build role's trust policy does not allow this run. It presented a subject like $SUBJECT: the role must trust the environment named image of this repository, in the form GitHub presents (the immutable-id form repo:ORG@ORG_ID/REPO@REPO_ID:environment:image when the organization uses it). Apply infra/aws/image-build-trust-policy.json to the role with those ids filled in (infra/README.md says how), and make sure this job runs in the environment image. Nothing was built."
+          exit 1
+      - name: Public sharing is allowed in every region this release publishes to (before anything is built)
+        if: needs.plan.outputs.public == 'true'
+        env:
+          REGIONS: ${{ needs.plan.outputs.all_regions }}
+        run: bash scripts/image/preflight.sh --regions "$REGIONS"
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
+        with:
+          version: 1.11.2
+      - name: Session Manager plugin (how Packer reaches the build instance; no inbound port)
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/ssm.deb" \
+            https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+          sudo dpkg -i "$RUNNER_TEMP/ssm.deb"
+      - name: Packer init and validate
+        working-directory: infra/packer/ozbox-image
+        run: |
+          set -euo pipefail
+          # GitHub release downloads fail intermittently (502/504); retry plugin installs before giving up.
+          for attempt in 1 2 3 4 5; do
+            if packer init .; then break; fi
+            if [ "$attempt" = 5 ]; then echo "packer init failed after 5 attempts" >&2; exit 1; fi
+            sleep $((attempt * 20))
+          done
+          packer validate -only='ozbox.amazon-ebs.ozbox' .
+      - name: Build
+        working-directory: infra/packer/ozbox-image
+        run: packer build -only='ozbox.amazon-ebs.ozbox' -color=false .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: |
+            infra/packer/ozbox-image/packer-manifest-${{ matrix.arch }}.json
+            infra/packer/ozbox-image/packages-${{ matrix.arch }}.txt
+            infra/packer/ozbox-image/dpkg-status-${{ matrix.arch }}
+            infra/packer/ozbox-image/disk-parts-${{ matrix.arch }}.txt
+            infra/packer/ozbox-image/agent/ozboxd-linux-${{ matrix.arch }}
+            infra/packer/ozbox-image/agent/ozboxd-linux-${{ matrix.arch }}.sha256
+            infra/packer/ozbox-image/agent/ozbox-linux-${{ matrix.arch }}
+            infra/packer/ozbox-image/agent/ozbox-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+
+  manifest:
+    name: Manifest, SBOM and signature
+    needs: [plan, build, dashboard]
+    if: needs.plan.outputs.republish != 'true'
+    # Signing is gated by the environment's reviewer like the build: the signed manifest is what clients trust.
+    environment: image
+    runs-on: ubuntu-latest
+    outputs:
+      manifest_sha256: ${{ steps.sign.outputs.sha256 }}
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: parts
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Build the release manifest and SBOMs
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          # the regions every image must exist in (the build region and the copies)
+          ALL_REGIONS: ${{ needs.plan.outputs.all_regions }}
+          # signed into the manifest: the client decides what a pre-release is from this, never from an image's name
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+          # the content hash of the dashboard every `ozbox` program in this image embeds
+          DASHBOARD_SHA256: ${{ needs.dashboard.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          archs=""
+          for d in parts/image-*; do
+            arch="${d#parts/image-}"
+            archs="$archs $arch"
+            # SBOM of the packages installed in the image: the image's own dpkg database, scanned as a directory.
+            root="$(mktemp -d)"
+            mkdir -p "$root/var/lib/dpkg"
+            cp "$d/dpkg-status-$arch" "$root/var/lib/dpkg/status"
+            printf 'ID=ubuntu\nVERSION_ID="24.04"\n' >"$root/etc-os-release" && mkdir -p "$root/etc" && mv "$root/etc-os-release" "$root/etc/os-release"
+            syft "dir:$root" -o "spdx-json=out/ozbox-$VERSION-$arch.spdx.json"
+            # The box daemon of this image: the file Packer installed, published as a release asset next to the manifest.
+            # upload-artifact keeps paths below the files' common ancestor, so the daemon sits under agent/.
+            cp "$d/agent/ozboxd-linux-$arch" "out/ozboxd-linux-$arch"
+            agent_sha="$(tr -d '\n' <"$d/agent/ozboxd-linux-$arch.sha256")"
+            printf '%s' "$agent_sha" | grep -Eq '^[0-9a-f]{64}$'
+            echo "$agent_sha  out/ozboxd-linux-$arch" | sha256sum --check --strict -
+            cp "$d/agent/ozbox-linux-$arch" "out/ozbox-linux-$arch"
+            cli_sha="$(tr -d '\n' <"$d/agent/ozbox-linux-$arch.sha256")"
+            printf '%s' "$cli_sha" | grep -Eq '^[0-9a-f]{64}$'
+            echo "$cli_sha  out/ozbox-linux-$arch" | sha256sum --check --strict -
+            # The disk generation the image recorded in /etc/ozbox/image-release, and the parts it is made of (ADR 0038).
+            # Recorded as the image wrote them: the manifest never recomputes what only the built image can know.
+            parts_file="$d/disk-parts-$arch.txt"
+            for k in kernel packages first_boot build units accounts sshd config disk_generation; do
+              test "$(grep -c "^$k=" "$parts_file")" = 1
+              grep -Eq "^$k=[0-9a-f]{64}$" "$parts_file"
+            done
+            jq -n --arg arch "$arch" --arg agent "$agent_sha" --arg cli "$cli_sha" \
+              --slurpfile pm "$d/packer-manifest-$arch.json" \
+              --rawfile pk "$d/packages-$arch.txt" \
+              --rawfile dp "$parts_file" '
+              ($dp | split("\n") | map(select(length > 0) | split("=") | {key: .[0], value: .[1]}) | from_entries) as $parts
+              | {arch: $arch, ozboxd: $agent, ozbox: $cli, disk: $parts,
+               amis: ($pm[0].builds | last | .artifact_id | split(",")
+                      | map(split(":") | {key: .[0], value: .[1]}) | from_entries),
+               packages: ($pk | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]}) | from_entries)}
+              ' >"out/part-$arch.json"
+          done
+          # The first-boot configuration this release's program renders (the box modules and cloud-init of this commit):
+          # a program refuses to create or upgrade a box from an image whose release records another one (ADR 0036).
+          first_boot="$(sh scripts/first-boot-hash.sh infra)"
+          printf '%s' "$first_boot" | grep -Eq '^[0-9a-f]{64}$'
+          # Every published program was checked by the agent job (run natively or under emulation). A missing check fails
+          # closed: no architecture is published unproven.
+          for arch in $archs; do
+            check="parts/ozboxd-$arch/ozbox-linux-$arch.first-boot"
+            if [ ! -f "$check" ]; then
+              echo "::error title=Unchecked program::the $arch program's first boot was never checked ($check is missing)"
+              exit 1
+            fi
+            # The program that was checked is the program that is published: the same bytes, by hash (the agent job's
+            # artifact and the image's agent directory are two copies of one build).
+            checked_sha="$(tr -d '\n' <"parts/ozboxd-$arch/ozbox-linux-$arch.sha256")"
+            published_sha="$(tr -d '\n' <"parts/image-$arch/agent/ozbox-linux-$arch.sha256")"
+            if [ "$checked_sha" != "$published_sha" ] || ! printf '%s' "$published_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error title=Unchecked program::the published $arch program ($published_sha) is not the one whose first boot was checked ($checked_sha)"
+              exit 1
+            fi
+            program_fb="$(tr -d '\n' <"$check")"
+            if [ "$program_fb" != "$first_boot" ]; then
+              echo "::error title=Wrong first boot::the $arch program's embedded first boot ($program_fb) is not this commit's ($first_boot)"
+              exit 1
+            fi
+          done
+          # The image's own first-boot part must be this commit's: a disk generation made from another first boot would
+          # name a disk this release does not describe. The same goes for the recipe's build hash.
+          build="$(sh scripts/packer-build-hash.sh infra/packer/ozbox-image)"
+          printf '%s' "$build" | grep -Eq '^[0-9a-f]{64}$'
+          for f in out/part-*.json; do
+            jq -e --arg fb "$first_boot" '.disk.first_boot == $fb' "$f" >/dev/null || {
+              echo "::error title=Wrong first boot::the first-boot part of $f's disk generation is not this commit's ($first_boot)"
+              exit 1
+            }
+            jq -e --arg b "$build" '.disk.build == $b' "$f" >/dev/null || {
+              echo "::error title=Wrong build::the build part of $f's disk generation is not this commit's recipe ($build)"
+              exit 1
+            }
+          done
+          # The manifest's `upgrade` record (ADR 0038, section 1), made by infra/packer/ozbox-image/upgrade-record.jq (a test
+          # runs the same file against hostile input). The disk generation and its machine-dependent parts are one value
+          # per architecture (each is made from what that build installed); the first-boot and build parts are the same for
+          # both. `live_from` is never written here: it is added by the release that ships the live updater, once the rules
+          # in ADR 0038 hold, so a release without it never offers a live update. The `/work` format comes from the
+          # tracked policy file, and only those two keys of it.
+          policy="infra/packer/ozbox-image/upgrade-policy.json"
+          jq -e '(.work_format | type == "number") and (.work_format_reads | type == "array") and (.work_format as $f | .work_format_reads | index($f) != null)' "$policy" >/dev/null
+          upgrade="$(jq -n --arg first_boot "$first_boot" --arg build "$build" --slurpfile policy "$policy" \
+            --slurpfile parts <(cat out/part-*.json) -f infra/packer/ozbox-image/upgrade-record.jq)"
+          jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg dashboard "$DASHBOARD_SHA256" --arg first_boot "$first_boot" --argjson upgrade "$upgrade" \
+            --argjson prerelease "$PRERELEASE" \
+            --slurpfile parts <(cat out/part-*.json) '
+            {version: $version, prerelease: $prerelease, source_commit: $commit, built_at: $built,
+             images: ($parts | map({arch, amis})),
+             packages: ($parts | map({(.arch): .packages}) | add),
+             ozboxd: ($parts | map({(.arch): .ozboxd}) | add),
+             ozbox: ($parts | map({(.arch): .ozbox}) | add),
+             dashboard: $dashboard,
+             first_boot: $first_boot,
+             upgrade: $upgrade,
+             sbom: ($parts | map("ozbox-" + $version + "-" + .arch + ".spdx.json"))}
+            ' >out/ozbox-image-manifest.json
+          rm out/part-*.json
+          jq -e '.images | length > 0' out/ozbox-image-manifest.json >/dev/null
+          # every architecture has an image id in EVERY region of this release: a client in a region the release does not cover
+          # would otherwise find no public image there (and a typo in a region would pass unnoticed)
+          jq -e --arg regions "$ALL_REGIONS" '($regions | split(",")) as $want
+            | .images | all(.amis as $a | $want | all(. as $r | ($a[$r] // "") | test("^ami-[0-9a-f]{8,17}$")))' \
+            out/ozbox-image-manifest.json >/dev/null || {
+            echo "::error title=Missing region::an image is missing in one of: $ALL_REGIONS"
+            exit 1
+          }
+          jq -e '.prerelease | type == "boolean"' out/ozbox-image-manifest.json >/dev/null
+          # every image in the manifest names its box daemon's SHA-256
+          jq -e '.ozboxd as $o | .images | all(.arch as $a | ($o[$a] // "") | test("^[0-9a-f]{64}$"))' out/ozbox-image-manifest.json >/dev/null
+          # and the ozbox program the secrets units run
+          jq -e '.ozbox as $o | .images | all(.arch as $a | ($o[$a] // "") | test("^[0-9a-f]{64}$"))' out/ozbox-image-manifest.json >/dev/null
+          # and the dashboard they serve
+          jq -e '.dashboard | test("^[0-9a-f]{64}$")' out/ozbox-image-manifest.json >/dev/null
+          # and the first-boot configuration its program renders
+          jq -e '.first_boot | test("^[0-9a-f]{64}$")' out/ozbox-image-manifest.json >/dev/null
+          # and the upgrade record: a disk generation for every image, a work format that reads itself
+          jq -e '.upgrade.disk_generation as $g | .images | all(.arch as $a | ($g[$a] // "") | test("^[0-9a-f]{64}$"))' out/ozbox-image-manifest.json >/dev/null
+          jq -e '.upgrade.disk_parts.first_boot == .first_boot' out/ozbox-image-manifest.json >/dev/null
+      - name: Sign the manifest (Sigstore keyless, GitHub OIDC)
+        id: sign
+        working-directory: out
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes ozbox-image-manifest.json \
+            --output-signature ozbox-image-manifest.json.sig \
+            --output-certificate ozbox-image-manifest.json.pem \
+            --bundle ozbox-image-manifest.json.sigstore.json
+          # .sig and .pem stay for older clients; the bundle is what cosign 3 prefers.
+          echo "sha256=$(sha256sum ozbox-image-manifest.json | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-manifest
+          path: out/ozbox-image-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload to a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="image-v$VERSION"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "Machine image $VERSION" --notes "Signed machine image manifest for $VERSION." --target "$GITHUB_SHA"
+          gh release upload "$tag" out/* --clobber
+
+  publish:
+    name: Make public and retire old images
+    # Only after the release's manifest is built, signed and uploaded: a client trusts the signed manifest, so no image is
+    # public before its release is. Only when this repository publishes its images (OZBOX_IMAGE_PUBLIC); a pre-release only
+    # through the plan job's exact beta opt-in (it sets `public`). A `republish` run has no build: it works from the release's own manifest.
+    needs: [plan, manifest]
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.public == 'true'
+      && (needs.manifest.result == 'success' || (needs.plan.outputs.republish == 'true' && needs.manifest.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: image
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.plan.outputs.republish != 'true'
+        with:
+          name: signed-manifest
+          path: signed
+      - name: This is the manifest that was signed
+        if: needs.plan.outputs.republish != 'true'
+        env:
+          WANT: ${{ needs.manifest.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$WANT" | grep -Eq '^[0-9a-f]{64}$'
+          echo "$WANT  signed/ozbox-image-manifest.json" | sha256sum --check --strict -
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        if: needs.plan.outputs.republish == 'true'
+      - name: The release's own manifest, checked against the signing identity (publishing again)
+        if: needs.plan.outputs.republish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir signed
+          gh release download "image-v$VERSION" -R "$GITHUB_REPOSITORY" -D signed \
+            -p ozbox-image-manifest.json -p ozbox-image-manifest.json.sig -p ozbox-image-manifest.json.pem
+          repo_re="${GITHUB_REPOSITORY//./\\.}"
+          # the same identity the client checks (ozbox_core::release::identity_regexp)
+          cosign verify-blob signed/ozbox-image-manifest.json \
+            --signature signed/ozbox-image-manifest.json.sig --certificate signed/ozbox-image-manifest.json.pem \
+            --certificate-identity-regexp "^https://github\\.com/${repo_re}/\\.github/workflows/image\\.yml@refs/(heads/main|tags/image-v[0-9a-z.-]+)\$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_IMAGE_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: ozbox-publish-${{ github.run_id }}
+      - name: Make the release's images public (the images in the signed manifest, in every region)
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REGIONS: ${{ needs.plan.outputs.all_regions }}
+        run: |
+          set -euo pipefail
+          bash scripts/image/preflight.sh --regions "$REGIONS"
+          bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
+      - name: Retire images outside the retention window
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REGIONS: ${{ needs.plan.outputs.all_regions }}
+          RETIRE: ${{ inputs.retire_old }}
+        run: |
+          set -euo pipefail
+          owner="$(aws sts get-caller-identity --query Account --output text)"
+          apply=--apply
+          # a tag push or a manual run retires; a manual run may ask for the list only
+          if [ "$RETIRE" = "false" ]; then apply=; fi
+          bash scripts/image/retention.sh --released "$VERSION" --regions "$REGIONS" --owner "$owner" --keep 3 $apply

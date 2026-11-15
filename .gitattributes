@@ -1,0 +1,4 @@
+# The adopt document is hashed twice: the aws-adopt-command module sends its bytes to Systems Manager, and the ozbox program pins
+# the SHA-256 of the same bytes on every command it sends. A checkout that rewrote its line endings (core.autocrlf on Windows)
+# would hash differently and every root command would be refused, so these bytes are LF on every machine.
+infra/tofu/modules/aws-adopt-command/adopt-document.yaml text eol=lf

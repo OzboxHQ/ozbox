@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MakeAndMaintainOnlyTheAdoptDocuments",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:CreateDocument",
+        "ssm:UpdateDocument",
+        "ssm:UpdateDocumentDefaultVersion",
+        "ssm:DeleteDocument",
+        "ssm:DescribeDocument",
+        "ssm:GetDocument",
+        "ssm:DescribeDocumentPermission",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:*:${account_id}:document/ozbox-adopt-*"
+    },
+    {
+      "Sid": "NeverRunACommandOrShareADocument",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:StartSession",
+        "ssm:ModifyDocumentPermission"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

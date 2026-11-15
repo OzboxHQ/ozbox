@@ -1,0 +1,61 @@
+[package]
+name = "ozbox-cli"
+description = "The ozbox command line: create, pause, resize, snapshot, clone and destroy cloud workstation boxes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ozbox"
+path = "src/main.rs"
+
+[dependencies]
+ozbox-core.workspace = true
+ozbox-catalog = { path = "../ozbox-catalog" }
+ozbox-memory = { path = "../ozbox-memory" }
+ozbox-browser = { path = "../ozbox-browser" }
+ozbox-seal = { path = "../ozbox-seal" }
+ozbox-listenfd = { path = "../ozbox-listenfd" }
+ozbox-plugin = { path = "../ozbox-plugin", features = ["host"] }
+ozboxd = { path = "../ozboxd" }
+ozbox-provider-fake = { path = "../ozbox-provider-fake" }
+ozbox-provider-hcloud = { path = "../ozbox-provider-hcloud" }
+ozbox-provider-aws = { path = "../ozbox-provider-aws" }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+dirs = "5"
+tiny_http = { version = "0.12", default-features = false }
+getrandom = "0.2"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+tempfile = "3"
+ring = "0.17"
+zeroize = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3", default-features = false }
+# O_NOFOLLOW and O_NONBLOCK for the root helper's file reader (already in the tree through ring and getrandom)
+libc = "0.2"
+# SO_PEERCRED (Linux): the audit service names the user a box-socket event came from by the kernel's word, not the client's.
+# `fs` is the adopt lock's `flock` (a kernel lock that frees itself when its holder dies), which also runs on macOS for tests;
+# `process` is main's `getuid` and friends.
+rustix = { version = "1", default-features = false, features = ["std", "net", "fs", "process"] }
+
+[build-dependencies]
+ring = "0.17"
+
+[dev-dependencies]
+# the Hetzner provider's in-memory doubles, to run `ozbox upgrade` against the real Hetzner backend in tests
+ozbox-provider-hcloud = { path = "../ozbox-provider-hcloud", features = ["testing"] }
+assert_cmd = "2"
+predicates = "3"
+
+[lints]
+workspace = true

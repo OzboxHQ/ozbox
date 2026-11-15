@@ -1,0 +1,35 @@
+# 0014 — Supervised agent runs: one way to start, one place to ask, nothing lost at a limit
+
+**Decision.** An agent run is a `RunSpec` (engine, prompt or skill, box, repository and branch, caps for time, spend and
+tokens, where the result goes, who asked and why) given to `RunStarter::start_run`. That is the only door: the dashboard, the
+command line, a schedule and a trigger all use it. `start_run` validates and **queues**; it never starts anything itself.
+
+1. **One store, one supervisor.** Tasks, approval requests, the approval policy, the spend limits and the audit trail are one
+   JSON file, written atomically and changed under a lock file, so `ozbox run` and `ozbox serve` always agree. The supervisor
+   (pure logic over that file and a host trait, tested with a fake engine and a fake clock) runs inside `ozbox serve`. A
+   queued run waits until its box has room: a size cap (XS 1, S 2, M 4, L 6, XL 8, XXL 16 runs at once) on top of free memory,
+   which the box daemon already enforces. A repeated idempotency key returns the first run, so a retried schedule firing
+   cannot make two.
+2. **Engines are adapters; policy is not.** An `AgentEngine` starts, polls, answers and stops one agent program. Changing
+   the engine changes nothing about admission, caps, approvals or audit. The Claude Code adapter runs `claude -p` headless
+   in the run's cgroup through the box daemon: the prompt goes in a private file fed to standard input (never argv), a key
+   handed to one run travels only in the process environment, and commands the policy asks about are refused to the agent
+   up front.
+3. **A cap pauses; it never kills.** At its time, spend or token limit (or a fleet or per-person monthly limit) a run is
+   checkpointed to a `wip/` branch, stopped, and shown under "Needs you" with an urgent alert through the routing rules. Adding
+   budget queues it again and it continues from the saved branch; stopping it keeps the branch. If saving fails, the run
+   still stops and says so, rather than running on unattended.
+4. **Risky actions ask.** A push to a protected branch, a pull request into one, a command on the ask list, an outbound
+   message, spend above a threshold and anything tagged production become approval requests that show the exact action
+   (secrets removed), who asked and when they lapse. Unanswered requests are reminded at 15 minutes and 1 hour and then
+   denied, never approved. In sign-in mode approving the risky kinds needs a fresh second factor; denying never does. Every
+   decision, refusal and expiry is an audit record, copied to the Activity list.
+
+**Why.** An agent left alone spends money and touches things. The two failures to avoid are an agent that silently runs past
+its budget, and a control that loses the work when it stops the agent. Both come from stopping without saving, and from
+asking in one place and recording in another; one store and one supervisor make the pause, the ask and the record a single
+step.
+
+**Not decided here.** Approving an action and then letting an agent that runs headless carry it out needs a permission hook in
+that agent; until an engine has one, the ask list is enforced by refusing those commands. Running engines on real boxes goes
+through the box daemon's run API (ADR 0019); the demo provider runs a simulated engine.

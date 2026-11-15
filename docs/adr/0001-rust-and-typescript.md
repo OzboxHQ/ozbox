@@ -1,0 +1,10 @@
+# 0001 — Rust for the CLI and daemons, TypeScript for adapters and the dashboard
+
+**Decision.** `ozbox` (CLI), `ozboxd` (box agent) and the control plane are Rust. Agent-engine adapters and the web dashboard
+are TypeScript on Node.
+
+**Why.** The daemons run on every box all the time and supervise other processes: they must be small, memory-safe and
+predictable under pressure. One static binary is also the simplest thing to install. Engine SDKs and UI tooling are richest
+in TypeScript, and adapters change often.
+
+**Cost.** Two toolchains in one repository. The boundary between them is a versioned gRPC/JSON contract, never shared code.

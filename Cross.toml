@@ -1,0 +1,4 @@
+# `cross` builds inside a container; only the variables named here reach it.
+# OZBOX_RELEASE makes the program's build script refuse to build without the dashboard (crates/ozbox-cli/build.rs).
+[build.env]
+passthrough = ["OZBOX_RELEASE", "OZBOX_ALLOW_NO_DASHBOARD"]

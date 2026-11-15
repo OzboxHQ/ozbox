@@ -1,0 +1,45 @@
+# 0030 — A tailnet you run yourself (Headscale) as a way to reach a box
+
+**Decision.** Besides Session Manager and an outbound tunnel, a person can reach their boxes over a tailnet they run
+themselves: a Headscale control server on a machine they own. `ozbox mesh` saves where it is (`mesh.toml`, no secret),
+generates the access rules from the fleet, joins a box to it, and reports who has joined. Oz Box ships no server, account or
+default address (ADR 0010).
+
+- **Nothing inbound (ADR 0005).** Every node dials out to the control server. A box runs Tailscale's client in user space as
+  a service of the box user (no root, no network device, ADR 0011) and forwards the tailnet's port 22 to the box's own SSH
+  server, which stays on loopback. The dashboard and the web IDE are reached by forwarding their loopback ports over that SSH
+  connection (`ozbox mesh forward`), so they gain no listener either.
+- **Rules come from the fleet and deny by default.** The generated policy lets the person's Headscale user open port 22 on
+  each box (each box carries its own tag). A box is never a source of any rule unless the person declared one
+  (`ozbox mesh allow <from> <to> --port N`), and a declared rule is one-way. There is no wildcard in the output; a rule naming
+  a box that does not exist is an error, not skipped. A test holds each of these.
+- **Keys are one-use, tagged, short-lived and never in an argument.** `ozbox mesh join` asks Headscale for a key that is valid
+  for one hour, single use, and carries the box's tag; it reaches the box on standard input of an SSH session, is written to a
+  private temporary file for the single command that reads it, and is deleted. A key the person made by hand can be kept in the
+  secret store (`ozbox mesh key`), is used once and is then removed. No error, plan or answer carries a key.
+- **Plan, then apply (ADR 0002).** Every change is printed first; `--dry-run` stops there; a script without `--yes` is refused.
+- **Policy is applied by the person's choice of mode.** Headscale loads a policy from a file or from its database. `ozbox mesh
+  policy --out` writes the document for a file-mode server; `--apply` sends it with `headscale policy set` and needs database
+  mode.
+
+**Why.** Some people will not, or cannot, use a cloud provider's session service or a third party's tunnel, and want one network
+they control, for boxes at different providers and for their own computers. Deny-by-default rules generated from the fleet make
+the safe arrangement the one that needs no thought, and a compromised box can reach nothing else.
+
+**Cost and limits.** The person runs and patches the control server, and it is a single point the fleet depends on to
+establish new connections. The box's node key sits in the box user's own state directory, so an agent on the box can read it
+(the same posture as an on-box tunnel token); the damage is bounded because the node's tag is the source of no rule by
+default. The Headscale commands (users by id, `preauthkeys create`, `policy set`) and the Tailscale client's TCP forwarding in
+user space follow the vendors' documentation and are exercised here against fakes only; they have not yet been run against a
+real server and box. Windows is not a target of the SSH entry.
+
+## Amendment 1 (security review, 2026-11-10): a box joins only under the deny-by-default rules
+
+A security review (2026-11-10) found that `ozbox mesh join` did not check that the generated rules were in force. Headscale
+with no policy allows every node to reach every other, so a box joined before `ozbox mesh policy --apply` (or to a file-mode
+server that never loaded the file) could reach the person's laptop. Now `join` first reads the policy the server has loaded
+(`headscale policy get`) and refuses unless it is exactly the one generated from the fleet; a server that cannot show it (file
+mode) is refused too. `--policy-managed-elsewhere` is the person's explicit word that they keep the rules themselves. A key made
+by hand and kept with `ozbox mesh key` is used only if the server lists it (`preauthkeys list`) for the configured user as
+single use, unused, unexpired and carrying the box's tag. Both checks are tested against fakes only, like the rest of this
+record.

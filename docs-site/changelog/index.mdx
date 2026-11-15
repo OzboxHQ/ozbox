@@ -1,0 +1,539 @@
+---
+title: "Changelog"
+description: "What is new in Oz Box, newest first."
+mode: center
+---
+
+What changes for someone using Oz Box, newest first. Each entry says what you can do now, never how it is built.
+
+Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security", "Platform"]} description="0.2.0-beta.0: the first public Beta">
+  ## Oz Box 0.2.0-beta.0: the first public Beta
+
+  Oz Box is now open to everyone: use it, file issues, and send pull requests (see [CONTRIBUTING](https://github.com/OzboxHQ/ozbox/blob/main/CONTRIBUTING.md)). **Beta does not mean every feature has been proven.** The single box (create, SSH, the web IDE, pause and resume, snapshot, clone, upgrade and destroy on AWS) has been run on a real cloud account. Anything marked **Preview** in the guides is built and tested but has not been run on a real box yet, and each entry below says which it is.
+
+  - **A box that runs out of memory slows down and tells you, instead of killing your terminal.** Compressed memory instead of swap on a disk, the box's own services protected, jobs capped by default, and an alert before anything is killed. See the entry "A box that fills its memory slows down" below. Not yet run on a real box.
+  - **Your coding agents' sessions come back when the box restarts (Preview), and a resize or an upgrade first lists what will end and saves your uncommitted work.** Sessions come back; running programs end. Not yet run on a real box.
+  - **Zero-downtime upgrades, first step (Preview).** The machine image now records what kind of disk it carries, and `ozbox upgrade` says in its plan whether a release allows a live update or needs a replace of the system disk, with the reason. Agent runs can also keep going when the box's daemon restarts. Not yet run on a real box.
+  - **Approvals are decided where you are.** A box holds change requests that name the exact change; you decide them on the Approvals page with your passkey, or from your computer. The commit barrier now files a request, lets ordinary public values through, and ties a code to one change. Not yet run on a real box or a real security key.
+  - **Coding agents on a box use the Oz Box tools, the browser included, through a socket of their own.** Nothing to paste; every risky step waits for you, and the card names the program and a session code. Not yet run on a real box.
+  - **An honest dashboard.** On a box, a page that shows demo data says so and never starts a demo shell; Fleet, Boxes, Tasks, Approvals, Terminal, Files, Tools, Usage, Bill, Activity, Account and Settings each say what is real, and a viewer is not offered buttons they cannot use. The checks run a real agent and dashboard on one computer; not yet run against a real box.
+  - **A box's secrets reach commands more safely.** `ozbox env run` and declared servers run on a closed network with a route to only the hosts the project declares, through a proxy that only that server can use. Not yet run on a real box. A box you already have can move its secrets store to your fleet's KMS key, and `ozbox init` now checks, by asking AWS to simulate the calls, that your sign-in may manage the fleet's secrets key before it plans one. These permission checks have not been tried against a real AWS account.
+  - **A new, smaller size: XS** (4 vCPU, 8 GiB), for lighter projects and for comparing with published benchmarks. S is unchanged. XS has not been launched on a real box yet (on Hetzner it maps to a larger machine, and the plan says so).
+  - **Telegram, Slack and WhatsApp tell you and let you talk to an agent, never approve for you.** A chat app can notify you and, in limited ways, type into a coding agent's own terminal; it never approves, denies, stops a run or raises a spending limit. **Not yet run against a real box.**
+  - **`ozbox create` can boot from a public Oz image (Preview).** On AWS, with no image named, it uses the newest Oz image in your account, otherwise the project's public image for your region (us-east-1, eu-west-1, ap-southeast-1), and only if that image belongs to the project's publisher account and the signed release lists it for your region. Anything else is refused with the reason and nothing is created. Name an image with `--image` to boot another. Not yet proven on a real account. See [ADR 0052](/adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest).
+  - **Smaller things:** the agent's browser no longer stalls on a busy machine, and closing it stops every process it started; OpenTofu and Playwright install from the tool catalogue; the web terminal pastes in Firefox and Safari.
+
+  **How to get started.** Install the signed program with `sh install.sh --version 0.2.0-beta.0` (see [install](/install)), try it with the demo provider and no cloud account, then follow the AWS steps in the README. The public machine images for this version are published by a separate release step; this build of `ozbox create` boots the image you name with `--image` (build your own from `infra/` with Packer until the public ones are listed in the release notes). This release is on GitHub Releases only: there is no Homebrew formula, crates.io or npm package yet. Every earlier entry on this page that is still marked "Not yet run on a real box" remains so.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security"]} description="Coding agents">
+  ## A coding agent's waiting request ends when you change what coding agents may do
+
+  - **Withdrawn, not answered.** If you turn the tools off, end standing permission early, or hand the setting to someone else while an agent is waiting for your answer, that request is withdrawn and the agent is told so. An answer given afterwards cannot run it.
+  - **Standing permission that runs out while an agent waits is not honoured by a late answer.**
+  - **On a production box, a browser an agent opened under standing permission is no longer readable by that agent once the permission has ended.** A person can still close it from the dashboard.
+  - **A browser that was still starting when you turned the tools off is closed, not left open.**
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security"]} description="Approvals">
+  ## Giving an approval more time needs your passkey
+
+  - **A longer approval window counts as loosening.** Raising how long an unanswered request stays approvable past 8 hours needs a fresh passkey, like turning an approval off. Shortening it, or keeping it at 8 hours or less, does not.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="Memory">
+  ## A box that fills its memory slows down and says so, instead of killing your terminal
+
+  - **Swap now lives in compressed RAM, never on a disk.** A box with the memory guard keeps idle pages in a compressed area of its own memory, so a build or a test browser that goes over has room before the kernel has to kill anything. No swap file is ever made: the secrets service's memory cannot reach a disk. The self-test fails if you add a swap file yourself.
+  - **The tunnel, the web IDE, the secrets service and the box daemon are the last things the kernel picks.** A runaway job is picked first, and the box stays reachable.
+  - **Jobs the box starts are capped by default**, from the box's own size, and are slowed well before they are ended. For a command you type, or an agent runs, use `ozbox capped -- <command>`; your own terminal sessions are slowed past a soft limit and never killed.
+  - **You hear about it first.** When the box starts stalling on memory, an alert reaches your chat before anything is killed, and the self-test names a box that has been starved.
+  - **A box made from this release has the guard from its first start. A box made before this release gets it when `ozbox upgrade` replaces its machine**: the replace restarts the box once, and the tunnel, web IDE, terminals and runs come back as after any upgrade. A running older box cannot be given the guard live, because its root helper predates it. From this release on, `ozbox upgrade` also replaces the helper with the one the box's installed `ozbox` program carries, but only when that is a newer revision: it never rolls the helper back. The program on a box moves only when its release is installed, so this does not by itself bring new helper code to a box. A killed build now dies alone: the agent and the web IDE keep running. See [ADR 0045](/adr/0045-box-memory-guard). Not yet run on a real box.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI","Security"]} description="The commit barrier">
+  ## The commit barrier stops holding ordinary files, says where, and waits for a person
+
+  - **A public value is not a key.** A web address or a value of a variable that is meant for the browser (`NEXT_PUBLIC_*`, `VITE_*`, `EXPO_PUBLIC_*` and the like) no longer holds a file, and naming such a variable in code or in a document never does. An address with a user name and password in it, or a chat webhook or private link, is never taken as public, and neither is an address with a query (`...:443?transport=tcp`): that one is held like a key, so keep the query in its own variable or let the change through with an override. A real key under such a name is still held. A bare `PUBLIC_*` name is not taken as public (SvelteKit and Astro projects mark their values when they import them with `--public`).
+  - **Short values and ordinary words.** A stored value shorter than 12 characters (a region, a port, `true`) no longer holds every file that says it. A long hyphenated word such as `risk-assessment-for-the-plan` is no longer mistaken for a key.
+  - **A hold says the file, the line and the rule.** It never prints the value, or the name of the secret it matched.
+  - **On a box, a held commit or push asks a person.** It files a request you decide on the Approvals page, and the commit goes through once you approve that exact change. Change it after approving and it is refused.
+  - **A code is for one change.** A code made with `ozbox secrets approve --scope guard-override --project ... --env ...` passes the change it was made for and no other. The hold prints the two values.
+  - **Large pushes are read, not refused.** A push of hundreds of commits is read in batches and passes when clean; one with a key in the middle is held at that file and line.
+  - **A push is read against the remote it goes to.** What the other remotes of the repository have says nothing about this one, so a branch fetched from one remote and pushed to another is read, and a push over the 5000-commit limit says how to get through (push an earlier commit first, or fetch the remote first).
+  - **A push to another address is read in full.** A repository that fetches from one address and pushes to another (a `pushurl`, or a rewritten push address) no longer has what it fetched counted as already sent. A remote whose name is `origin/fork` is not `origin`. A push of more than 768 MiB is asked to go in pieces, so that an approved one can be read again in time.
+  - **More of a change is read.** Files git treats as binary, renamed and edited files, files that were symbolic links, the lines a conflict resolution adds, a commit's message and headers (a merged signed tag's text included), a tag's message and the names of files, whatever characters they hold, are all read. A key written after an escaped character such as `\u003d` is found. A line that happens to look like part of a diff no longer hides the lines after it. A pushed tag, file or folder that is not a commit is read too.
+  - **A busy minute does not waste an approval.** When the box is busy checking other changes, the hook now waits for room, instead of failing after you approved. If it still fails, it says why.
+  - **No second factor, no override.** A box with no passkey or key enrolled refuses a held change's override and says how to enrol one, because nobody else could approve it.
+  - **Submodules are covered.** `ozbox guard install` now puts the hooks in submodules and linked worktrees too.
+  - **A box whose secrets service is down still checks the shapes of keys when a commit is made,** and says that stored keys were not checked. A laptop with `ozbox` in `/usr/local/bin` is no longer taken for a box.
+  - **Not yet run on a real box.**
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI","Security"]} description="Declared commands and servers">
+  ## One-shot runs work on systemd 255, and a server can receive a secret
+
+  - **`ozbox env run` works again on a box with systemd 255.** Before, every one-shot run failed with "Unknown assignment": the 30-minute limit was written with a name systemd does not have. A run now ends after 30 minutes, and a test reads every unit the program starts against the names systemd defines.
+  - **A declared server can receive a secret.** List the names in its `allow` and `env`, as for a command. It is held to every rule a secret command is held to (a pinned `node FILE`, a list of environments, exact egress hosts, no browser), and the rules apply when you start it. The secret is handed to it as a systemd credential, never as an environment line, an argument or a unit property, so `systemctl show` does not hold it. The program reads `$CREDENTIALS_DIRECTORY/NAME`, or add `"credential_env": true` to have it set as a variable. What this does not do: the agent can still reach the server's port and make it use its key, a server has no outbound route yet, and what it prints goes to the journal. See [secure agent workspace](/use-cases/secure-agent-workspace).
+  - **A public value is marked when you import it.** `ozbox secrets import --public NAME` marks a public URL or a hosted backend's anonymous key, and a command or server that lists the name receives it as plain environment. A value can be marked only if it is a known public kind: an anonymous key, a publishable key, or plain text such as a URL. Anything that looks like a secret (a provider key, a signed-in user's token, a service-role key, a name that says secret, a production-looking value) is refused, nothing is imported when one is refused, and the check runs again when the value is handed out. A box with no second factor yet refuses a mark. A value that looks like a key and is not marked is still refused as a plain setting. A box that cannot read the mark asks you to upgrade first.
+  - **A server that holds a secret can reach the hosts its project declares, and only those.** List the hosts in the project's `egress`, start the server with `--start`, and it is given a route to exactly them for as long as it runs: `--stop`, its 4-hour limit or its own exit all close the route, and the server does not start if the route cannot be made. The route's ports are held from before the server starts until after it has ended, and only that server can use the route; another user of the box cannot. A project that declares raw `tcp` destinations cannot start a server that holds a secret yet; a one-shot `ozbox env run` still gets them. A server with nothing declared, or with no secret, still reaches this machine's loopback and nothing else. The program has to honour `HTTPS_PROXY`.
+  - **Not yet run on a real box.** The first things to try are listed in [ADR 0029, Amendment 12](/adr/0029-production-secrets-have-no-standing-access).
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security"]} description="Coding agents on a box">
+  ## Claude Code on the box uses the Oz Box tools, the browser included
+
+  - **A coding agent you start in a terminal on a box (Claude Code, Codex, Gemini CLI, OpenCode) now has the Oz Box tools, including the browser, with nothing to paste.** Before, only runs that Oz Box started had them. The box's setup adds one entry to each engine's settings in your home folder; your other servers are never touched, and `ozbox agent-mcp status`, `install` and `remove` show, add and take it out. A program started in a terminal gets no `auto` mode and none of your box grants: every risky step (a submit, a payment, a send, a new site, a write) waits for you, and the request says "a program that calls itself claude ... in this box's terminal" with a session code. When a call is waiting for you, your agent's answer repeats the code, so you can match it with the request; a script cannot make its code match yours. See [use the browser from Claude Code on the box](/use-cases/browser-on-the-box).
+  - **A switch on the box's page, "Coding agents on this box can use Oz Box tools", is on by default.** Turning it off ends every agent's access at once, even when the setting cannot be saved; turning it on again needs your passkey. An optional "standing permissions" switch lets agents use your `auto` mode and grants for a short time (30 minutes unless you say). The tools are reachable only by the box's own user, through a connection that is not the dashboard and has no public address.
+  - **Ending standing permission early does not close the agent's browser.** It is the same as the time running out: the agent's tools ask again, and a browser task in progress carries on. Turning the tools off, or changing who owns the setting, closes it, and the off switch answers at once even if a browser is slow to close.
+  - **A program started by hand from the web terminal or over SSH is not named after the terminal.** The card says it does not say what it is, never `sshd` or `ozboxd`. The cards for orchestration tools asked from a terminal name the program and its session code too.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard"]} description="Preview: quiesce before a resize or an upgrade">
+  ## Preview: a resize or an upgrade now says what will end, and saves your uncommitted work first
+
+  A resize, and an upgrade that stops the machine, end every program on a box. Before it asks you to confirm, `ozbox` now lists what will end, and after you confirm it gets the box ready. **Sessions come back; running programs end.** The coming back has **not yet been run on a real box**, so do not rely on it yet.
+
+  - **The plan says what ends:** the supervised runs, the coding-agent sessions (Claude Code reopens its conversation; other agents get their window back, not their conversation), and everything else running in the box. If the box cannot be asked, the plan says "could not list", never "nothing running".
+  - **Runs are asked to end first.** Each is asked to end, given ten seconds, and stopped if it has not. The command reports each one: ended when asked, stopped, cancelled while queued, or already finished. New runs are refused for up to ten minutes, and the hold ends by itself.
+  - **Uncommitted work is saved without touching anything of yours.** In each git repository under `/work` (up to four folders deep, including your home folder and repositories nested inside another), a hidden snapshot of everything uncommitted (new files that are not ignored too) is kept under `refs/ozbox/wip/`. Your files, index, branch, stash and remotes are not changed, nothing is pushed, and no hook of the repository runs. **To get a snapshot back without touching newer work,** in that repository run `mkdir ../recovered && git archive <ref> | tar -x -C ../recovered` (a copy in a separate folder), `git diff HEAD <ref>` to see what differs, or `git show <ref>:<file>` to print one file. Do not run `git restore --source=<ref> .` over a folder you kept working in: it replaces every file the snapshot holds and removes files it does not.
+  - **If the box was not fully ready, you are asked again** before it is stopped, because `/work` is kept either way. Add `--strict-checkpoint` to `ozbox resize` or `ozbox upgrade` to refuse to stop the box unless it was fully ready (a program that ignores the request and is stopped after the wait does not count against it). The refusal says exactly what had already happened, and new runs are allowed again.
+  - **Nothing is typed into your terminals.** Agent sessions come back from their records, not from anything sent to them.
+  - **Nothing is pushed, also when the box stops or pauses itself.** The box's own stop, its idle stop and a cloud interruption notice save the same hidden snapshot and write no visible branch. A setting (`checkpoint.push_wip_on_stop`, off by default) brings back the older checkpoint, which writes a branch `wip/<box>/<time>` and pushes it if the box has a push remote.
+  - **Some things are left out on purpose, and the result says so.** A repository that is your home folder, or holds a credentials folder such as `.ssh` or `.aws`, is not saved ("not saved: home/dotfiles repo"). A new file over 50 MB is left out. Snapshots older than 14 days are removed.
+  - **A dropped connection or Ctrl-C does not leave a mess.** The command keeps waiting for the box up to the time the job can take, and does not stop a box that may still be saving. Ctrl-C while it waits lifts the hold on new runs.
+  - **An older box** whose agent predates this is told so in the plan: its uncommitted work is **not** snapshotted and its runs are **not** asked to end, and you are asked again before it is stopped. `--legacy-checkpoint` uses that agent's own checkpoint instead, which writes a visible branch `wip/<box>/<time>` and **pushes it if the box has a push remote**.
+  - The dashboard shows the same lines in a resize or upgrade plan, gets the box ready without freezing the page, and does not stop a box that was not ready (it says why).
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Docs"]} description="Preview: sessions come back">
+  ## Preview: your coding agents' sessions are meant to come back when the box restarts
+
+  A resize, an upgrade, a crash or a pause ends every program on a box, including the agent you left in a terminal. The conversation is kept. This preview reopens the terminal too. **Sessions come back; running programs end.** It is covered by tests only and **has not yet been run on a real box**, so do not rely on it yet.
+
+  - **Claude Code in tmux is reopened by itself when the box starts again**, after a restart of the whole box (a resize, a stop and start, a reboot). It does not run when one agent is killed on a box that keeps running. The box recreates your tmux windows in their folders under `/work` and reopens each agent with its own resume. At most six come back at one start, the most recent first. See [coding from anywhere](/use-cases/coding-from-anywhere).
+  - **A session you end on purpose does not come back.** `/exit`, `/clear`, a logout and a window you close are forgotten, and so is anything not used for seven days.
+  - **Other agents get their window back, not their conversation.** The window shows that resume is not supported for that agent, and the agent must have been hooked with `ozboxd hooks install`.
+  - **What is lost:** the turn in flight, background programs such as dev servers, shell variables and scrollback, and a permission question that was waiting. Oz Box sends the agent nothing on its own; tell it to continue.
+  - **Nothing new is asked or denied.** Only the record is kept. The questions about `git push`, `sudo` and `rm -rf` still come only from `ozboxd hooks install`.
+  - **One off switch.** `touch ~/.config/ozbox/session-resume.off` stops the record hooks, the boot unit, the sweeps and the resume; delete it to turn it on again.
+  - **The record holds no prompts and no secrets:** the agent, its session id, the folder and the window.
+  - **Boxes made before this release:** the box adds what it needs the next time its daemon starts after the upgrade. A session already running then is recorded after you start it again.
+  - Warning and saving your work before a resize or an upgrade is in the next entry.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard","Security"]} description="Chat, Apps, Schedules and Triggers">
+  ## Chat apps only notify, and schedules and triggers run on an engine that exists
+
+  A chat app could still stop a run, a schedule or trigger made without an engine named one no box has, and the demo's "Telegram" looked like a real chat. Now each says what it is.
+
+  - **Telegram, Slack and WhatsApp never approve, deny, stop or raise a spending limit.** A request arrives as a message with a link to the dashboard. A `/stop` or `/budget` sent from a chat app is answered with a link and changes nothing. The server refuses it, so it does not rest on a missing button. Stopping a run is done in the dashboard.
+  - **A chat app types into a coding agent only when that agent's own terminal has said it is waiting.** This is decided for each terminal on its own, so another agent in the same repository finishing does not unlock one that is asking. A question from an MCP server, or a notice Oz Box does not recognise, counts as a question. A Gemini CLI set up before this release needs its hooks installed again before a chat app can type into it.
+  - **A chat app never borrows a coding agent's own permissions.** A message typed into a terminal runs with what that agent may already do without asking, so Telegram, Slack and WhatsApp may type only into a Claude Code session that asks before anything beyond reading. Not one in auto, accept-edits, don't-ask or bypass mode (heard from its hooks or read from its screen), not one with allow rules, a sandbox that runs commands for it, hooks or plugins of its own, a skip-permissions flag or a settings file Oz Box cannot see, and not one whose mode is not known. A refusal says whether the session "may do things without asking" or whether Oz Box "cannot tell", links to the dashboard, and is audited without your message.
+  - **A chat app never types a line that starts with `!`, `#`, `&` or `/` into a terminal.** Claude Code runs those itself without asking: `!` as a shell command, `#` as a memory note, `&` as a background task, `/` as a command of its own. Both the server and the box refuse them.
+  - **A run started from a chat app is launched in Claude Code's default permission mode.** It no longer starts in accept-edits mode, and it has no terminal to ask in, so file edits and commands beyond reading are refused instead of made; start a run that changes code from the dashboard. A message to a run on the board in auto or accept-edits mode, or under a standing permission, is refused from a chat app. The dashboard's own Chat is unchanged.
+  - **New schedules and triggers run on Claude Code** (the demo uses its own demo agent). Ones saved earlier under the old name `claude`, which no box runs, are read as `claude-code` from now on, so the runs they fire can start. The `ozbox schedule add` and `ozbox trigger add` commands default to it too.
+  - **The agent is a menu, not a text box,** on both forms, and Schedules and Triggers say when a server is a demo.
+  - **Chat says where its conversation is kept**: in the dashboard's memory, the last 200 lines, shown only to you, gone at a restart. It says when the agent is a demo, when the server cannot start sessions at all, and when a refresh failed.
+  - **Apps labels the demo Telegram** with a Simulated badge. Removing a channel turns it off first, then deletes its keys, and tells you plainly if a key could not be deleted and is still stored. Saving a channel stores the key first, so a refused save cannot leave a channel switched on without its key.
+  - **A viewer sees Chat, Schedules and Triggers without buttons they cannot use**, with a line saying why.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer, and none of them fires a run. A real message to a chat app, a schedule or trigger firing on a real box, and opening an approval from a chat link are still by hand.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security"]} description="Settings">
+  ## Settings says what is real, and changes that ask for less need your passkey
+
+  The Providers page said "Connected" for the demo, Backups showed made-up snapshots as real ones, and a tunnel token could be replaced without the passkey the server asks for. Now each says what it is.
+
+  - **Providers asks the provider.** The badge reads Connected only when the provider answered a read-only question just now. The demo reads **Demo**, a box's own dashboard reads **This box**, and a provider that refuses reads **Not answering** with the reason. **Check now** asks again. The fixed Regions and Permission check rows are gone; where the provider looks is shown when it says.
+  - **Backups and local AI say when they are simulated.** A **Simulated** badge and a sentence appear when the server is running the demo, on Settings, a box's Backups tab and the local AI card. The text on Backups no longer says a box is asked to make the backup when it is the demo.
+  - **Replacing a tunnel token asks for your passkey.** Behind a sign-in, saving a new token on Dashboard access now shows the passkey prompt instead of failing with no explanation.
+  - **Loosening the approval policy or raising a spend limit needs a fresh passkey.** Asking for less (dropping an action from the ask list, a protected branch, a command or a second factor, widening who can decide, removing or raising the spend threshold, the fleet or per-person limit, or a model provider's monthly limit) is refused without one, and the review says so before you save. Asking for more needs nothing. On a box with no sign-in these changes are refused outright and say why, and the review says so before you save. The provider check no longer shows account numbers, role names or addresses from the cloud's error.
+  - **Box defaults on a box's own dashboard say the fleet is not connected**, instead of a form that could only answer "that size is not offered".
+  - **The command palette reaches every Settings section**, including General, Backups, Dashboard access, Approvals and Secret approvals.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer; the provider check against a real cloud account, and a real restic backup of a box, are still by hand.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Terminal, Files and Tools">
+  ## The terminal names where it is connected, and Files and Tools say when they are showing a demo
+
+  A demo folder looked like a box's disk, and a failed read looked like an empty list. Now each page says what it is.
+
+  - **The terminal names its box** before it connects, and says "Connected to main, as the box user" once the shell is up. That shell is started by the box's own agent, never by the dashboard.
+  - **Files, Tools and the Terminal carry a Simulated badge and a sentence** when the server is running the demo, so made-up folders, tool installs and shells are never taken for a box's own.
+  - **Files says when a refresh failed**, and keeps what it had on screen marked as possibly out of date.
+  - **Tools shows a failed profile list or tool list as an error**, says plainly when a server has no tools to show, and says when the tools you chose for a new box could not be saved for later.
+  - **One way of talking to the server.** The file browser, the terminal, the live updates and the sign-in pages now share the code every other page uses, so an ended session sends you back to the sign-in page from any of them.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer; opening a shell as the box user on a real cloud box, and installing a tool from the dashboard, are still by hand.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Usage, Bill, Activity and Account">
+  ## These pages say what is measured, what is a demo and who did what
+
+  - **Usage and its suggestions say when they are demo figures.** On the demo provider they carry a **Simulated** note: nothing was measured and no suggestion is a real saving. A real box shows none.
+  - **A box Usage could not read is named, with the reason**, in a "boxes could not be reached" note, instead of "No running boxes" or a quiet "Nothing to suggest". A box that is slow to answer never holds the page: it shows its last answer with the time it is from, or says it is still being read. The suggestions are read at the same time rather than one box after another.
+  - **Usage says why it has no cost on a box's own dashboard**: **Fleet not connected**, not "enter a price". A suggestion's button there explains that a box cannot change a fleet. A viewer sees the suggestions and no button.
+  - **Bill says Fleet not connected on a box**, and asks the provider for nothing. Reading the bill and scanning for forgotten resources are for members and owners; deleting what a scan found is for owners.
+  - **Activity says it is the most recent 500 since the server started** and that a restart clears it. It shows an error with **Try again** when it cannot be read, instead of nothing.
+  - **Activity names the person who did each thing.** It said "this computer" for everything, even behind a sign-in. A dashboard opened with an access link says **access link**, and a change that finishes later is still credited to the person who asked.
+  - **A box that answered with no usage yet is "has not reported usage yet"**, not "could not be reached". The monthly cost says when it leaves out boxes that gave nothing to price, and says whether the prices were entered or from the cloud's price list. On a box's own dashboard it stays **Fleet not connected**.
+  - **A finished background change is credited to the person who asked**, or to automation when nobody did, never to whoever happened to be looking at the page. A change to a box is judged under the signed-in person's own rules, not the owner's.
+  - **Account says it needs a sign-in** on a dashboard opened with an access link, instead of a blank page.
+  - **Not yet run against a real cloud box**: the new checks run a real dashboard on one computer. The saving a suggestion shows still comes from the size prices you enter in Settings, not from the cloud's price list.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Orchestrations, Browser, Memory and Skills">
+  ## These four pages say what is real, and a viewer is not offered what it cannot do
+
+  - **Orchestrations and Browser say when they are the demo's stand-ins.** The simulated agents and merge, and the stand-in browser, carry a **Simulated** note. A real box shows none.
+  - **Orchestrations says why its list could not be read**, instead of an empty page.
+  - **Browser says it is not available** when the server has nowhere to keep sessions, instead of a generic failure.
+  - **Memory and Skills say where they are kept**: on this box, or on the computer that runs the dashboard. They are not copied onto your other boxes, and they say so. A server with no settings file says its notes are forgotten when it stops.
+  - **Installing a skill says who may use it**: every agent session, the orchestration agents on one box, or the orchestration agents in one project. You pick a box from a list rather than typing `box:name`.
+  - **A viewer can read notes, skills and orchestrations and is offered nothing to change.** A member may change notes and orchestrations. Only an owner installs, reviews or approves a skill.
+  - **Memory and Skills show an error when forgetting a note or removing an install fails**, instead of closing quietly.
+  - **Not built yet.** Adding a skill of your own from the page (use `ozbox skills add <folder>` on the computer that runs the dashboard), and putting a skill onto a box's own disk. **Not yet run against a real cloud box**: the new checks run a real dashboard on one computer.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Tasks and Approvals">
+  ## One place for your agents' work, and Approvals says what it cannot read
+
+  Runs and Tasks were two lists of the same work, and the Runs list could only show made-up data or nothing. Runs is gone from the menu: **Tasks** is the one place, and the old Runs address opens it.
+
+  - **A box's page links to All tasks on this box**, which opens Tasks filtered to that box.
+  - **A role that may look but not act** (a viewer) is told so on Tasks, and its task sheet offers no Cancel, Retry, Review or Resume.
+  - **Tasks says so when the server has no task store**, or when a refresh fails and what you see may be old.
+  - **New task says when no box is running**, and on a box offers only the real engines.
+  - **Approvals says which list it could not read, and why**, for waiting plans, requests from agents, tool requests and change requests. It no longer says "Nothing waiting" when one of them did not answer.
+  - **Approvals says plans are kept in memory** for ten minutes and forgotten on a restart.
+  - **A change request always shows its User id row.** Where the system gives no verified user id (a service not on Linux) it says "not reported".
+  - **Settings, Secret approvals** keeps its form and Create approval button on the first screen of a phone; the long explanation moved below it.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer; starting a task on a real cloud box and deciding an agent's request from the dashboard is still by hand.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Fleet, Boxes and Box pages">
+  ## Starting or changing a box no longer freezes the dashboard, and the fleet pages show what is real
+
+  Creating, resuming, resizing, upgrading or destroying a box from the dashboard used to hold every other tab and person until the machine had finished. It now runs in the background: the page shows its progress and everything else keeps answering.
+
+  - **Boxes has a Create a box button** (on a dashboard that runs on a box it says "Fleet not connected").
+  - **A box's Usage tab shows live usage and charts** on a real fleet, not only on the demo.
+  - **Cost this month is an estimate from the hours Oz Box watched and public prices**, on the Fleet page and on each box. It says "Fleet not connected" on a box, and shows the reason when it cannot be read. The bill is on the Bill page.
+  - **Needs you lists a failing self-test** for any running box, beside memory and disk alerts.
+  - **"N boxes could not be reached"** with the reason for each, instead of a box with no bars and no explanation.
+  - **Opening a box's SSH details no longer creates a key.** The SSH sheet offers **Create the SSH key** when the key does not exist yet.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer; creating, resuming and destroying a real cloud machine from the dashboard is still by hand.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security"]} description="Honest dashboard">
+  ## A dashboard on a box never opens a demo shell, and every page says what it is
+
+  A dashboard that runs the demo provider on a box could start a real shell, serve a real folder or start a browser on the box itself, all labelled as demo. It now refuses all three, and says why, on any box, however the demo was chosen. Nothing changes on your own computer, where the demo still works as before.
+
+  - **Terminal, Files, the browser and tool servers on a box with the demo provider** answer "This is demo data, and a box has no demo terminal" (or files, browser, server) instead of starting anything.
+  - **Account without a sign-in** (a dashboard opened with an access link) now says "Account needs a sign-in" instead of a blank page.
+  - **Not yet run against a real box.** The new checks run a real agent and dashboard on one computer; the same checks against a box and a laptop with a cloud provider are by hand for now.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Terminal">
+  ## Paste works in the terminal in Firefox and Safari
+
+  The terminal's **Paste** button asked the browser for the clipboard and did nothing useful when the browser said no, which Firefox before version 125 does always, and other browsers do when you refuse the permission.
+
+  - **When the browser will not hand over the clipboard,** Paste opens a box. Paste into it with Ctrl+V (Cmd+V on a Mac, or long-press and choose Paste) and choose **Send to terminal**. Cancel sends nothing.
+  - **An empty clipboard and a paste that is too large now say so,** instead of doing nothing.
+  - **A failed Copy says so too,** and leaves the text selected.
+  - Ctrl+V or Cmd+V with the terminal focused was never affected.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard"]} description="Tools">
+  ## OpenTofu and Playwright can be installed on a box
+
+  Both were listed in the tool catalogue but could not be installed. They can now. See [the tool catalogue](/tools).
+
+  - **OpenTofu** installs the `tofu` command from one pinned release on both x86 and Arm. Its download is checked against the digest the project publishes.
+  - **Playwright and Chromium** installs the system libraries from Ubuntu's archive, the Playwright package pinned to one version, and Chromium for the box user. **Playwright publishes no checksum for its browsers, so they are downloaded over https and not hash-checked.** Firefox and WebKit are not included. The catalogue page says what is downloaded and how large it is.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security", "CLI"]} description="Approval requests">
+  ## A box can hold change requests, and you decide them with your passkey or from your computer
+
+  A change a box guards used to need a short code that you carried from one place to another before it expired. A box can now hold a request that names the exact change, and you decide it where you are. **No `ozbox` command and no git hook files a request yet.** Importing keys, policy changes, tunnel tokens and the key guard's override still use codes in this release, so the Approvals page shows a request only when something has filed one on the box's own request route. Those commands will file requests in a later release.
+
+  - **The Approvals page shows each request as a card:** what is being changed, field by field, who or what asked (named exactly as the box reports it), the reason the requester gave (marked as theirs), how long is left, and Approve or Deny. Approving asks for your passkey for that one request, with user verification for a change only an owner may approve; a viewer, or a dashboard with no sign-in, can read but not decide.
+  - **Telegram, Slack and the other chat apps only tell you, on every kind of request.** The message carries the details and a link to the card. It cannot approve, deny or cancel anything, and an agent's own approval in a chat no longer has Approve and Deny buttons: the message links to the dashboard.
+  - **From your computer:** `ozbox secrets ingress requests --box <name> list|show|approve|deny|keys`. `approve` needs the whole digest `show` prints, so what you approve is what you read, and your computer checks that the box's challenge is the one for that request, digest and decision before it signs. The key on your computer is a software key: it decides only what a member may decide.
+  - **Codes stay on until phase 3.** The old approval codes keep working for every operation on every box, as they did before. Phase 3 turns them off everywhere. Until then, root can turn them off on one box by creating `/etc/ozbox/approvals-legacy-codes-off` and restarting the secrets service (the file is read once, at start; the service logs what it read, and a file that is not a plain file owned by root that no one else can write is ignored and the box's self-test fails until it is fixed). The dashboard cannot make a code that enrols a key, and the Secret approvals page no longer offers one.
+  - **A new laptop key waits 24 hours before it can approve anything.** On a box that has had a laptop key before, a key enrolled with a code cannot decide a request, make an approval code or redeem one until the 24 hours are over. The first key on a box that never had one is not held back.
+  - **Enrolling a laptop key from the dashboard needs an approved request, and nothing files one yet.** Until a later release adds the command that does, add a key from a computer that already has one, or have root on the box add it. A box whose only laptop key is lost needs root. The dashboard's revoke of a key makes no code.
+  - **Hardware keys do not count as proof of presence yet.** A FIDO2 key enrolled with its attestation is checked against Yubico's FIDO roots and FIDO attestation certificates, and the check is recorded, but it counts as a presence key only where root has turned that on (`/etc/ozbox/approvals-presence-keys`) after a real key has been proved on a box. Otherwise it is a software key, which never decides a Production or owner-only change.
+  - **Settings, Approvers** lists the laptop keys on a box and which have proved presence, and an owner can revoke one with a passkey.
+  - **`ozbox guard wait <request-id>`** waits on a box for a request to be decided and prints its digest when it is approved. It waits through a service restart, and a refusal (a mistyped id, "not allowed") fails at once.
+  - Not yet run against a real box or a real security key.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="AWS secrets key">
+  ## A box you already have can move its secrets store to your fleet's KMS key
+
+  A box made before your fleet's KMS key existed kept its secrets store's key in a file on its system disk, so every upgrade would lose the store, and there was no way to give such a box the key. Now there is, and nothing is entered again.
+
+  - **`ozbox adopt-fleet-key <box>` moves the store to your fleet's KMS key, in place.** The box's role is allowed to use the key for that box's own secrets, and the box re-wraps its own store while its secrets service keeps running, then swaps it in during a short stop. `--dry-run` shows what changes first. See [keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - **The box's secrets service is down for a short time, and the time grows with the store.** Expect a few seconds plus about a second or two for each secret it unlocks when it starts (a store of 100 secrets can take a minute or two). `ozbox env run` and the dashboard's secret reads wait or retry meanwhile.
+  - **Secrets read through the key service cost a little time after a pause.** Each secret the service has not unlocked in the last five minutes takes about a second to unlock again (an estimate, not yet measured on a real box); one that was used recently costs nothing extra.
+  - **Nothing is destroyed until you commit.** The box keeps the key file on its system disk until this command has seen, as the box's root through AWS Systems Manager (your AWS sign-in needs the policy the fleet module outputs: it can run one fixed document of yours on your boxes, never a shell), that the store is on KMS, and written the label that makes upgrades keep it. The box user's own answer is never trusted for that. A key you escrowed in a vault before the move is not removed from it.
+  - **`--cancel` takes the store back before it takes the grant away.** The box records the cancel itself and, if it had moved, re-wraps its store back under the file key, so nothing written in between is lost; only then are the mark and the grant removed. A box that cannot confirm keeps its grant.
+  - **A move that is cut short puts itself right.** A reboot half way no longer leaves the secrets service refusing its store, the box's lock frees itself when a run dies, and a box that lost its tag and its grant to two operators acting at once is reported, never put back on its own: `--cancel` offers the copy made before the move only when the cloud's own tag list shows no label and the key service itself refuses the box, and asks you to type the box's name first (it says what that loses).
+  - **A box with its metadata guard missing is refused before anything changes**, and a store that is written too often to be re-wrapped waits longer before each new try and says so.
+  - **On AWS, an upgrade reads the store's key from the box's root, not from what the box says over SSH.** An unlabelled box is reported as lost, kept by escrow or unknown from that, and when the root channel cannot answer, the box's secrets service is not ready, or the box's program is older than the check, it is unknown and refused unless you accept a new store, never "kept". The box's firewall list can no longer be tightened to cut it off from its key service.
+  - **A box that cannot move its own store is refused before anything changes.** A box made on an earlier release cannot (this includes boxes made on 0.1.1): upgrade it first, to an image built from a release that includes this command (the plan says what to enter again if its store would be lost, and that one time is the only time it loses it), then run the command. The upgrade plan now reminds you when your fleet's key is set and the box does not use it.
+  - **`ozbox upgrade --use-fleet-key` on AWS now rests on what the box's root says.** Whether the store is empty and on a file key is read through Systems Manager, as for the other checks, and a box that cannot answer is refused. A box whose copy of the key is kept in this computer's keychain is reported as kept, as on the other clouds.
+  - (Tested in CI; a run on a real box is still to come.)
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="A box's own dashboard">
+  ## A dashboard on a box shows that box, and says when the fleet is not connected
+
+  - **A dashboard on a box shows that box, and says when the fleet is not connected, instead of demo boxes.** Before, a dashboard running on a box with no provider set showed made-up boxes that looked like a fleet. Now it shows the box it runs on, and where a fleet would appear it says "Fleet not connected: this dashboard sees only this box". Creating, resizing, pausing, cloning and destroying boxes, and what boxes cost, say why they are not available there instead of showing demo rows. Do those from your own computer with the `ozbox` command line. When you choose the demo provider on purpose, every page now carries a "Demo data" banner. See [run the dashboard on a box](/use-cases/coding-from-anywhere).
+  - **The dashboard on a box can start and follow this box's runs and chat sessions, upload and edit files, and take a checkpoint.** Starting a session from Chat with `/new` on a box did not work. Now the dashboard reaches the box's agent through a connection that only it can use, and sessions started from the dashboard's Chat or Telegram start on the box. The dashboard on a box is no longer in the box user's group. Backups, installing tools and local models are not available from a box's own dashboard (use your own computer); starting runs and the terminal still act as the box user, so treat access to that dashboard as access to the box.
+  - **Claude Code now asks you in its own terminal, straight away, before a risky command (`git push`, `sudo`, `rm -rf`).** Before, with Oz Box's hooks installed, it waited about nine minutes for an answer nobody could give, and then refused. Gemini CLI is refused at once for those commands until you approve them in its own settings. Answering from the dashboard comes later.
+  - **A box whose agent is older than this release is not given the dashboard's connection until the agent is upgraded**, and the dashboard says the agent's socket is missing (run `ozbox admin <box> -- reinstall-ozboxd`). An agent older than this release says nothing itself. A newer agent beside an older program reports the missing socket in its self-test as a warning, not a failure.
+</Update>
+
+<Update label="November 15, 2026" tags={["Security"]} description="Browser isolation">
+  ## The agent's browser runs as a user of its own
+
+  - **On a box where the dashboard runs on the box, the browser's worker, its Chromium and its profiles run as their own user.** From an agent's shell, a profile's cookies can no longer be read, a Chromium cannot be started against a profile, Chromium's control pipe cannot be opened through `/proc`, and the worker cannot be stopped from outside. Before, they ran as the same user as the agent's shell.
+  - **Profiles and held-back downloads are in a folder only the browser's user can open.** Recordings and the documents a session released stay readable by the dashboard and by the agent, as before.
+  - **Sign-ins saved in a browser profile before this release are moved, once, into that folder.** They were in `/work/.ozbox/browser/profiles`, where the agent's user could read them. A dashboard on the box keeps them; a person who drives the box from a dashboard on their own computer signs in again once. See [the browser guide](/use-cases/browser-on-the-box).
+  - A dashboard on your own computer still reaches a box's browser through the box, as the agent's user, so the limits in the guide still apply there. Not yet run on a real box.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI"]} description="Hetzner upgrade">
+  ## Upgrading a Hetzner box replaces the server, so it gets everything new
+
+  - **`ozbox upgrade` on Hetzner now replaces the server through OpenTofu instead of rebuilding its disk.** The new server is made from the current first-boot configuration, so a box made before a release gets that release's helper scripts, setup and settings, not only its programs. `/work` is a separate volume and is kept; the plan is checked first and refused unless it replaces only the server and its attachment.
+  - **The server gets a new address**, and a vault token placed by hand on the old system disk is placed again (`ozbox admin <box> -- place-bao-token`). If Hetzner cannot create the new server right away, `/work` stays safe, the box shows as `instance missing`, and running the same upgrade again finishes it. See [keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - Not yet run against Hetzner.
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard", "Security"]} description="Roles">
+  ## Decide who may do what on a shared dashboard
+
+  Everyone who could sign in could do everything, including watch a browser session and change the settings. Now each person has a role.
+
+  - **Owner, member or viewer.** An owner can do everything. A member does the work: starts runs, approves what agents ask, watches and takes over a browser, and uses a box's terminal, files and IDE. A viewer can look at boxes, runs, costs and the audit log, and nothing more.
+  - **Only an owner changes what governs the dashboard:** settings, permissions, the secrets policy, costs, the browser's settings and who has which role. A viewer cannot watch a browser session at all, because its pictures show what is on a person's screen.
+  - **The first person is the owner.** A dashboard you already have keeps its first person as the owner, so nobody is locked out; anyone else it lists becomes a member. Add `role=viewer` to a `--person` to start someone as a viewer, or change a role later in Settings → Members & roles with your passkey. The change is recorded in the audit log, and a dashboard always keeps at least one owner.
+  - **Pages match the role.** What a role may not change is shown read-only with a line saying why, and a button it may not use is not offered. The server refuses the same requests either way.
+  - **On a box with no sign-in, more is refused.** Deleting what the bill found, granting access to production, changing the permission rules, applying a change that cannot be undone and changing how the dashboard is reached now need a sign-in with a passkey there, as taking over a browser already did. On your own computer nothing changes.
+  - **Open Web IDE and Open Desktop no longer reuse an old box's connection.** A box you destroy and make again under the same name now opens its own IDE.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI"]} description="Upgrade plan names its kind (Preview)">
+  ## `ozbox upgrade` now says what kind of upgrade a release calls for, and why (Preview)
+
+  - **A "Kind of upgrade" line in the plan** says whether the box's release and the new one would allow a live update, need a replace of the system disk, or, for a stopped box, are upgraded in place, with the reason in plain words. It is read from the two signed releases, never from what the box says about itself.
+  - **`--json` names what is called for apart from what is done.** `upgrade_kind` has `called_for` (`live`, `replace`, `in_place` or `undecided`), `carried_out` (always `replace` in this release) and `reason`. Read `carried_out` to know what happened.
+  - **Nothing else changes.** Every upgrade is still carried out as before: the box stops, its system disk is replaced and `/work` is kept. Live updates are not available, and no release can offer one yet. This is Preview: it is covered by tests, and no image has been built with it or run on a real box.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI"]} description="Runs can outlive the box's daemon (Preview)">
+  ## Agent runs can keep going when the box's daemon restarts (Preview)
+
+  - **When the box user's own service manager is up and hands out memory and cpu limits, a run that is going is meant to keep going, with its output and input still working, when the box's daemon restarts.** Before, restarting the daemon ended every run on the box.
+  - **When that manager is not ready, a run still ends with the daemon**, and the box's self-test says so (`run_backend`). The choice is made again for each run, so a daemon that started a moment before the manager does not lose every later run; a run that already started keeps the way it started.
+  - **A run keeps the memory guard's protections either way:** the default cap, the bounded share of compressed swap, one kill for the whole run, and a raised OOM score.
+  - **A run keeps part of the daemon's own restrictions** (no new privileges, no setuid files). A stricter sandbox is a setting, `runs.sandbox`, off until it has been seen to work on a box; until then a run in this mode sees the box user's files and devices as a terminal of that user does.
+  - **Processes outside the daemon's service (SSH sessions, the box user's own units) cannot reach a run's connection**; dashboard terminals and runs in cgroup scopes still can. This is defence in depth, not a boundary between processes of the box user. A run that never started is no longer shown as killed.
+  - This is Preview: it is covered by tests, and it has not been run on a real box.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security"]} description="Tunnel tokens on a protected box">
+  ## Give a box's dashboard a new tunnel token after you turn on a second factor
+
+  - **`--approval CODE` (or `--approval-stdin`) on `ozbox dashboard install` and `ozbox tunnel setup`.** Once a passkey or authenticator code is enrolled, a token change needs an approval. On the computer that made the box, pipe the new token into `ozbox secrets approve --box <box> --scope tunnel-token --project cloudflare --token-stdin` and use the code it prints. The code works once, for a few minutes, and **only for that token**: a different token is refused. Before, the token could only be changed from the dashboard, and the dashboard could only be reached through that same tunnel.
+  - **Running `ozbox dashboard install` again with a new token changes the token** on a box whose dashboard already runs as its own user. The public address is not changed by it. On a box with no second factor yet, no code is needed. On a box with one, the command stops, says an approval is needed and prints the command that gets one.
+  - **A box made from an image before this release** takes the same route, but its root helper checks the code and not which token it is for. The command tells you to get the code without `--token-stdin` and use it straight away. A newer image removes the difference.
+  - **When a box refuses a token, you see why**, along with the command that gets an approval, instead of "did not take the tunnel token".
+  - **`ozbox` commands you run on a box use the box's own secret store.** Before, they looked for a desktop keychain the box does not have. Nothing is asked for a typed confirmation there: the box's secret service decides, and says what to do.
+  - **Codes stay out of command lines** on the box and, with `--approval-stdin`, on your computer. The code `ozbox secrets approve` gets from the box now comes back without the box user's shell (see the entry on importing keys). The token and code you hand to `ozbox dashboard install` still pass through that shell on their way to the box, which is why a code is tied to its token.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Dashboard"]} description="Tool installs and boot">
+  ## Tool installs work again, and your own services start when the box does
+
+  - **Installing a tool from the catalog, or from the Dashboard, works again.** Every step that used the system's package manager failed on a real box, so no catalog tool could be installed. If the package manager cannot change to its download user inside the tool installer (the reason it failed), the step now runs once more with downloads done as root, inside the installer's own service. Signatures and hashes are still checked. The tool's log says "Download is performed unsandboxed as root" when this happens. A box where the normal way works keeps it.
+  - **`ozbox admin <box> -- collect-logs` now includes the tool installer's log**, the security modules the kernel loaded and the kernel's denial lines (secrets blanked, size capped), so a failing install can be diagnosed without a shell on the box.
+  - **The box user's own services (IDE, desktop, dashboard) start at boot**, once, after your files are mounted, and keep running after the last login ends. Before, on a box from an image they could start before `/work` was there and then be restarted.
+  - **The self-test no longer reports `user_services_active` as failed** when the services are running: it now asks the box user's own service manager instead of root's.
+  - **`ozbox dashboard install` reads the box's image record in full**, so it no longer says the box has no record when it has one.
+  - (Tested in CI; a run on a real box is still to come.)
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="Run a web app's tests on a box">
+  ## A declared command can now run your real tests: tools, settings, a server and a browser
+
+  Before, a command you declared on a box could not find your tools, could not be given a plain setting like a port, could not read your project folder, and an agent could edit the script it ran to read what the command received. Now one declaration covers a whole test run. See [Run a web app's tests on a box](/use-cases/secure-agent-workspace).
+
+  - **Plain settings.** `vars` fixes a value for every run, and `pass` names values you may give with `--pass NAME=value`. They are never secrets: a value that looks like a key, or holds one you stored, is refused, and so is a name that decides how a program starts (`PATH`, `NODE_OPTIONS`).
+  - **Rename a secret as it is delivered** (`{"name": "STORED", "as": "OTHER"}`), so you do not store a second copy.
+  - **Pin a script by its content.** The box checks it every run and runs a read-only copy of exactly what you approved, so editing or swapping the script, even a moment after the check, no longer reaches the key. A changed file stops the run and says which. Pin a folder too (`pin_tree`, for a package), and a script that receives a secret is refused unless everything it imports is pinned; `ozbox env policy pin --entry FILE` lists it all.
+  - **A server that stays up.** Mark a command `service` and use `--start`, `--stop` and `--status`. It listens only on this box's loopback, waits for its health check, and another command in the project can reach it. It receives no secrets.
+  - **Tools and browsers on the command's PATH.** The tools your declaration names are copied read-only from the catalog's install. A project with a command that receives a secret must pin every tool by its digest, and a browser is copied only for the revision you approved; a command that receives a secret cannot drive a browser.
+  - **A command that receives a secret runs as a user of its own.** A server, a browser or any other command can no longer read it from the system's process list. A box from before this refuses such a declaration and says to run `ozbox upgrade`.
+  - **Before you have a second factor, no command can be given a secret.** The box cannot tell you from an agent, so it refuses any declaration that gives a command a secret and hands none out, until you enrol a passkey or make the box with `ozbox create` from a computer with a keychain. Declarations with no secrets are accepted, and a stored value cannot be replaced from the box.
+  - **The command can read its own project folder, and nothing else of yours.** Before, runners were in the box user's group; they are not now, and a runner made earlier is taken out of it.
+  - `ozbox env policy pin --dir DIR --commit SHA [--entry FILE] [--tree PATH] [--tool NAME=DIR] [--browser NAME --browser-cache DIR] [FILE...]` prints the digests to paste into a declaration. Run it on your own computer in a clean checkout at the commit the box reports: a digest taken on the box only freezes what an agent may already have changed. A box from before this release refuses such a declaration and tells you to upgrade.
+  - **A command that receives a secret sees only what you approved of the project.** Its folder is a private, read-only view with just your pinned files and folders and your writable folders in it; a file an agent adds or changes cannot reach the key, and after the first run the box does not read the folder at all, so each run starts faster. Such a command runs exactly the words you approved, names the environments it may use, takes no host names or URLs from the caller, and needs exact egress hosts.
+  - **Production values stay out.** A value stored as production anywhere on the box is production under every name, a file named for production is not imported under another environment, and you can list your own production identifiers per project.
+  - (Tested with a simulated machine; a run on a real box is still to come.)
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="Secrets can hold any value">
+  ## Secrets can now hold any value, including spaces, quotes, JSON and several lines
+
+  A `.env` value with spaces (an address list), quotes, a JSON document or a whole private key used to be refused. Now it is stored and handed to your program exactly as you wrote it.
+
+  - **`ozbox secrets import` stores any value.** A quoted value may run over several lines (a PEM key, a service-account JSON). The preview marks a value that is stored in its encoded form with `(stored encoded)`, and still shows names and fingerprints only, never a value. Only a blank value, a value with a NUL byte, one over 96 KB, or a quote that is never closed is skipped, with the reason. Every key is checked before any is stored; if the disk itself refuses part-way, run the import again to finish.
+  - **`ozbox env run` gives the program the exact value,** and anything it prints that contains the value, or one line of a multi-line value, or the value written inside JSON, still has it removed.
+  - **On a box, a value with a line break cannot add or replace another variable.** Values now reach the command directly, not through a file the service manager parses.
+  - **A key that only fits in a command line when it is plain** (`{{secret:NAME}}`) says to read it from the environment instead, when it holds spaces, quotes or lines.
+  - **A box made from an older image cannot take these values yet.** The import tells you which keys wait for `ozbox upgrade` and sends the rest. A store that holds one of these values cannot be opened by an older program, which says so rather than hand back the wrong text; `ozbox secrets status` shows how many are stored this way.
+  - Existing keys are not changed.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="Importing keys, the box's PATH, auto-pause and the AWS CLI">
+  ## Importing a project's keys no longer stops at the first awkward line
+
+  - **`ozbox secrets import` reads a `.env` file the way other tools do.** Quotes around a value are removed, `export KEY=...` works, and a trailing ` # comment` is ignored.
+  - **A blank value, or one that cannot be stored, is skipped and listed instead of stopping the import.** The list names the key and the reason, never the value. Every key is checked before any is stored, so a skipped key never leaves the rest half imported.
+  - **`ozbox secrets approve --dry-run` no longer makes a real approval code.** It says what it would do and contacts nothing.
+  - **Keys and approval codes no longer go through the box user's shell.** `ozbox secrets import --box` and the approval calls used to run `ozbox` on the box through the box user's own shell, whose start-up files the box user (and so an agent working there) can edit, so a planted shell function could copy what was sent. They now go through the box's separate secrets account, sealed (see the entry on the secrets route). This does not protect against root on the box, and boxes whose secrets service is not running cannot take keys.
+  - **The box user's own `~/.local/bin` and `~/.cargo/bin` now come after the system folders** in the PATH file that login shells read. This is tidiness, not a lock: the stock `~/.profile` still puts `~/.local/bin` first, and the box user can change its own start-up files. Upgrading a box on AWS to this release replaces its machine (your files in `/work` are kept), because this file is part of the first boot.
+  - **A box with no pause command configured says so once, with how to set one,** instead of repeating it every ten minutes. It still saves your repositories (the idle checkpoint) every ten minutes while it is idle, as before.
+  - **`--dry-run` now stops every `ozbox secrets` command that changes something** (`import` even with `--yes`, the rotations, `put`, `remove`, enrolling or revoking an approval key), and `ozbox env run` and `ozbox env policy` refuse the flag instead of ignoring it.
+  - **A connection that fails with the AWS CLI at version 1 now says so, and which `aws` it used.** Before, `ozbox init` blamed an expired sign-in, or a connection just failed without a word. Version 1 can open a connection to a box; only `aws sso login` needs version 2. So `ozbox connect --ssh --write` no longer refuses a computer whose first `aws` is version 1, and a connection that works costs no extra check.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="0.1.1-alpha.0: first boot belongs to the program">
+  ## A box always boots with the configuration of the program that made it
+
+  - **`ozbox` carries its own box modules and first-boot configuration**, and checks them by hash before it uses them. You no longer copy modules by hand or set `module_dir`. A `module_dir` that points at another copy is now ignored, with a warning that says why; developers who want it can set `dev_modules = true` (or pass `--dev-modules`), and every plan then says so. `ozbox infra` shows what the program renders and from where.
+  - **On AWS, `ozbox create` and `ozbox upgrade` refuse a signed image built for a different first-boot configuration** than the program's, so a program and an image from different releases cannot make a mismatched box. `--allow-first-boot-mismatch` goes ahead with a warning in the plan. Images from before this release, images whose signature was not verified, and Hetzner images record nothing to compare and are allowed with a note.
+  - **On AWS, a box made with another first-boot configuration can be repaired without a new image.** Each new machine is now tagged with the first-boot configuration it was made with, a tag the box itself cannot change. `ozbox upgrade` to the image the box already runs reads that tag, and replaces the machine from the same image when it is not this program's (or a machine from before this release has none), keeping `/work`, instead of saying "Nothing to do". What the box says about itself can only ask for a repair, never skip one. `--reprovision` does it in any case. Every upgrade check still applies, and an unfinished upgrade is finished first.
+  - **On Hetzner, an upgrade to a newer image replaces the server** (see "Upgrading a Hetzner box replaces the server" above) with the first-boot configuration the program renders, and records its hash on the new server. A server already on the image is not replaced to repair its first boot, because Hetzner keeps no record to compare, so `ozbox upgrade` says it cannot check it there and `--reprovision` is refused with what to do instead.
+  - (Tested in CI; a run on a real box is still to come.)
+</Update>
+
+<Update label="November 15, 2026" tags={["Dashboard"]} description="Demo fix">
+  ## The demo's web IDE opens on a Mac
+
+  - **Open Web IDE on a demo box now shows the stand-in IDE on macOS.** Before, the new tab often stayed blank after signing in. Boxes you run yourself were not affected.
+</Update>
+
+<Update label="November 15, 2026" tags={["CLI", "Security"]} description="Secrets route">
+  ## Keys and approvals now reach a box through a route the box's own user is not on
+
+  Before, `ozbox secrets import --box`, signing an approval and enrolling a key went through the box user's own SSH account, where an agent's shell startup files could read what was sent. They now go through a separate account that only runs one command, and every request is sealed so that anything on the way sees only ciphertext.
+
+  - **`ozbox secrets import --box`, `ozbox env policy set --box`, `ozbox secrets approval-key` and `ozbox secrets approve` use the new route.** The first request to a box pins that box's key on your computer and prints its fingerprint; a box whose key later differs is refused and nothing readable is sent. `ozbox secrets ingress pin --box <name>` shows or checks the pin, and `--replace` accepts a new key on purpose.
+  - **A box made before this release is refused with a sentence that says what to do**, and the old route is not used instead. `ozbox upgrade <name>` gives the box the new account and keeps `/work`: on AWS the machine is rebuilt from the newer image, and on Hetzner the server is replaced (the box needs a newer image than the one it runs). The one-time cost, when the box keeps its secrets store's key in a file, is a new, empty store, because that key cannot be copied off the box without the account; the upgrade lists what to enter again and asks for `--accept-new-secrets-store`.
+  - **The dashboard's first-time setup code is no longer in the box's logs.** Read it on your own computer with `ozbox secrets ingress setup-code --box <name>`.
+  - **A box that keeps its store's key in a file can now keep a copy in your computer's keychain.** Run `ozbox secrets ingress escrow --box <name>` once; `ozbox upgrade` then keeps the box's secrets across the upgrade and puts the key back for you, where before it asked you to accept a new store.
+  - **A box's AWS role can no longer read every Parameter Store value in your account.** Boxes now carry only small policies made for them once per account (`ozbox-box-session-manager` and, when used, ones for the box's own parameters, the fleet key and session logs), never an inline policy and never AWS's broader Session Manager policy. `ozbox init` makes them; an upgrade that needs a permission your daily role cannot grant is refused before the box is stopped. `ozbox upgrade --use-fleet-key` moves a box with an empty store onto the fleet key; boxes you already have switch at `ozbox upgrade`, and the steps for an existing account are in the infra README.
+  - **The key import route is fixed and stricter.** The ingress account's settings now pass sshd's own check, and a setup that fails leaves the account unable to log in. It has its own SSH key, no agent is forwarded, `ozbox upgrade` gives an existing AWS box the account, and the store-key copy and the first-time code need an approval from your approval key once the box has one.
+  - **`ozbox init` now sets up the fleet's secrets key on AWS.** It is shown in the plan with its alias, created only when you approve, and recorded in your config, so new boxes keep their secrets store's key in KMS and an upgrade keeps the store. Setup runs as the identity that has the `OzBoxKeyAdmin` permissions; your daily operator role is not given any right to the key. If setup cannot create keys, it says what to ask an administrator for and your boxes keep a file key. On Hetzner a box uses its TPM, or a file key you escrow to OpenBao or your keychain.
+  - **`ozbox init --issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets** in your account, from a package you built. Nothing is created without your approval.
+  - **Preview.** Built and tested without a real box or a cloud account; not yet run on one. See [ADR 0029](/adr/0029-production-secrets-have-no-standing-access), Amendment 9.
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Security"]} description="Browser fixes">
+  ## The browser on a box no longer stalls on a busy machine or a crashed page
+
+  - **A site you marked safe can post to itself from the first page the agent opens**, and a form a person approved is sent, on a box under load too. Before, the first page could be treated as having no site, so its posts were held.
+  - **A page cannot open a window.** The browser refuses it, and the agent is told where the page tried to go, so it can open that address itself. A page load that is refused now leaves the tab on the page it showed.
+  - **A page that crashes its tab is reported at once.** The agent is told the page crashed, and the tab works again when it opens a page. Before, each step on that tab waited 30 seconds.
+  - **Actions finish as soon as the page does**, also after a jump within the page or going back to a page the browser kept. Before, these could wait 20 seconds.
+  - Known issue: on Linux, Google Chrome crashes the agent's tab when a page tries to open a window from a click. See [the browser guide](/use-cases/browser-on-the-box).
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Dashboard", "Security"]} description="Upgrade and recovery fixes">
+  ## An upgrade tells you what happens to a box's secrets before it changes anything
+
+  Fixes from a security review (2026-11-11) of what a real box meets after this release.
+
+  - **`ozbox upgrade` says what happens to the box's secrets store**, in every plan. A box that keeps its store's key only in a file on its system disk loses the store when that disk is replaced, so such an upgrade is refused, with what you would have to enter again and two ways forward: escrow the key in the box's vault first, or run it again with `--accept-new-secrets-store`. The dashboard's upgrade asks the same. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - **On AWS a box can keep its store's key in your fleet's KMS key.** Set `secrets_key_arn` and `fleet` under `[aws]` before you create the box; its upgrades then keep its secrets.
+  - **Starting a new secrets store needs your approval.** `ozbox admin <box> -- recover-secrets` works only when the box itself recorded that its key is lost with no escrow, and only with the key your computer pinned when it made the box. Programs on the box can no longer ask for it.
+  - **`ozbox dashboard install` runs the dashboard as a user of its own from the start**, never as the box user, and reports success only once it runs that way.
+  - **The Secret approvals page can approve enrolling a laptop key and changes to a box's own vault.**
+  - **An AWS box made without a pinned approver gets your computer's key when you upgrade it**, and keys the box trusts with no record of how they were enrolled are listed afterwards, with the command that revokes one. On Hetzner the plan says that a rebuild keeps the first-boot settings the box was made with.
+  - **On a box, a dashboard with no sign-in no longer lets anyone take over a browser**, resume one or change its settings.
+  - (Tested in CI; a run on a real box is still to come.)
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Security"]} description="Security fixes">
+  ## A box's own guards hold even against the programs on it
+
+  An agent on a box runs as the box user, so the box now treats a request from that user as a request, not as your word.
+
+  - **Turning the box-wide egress list off or widening it needs your approval.** So does letting a box restart itself after patches. Run the change, take the approval the plan names (from the dashboard or `ozbox secrets approve`), and run it again with `--approval CODE`. Asking for less needs nothing. A box with no second factor yet refuses these changes. See [the egress list decision](/adr/0034-a-box-wide-egress-list-enforced-by-the-kernel-off-until-you-have-seen-it).
+  - **A damaged egress declaration no longer opens the box.** The last good rules stay, and `ozbox box-egress <box>` says what is wrong first.
+  - **Only the machine's own services reach the instance metadata service.** Programs running as the box user can no longer read the machine's cloud credentials from it. (Tested in CI; a run on a real box is still to come.)
+  - **`ozbox mesh join` checks that the deny-by-default rules are loaded** before a box joins. Use `--policy-managed-elsewhere` if you keep the rules yourself. See [Reaching your boxes over a tailnet you run](/mesh).
+  - **`ozbox state migrate --switch` refuses while any box's copy in the bucket is older than yours**, and `ozbox state migrate <box>` brings it up to date.
+  - **`ozbox harden` run twice changes nothing**, and nobody but the account's root user can loosen the locked session-log bucket.
+  - **Upgrading to an image that names no version now says so** in the plan, instead of passing in silence.
+  - The installer runs nothing if its download is cut short.
+</Update>
+
+<Update label="November 11, 2026" tags={["Dashboard", "Security"]} description="Browser on the box">
+  ## A browser session answers only you, and every step is judged where it goes
+
+  Fixes from a security review (2026-11-10) of the browser on the box, which is still Preview.
+
+  - **Only the server that opened a browser can drive it.** Other programs on the box can no longer send it steps or read its pages, pictures or extracted data.
+  - **A risky step always waits for a person.** An allow rule or the most permissive mode no longer answers for you. An approval covers the element, the form's destination and the page you were shown, once; if the page changes before it runs, you are asked again.
+  - **What a page does by itself is checked too:** a script's post to another site, popups, frames from other sites, redirects, and pages made from `data:` or `blob:`. Addresses inside the box's network are refused.
+  - **Uploads come only from folders you choose** (`/work/uploads` by default), and each one asks you. Archives and office documents with macros are held back.
+  - **Taking over, resuming and the browsing settings** ask for your passkey again after a few minutes, and only the person who took over can type into the browser.
+  - The limits that remain are in [A browser for your agent](/use-cases/browser-on-the-box).
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Security"]} description="Secrets fixes">
+  ## A box's secrets stay out of an agent's reach from the first minute
+
+  A security review found ways for an agent on a fresh box to give itself the power to approve changes, and for a backup to carry the key that opens the box's secrets. Those are closed.
+
+  - **Your computer's key is a new box's first approver.** `ozbox create` pins the key kept in this computer's keychain on the box, so nothing on the box can enrol a key of its own. A box made without one waits for a passkey in its dashboard.
+  - **Backups, snapshots and clones no longer hold a box's store key.** A box without a cloud key service keeps its key in its own vault when it has one (box secrets on OpenBao), so an upgrade still keeps its secrets; without a vault an upgrade starts a new store, and `ozbox secrets status` says so.
+  - **A run's model token reaches the model only.** The broker passes on a model's answers and its model list, and refuses everything else your cloud account could do (training jobs, files, fine-tuning). A run with a spend limit stops if its provider answers in a form that cannot be counted.
+  - **An approval for a box's vault settings covers that exact address**, and a new address needs a new token. `ozbox box-secrets` shows the address and what to approve.
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Platform"]} description="Versioning">
+  ## One version for the program, the daemon and the image
+
+  The `ozbox` program, the box daemon and the machine image now share one version, such as `0.3.0`. Before 1.0 a minor version may break anything and a patch never does, so the program refuses to upgrade a box to an image from a different minor version and tells you which side to upgrade. Releases are tagged `vX.Y.Z` (the program) and `image-vX.Y.Z` (the image). See [Releasing](/releasing).
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Security"]} description="v1.0 preparation">
+  ## Your own tailnet, plugins, and optional telemetry
+
+  - **Reach your boxes over a Headscale tailnet you run.** Access rules are generated from your boxes and deny box-to-box traffic until you allow it. See [Reaching your boxes over a tailnet you run](/mesh).
+  - **Plugins** add a provider or a tunnel without changing Oz Box. A plugin runs only after you approve its exact program. See [Writing a plugin](/plugins).
+  - **Telemetry is off.** If you turn it on, one small anonymous event a day goes to an address you choose, and you can preview it first. See [Telemetry](/telemetry).
+  - A [hardening checklist](/hardening-checklist) lists the controls and the open items for v1.0.
+</Update>
+
+<Update label="November 11, 2026" tags={["CLI", "Docs"]} description="v1.0 preparation">
+  ## The documentation site, and a verified install
+
+  Oz Box now has a documentation site that is built from the same source as the repository's guides, so the two cannot disagree.
+
+  - **Install** from a signed release: download the installer, read it, run it with a pinned version, and check the download with `cosign` and a checksum. See [Install](/install).
+  - **Every command** is listed by task in the [CLI reference](/cli-reference).
+  - **Worked examples** and the **decision records** are on the site, with links between them. See [Use cases](/use-cases) and [Decision records](/adr).
+</Update>

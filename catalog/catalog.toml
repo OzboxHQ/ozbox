@@ -1,0 +1,1077 @@
+# The Oz Box tool catalog. Data, not code: each tool says where it comes from, how that source is checked, how it is
+# removed and how it keeps itself current. `verified = false` means the source could not be confirmed from the vendor's
+# own documentation; such a tool carries no install steps and no plan will include it.
+# Apt package names are Ubuntu 24.04 (noble). Rules are enforced by the tests in crates/ozbox-catalog.
+schema = 1
+version = "2026.11.3"
+
+[[group]]
+id = "editors"
+name = "Editors"
+[[group]]
+id = "ai-agents"
+name = "AI agents"
+[[group]]
+id = "local-ai"
+name = "Local AI (GPU boxes)"
+[[group]]
+id = "file-managers"
+name = "File managers"
+[[group]]
+id = "languages"
+name = "Languages"
+[[group]]
+id = "containers-databases"
+name = "Containers and databases"
+[[group]]
+id = "cloud-infra"
+name = "Cloud and infrastructure CLIs"
+[[group]]
+id = "browsers-tools"
+name = "Browsers and test tools"
+
+[[bundle]]
+id = "web"
+name = "Web / full-stack"
+description = "Node with pnpm and bun, Deno, containers, a Postgres client."
+tools = ["node", "pnpm", "bun", "deno", "podman", "postgresql-client"]
+
+[[bundle]]
+id = "python-data"
+name = "Python / data"
+description = "Python with uv, Jupyter, SQLite and a Postgres client."
+tools = ["python", "uv", "jupyterlab", "sqlite", "postgresql-client"]
+
+[[bundle]]
+id = "infra"
+name = "Infra / cloud"
+description = "Packer, Helm, kubectl and the GitHub CLI."
+tools = ["packer", "helm", "kubectl", "github-cli"]
+
+[[bundle]]
+id = "ai-agents"
+name = "AI agents"
+description = "Claude Code, Codex CLI, Gemini CLI and Aider."
+tools = ["claude-code", "codex", "gemini-cli", "aider"]
+
+[[tool]]
+id = "neovim"
+name = "Neovim"
+group = "editors"
+description = "A fast terminal editor."
+homepage = "https://neovim.io"
+source = "https://packages.ubuntu.com/noble/neovim"
+verified = true
+verification = "apt_archive"
+size_mb = 30
+detect = { bin = "nvim", version_cmd = ["nvim", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["neovim"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["neovim"]
+
+[[tool]]
+id = "nano"
+name = "nano"
+group = "editors"
+description = "A small, friendly terminal editor."
+homepage = "https://www.nano-editor.org"
+source = "https://packages.ubuntu.com/noble/nano"
+verified = true
+verification = "apt_archive"
+size_mb = 2
+detect = { bin = "nano", version_cmd = ["nano", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["nano"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["nano"]
+
+[[tool]]
+id = "micro"
+name = "micro"
+group = "editors"
+description = "A terminal editor with familiar keys."
+homepage = "https://micro-editor.github.io"
+source = "https://packages.ubuntu.com/noble/micro"
+verified = true
+verification = "apt_archive"
+size_mb = 12
+detect = { bin = "micro", version_cmd = ["micro", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["micro"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["micro"]
+
+[[tool]]
+id = "zed-remote"
+name = "Zed remote server"
+group = "editors"
+description = "Lets the Zed editor on your own computer open this box. Zed puts its server on the box itself the first time you connect."
+homepage = "https://zed.dev"
+source = "https://zed.dev/docs/remote-development"
+verified = true
+verification = "client_managed"
+size_mb = 0
+post_install = "Open the box from Zed on your computer; it installs and updates its own server."
+[tool.updates]
+how = "client"
+detail = "Zed on your computer installs and updates it."
+[[tool.install]]
+kind = "client_managed"
+note = "Nothing to install on the box. Zed installs its own server when you connect."
+[[tool.remove]]
+kind = "client_managed"
+note = "Nothing to remove from the box. Zed's server lives in your home folder and Zed manages it."
+
+[[tool]]
+id = "vscode-desktop"
+name = "VS Code (desktop)"
+group = "editors"
+description = "The desktop VS Code application, for the box's remote desktop. The browser VS Code is always there."
+homepage = "https://code.visualstudio.com"
+source = "https://code.visualstudio.com/docs/setup/linux"
+verified = false
+unverified_reason = "Microsoft's setup page gives the key URL and the repository but does not publish the key's fingerprint, so the key cannot be checked against the vendor's own statement."
+verification = "unverified"
+size_mb = 400
+
+[[tool]]
+id = "claude-code"
+default = true
+name = "Claude Code"
+group = "ai-agents"
+description = "Anthropic's coding agent for the terminal."
+homepage = "https://claude.com/claude-code"
+source = "https://code.claude.com/docs/en/setup"
+verified = true
+verification = "apt_key_fingerprint"
+size_mb = 220
+detect = { bin = "claude", version_cmd = ["claude", "--version"] }
+post_install = "Sign in on the box: run `claude` in a terminal."
+[tool.updates]
+how = "apt"
+detail = "Installed from Anthropic's signed package source; unattended upgrades take new versions from it. `claude update` is not needed."
+[[tool.install]]
+kind = "apt_repo"
+name = "claude-code"
+key_url = "https://downloads.claude.ai/keys/claude-code.asc"
+key_fingerprints = ["31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"]
+uri = "https://downloads.claude.ai/claude-code/apt/stable"
+suite = "stable"
+components = ["main"]
+packages = ["claude-code"]
+[[tool.remove]]
+kind = "apt_repo_remove"
+name = "claude-code"
+packages = ["claude-code"]
+
+[[tool]]
+id = "codex"
+name = "Codex CLI"
+group = "ai-agents"
+description = "OpenAI's coding agent for the terminal."
+homepage = "https://github.com/openai/codex"
+source = "https://github.com/openai/codex"
+verified = true
+verification = "registry_integrity"
+size_mb = 150
+requires = ["node"]
+detect = { bin = "codex", version_cmd = ["codex", "--version"] }
+post_install = "Sign in on the box: run `codex` in a terminal."
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "npm"
+package = "@openai/codex"
+[[tool.remove]]
+kind = "npm_remove"
+package = "@openai/codex"
+
+[[tool]]
+id = "gemini-cli"
+name = "Gemini CLI"
+group = "ai-agents"
+description = "Google's coding agent for the terminal."
+homepage = "https://github.com/google-gemini/gemini-cli"
+source = "https://github.com/google-gemini/gemini-cli"
+verified = true
+verification = "registry_integrity"
+size_mb = 120
+requires = ["node"]
+detect = { bin = "gemini", version_cmd = ["gemini", "--version"] }
+post_install = "Sign in on the box: run `gemini` in a terminal."
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "npm"
+package = "@google/gemini-cli"
+[[tool.remove]]
+kind = "npm_remove"
+package = "@google/gemini-cli"
+
+[[tool]]
+id = "aider"
+name = "Aider"
+group = "ai-agents"
+description = "A pair-programming agent that edits files in your git repository."
+homepage = "https://aider.chat"
+source = "https://aider.chat/docs/install.html"
+verified = true
+verification = "registry_integrity"
+size_mb = 250
+requires = ["uv"]
+detect = { bin = "aider", version_cmd = ["aider", "--version"] }
+post_install = "Give it a model key on the box: see `aider --help`."
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "uv"
+package = "aider-chat"
+python = "python3.12"
+with = ["pip"]
+[[tool.remove]]
+kind = "uv_remove"
+package = "aider-chat"
+
+[[tool]]
+id = "opencode"
+name = "OpenCode"
+group = "ai-agents"
+description = "An open-source coding agent for the terminal."
+homepage = "https://opencode.ai"
+source = "https://opencode.ai/docs/"
+verified = false
+unverified_reason = "The package name could not be confirmed: the vendor's documentation page as fetched named a package that does not match the project's published one. It will be enabled once the name is confirmed against the project's own repository."
+verification = "unverified"
+size_mb = 100
+
+[[tool]]
+id = "thunar-xfce"
+name = "Thunar and a light XFCE desktop"
+group = "file-managers"
+description = "A graphical file manager on a light desktop, for the box's remote desktop."
+homepage = "https://docs.xfce.org/xfce/thunar/start"
+source = "https://packages.ubuntu.com/noble/thunar"
+verified = true
+verification = "apt_archive"
+size_mb = 350
+detect = { bin = "thunar", version_cmd = ["thunar", "--version"] }
+post_install = "Open it from the box's remote desktop."
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["thunar", "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop4", "xfce4-terminal"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["thunar", "xfce4-session", "xfwm4", "xfce4-panel", "xfdesktop4", "xfce4-terminal"]
+
+[[tool]]
+id = "yazi"
+name = "yazi"
+group = "file-managers"
+description = "A fast terminal file manager. It is built from source, which takes a few minutes."
+homepage = "https://yazi-rs.github.io"
+source = "https://yazi-rs.github.io/docs/installation/"
+verified = true
+verification = "registry_integrity"
+size_mb = 900
+requires = ["rust"]
+detect = { bin = "yazi", version_cmd = ["yazi", "--version"] }
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to build the newest version."
+[[tool.install]]
+kind = "apt_install"
+packages = ["file", "build-essential"]
+[[tool.install]]
+kind = "cargo"
+packages = ["yazi-build"]
+locked = false
+[[tool.remove]]
+kind = "cargo_remove"
+packages = ["yazi-fm", "yazi-cli"]
+
+[[tool]]
+id = "node"
+name = "Node.js 22"
+group = "languages"
+description = "The Node.js 22 long-term-support runtime with npm."
+homepage = "https://nodejs.org"
+source = "https://nodejs.org/en/download"
+verified = true
+verification = "vendor_checksum"
+size_mb = 190
+detect = { bin = "node", version_cmd = ["node", "--version"] }
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest 22.x release."
+[[tool.install]]
+kind = "release"
+base_url = "https://nodejs.org/dist/latest-v22.x/"
+asset = "node-v22.*-linux-{arch}.tar.xz"
+checksum_url = "https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt"
+checksum_format = "sums"
+extract = "tar_xz"
+strip = 1
+bins = [{ name = "node", path = "bin/node" }, { name = "npm", path = "bin/npm" }, { name = "npx", path = "bin/npx" }]
+[tool.install.arch_names]
+amd64 = "x64"
+arm64 = "arm64"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".local/bin/node", ".local/bin/npm", ".local/bin/npx", ".local/opt/node"]
+
+[[tool]]
+id = "pnpm"
+name = "pnpm"
+group = "languages"
+description = "A fast, disk-efficient package manager for Node."
+homepage = "https://pnpm.io"
+source = "https://pnpm.io/installation"
+verified = true
+verification = "registry_integrity"
+size_mb = 60
+requires = ["node"]
+detect = { bin = "pnpm", version_cmd = ["pnpm", "--version"] }
+[tool.updates]
+how = "self_update"
+detail = "Updates itself: run `pnpm self-update`."
+[[tool.install]]
+kind = "npm"
+package = "pnpm"
+[[tool.remove]]
+kind = "npm_remove"
+package = "pnpm"
+
+[[tool]]
+id = "bun"
+name = "Bun"
+group = "languages"
+description = "A fast JavaScript runtime, bundler and package manager."
+homepage = "https://bun.sh"
+source = "https://bun.sh/docs/installation"
+verified = true
+verification = "registry_integrity"
+size_mb = 110
+requires = ["node"]
+detect = { bin = "bun", version_cmd = ["bun", "--version"] }
+[tool.updates]
+how = "self_update"
+detail = "Updates itself: run `bun upgrade`."
+[[tool.install]]
+kind = "npm"
+package = "bun"
+[[tool.remove]]
+kind = "npm_remove"
+package = "bun"
+
+[[tool]]
+id = "deno"
+name = "Deno"
+group = "languages"
+description = "A secure JavaScript and TypeScript runtime."
+homepage = "https://deno.com"
+source = "https://docs.deno.com/runtime/getting_started/installation/"
+verified = true
+verification = "registry_integrity"
+size_mb = 130
+requires = ["node"]
+detect = { bin = "deno", version_cmd = ["deno", "--version"] }
+[tool.updates]
+how = "self_update"
+detail = "Updates itself: run `deno upgrade`."
+[[tool.install]]
+kind = "npm"
+package = "deno"
+[[tool.remove]]
+kind = "npm_remove"
+package = "deno"
+
+[[tool]]
+id = "python"
+name = "Python 3.12"
+group = "languages"
+description = "Python 3.12 with pip and virtual environments."
+homepage = "https://www.python.org"
+source = "https://packages.ubuntu.com/noble/python3"
+verified = true
+verification = "apt_archive"
+size_mb = 60
+detect = { bin = "python3", version_cmd = ["python3", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["python3", "python3-pip", "python3-venv"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["python3-pip", "python3-venv"]
+
+[[tool]]
+id = "uv"
+name = "uv"
+group = "languages"
+description = "A very fast Python package and project manager."
+homepage = "https://docs.astral.sh/uv/"
+source = "https://docs.astral.sh/uv/getting-started/installation/"
+verified = true
+verification = "registry_integrity"
+size_mb = 60
+requires = ["python"]
+detect = { bin = "uv", version_cmd = ["uv", "--version"] }
+[tool.updates]
+how = "manual"
+detail = "Installed through pipx, which turns off uv's own updater. Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "apt_install"
+packages = ["pipx"]
+[[tool.install]]
+kind = "pipx"
+package = "uv"
+[[tool.remove]]
+kind = "pipx_remove"
+package = "uv"
+
+[[tool]]
+id = "jupyterlab"
+name = "JupyterLab"
+group = "languages"
+description = "Notebooks in the browser, for data work."
+homepage = "https://jupyter.org"
+source = "https://jupyter.org/install"
+verified = true
+verification = "registry_integrity"
+size_mb = 300
+requires = ["uv"]
+detect = { bin = "jupyter-lab", version_cmd = ["jupyter-lab", "--version"] }
+post_install = "Start it on the box with `jupyter-lab` and reach it through the box's web tunnel."
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "uv"
+package = "jupyterlab"
+[[tool.remove]]
+kind = "uv_remove"
+package = "jupyterlab"
+
+[[tool]]
+id = "rust"
+name = "Rust"
+group = "languages"
+description = "The Rust toolchain, managed by rustup."
+homepage = "https://rust-lang.org"
+source = "https://packages.ubuntu.com/noble/rustup"
+verified = true
+verification = "apt_archive"
+size_mb = 700
+detect = { bin = "rustup", version_cmd = ["rustup", "--version"] }
+[tool.updates]
+how = "self_update"
+detail = "Run `rustup update` to move to the newest stable toolchain."
+[[tool.install]]
+kind = "apt_install"
+packages = ["rustup", "build-essential"]
+[[tool.install]]
+kind = "run"
+argv = ["rustup", "default", "stable"]
+title = "Download the stable Rust toolchain (checked by rustup against the Rust project's signed manifest)"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".rustup", ".cargo"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["rustup"]
+
+[[tool]]
+id = "go"
+name = "Go"
+group = "languages"
+description = "The Go toolchain from Ubuntu (1.22)."
+homepage = "https://go.dev"
+source = "https://packages.ubuntu.com/noble/golang-go"
+verified = true
+verification = "apt_archive"
+size_mb = 250
+detect = { bin = "go", version_cmd = ["go", "version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. Ubuntu's Go stays on 1.22 for this release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["golang-go"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["golang-go"]
+
+[[tool]]
+id = "java"
+name = "Java 21"
+group = "languages"
+description = "OpenJDK 21 (headless) for building and running Java."
+homepage = "https://openjdk.org"
+source = "https://packages.ubuntu.com/noble/openjdk-21-jdk-headless"
+verified = true
+verification = "apt_archive"
+size_mb = 300
+detect = { bin = "java", version_cmd = ["java", "-version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["openjdk-21-jdk-headless"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["openjdk-21-jdk-headless"]
+
+[[tool]]
+id = "podman"
+name = "Podman and Compose"
+group = "containers-databases"
+description = "Rootless containers with a Docker-compatible command, and Compose."
+homepage = "https://podman.io"
+source = "https://packages.ubuntu.com/noble/podman"
+verified = true
+verification = "apt_archive"
+size_mb = 250
+detect = { bin = "podman", version_cmd = ["podman", "--version"] }
+post_install = "Use `podman` where you would use `docker`; it runs without root."
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["podman", "podman-compose", "uidmap"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["podman", "podman-compose", "uidmap"]
+
+[[tool]]
+id = "postgresql-client"
+name = "PostgreSQL 16 client"
+group = "containers-databases"
+description = "psql and the PostgreSQL command-line tools."
+homepage = "https://www.postgresql.org"
+source = "https://packages.ubuntu.com/noble/postgresql-client-16"
+verified = true
+verification = "apt_archive"
+size_mb = 30
+detect = { bin = "psql", version_cmd = ["psql", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["postgresql-client-16"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["postgresql-client-16"]
+
+[[tool]]
+id = "redis-cli"
+name = "Redis CLI"
+group = "containers-databases"
+description = "redis-cli and the Redis command-line tools."
+homepage = "https://redis.io"
+source = "https://packages.ubuntu.com/noble/redis-tools"
+verified = true
+verification = "apt_archive"
+size_mb = 5
+detect = { bin = "redis-cli", version_cmd = ["redis-cli", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["redis-tools"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["redis-tools"]
+
+[[tool]]
+id = "sqlite"
+name = "SQLite"
+group = "containers-databases"
+description = "The sqlite3 command-line shell."
+homepage = "https://sqlite.org"
+source = "https://packages.ubuntu.com/noble/sqlite3"
+verified = true
+verification = "apt_archive"
+size_mb = 3
+detect = { bin = "sqlite3", version_cmd = ["sqlite3", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["sqlite3"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["sqlite3"]
+
+[[tool]]
+id = "docker"
+name = "Docker (rootless)"
+group = "containers-databases"
+description = "Docker Engine run without root. Podman covers the same need and is available now."
+homepage = "https://docs.docker.com/engine/security/rootless/"
+source = "https://docs.docker.com/engine/install/ubuntu/"
+verified = false
+unverified_reason = "Docker's install page gives the repository and key URL but does not publish the key's fingerprint, so the key cannot be checked against the vendor's own statement."
+verification = "unverified"
+size_mb = 600
+
+[[tool]]
+id = "dbeaver"
+name = "DBeaver"
+group = "containers-databases"
+description = "A graphical database client for the box's remote desktop."
+homepage = "https://dbeaver.io"
+source = "https://dbeaver.io/download/"
+verified = false
+unverified_reason = "The vendor's download page was not checked for a published checksum or signature, so no verification method is confirmed."
+verification = "unverified"
+size_mb = 200
+
+[[tool]]
+id = "duckdb"
+name = "DuckDB"
+group = "containers-databases"
+description = "A fast analytical database you run from the command line."
+homepage = "https://duckdb.org"
+source = "https://duckdb.org/docs/installation/"
+verified = false
+unverified_reason = "The vendor's installation page was not checked for a published checksum or signature, so no verification method is confirmed."
+verification = "unverified"
+size_mb = 60
+
+[[tool]]
+id = "github-cli"
+default = true
+name = "GitHub CLI"
+group = "cloud-infra"
+description = "Work with pull requests, issues and releases from the terminal."
+homepage = "https://cli.github.com"
+source = "https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+verified = true
+verification = "apt_key_fingerprint"
+size_mb = 45
+detect = { bin = "gh", version_cmd = ["gh", "--version"] }
+post_install = "Sign in on the box: run `gh auth login`."
+[tool.updates]
+how = "apt"
+detail = "Unattended upgrades take new versions from the vendor's package source, so it stays current by itself."
+[[tool.install]]
+kind = "apt_repo"
+name = "github-cli"
+key_url = "https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+key_fingerprints = ["2C6106201985B60E6C7AC87323F3D4EA75716059", "7F38BBB59D064DBCB3D84D725612B36462313325"]
+uri = "https://cli.github.com/packages"
+suite = "stable"
+components = ["main"]
+packages = ["gh"]
+[[tool.remove]]
+kind = "apt_repo_remove"
+name = "github-cli"
+packages = ["gh"]
+
+[[tool]]
+id = "packer"
+name = "Packer"
+group = "cloud-infra"
+description = "Build machine images from a template."
+homepage = "https://developer.hashicorp.com/packer"
+source = "https://www.hashicorp.com/official-packaging-guide"
+verified = true
+verification = "apt_key_fingerprint"
+size_mb = 90
+detect = { bin = "packer", version_cmd = ["packer", "version"] }
+[tool.updates]
+how = "apt"
+detail = "Unattended upgrades take new versions from the vendor's package source, so it stays current by itself."
+[[tool.install]]
+kind = "apt_repo"
+name = "hashicorp"
+key_url = "https://apt.releases.hashicorp.com/gpg"
+key_fingerprints = ["D55C0D1AC78A8D8126CB631CFC9CA96ACA026560"]
+uri = "https://apt.releases.hashicorp.com"
+suite = "noble"
+components = ["main"]
+packages = ["packer"]
+[[tool.remove]]
+kind = "apt_repo_remove"
+name = "hashicorp"
+packages = ["packer"]
+
+[[tool]]
+id = "helm"
+name = "Helm"
+group = "cloud-infra"
+description = "The package manager for Kubernetes."
+homepage = "https://helm.sh"
+source = "https://helm.sh/docs/intro/install/"
+verified = true
+verification = "apt_key_fingerprint"
+size_mb = 60
+detect = { bin = "helm", version_cmd = ["helm", "version", "--short"] }
+[tool.updates]
+how = "apt"
+detail = "Unattended upgrades take new versions from the vendor's package source, so it stays current by itself."
+[[tool.install]]
+kind = "apt_repo"
+name = "helm"
+key_url = "https://packages.buildkite.com/helm-linux/helm-debian/gpgkey"
+key_fingerprints = ["DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6"]
+uri = "https://packages.buildkite.com/helm-linux/helm-debian/any/"
+suite = "any"
+components = ["main"]
+packages = ["helm"]
+[[tool.remove]]
+kind = "apt_repo_remove"
+name = "helm"
+packages = ["helm"]
+
+[[tool]]
+id = "kubectl"
+name = "kubectl"
+group = "cloud-infra"
+description = "The Kubernetes command-line tool."
+homepage = "https://kubernetes.io/docs/reference/kubectl/"
+source = "https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/"
+verified = true
+verification = "vendor_checksum"
+size_mb = 60
+detect = { bin = "kubectl", version_cmd = ["kubectl", "version", "--client"] }
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest stable release."
+[[tool.install]]
+kind = "release"
+version_url = "https://dl.k8s.io/release/stable.txt"
+base_url = "https://dl.k8s.io/release/{version}/bin/linux/{arch}/"
+asset = "kubectl"
+checksum_url = "https://dl.k8s.io/release/{version}/bin/linux/{arch}/kubectl.sha256"
+checksum_format = "single"
+extract = "none"
+bins = [{ name = "kubectl", path = "kubectl" }]
+[tool.install.arch_names]
+amd64 = "amd64"
+arm64 = "arm64"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".local/bin/kubectl", ".local/opt/kubectl"]
+
+[[tool]]
+id = "aws-cli"
+name = "AWS CLI v2"
+group = "cloud-infra"
+description = "The AWS command-line tool."
+homepage = "https://aws.amazon.com/cli/"
+source = "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+verified = false
+unverified_reason = "The vendor signs the installer and publishes its public key only inside its documentation page. The installer's detached-signature check is not built yet, so this stays off until it is."
+verification = "unverified"
+size_mb = 150
+
+[[tool]]
+id = "session-manager-plugin"
+name = "AWS Session Manager plugin"
+group = "cloud-infra"
+description = "Lets the AWS CLI open Session Manager sessions."
+homepage = "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+source = "https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html"
+verified = false
+unverified_reason = "The vendor's install page publishes no checksum or signature for the package."
+verification = "unverified"
+size_mb = 10
+
+[[tool]]
+id = "gcloud"
+name = "Google Cloud CLI"
+group = "cloud-infra"
+description = "The Google Cloud command-line tool."
+homepage = "https://cloud.google.com/sdk"
+source = "https://cloud.google.com/sdk/docs/install-sdk"
+verified = false
+unverified_reason = "Google's install page gives the repository and key URL but does not publish the key's fingerprint."
+verification = "unverified"
+size_mb = 400
+
+[[tool]]
+id = "azure-cli"
+name = "Azure CLI"
+group = "cloud-infra"
+description = "The Azure command-line tool."
+homepage = "https://learn.microsoft.com/cli/azure/"
+source = "https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-linux?pivots=apt"
+verified = false
+unverified_reason = "Microsoft's install page gives the repository and key URL but does not publish the key's fingerprint."
+verification = "unverified"
+size_mb = 600
+
+[[tool]]
+id = "opentofu"
+name = "OpenTofu"
+group = "cloud-infra"
+description = "Infrastructure as code with OpenTofu (the `tofu` command)."
+homepage = "https://opentofu.org"
+source = "https://github.com/opentofu/opentofu/releases/tag/v1.13.9"
+verified = true
+verification = "vendor_checksum"
+size_mb = 220
+detect = { bin = "tofu", version_cmd = ["tofu", "version"] }
+post_install = "Run `tofu init` in a project folder to download its providers; they come from the registry that project names."
+[tool.updates]
+how = "manual"
+detail = "Pinned to v1.13.9. A newer version arrives with a newer catalogue; install it again from this page to move to it."
+[[tool.install]]
+kind = "release"
+base_url = "https://github.com/opentofu/opentofu/releases/download/v1.13.9/"
+asset = "tofu_1.13.9_linux_{arch}.tar.gz"
+extract = "tar_gz"
+strip = 0
+bins = [{ name = "tofu", path = "tofu" }]
+[tool.install.arch_names]
+amd64 = "amd64"
+arm64 = "arm64"
+[tool.install.pinned_sha256]
+amd64 = "b34b327cc1ef07178207b6f2cd1f5276537d3e5b7be316500f6dac50d4c0a857"
+arm64 = "5dc196dde75b667e4806d358310ec96742774cd0993c54c1237efee5644b69b8"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".local/bin/tofu", ".local/opt/tofu"]
+
+[[tool]]
+id = "supabase-cli"
+name = "Supabase CLI"
+group = "cloud-infra"
+description = "The Supabase command-line tool."
+homepage = "https://supabase.com/docs/guides/local-development"
+source = "https://supabase.com/docs/guides/local-development/cli/getting-started"
+verified = false
+unverified_reason = "The vendor's documentation was not checked for a published checksum or signature, so no verification method is confirmed."
+verification = "unverified"
+size_mb = 50
+
+[[tool]]
+id = "playwright-browsers"
+name = "Playwright and Chromium"
+group = "browsers-tools"
+description = "Playwright with a Chromium browser for testing web pages."
+homepage = "https://playwright.dev"
+source = "https://playwright.dev/docs/browsers"
+verified = true
+verification = "registry_integrity"
+size_mb = 900
+requires = ["node"]
+detect = { bin = "playwright", version_cmd = ["playwright", "--version"] }
+post_install = "The browser is in ~/.cache/ms-playwright. Firefox and WebKit are not installed; add one with `playwright install firefox` (its system libraries are not in this list)."
+[tool.updates]
+how = "manual"
+detail = "Pinned to Playwright 1.65.0 and the Chromium build it names. Install it again from this page to move to a newer catalogue's version."
+[[tool.install]]
+kind = "apt_install"
+packages = ["xvfb", "fonts-noto-color-emoji", "fonts-unifont", "libfontconfig1", "libfreetype6", "xfonts-cyrillic", "xfonts-scalable", "fonts-liberation", "fonts-ipafont-gothic", "fonts-wqy-zenhei", "fonts-tlwg-loma-otf", "fonts-freefont-ttf", "libasound2t64", "libatk-bridge2.0-0t64", "libatk1.0-0t64", "libatspi2.0-0t64", "libcairo2", "libcups2t64", "libdbus-1-3", "libdrm2", "libgbm1", "libglib2.0-0t64", "libnspr4", "libnss3", "libpango-1.0-0", "libx11-6", "libxcb1", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxkbcommon0", "libxrandr2"]
+[[tool.install]]
+kind = "run"
+argv = ["npm", "install", "-g", "--prefix", "{home}/.local", "playwright@1.65.0"]
+title = "Install Playwright 1.65.0 with npm (the registry checks the package's integrity hash; the version is fixed because the library list above belongs to it)"
+[[tool.install]]
+kind = "run"
+argv = ["playwright", "install", "chromium"]
+title = "Download Chromium and its headless shell from Playwright's own download server (Playwright publishes no checksum for them, so they are fetched over https and not hash-checked)"
+[[tool.remove]]
+kind = "npm_remove"
+package = "playwright"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".cache/ms-playwright"]
+
+[[tool]]
+id = "jq"
+name = "jq"
+group = "browsers-tools"
+description = "Process JSON on the command line."
+homepage = "https://jqlang.github.io/jq/"
+source = "https://packages.ubuntu.com/noble/jq"
+verified = true
+verification = "apt_archive"
+size_mb = 2
+detect = { bin = "jq", version_cmd = ["jq", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["jq"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["jq"]
+
+[[tool]]
+id = "ripgrep"
+name = "ripgrep"
+group = "browsers-tools"
+description = "Very fast text search."
+homepage = "https://github.com/BurntSushi/ripgrep"
+source = "https://packages.ubuntu.com/noble/ripgrep"
+verified = true
+verification = "apt_archive"
+size_mb = 5
+detect = { bin = "rg", version_cmd = ["rg", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["ripgrep"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["ripgrep"]
+
+[[tool]]
+id = "fd"
+name = "fd"
+group = "browsers-tools"
+description = "A friendly, fast alternative to find (the program is named fdfind)."
+homepage = "https://github.com/sharkdp/fd"
+source = "https://packages.ubuntu.com/noble/fd-find"
+verified = true
+verification = "apt_archive"
+size_mb = 3
+detect = { bin = "fdfind", version_cmd = ["fdfind", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["fd-find"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["fd-find"]
+
+[[tool]]
+id = "htop"
+name = "htop"
+group = "browsers-tools"
+description = "An interactive process viewer."
+homepage = "https://htop.dev"
+source = "https://packages.ubuntu.com/noble/htop"
+verified = true
+verification = "apt_archive"
+size_mb = 2
+detect = { bin = "htop", version_cmd = ["htop", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["htop"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["htop"]
+
+[[tool]]
+id = "btop"
+name = "btop"
+group = "browsers-tools"
+description = "A resource monitor with graphs."
+homepage = "https://github.com/aristocratos/btop"
+source = "https://packages.ubuntu.com/noble/btop"
+verified = true
+verification = "apt_archive"
+size_mb = 5
+detect = { bin = "btop", version_cmd = ["btop", "--version"] }
+[tool.updates]
+how = "apt"
+detail = "Security updates install by themselves. A newer version arrives with the next image release."
+[[tool.install]]
+kind = "apt_install"
+packages = ["btop"]
+[[tool.remove]]
+kind = "apt_remove"
+packages = ["btop"]
+
+[[tool]]
+id = "vllm"
+name = "vLLM"
+group = "local-ai"
+description = "Serves an open-weight model from a GPU box on the box's own loopback address, for the whole fleet's engines to use."
+homepage = "https://docs.vllm.ai"
+source = "https://docs.vllm.ai/en/latest/getting_started/installation/"
+verified = true
+verification = "registry_integrity"
+size_mb = 9000
+requires = ["uv"]
+detect = { bin = "vllm", version_cmd = ["vllm", "--version"] }
+post_install = "On a GPU box, choose a model to download in Settings -> Models -> Local AI. The server listens on the box's loopback address only."
+[tool.updates]
+how = "manual"
+detail = "Install it again from this page to move to the newest version."
+[[tool.install]]
+kind = "uv"
+package = "vllm"
+python = "python3.12"
+[[tool.remove]]
+kind = "uv_remove"
+package = "vllm"
+
+[[tool]]
+id = "ollama"
+name = "Ollama"
+group = "local-ai"
+description = "Runs open-weight models from a GPU box on the box's own loopback address."
+homepage = "https://ollama.com"
+# The release the checksums below were taken from: each archive's SHA-256 is the digest GitHub shows for that asset, and
+# the release's own sha256sum.txt lists the same values.
+source = "https://github.com/ollama/ollama/releases/tag/v0.40.15"
+verified = true
+verification = "vendor_checksum"
+size_mb = 5000
+detect = { bin = "ollama", version_cmd = ["ollama", "--version"] }
+post_install = "On a GPU box, choose a model to download in Settings -> Models -> Local AI. The server listens on the box's loopback address only."
+[tool.updates]
+how = "manual"
+detail = "This is the version Oz Box checked. A newer one arrives with a newer Oz Box release; install it again from this page to move to it."
+# The archive is zstd-compressed; `tar` needs the operating system's own zstd program to unpack it.
+[[tool.install]]
+kind = "apt_install"
+packages = ["zstd"]
+[[tool.install]]
+kind = "release"
+base_url = "https://github.com/ollama/ollama/releases/download/v0.40.15/"
+asset = "ollama-linux-{arch}.tar.zst"
+extract = "tar_zst"
+strip = 0
+bins = [{ name = "ollama", path = "bin/ollama" }]
+[tool.install.arch_names]
+amd64 = "amd64"
+arm64 = "arm64"
+[tool.install.pinned_sha256]
+amd64 = "628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379"
+arm64 = "7f699ead5cdb4ae1ed89b888b148a238af188708800871e1889ab9dcee95f247"
+[[tool.remove]]
+kind = "user_remove"
+paths = [".local/bin/ollama", ".local/opt/ollama", ".config/systemd/user/ozbox-ollama.service"]

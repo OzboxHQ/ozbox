@@ -1,0 +1,19 @@
+body:
+  - type: markdown
+    attributes:
+      value: Share an idea for Oz Box. A short description of the problem is worth more than a finished design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do today, or what is harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Other ways you considered

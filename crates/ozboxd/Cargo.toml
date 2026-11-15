@@ -1,0 +1,42 @@
+[package]
+name = "ozboxd"
+description = "The Oz Box daemon: metrics, run supervision, idle detection, checkpoints and a local API on a Unix socket."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ozboxd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ozboxd"
+path = "src/main.rs"
+
+[dependencies]
+ozbox-core.workspace = true
+ozbox-catalog = { path = "../ozbox-catalog" }
+ozbox-listenfd = { path = "../ozbox-listenfd" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+ring = "0.17"
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+
+[target.'cfg(unix)'.dependencies]
+portable-pty = "0.9"
+# only the open(2) flag constants (no unsafe): a record is opened without following a link and without blocking on a pipe
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs", "net"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

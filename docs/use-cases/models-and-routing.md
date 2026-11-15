@@ -1,0 +1,132 @@
+# Models and routing
+
+You bring your own model access: a vendor key, or your own cloud account, or a model running on your own GPU box. You
+decide which model each agent engine uses — for the whole fleet, per box, or per run — with a fallback, and you see the
+spend.
+
+See [how to read the status](README.md#how-to-read-the-status). Provider settings, testing, prices and the usage view
+are built; using those choices inside real agent runs, and recording their usage, is being wired now
+([ADR 0015](../adr/0015-model-providers-and-local-ai.md)).
+
+---
+
+## 1. Add a model provider with your own key
+
+**You want:** to use your Anthropic (or OpenAI, Gemini, Mistral, Groq, Together, OpenRouter) account.
+
+```
+printf '%s\n' "$MY_KEY" | ozbox models add anthropic --kind anthropic --key-stdin
+ozbox models test anthropic           # free: lists the models you can use, with estimated prices
+```
+
+Or **Settings → Models → Add provider**, with a step-by-step guide per provider.
+
+**Underneath:** the key is written once and never shown again; it is read from standard input, never from the command
+line; error messages never repeat it.
+**Status:** Preview.
+
+## 2. Use your own cloud account instead of a vendor key
+
+**You want:** model calls to stay inside your AWS, Google Cloud or Azure account and its agreements and billing.
+
+```
+ozbox models add bedrock --kind bedrock --region us-east-1 --key-stdin < bedrock-key.txt
+ozbox models add azure --kind azure_openai --resource my-openai --key-stdin < azure-key.txt
+ozbox models add vertex --kind vertex --key-stdin < vertex-key.txt
+```
+
+**Status:** Preview (not yet tried against real cloud accounts).
+
+## 3. Choose the model each engine uses
+
+**You want:** Claude Code on your best model, with a cheaper one to fall back on.
+
+```
+ozbox models default claude-code anthropic <model-id> --fallback anthropic:<cheaper-model-id>
+ozbox models default codex openai <model-id>
+ozbox models list
+```
+
+Engines are only offered providers they can speak to.
+
+**Status:** Preview.
+
+## 4. A cheaper model on one box
+
+**You want:** routine work on a test-lane box to cost less.
+
+```
+ozbox models default claude-code anthropic <cheaper-model-id> --box lane
+ozbox models default claude-code --box lane --clear      # back to the fleet default
+```
+
+**Status:** Preview.
+
+## 5. A different model for one run
+
+**You want:** your strongest model for one hard review, without changing defaults.
+
+Pick the model in **Tasks → New task** (per-run override); the task card shows which provider and model actually ran,
+and whether the fallback was used.
+
+**Status:** Preview (the New task sheet offers the providers the engine can use and the plan names the choice; a run on a real box
+goes through the box daemon, which has not yet been proven on a real cloud box).
+
+## 6. Two engines for a second opinion
+
+**You want:** one agent writes the change, another reviews it.
+
+Start a Claude Code run to implement, then a Codex (or Gemini CLI) run on the same branch to review. Both appear on the
+board with their own cost.
+
+**Status:** Preview.
+
+## 7. Private models on your own GPU box
+
+**You want:** code that never leaves your machines, and no per-token cost.
+
+```
+ozbox create gpu-1 --size GPU-S
+```
+
+Then **Settings → Models → Local AI**: pick vLLM (or Ollama), pick a model, review the download size, free disk and GPU
+memory, and pull it. It appears as a provider reachable only inside your fleet — never on a public port. Point Aider or
+OpenCode at it.
+
+**Status:** Preview (works in the demo; the box daemon now serves local models and the tool installer can install Ollama, but
+neither has been proven on a real GPU box yet).
+
+## 8. Your own OpenAI-compatible server
+
+**You want:** to use an LM Studio, vLLM or Ollama server you already run on your network.
+
+```
+ozbox models add lab --kind openai_compatible --base-url http://10.0.0.20:8000/v1 --local
+```
+
+**Underneath:** plain http is allowed only for addresses you mark `--local` (loopback or private networks); cloud
+metadata addresses and public plain-http are always refused.
+**Status:** Preview.
+
+## 9. See spend by model, engine and box
+
+**You want:** to know what each provider, model, engine and box costs.
+
+```
+ozbox models usage --days 30
+```
+
+**Settings → Models → Usage** shows tokens and estimated cost by day, provider, model, box and engine, against your caps.
+Prices come with their source and the date they were checked, and you can enter your own negotiated price.
+
+**Status:** Preview (stays empty until runs record usage, being wired now).
+
+## 10. Agents never see your real keys
+
+**You want:** a prompt-injected agent to be unable to leak your provider key.
+
+A small credential broker holds your key. An agent gets a token valid only for its run, one provider and its spend cap,
+never your key. The broker adds the real key to outgoing requests and records usage from every response
+([ADR 0017](../adr/0017-credential-broker-per-run-tokens.md)).
+
+**Status:** Preview (built and tested; not yet exercised with a real agent on a real cloud box).

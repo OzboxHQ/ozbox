@@ -1,0 +1,181 @@
+# Agentic fleet
+
+Coding agents (Claude Code first; Codex, Gemini CLI, Aider and OpenCode follow the same interface) run **supervised**
+on your boxes: admitted by the box's size and free memory, capped in time, tokens and spend, logged live, saving their
+work to a branch, and asking you before anything risky. You follow everything on one board.
+
+See [how to read the status](README.md#how-to-read-the-status). The supervisor, board, caps, approvals, schedules and
+triggers are built and tested, and a run on a real box now goes through the box daemon
+([ADR 0019](../adr/0019-agent-runs-on-real-boxes.md)); it has not been proven on a real cloud box yet, so every example
+below is **Preview** at most ([ADR 0014](../adr/0014-supervised-agent-runs.md)).
+
+---
+
+## 1. Give an agent a task
+
+**You want:** an agent to fix something while you do something else.
+
+```
+ozbox run start --engine claude-code --box main --repo shop-app --branch fix/flaky-test \
+  --prompt "Find why the checkout test is flaky and fix it" --max-minutes 45 --max-spend 3
+ozbox run logs <run-id>
+```
+
+Or in the dashboard: **Tasks → New task**, which shows the plan before it queues.
+
+**Underneath:** the prompt is passed on standard input, never on a command line; the live log hides secrets; the work
+is checkpointed to a branch. When it finishes the task moves to **Review**.
+**Status:** Preview.
+
+## 2. Several agents on one box
+
+**You want:** to run agents in parallel without freezing the box.
+
+Start as many runs as you like. A box admits runs by its size (XS 1, S 2, M 4, L 6, XL 8, XXL 16 at once) **and** its free
+memory; the rest wait in **Queued** with the reason.
+
+**Status:** Preview.
+
+## 3. Follow the work on a board
+
+**You want:** one place to see what every agent is doing.
+
+**Tasks** shows a board — Queued → Running → Needs you → Review → Done — and a list view with filters (box, engine,
+state, person, date) and bulk cancel, retry or move to review. Each card shows its box, engine, elapsed time, cost so far
+and links (pull request, branch, files).
+
+```
+ozbox run list --state running
+```
+
+There is no separate Runs page: **Tasks** is the one place for a person's work, and the old `/runs` address opens it.
+A box's page links to **All tasks on this box**, which opens Tasks filtered to that box. On a dashboard that runs on a box,
+Tasks shows that box's own tasks, with no simulated agent, and says plainly when the server has no task store or when a role
+may look but not start, cancel or retry.
+
+**Status:** Preview.
+
+## 4. A run that reaches its budget pauses and asks
+
+**You want:** never to lose work because an agent ran out of budget at 3 am.
+
+When a run reaches its time, token or spend cap, it saves its work to a work-in-progress branch, stops, and appears in
+**Needs you** with an urgent alert. Add budget and it continues from the saved branch:
+
+```
+ozbox run resume <run-id> --add-spend 2 --add-minutes 30
+```
+
+Monthly caps (for the fleet and per person) hold new runs until raised or the month rolls over.
+
+**Status:** Preview.
+
+## 5. Approve risky actions from your phone
+
+**You want:** agents to work alone, but not to push to `main` or message anyone without you.
+
+By default an agent **asks** before: pushing to a protected branch, opening a pull request into one, running a command on
+your "ask" list, sending any outbound message, spending above a threshold, or touching anything tagged production. You
+get the exact action through your alert channels and decide in **Approvals** (a passkey is required for the risky kinds):
+
+```
+ozbox approvals list
+ozbox approvals approve <request-id>
+```
+
+Requests expire (denied, never auto-approved) and every decision is recorded. Edit the rules in **Settings →
+Approvals**, reviewed before they are saved.
+
+**Approvals** also lists changes you planned and have not applied yet. Those plans are kept in the dashboard server's
+memory for ten minutes, never on disk, so restarting the server forgets them. A forgotten plan changed nothing: plan it
+again. If one of the lists on the page cannot be read, the page says which and why, and it does not say "Nothing waiting".
+
+**Status:** Preview.
+
+## 5b. Notes and skills your agents read
+
+**Memory** holds the notes agents may read, and **Skills** the folders of guidance they may follow. Both are kept by the
+server that runs the dashboard, and both pages say where: **on this box (name)** when the dashboard runs on a box,
+**on the computer that runs this dashboard** otherwise. They are not copied onto your other boxes; an agent reads a note or an
+approved skill from there when it asks. When a server has no settings file to keep them beside, the page says they are
+forgotten when it stops.
+
+Installing a skill chooses **who may use it** once you approve it: every agent session, the orchestration agents working on one
+box, or the orchestration agents working in one project. A task started on its own, or an agent you run yourself, is offered only the skills installed for every agent session. Nothing is copied onto a box's own disk. To add a skill of your own, put it in a folder with a
+`SKILL.md` and run `ozbox skills add <folder>` on that computer; it then appears on the page to install and approve. Adding one
+from the page, and putting a skill onto a box's own disk, are not built yet.
+
+A viewer can read both pages but is offered nothing to change. A member may add, edit, approve and forget notes; only an owner
+installs, removes, reviews or approves a skill, because a skill is guidance an agent follows with the box's authority.
+
+**Status:** Preview.
+
+## 6. Nightly agent work in your time zone
+
+**You want:** an agent to run your eval or dependency-update job every night.
+
+```
+ozbox schedule add --name nightly-deps --when "every weekday at 2am Lagos time" \
+  --engine claude-code --box lane --prompt "Update dependencies, run the tests, open a PR" \
+  --max-spend-cents 300 --max-minutes 60
+```
+
+It shows the cron it means and the next five runs in your time and UTC before saving. Daylight saving is handled; a
+missed run is caught up once inside a window (two hours by default), never in a burst; a run never overlaps the previous
+one ([ADR 0013](../adr/0013-schedules-and-triggers.md)).
+
+**Status:** Preview.
+
+## 7. A paused box that wakes for its job
+
+**You want:** the night job without paying for a box all day.
+
+Point the schedule at a paused box (or `--profile` for "any box with this profile"). It is resumed, runs, and auto-pause
+puts it back to sleep; the schedule shows the estimated cost of each wake.
+
+**Status:** Preview.
+
+## 8. GitHub starts an agent on every pull request
+
+**You want:** a first review of each new pull request.
+
+```
+ozbox trigger add --name pr-review --scheme github --event pull_request \
+  --engine claude-code --box lane \
+  --template "Review pull request {{pull_request.number}} in {{repository.full_name}} and comment findings"
+```
+
+It prints the webhook address and a secret **once**; add both to the repository's webhook settings. Only correctly
+signed requests start a run; replays, stale timestamps, oversized bodies and floods are refused; the event's text is
+treated as data, never as instructions.
+
+**Status:** Preview.
+
+## 9. Any service starts an agent
+
+**You want:** a run when your monitoring, form or payment system sends an event.
+
+```
+ozbox trigger add --name on-alert --scheme generic --engine claude-code --box lane \
+  --template "Investigate alert {{alert.name}} and propose a fix"
+ozbox trigger deliveries <trigger-id>   # each request, accepted or refused, and why
+```
+
+`generic` uses a timestamped HMAC signature; `stripe` follows Stripe's signature header style. **Test delivery** in the
+dashboard checks a trigger end to end without starting a run.
+
+**Status:** Preview.
+
+## 10. A heartbeat agent
+
+**You want:** an agent that checks in every half hour (open pull requests, failing builds) and alerts you only when
+something needs you.
+
+```
+ozbox schedule add --name check-in --every-minutes 30 --heartbeat \
+  --engine claude-code --box main --prompt "Check open PRs and CI; alert me only if something is blocked"
+```
+
+Off by default; its cost is shown before you turn it on.
+
+**Status:** Preview.

@@ -1,0 +1,26 @@
+schemaVersion: "2.2"
+description: "Oz Box: read a box's secrets-store facts, or record and carry out a cancel of a move to the fleet key. Runs only fixed ozbox programs."
+parameters:
+  action:
+    type: String
+    description: "Which fixed program to run."
+    allowedValues:
+      - status
+      - arm
+      - cancel
+      - cancel-from-copy
+mainSteps:
+  - action: aws:runShellScript
+    name: ozboxAdopt
+    inputs:
+      timeoutSeconds: "900"
+      runCommand:
+        - |
+          set -eu
+          case "{{ action }}" in
+            status) exec /usr/local/bin/ozbox secrets adopt-status ;;
+            arm) exec /usr/local/bin/ozbox secrets adopt-arm ;;
+            cancel) exec /usr/local/bin/ozbox secrets adopt-cancel ;;
+            cancel-from-copy) exec /usr/local/bin/ozbox secrets adopt-cancel --from-copy ;;
+            *) echo "unknown action" >&2; exit 2 ;;
+          esac

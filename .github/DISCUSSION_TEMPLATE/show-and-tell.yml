@@ -1,0 +1,19 @@
+body:
+  - type: markdown
+    attributes:
+      value: Show what you built or how you use Oz Box. Please leave out keys, tokens and anything private.
+  - type: textarea
+    id: what
+    attributes:
+      label: What you made
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it works
+      description: The setup, the plugins or skills you used, and anything others could reuse.
+  - type: input
+    id: link
+    attributes:
+      label: A link, if you have one

@@ -1,0 +1,105 @@
+name: Publish Homebrew formula
+
+# After a release exists, opens a pull request on the owner's Homebrew tap with the formula for it. The formula's sha256
+# values come from the release's manifest, whose Sigstore signature is verified here first.
+#
+# DISABLED until the owner creates the tap repository (docs/releasing.md) and sets the repository variable OZBOX_TAP_REPO
+# (for example OzboxHQ/homebrew-tap) and the secret OZBOX_TAP_TOKEN (a fine-grained token or GitHub App installation token
+# with Contents and Pull requests write on the tap repository only). It opens a pull request, never pushes to the tap's
+# default branch, and waits for the owner's approval of the `homebrew` environment.
+#
+# A release made by cli-release.yml with the workflow's own token does NOT start this on `release: published` (GitHub does
+# not start workflows from events made by that token), so after a release, run this by hand: Actions -> Publish Homebrew
+# formula -> Run workflow -> the tag, for example v0.1.0.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-homebrew-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  formula:
+    name: Open a pull request on the tap
+    if: vars.OZBOX_TAP_REPO != '' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ubuntu-latest
+    environment: homebrew
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: "v2.5.3"
+      - name: Which release
+        id: rel
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "not a stable program release tag: $TAG (pre-releases are not published to the tap)" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >>"$GITHUB_OUTPUT"
+      - name: Download the manifest and verify its signature (this repository's cli-release workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir manifest
+          gh release download "$TAG" --repo "$REPO" --dir manifest \
+            --pattern ozbox-cli-manifest.json --pattern ozbox-cli-manifest.json.sig --pattern ozbox-cli-manifest.json.pem
+          repo_re="${REPO//./\\.}"
+          cosign verify-blob manifest/ozbox-cli-manifest.json \
+            --signature manifest/ozbox-cli-manifest.json.sig --certificate manifest/ozbox-cli-manifest.json.pem \
+            --certificate-identity-regexp "^https://github\\.com/${repo_re}/\\.github/workflows/cli-release\\.yml@refs/(heads/main|tags/v[0-9a-z.-]+)\$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Render the formula
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p formula/Formula
+          node scripts/release/gen-homebrew-formula.mjs manifest/ozbox-cli-manifest.json --repo "$REPO" --out formula/Formula/ozbox.rb
+          cat formula/Formula/ozbox.rb
+      - name: Pull request on the tap
+        env:
+          GH_TOKEN: ${{ secrets.OZBOX_TAP_TOKEN }}
+          TAP: ${{ vars.OZBOX_TAP_REPO }}
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "the secret OZBOX_TAP_TOKEN is not set" >&2; exit 1; }
+          gh auth setup-git
+          gh repo clone "$TAP" tap -- --depth 1
+          cd tap
+          mkdir -p Formula
+          cp ../formula/Formula/ozbox.rb Formula/ozbox.rb
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "the tap already has this formula; nothing to do"
+            exit 0
+          fi
+          branch="ozbox-$VERSION"
+          git checkout -b "$branch"
+          git add Formula/ozbox.rb
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -s -m "ozbox $VERSION"
+          git push origin "$branch"
+          gh pr create --repo "$TAP" --head "$branch" --title "ozbox $VERSION" \
+            --body "Formula for ozbox $VERSION, generated from the signed release manifest (signature verified by the publishing workflow)."

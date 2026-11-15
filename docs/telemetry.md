@@ -1,0 +1,33 @@
+# Telemetry
+
+Off by default. Nothing is read, written or sent until you run `ozbox telemetry on --endpoint <https address>`, and Oz Box
+hosts no collector: the address is one you run or trust. The decision is
+[ADR 0032](adr/0032-telemetry-is-off-and-anonymous-and-goes-where-you-say.md).
+
+```sh
+ozbox telemetry status      # on or off
+ozbox telemetry preview     # the exact event that would be sent now; sends nothing
+ozbox telemetry on --endpoint https://collect.example.com/ozbox
+ozbox telemetry send        # send today's event now
+ozbox telemetry off         # off, and forget what it kept
+```
+
+## The event
+
+```json
+{"schema":1,"ozbox_version":"1.0.0","os":"linux","arch":"x86_64","day":"2026-11-10","provider":"aws","boxes":"2-5"}
+```
+
+| field | meaning |
+|---|---|
+| `schema` | the shape's version; fields are only ever added |
+| `ozbox_version`, `os`, `arch` | the program's version, operating system and CPU family |
+| `day` | the UTC date, so at most one event a day |
+| `provider` | `fake`, `hcloud`, `aws`, `plugin` or `unset` (a plugin's name is never sent) |
+| `boxes` | a size bucket for the fleet: `0`, `1`, `2-5`, `6-20`, `21+`, or `unknown` |
+
+There is no box name, host name, path, prompt, key, account or identifier of the installation. Free text cannot reach the event:
+the provider and the bucket come from fixed lists. The server you configure sees the sender's network address, as any server does.
+
+When it is on, one event is posted after a successful command, at most once a day, with a two-second limit; a failure is ignored.
+The request goes through the same outbound guard as every other call (https, public addresses only).

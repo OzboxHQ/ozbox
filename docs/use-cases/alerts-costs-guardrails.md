@@ -1,0 +1,136 @@
+# Alerts, costs and guardrails
+
+What keeps a fleet of boxes and agents safe and affordable: alerts that reach the right person on the right channel,
+spending you can see and cap, secrets that agents cannot read, and boxes nobody can reach from the internet.
+
+See [how to read the status](README.md#how-to-read-the-status).
+
+---
+
+## 1. Alerts on the channels you already use
+
+**You want:** to hear about problems by email, SMS, Telegram, Slack, Discord, Teams, WhatsApp or phone push.
+
+**Settings → Apps and alerts** has a card per channel with a step-by-step guide, write-only credentials and **Send
+test**, which shows each channel's result as it arrives. SMS works through Twilio, Vonage, Amazon SNS, Africa's Talking
+or Telnyx; email through Resend, Postmark, SendGrid, Amazon SES or your own SMTP server.
+
+**Status:** Preview (no real message has been sent in testing).
+
+## 2. Urgent at 2 am, everything else in the morning
+
+**You want:** to be woken only for what matters.
+
+In **Settings → Routing**, each person sets which channels get **urgent** and **normal** alerts, quiet hours in their own
+time zone (urgent still gets through), and a daily summary time. The preview reads like: *"Urgent alerts at 2am Lagos
+time go to SMS, Telegram and Push."*
+
+**Status:** Preview.
+
+## 3. Know whether an alert really arrived
+
+**You want:** "delivered" to mean delivered.
+
+Each alert shows, per person and channel, whether it was sent, is retrying, failed after its last try, or was held by
+quiet hours or a text limit. Failed deliveries retry after 1, 5 and 15 minutes. The **Daily summary** lists any day, for
+everyone or one person.
+
+**Status:** Preview.
+
+## 4. Keep spending under a budget
+
+**You want:** a monthly limit with warnings.
+
+Set the fleet's monthly budget; alerts go out at 50%, 80% and 100%. Agent runs have their own caps (per run, per person,
+per month) that pause and ask instead of losing work — see [Agentic fleet](agentic-fleet.md).
+
+**Status:** Preview.
+
+## 5. Compare the estimate with the real bill
+
+**You want:** to see what your cloud really charged, per box, and why it differs from the estimate.
+
+```
+ozbox cost bill
+ozbox cost reconcile
+```
+
+**Costs → Bill** shows month-to-date real cost against the estimate per box and service, the difference and its likely
+cause (an untagged resource, a price change, a cost Oz Box doesn't model such as data transfer). Real cost needs the
+`ozbox-managed` tag turned on as a cost-allocation tag in your AWS billing settings, and lags about a day — the page says
+so ([ADR 0016](../adr/0016-the-real-bill-and-forgotten-resources.md)).
+
+A bill is for a whole cloud account, so a dashboard that runs on one box has none to show: **Bill** there says **Fleet
+not connected** and offers neither **Read the bill now** nor the forgotten-resources scan. Read the bill from your own
+computer. Reading the bill and scanning for forgotten resources are for members and owners; deleting what a scan found is
+an owner's.
+
+**Status:** Preview.
+
+### Usage, suggestions and Activity
+
+**Usage** shows CPU and memory per box over a range you pick, with a weekly suggestion to pause or shrink a box that
+is mostly idle. A box that could not be read within ten seconds is named, with the reason, in a **N boxes could not be
+reached** note; it is never left out quietly and never counted as idle. On the demo provider the figures and the
+suggestions carry a **Simulated** note: none of it was measured and no suggestion is a real saving. On a box's own
+dashboard the cost is a dash that says **Fleet not connected**. Applying a suggestion changes a box, so a viewer sees the
+suggestion and no button.
+
+**Activity** lists what this server did, who did it (the signed-in person, or **access link** when the dashboard was
+opened with a link and no one is signed in) and how it went. It is kept in memory, the most recent 500, and a restart
+clears it: the page says so, and box changes and settings changes are also kept in the audit log. A list that cannot be read shows an error with
+**Try again**, not an empty page.
+
+**Account** needs a sign-in. On a dashboard opened with an access link it says so instead of showing nothing.
+
+## 6. Keep provider keys away from agents
+
+**You want:** a prompt-injected agent to be unable to read your keys.
+
+Credentials you give Oz Box are write-only: they are never shown, logged or placed on a command line. On your computer
+they live in the operating system's keychain. Agents are treated as untrusted: they will get short-lived per-run tokens
+through a credential broker instead of real keys, and secrets on a box are held encrypted under a key from your
+cloud's key service (or your machine's), by a separate system user agents cannot read
+([ADR 0017](../adr/0017-credential-broker-per-run-tokens.md), [ADR 0018](../adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md)).
+More in [A secure workspace for AI agents](secure-agent-workspace.md).
+
+**Status:** Preview (built and tested; not yet exercised with a real agent on a real cloud box).
+
+## 7. App secrets for builds and tests, without exposing them
+
+**You want:** your test suite to reach a staging database without the agent ever seeing the key.
+
+Import a `.env` file from your computer (names and fingerprints shown, never values; production-looking keys refused
+unless you allow one with a passkey). Commands that need the values run as a separate user, receive only the names they
+are allowed, and return output only — scanned for leaks before the agent sees it. The box's file browser already refuses
+to show or move `.env` files.
+
+**Status:** Preview (built and tested; the `.env` refusal in the file browser works today).
+
+## 8. Nothing listens on the internet
+
+**You want:** no exposed SSH or web ports to attack.
+
+Boxes have no inbound rules at all; every way in is outbound — your cloud's session service, or your own tunnel. The
+infrastructure modules are tested so that any inbound rule fails the build ([ADR 0005](../adr/0005-no-inbound-network.md)).
+
+**Status:** Works.
+
+## 9. No root for you or your agents
+
+**You want:** an agent that goes wrong to be unable to take over the box.
+
+The box user has no `sudo`. The only root path is `ozbox admin` with a short allow-list of actions, each recorded on the
+box ([ADR 0011](../adr/0011-no-sudo-one-audited-root-path.md)). Images are signed in CI and verified before an upgrade.
+
+**Status:** Works.
+
+## 10. Sign in safely to a shared dashboard
+
+**You want:** teammates to reach the dashboard without sharing a password.
+
+Sign-in uses passkeys, or GitHub or Google with your own OAuth app followed by an authenticator code, or the signed
+token of an identity-aware proxy such as Cloudflare Access. Risky actions (approvals, tunnel changes) ask for a fresh
+passkey. Sessions are bound to your address with strict cookies and CSRF protection.
+
+**Status:** Preview.

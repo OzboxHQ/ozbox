@@ -1,0 +1,91 @@
+---
+title: "Install"
+description: "Install the ozbox command from a signed release: download the installer, read it, run it with a pinned version, and verify the download."
+---
+
+The `ozbox` program is one self-contained file. The installer downloads the release for your computer, checks it, and puts it on your path. You download the installer first and read it before you run it; nothing is piped into a shell.
+
+## What you need
+
+| | |
+|---|---|
+| **Operating system** | Linux or macOS. On Windows, use [WSL](https://learn.microsoft.com/windows/wsl/) and follow the Linux steps inside it. |
+| **CPU** | x86\_64 or aarch64 (Arm) |
+| **For a real cloud** | your cloud's own command-line tool signed in (for AWS, `aws sso login`), and OpenTofu 1.7 or newer (the AWS and Hetzner modules need it; an older one stops at `tofu init` with an "Unsupported OpenTofu version" error before anything is created) |
+| **To verify downloads** | `cosign` and `sha256sum` (or `shasum -a 256` on macOS) |
+
+You do not need a cloud account to try Oz Box. The default provider is a file-backed demo that runs on your own computer.
+
+## Install
+
+<Steps>
+  <Step title="Download the installer">
+    Pick the release you want. Pinning a version means the same command installs the same program next month. The Beta is a GitHub pre-release, which the installer skips when you do not name a version, so always name it.
+
+    ```bash
+    VERSION=0.2.0-beta.0
+    curl -fsSLO "https://raw.githubusercontent.com/OzboxHQ/ozbox/v${VERSION}/scripts/install.sh"
+    ```
+  </Step>
+  <Step title="Read it">
+    It is a short shell script. Check what it will download and where it will write.
+
+    ```bash
+    less install.sh
+    ```
+  </Step>
+  <Step title="Run it with the pinned version">
+    ```bash
+    sh install.sh --version "${VERSION}"
+    ozbox --version
+    ```
+  </Step>
+</Steps>
+
+## Verify a download yourself
+
+Every release is signed with Sigstore (keyless, from the release workflow) and carries a SHA-256 file. To check the program by hand instead of trusting the installer, download the program and its signature files from the same release, then verify both.
+
+```bash
+VERSION=0.2.0-beta.0
+ARCH=x86_64        # or aarch64
+BASE="https://github.com/OzboxHQ/ozbox/releases/download/v${VERSION}"
+for f in "ozbox-linux-${ARCH}" "ozbox-linux-${ARCH}.sha256" "ozbox-linux-${ARCH}.sigstore.json"; do
+  curl -fsSLO "${BASE}/${f}"
+done
+
+# 1. The checksum matches
+sha256sum --check "ozbox-linux-${ARCH}.sha256"
+
+# 2. The signature proves which workflow built it
+cosign verify-blob "ozbox-linux-${ARCH}" \
+  --bundle "ozbox-linux-${ARCH}.sigstore.json" \
+  --certificate-identity-regexp "^https://github.com/OzboxHQ/ozbox/\.github/workflows/cli-release\.yml@refs/tags/v${VERSION}$" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
+<Warning>
+  If either check fails, do not run the file. Download it again from the release page, and if it still fails, report it privately as described in the [security policy](/security-policy).
+</Warning>
+
+The release also contains a signed manifest, `ozbox-cli-manifest.json`, that records the SHA-256 of each program and of the dashboard built into it. The same signature check works on it.
+
+## Upgrade and uninstall
+
+- **Upgrade:** download the installer for the newer release and run it the same way. It replaces the program in place.
+- **Uninstall:** delete the `ozbox` file the installer reported. Your boxes are not touched: they live in your cloud account, and `ozbox list` shows them again after a reinstall. Your configuration stays in your home directory until you remove it.
+
+## Build from source
+
+You can also build the program yourself. You need the stable Rust toolchain, Node 22 for the dashboard, and a C compiler.
+
+```bash
+cd packages/dashboard && npm ci && npm run build
+cd ../.. && cargo build --release -p ozbox-cli
+```
+
+The program embeds the dashboard, so build the dashboard first. A release build refuses to compile without it.
+
+## Next
+
+Follow [One box](/use-cases/one-box) for a first box, or the [CLI reference](/cli-reference) for every command.

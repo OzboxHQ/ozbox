@@ -1,0 +1,20 @@
+[package]
+name = "ozbox-seal"
+description = "Sealed delivery: HPKE (RFC 9180) to a service key, with the request's fields as authenticated data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# RFC 9180 base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305. Pure Rust, no C toolchain (ADR 0008).
+hpke = { version = "0.13", default-features = false, features = ["x25519", "alloc"] }
+rand_core = "0.9"
+getrandom = "0.2"
+ring = "0.17"
+zeroize = "1"
+
+[lints]
+workspace = true

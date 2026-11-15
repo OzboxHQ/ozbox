@@ -1,0 +1,20 @@
+[package]
+name = "ozbox-issuer"
+description = "The off-box issuer for Production secrets (ADR 0029 Amendment 6 section 4): pinned approvers, challenges it makes and checks itself, one-use releases sealed to the box's service key. Logic only, behind traits for its state, its secret reader and its audit record."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ozbox-seal = { path = "../ozbox-seal" }
+ring = "0.17"
+serde.workspace = true
+serde_json.workspace = true
+zeroize = "1"
+getrandom = "0.2"
+
+[lints]
+workspace = true
