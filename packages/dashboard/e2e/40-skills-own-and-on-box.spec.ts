@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
+import { applyPlan } from './apply';
 import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open } from './fixtures';
 
 // Skills of your own, and skills on a box's disk, against the real server with the demo provider. The demo's boxes are
@@ -23,6 +24,17 @@ async function axeClean(page: Page, testId: string) {
   const r = await new AxeBuilder({ page }).include(`[data-testid="${testId}"]`).withTags(['wcag2a', 'wcag2aa', 'wcag22aa']).analyze();
   expect(r.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical')).toEqual([]);
 }
+
+// These tests need `delta` to be the paused box it is seeded as, and an earlier spec in the shared server (03) resumes it to
+// watch a change reach another tab. So this spec puts it back, rather than assume the order the files run in.
+test.beforeAll(async ({ request }) => {
+  const listed = (await (await request.get(`${origin()}/v1/boxes`, { headers: headers() })).json()) as { name: string; state: string }[] | { boxes: { name: string; state: string }[] };
+  const boxes = Array.isArray(listed) ? listed : listed.boxes;
+  if (boxes.find((b) => b.name === 'delta')?.state !== 'running') return;
+  const plan = await request.post(`${origin()}/v1/plans`, { headers: headers(), data: { operation: { op: 'pause', name: 'delta' } } });
+  const { plan_id } = (await plan.json()) as { plan_id: string };
+  expect((await applyPlan(request, origin(), headers(), { plan_id })).ok()).toBe(true);
+});
 
 const md = (name: string, body: string) => `---\nname: ${name}\ndescription: Checks the e2e skill.\nversion: 1\n---\n${body}\n`;
 
