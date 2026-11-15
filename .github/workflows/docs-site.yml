@@ -42,11 +42,9 @@ jobs:
         run: node scripts/compile-check.mjs .
       - name: Offline link check (the hard gate)
         run: node scripts/check-links.mjs .
-      # Until the repository is public the work happens on main directly, so the placeholder is allowed on a push to main;
-      # a pull request into main and a release tag must not carry one.
-      - name: No changelog entry may keep a placeholder date in a release (run `npm run stamp-release`)
-        if: github.base_ref == 'main' || startsWith(github.ref, 'refs/tags/')
-        run: node scripts/validate-docs.mjs . --strict-dates
+      # A changelog entry keeps `[Release date]` while its change waits on main for the next release: the date a reader sees is
+      # the day it shipped, not the day it merged. The release workflow (cli-release.yml) refuses a real release that still
+      # carries one, so dates are stamped (`npm run stamp-release`) right before the tag.
       # Extra, not a gate: the hosted tool's own check needs the network and its own toolchain, which can fail for
       # reasons that have nothing to do with the pages. The offline check above is the one that blocks.
       - name: Mintlify broken-links (informational)
