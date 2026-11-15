@@ -100,6 +100,21 @@ owner; an owner changes a role with a passkey, and it is audited ([ADR 0039](adr
 One function also decides whether a request counts as a person's second factor, so a dashboard with no sign-in on a box is
 refused everywhere one is asked for.
 
+### Telegram (Preview)
+
+The dashboard server hosts one **Telegram bridge** (ADR 0050, phase P1): an outbound long poll of the Bot API on a thread of its own
+(no inbound port, no webhook), reading `message` updates only. The bot token is a secret in the secret store, read for each call and
+never kept. What a message may do is decided by one pure function in `ozbox_core::chat_policy`: a closed table of acts, one parser
+that turns a message into exactly one of them, and `decide`, which returns `Allow`, `Handoff` (a link to the dashboard, nothing
+done) or `Refuse`. An `Allow` can only be made by `decide`, and the executor asks again with fresh facts just before it acts.
+Identity is a **link**: a Telegram numeric user id bound to a person by a passkey assertion made in the dashboard, and what a link
+may do beyond reading is a **delegation**, a signed record whose digest is the WebAuthn challenge. The server keeps the evidence and
+checks it again every time it is used, so a hand-edited row grants nothing. Links, delegations, the replay set of `(bot id,
+update_id)` and the poll offset live in a file of their own, written with a sync before the act they allow; every act and refusal
+is an audit entry, and what was said is kept in a sealed, 30-day, per-link transcript. In P1 only reading and talking to an agent
+exist; talking goes through the chat gateway's own code, unchanged. Box power, `/run` and the chat profile on the box are later
+phases.
+
 ## Supervised agent runs
 
 A run is one agent doing one job on one box: an engine, a prompt or skill, the box, optionally a repository and branch, caps

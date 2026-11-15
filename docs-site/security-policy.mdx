@@ -45,3 +45,14 @@ What the software does and does not protect against is written down in the decis
 each with a "what is not covered" list), the [shared responsibility](/shared-responsibility) page and the
 [hardening checklist](/hardening-checklist). Oz Box describes controls; it makes no claim of certification or
 compliance.
+
+## What a chat app can and cannot do (Telegram, Preview)
+
+Telegram is not private: bot messages are not end to end encrypted, and the vendor has no data agreement with the project. Never type
+a secret into the bot. A chat never approves, denies, stops a run, raises a spending limit, or reads, sets, imports or exports a secret:
+the server refuses those, whatever a button or a message says. A linked Telegram account can read, and, only where a person delegated
+it in the dashboard with a passkey, talk to a coding agent on a chosen box. **Talking to an agent is code execution as the box user,
+inside the agent's own ask-before-acting rules**: a taken-over Telegram account that holds that permission can make an agent run code
+on that box until the link is revoked. The redaction of what an agent writes back is a net, not a wall: it does not stop a
+prompt-injected agent from encoding what it can read into its replies. Lock a link with `/lock` or from the dashboard, and cut it
+with `/unlink`.
