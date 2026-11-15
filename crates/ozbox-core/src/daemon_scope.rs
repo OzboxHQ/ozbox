@@ -16,7 +16,8 @@
 //! agents cannot reach the dashboard's process or its secrets.
 //!
 //! Skills on the box's own disk (`/v1/skills`) are on the table: a push writes only into the agents' skills folders, only
-//! the files of a skill a person approved, re-checked and re-hashed by the daemon, and is audited. It adds no authority the
+//! the files the dashboard sends, re-checked and re-hashed by the daemon (whether a person approved them is the dashboard's
+//! check, made before it sends; the daemon cannot see an approval), and is audited. It adds no authority the
 //! terminal does not already give.
 //!
 //! Left off, so "not available on a box's dashboard": backups (`/v1/backup`), the tool installer (`/v1/tools`), local models

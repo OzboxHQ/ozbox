@@ -202,6 +202,12 @@ write_files:
       d /run/ozbox-admin/requests 1770 root ozbox -
       d /run/ozbox-admin/results  0755 root root -
 
+  - path: /etc/claude-code/managed-settings.json
+    permissions: "0644"
+    owner: root:root
+    content: |
+      {"disableSkillShellExecution": true}
+
   - path: /etc/systemd/system/ozbox-admin.path
     permissions: "0644"
     owner: root:root

@@ -10,16 +10,15 @@
 
 use std::collections::BTreeMap;
 
-use ozbox_core::skill_pack::{skill_agent, skill_name_ok, SkillPack, MAX_PACK_BODY};
+use ozbox_core::skill_pack::{
+    legacy_name_ok, skill_agent, skill_name_ok, SkillPack, MAX_PACK_BODY,
+};
 use ozbox_core::BoxState;
 use ozbox_memory::skills::{Origin, Replace, SkillError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{unix_ms, App, Req, Resp};
-
-/// The most "seen on a box" lines kept as already noted.
-const MAX_UNRECORDED_NOTED: usize = 500;
 
 fn skill_error(e: SkillError) -> Resp {
     match e {
@@ -275,13 +274,18 @@ impl App {
         // A skill on a box that this dashboard did not put there is worth a line in the record, once per box, skill and
         // folder, and never more than a few hundred: the box user chooses what its box reports, so it does not get to fill
         // the record by changing a file or inventing names.
+        // Keys are `box:skill:folder`. What the box no longer reports is forgotten, so the set is never more than what a box
+        // reports right now (and a daemon follows at most a few dozen places), and a copy that goes away and comes back is
+        // noted again.
+        let now_seen: std::collections::BTreeSet<String> =
+            unrecorded.iter().map(|u| format!("{name}:{u}")).collect();
+        let prefix = format!("{name}:");
+        self.unrecorded_skills
+            .retain(|k| !k.starts_with(&prefix) || now_seen.contains(k));
         for u in unrecorded {
             let skill = u.split_once(':').map_or(u.as_str(), |(s, _)| s);
             let key = format!("{name}:{u}");
-            if skill_name_ok(skill)
-                && self.unrecorded_skills.len() < MAX_UNRECORDED_NOTED
-                && self.unrecorded_skills.insert(key)
-            {
+            if legacy_name_ok(skill) && self.unrecorded_skills.insert(key) {
                 self.log_activity(
                     "skill seen on box",
                     name,
@@ -331,7 +335,7 @@ impl App {
                 Resp::json(200, &v)
             }
             ("PUT", [skill]) if skill_name_ok(skill) => self.skill_push(name, skill, req),
-            ("DELETE", [skill]) if skill_name_ok(skill) => self.skill_pull(name, skill),
+            ("DELETE", [skill]) if legacy_name_ok(skill) => self.skill_pull(name, skill),
             (_, [] | [_]) => Resp::error(405, "method_not_allowed", "method not allowed"),
             _ => Resp::error(404, "not_found", "no such endpoint"),
         }
@@ -392,10 +396,29 @@ impl App {
                 .filter(|r| r["ok"] == true)
                 .filter_map(|r| r["agent"].as_str().map(str::to_string))
                 .collect();
-            let _ = host
+            // The copy is on the box. Record exactly the hash that was sent; if that cannot be done the answer says so and the
+            // record says so, instead of reporting a push this dashboard cannot account for as a plain success.
+            match host
                 .skills
-                .record_push(skill, box_name, &b.hash, agents, &who, unix_ms());
-            self.log_activity("skill push", box_name, None, &format!("{skill} {short}"));
+                .record_push(skill, box_name, &b.hash, agents, &who, unix_ms())
+            {
+                Ok(()) => {
+                    self.log_activity("skill push", box_name, None, &format!("{skill} {short}"))
+                }
+                Err(e) => {
+                    self.log_activity(
+                        "skill push",
+                        box_name,
+                        None,
+                        &format!("{skill} {short} put on the box, not recorded"),
+                    );
+                    let msg = match e {
+                        SkillError::NotApproved(m) => m,
+                        _ => "the skill was put on the box but this dashboard could not record it, so it will show as not pushed from here".to_string(),
+                    };
+                    return Resp::error(500, "not_recorded", &msg);
+                }
+            }
         } else {
             self.log_activity("skill push", box_name, None, &format!("{skill} refused"));
         }

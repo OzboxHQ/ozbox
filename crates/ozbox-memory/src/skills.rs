@@ -379,7 +379,11 @@ impl SkillStore {
 
     /// Is there an approval of exactly these files that also covers every command and permission they ask for?
     fn approved(reg: &Registry, p: &SkillPack, hash: &str) -> bool {
-        let need = p.asks().keys();
+        // a pack whose asks cannot be read is never approved
+        let Ok(asks) = p.asks() else {
+            return false;
+        };
+        let need = asks.keys();
         reg.approvals.iter().any(|a| {
             a.name == p.name && a.hash == hash && need.iter().all(|k| a.acks.iter().any(|x| x == k))
         })
@@ -497,7 +501,7 @@ impl SkillStore {
                 version: p.version.clone(),
                 license: p.license.clone(),
                 approved: Self::approved(&reg, p, &hash),
-                asks: p.asks().keys(),
+                asks: p.asks().map(|a| a.keys()).unwrap_or_default(),
                 files: Self::file_infos(p),
                 installs: reg
                     .installs
@@ -543,7 +547,7 @@ impl SkillStore {
                     hash: hash.clone(),
                     source: "removed".into(),
                     approved: Self::approved(&reg, &p, &hash),
-                    asks: p.asks().keys(),
+                    asks: p.asks().map(|a| a.keys()).unwrap_or_default(),
                     files: Self::file_infos(&p),
                     installs: reg
                         .installs
@@ -612,11 +616,12 @@ impl SkillStore {
         allow_shadow: bool,
         now: u64,
     ) -> Result<CatalogItem, SkillError> {
-        self.add_pack_inner(pack, origin, replace, allow_shadow, now, false)
+        self.add_pack_inner(pack, origin, replace, allow_shadow, now)
     }
 
-    /// `drop_approval`: the added files start unapproved even if an approval of exactly them is still on record (a restored
-    /// version, which may still be installed somewhere).
+    /// Whatever is added starts unapproved, even when an approval of exactly these files is still on record (a version that
+    /// is still installed or on a box): approvals are of what a person looked at for this purpose. Restoring an earlier
+    /// version and adding its identical bytes again are the same act. (Adding what is already current changes nothing.)
     fn add_pack_inner(
         &self,
         pack: SkillPack,
@@ -624,7 +629,6 @@ impl SkillStore {
         replace: &Replace,
         allow_shadow: bool,
         now: u64,
-        drop_approval: bool,
     ) -> Result<CatalogItem, SkillError> {
         let _l = self.lock()?;
         let name = pack.name.clone();
@@ -744,10 +748,8 @@ impl SkillStore {
                 !gone.contains(&(i - 1))
             });
         }
-        if drop_approval {
-            reg.approvals
-                .retain(|a| !(a.name == name && a.hash == hash));
-        }
+        reg.approvals
+            .retain(|a| !(a.name == name && a.hash == hash));
         self.gc(&mut reg);
         self.save(&reg)?;
         drop(_l);
@@ -835,10 +837,6 @@ impl SkillStore {
             Some(h) => Replace::Over(h),
             None => Replace::Fresh,
         };
-        // Restoring is always a new addition that waits for a person, even if these exact files are still installed or on a
-        // box and still carry an approval: approvals are of what a person looked at for this purpose, so the record is dropped.
-        // (Restoring the version that is already current changes nothing and keeps its approval.)
-        let drop_approval = current.as_deref() != Some(hash);
         self.add_pack_inner(
             pack,
             &Origin {
@@ -848,7 +846,6 @@ impl SkillStore {
             &replace,
             true,
             now,
-            drop_approval,
         )
     }
 
@@ -905,16 +902,21 @@ impl SkillStore {
         now: u64,
     ) -> Result<(), SkillError> {
         let _l = self.lock()?;
+        // The files that were sent: the library's, or, when the library has moved on since the push began, the version it
+        // archived. Either way the hash recorded is the one actually put on the box, and it is recorded even if the
+        // approval was withdrawn meanwhile (the copy is on the box, and the dashboard must be able to account for it).
         let src = self.sources();
-        let (pack, _) = src.get(name).ok_or(SkillError::NotFound)?;
-        if pack.hash() != hash {
-            return Err(SkillError::Refused(
-                "those are not the files of this skill any more; review it again".into(),
-            ));
-        }
+        let pack = match src.get(name) {
+            Some((p, _)) if p.hash() == hash => p.clone(),
+            _ => Self::read_dir_pack(&self.history_dir(name, hash), hash).ok_or_else(|| {
+                SkillError::Refused(
+                    "the files that were sent are no longer kept here, so the copy on the box could not be recorded".into(),
+                )
+            })?,
+        };
         let dir = self.snapshot_dir(name, hash);
         if self.read_snapshot(name, hash).is_none() {
-            Self::write_pack_dir(&dir, pack)?;
+            Self::write_pack_dir(&dir, &pack)?;
         }
         let mut reg = self.registry();
         // A push that reached only some folders leaves the others at the hash they had.
@@ -946,8 +948,16 @@ impl SkillStore {
             pushed_by: who.to_string(),
             pushed_ms: now,
         });
+        let approved = Self::approved(&reg, &pack, hash);
         self.gc(&mut reg);
-        self.save(&reg)
+        self.save(&reg)?;
+        if approved {
+            Ok(())
+        } else {
+            Err(SkillError::NotApproved(
+                "the approval was withdrawn while the skill was being put on the box; the copy is recorded and can be removed".into(),
+            ))
+        }
     }
 
     /// What this dashboard recorded putting on `box_name` for `name`, per agent folder: the hashes it may claim.
@@ -1018,6 +1028,31 @@ impl SkillStore {
             .retain(|p| !(p.name == name && p.box_name == box_name));
         self.gc(&mut reg);
         self.save(&reg)
+    }
+
+    /// Library folders that cannot be read as a skill, with why, so a person can see and remove them (a folder from before
+    /// names were lower case, one whose front matter is no longer valid, one that was edited by hand).
+    pub fn unreadable(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for e in fs::read_dir(self.root.join("library"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.starts_with('.') || !e.path().is_dir() {
+                continue;
+            }
+            if let Err(why) = SkillPack::from_dir(&e.path()) {
+                out.push((
+                    n.chars().take(64).collect(),
+                    why.to_string().chars().take(200).collect(),
+                ));
+            }
+        }
+        out.sort();
+        out.truncate(50);
+        out
     }
 
     /// Where the skills are kept, for a page to say.
@@ -1104,7 +1139,7 @@ impl SkillStore {
                     "those are not the files of this skill any more; review it again".into(),
                 )
             })?;
-        let need = pack.asks().keys();
+        let need = pack.asks()?.keys();
         if let Some(k) = acks.iter().find(|k| !need.contains(&k.as_str())) {
             return Err(SkillError::Invalid(format!(
                 "{} is not something this skill asks for",
@@ -1177,7 +1212,7 @@ impl SkillStore {
             version: pack.version.clone(),
             license: pack.license.clone(),
             approved: Self::approved(&reg, &pack, &h),
-            asks: pack.asks(),
+            asks: pack.asks()?,
             hash: h,
             files: pack
                 .files
@@ -1691,5 +1726,125 @@ mod tests {
         assert_eq!(left.pushes[0].box_name, "alpha");
         s.forget_push("mine", "alpha").unwrap();
         assert!(s.catalog().iter().all(|c| c.name != "mine"));
+    }
+
+    #[test]
+    fn adding_a_past_versions_identical_files_is_the_same_act_as_restoring_it() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let one = s
+            .add_pack(pack("mine", "one"), &origin(), &Replace::Fresh, false, 1)
+            .unwrap();
+        s.approve("mine", &one.hash, "owner", 2, &[]).unwrap();
+        s.record_push(
+            "mine",
+            "alpha",
+            &one.hash,
+            vec!["claude-code".into()],
+            "owner",
+            3,
+        )
+        .unwrap();
+        s.add_pack(
+            pack("mine", "two"),
+            &origin(),
+            &Replace::Over(one.hash.clone()),
+            false,
+            4,
+        )
+        .unwrap();
+        // the box still holds `one`, so its approval is on record; adding the same bytes again must not bring it back approved
+        let again = s
+            .add_pack(
+                pack("mine", "one"),
+                &origin(),
+                &Replace::Over(
+                    s.catalog()
+                        .iter()
+                        .find(|c| c.name == "mine")
+                        .unwrap()
+                        .hash
+                        .clone(),
+                ),
+                false,
+                5,
+            )
+            .unwrap();
+        assert_eq!(
+            (again.hash.as_str(), again.approved),
+            (one.hash.as_str(), false)
+        );
+    }
+
+    #[test]
+    fn a_push_that_landed_is_recorded_as_sent_even_if_the_library_moved_or_the_approval_went() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let one = s
+            .add_pack(pack("mine", "one"), &origin(), &Replace::Fresh, false, 1)
+            .unwrap();
+        s.approve("mine", &one.hash, "owner", 2, &[]).unwrap();
+        // the library moves on while the push is in flight: the hash that was sent is still recorded
+        s.add_pack(
+            pack("mine", "two"),
+            &origin(),
+            &Replace::Over(one.hash.clone()),
+            false,
+            3,
+        )
+        .unwrap();
+        // (the library moving on also lets go of the approval nothing holds, so the caller is told; the copy is recorded)
+        let r = s.record_push(
+            "mine",
+            "alpha",
+            &one.hash,
+            vec!["claude-code".into()],
+            "owner",
+            4,
+        );
+        assert!(matches!(r, Err(SkillError::NotApproved(_))), "{r:?}");
+        assert_eq!(s.pushed_places("mine", "alpha")["claude-code"], one.hash);
+        // the approval is withdrawn meanwhile: the copy is still recorded, and the caller is told
+        s.revoke("mine").unwrap();
+        let r = s.record_push(
+            "mine",
+            "beta",
+            &one.hash,
+            vec!["claude-code".into()],
+            "owner",
+            5,
+        );
+        assert!(matches!(r, Err(SkillError::NotApproved(_))), "{r:?}");
+        assert_eq!(s.pushed_places("mine", "beta")["claude-code"], one.hash);
+        // files that are not kept anywhere cannot be recorded, and the error says so
+        let r = s.record_push(
+            "mine",
+            "gamma",
+            "00",
+            vec!["claude-code".into()],
+            "owner",
+            6,
+        );
+        assert!(matches!(r, Err(SkillError::Refused(_))));
+        assert!(s.pushed_places("mine", "gamma").is_empty());
+    }
+
+    #[test]
+    fn a_library_folder_that_cannot_be_read_is_listed_with_why() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let dir = s.root().join("library").join("Old_Name");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: Old_Name\ndescription: x\n---\n",
+        )
+        .unwrap();
+        let u = s.unreadable();
+        assert_eq!(u.len(), 1);
+        assert_eq!(u[0].0, "Old_Name");
+        assert!(u[0].1.contains("name"), "{}", u[0].1);
+        s.remove_from_library("Old_Name").unwrap();
+        assert!(s.unreadable().is_empty());
     }
 }

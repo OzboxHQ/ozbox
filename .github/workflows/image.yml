@@ -241,6 +241,17 @@ jobs:
           # daemon (a daemon that does not take its socket from systemd must never be handed one). Never reword it (G1 F8).
           grep -aq 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
             || { echo "::error title=Missing marker::the release ozboxd does not carry ozbox-listenfd-protocol-1, so no box would make its dashboard socket"; exit 1; }
+      - name: The release programs carry none of the debug-only test sockets
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Both hooks exist for the browser tests of a DEBUG build (a dashboard socket the daemon binds itself and admits any
+          # peer on, and the dashboard's switch to it). Neither may ever be in a program a box runs.
+          ! grep -aq 'OZBOXD_TEST_DASHBOARD_SOCKET' "target/$TARGET/release/ozboxd" \
+            || { echo "::error title=Debug hook in a release::the release ozboxd carries OZBOXD_TEST_DASHBOARD_SOCKET"; exit 1; }
+          ! grep -aq 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+            || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: One self-contained file, and a start check where this runner can
         env:
           ARCH: ${{ matrix.arch }}

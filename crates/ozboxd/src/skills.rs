@@ -32,8 +32,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ozbox_core::skill_pack::{
-    skill_agent, skill_name_ok, PackHasher, SkillAgent, SkillPack, MAX_FILES, MAX_FILE_BYTES,
-    MAX_TOTAL_BYTES, SKILL_AGENTS,
+    legacy_name_ok, skill_agent, skill_name_ok, PackHasher, SkillAgent, SkillPack, MAX_FILES,
+    MAX_FILE_BYTES, MAX_TOTAL_BYTES, SKILL_AGENTS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -119,6 +119,7 @@ fn clean(s: &str, max: usize) -> String {
 }
 
 const MAX_DIRS: usize = 200;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 /// The places one `GET` follows (an agent could write any number of records), and the bytes it reads across all of them.
 const MAX_PLACES: usize = 64;
 const MAX_LOOK_BYTES: u64 = 16 * 1024 * 1024;
@@ -194,7 +195,7 @@ fn hash_dir_within(dir: &Path, budget: Option<&mut u64>) -> Option<String> {
     found.sort_by(|a, b| a.rel.cmp(&b.rel));
     let mut h = PackHasher::new();
     for f in &found {
-        let file = fs::File::open(&f.path).ok()?;
+        let file = open_plain(&f.path)?;
         // opened, not followed: what was opened must be the plain file that was looked at
         let meta = file.metadata().ok()?;
         if !meta.is_file() || meta.len() != f.len {
@@ -205,6 +206,20 @@ fn hash_dir_within(dir: &Path, budget: Option<&mut u64>) -> Option<String> {
         }
     }
     Some(h.finish())
+}
+
+/// Open a file to read, only if it is a plain file: never through a link, and without waiting on a pipe. A path that was swapped
+/// for a link or a FIFO between looking at it and opening it is refused here, not followed or waited on.
+fn open_plain(path: &Path) -> Option<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let f = o.open(path).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
 }
 
 /// A copy that was put in place and can still be taken back: the folder the swap moved aside, until the whole push is done.
@@ -230,23 +245,38 @@ impl Placed {
 
 impl SkillsService {
     pub fn new(home: PathBuf, state: PathBuf, clock: Arc<dyn Clock>) -> SkillsService {
-        SkillsService {
+        let svc = SkillsService {
             home,
             state,
             clock,
             gate: Mutex::new(()),
+        };
+        // Leftovers of a push that was cut short (nothing is in flight at start): swept, never read as skills.
+        if !fs::symlink_metadata(svc.work_dir()).is_ok_and(|m| m.file_type().is_symlink()) {
+            let _ = fs::remove_dir_all(svc.work_dir());
         }
+        svc
     }
 
     fn manifest_path(&self) -> PathBuf {
         self.state.join("skills.json")
     }
 
+    /// The record, read as a plain file of at most 1 MiB (the box user can write anything there, so it is bounded and never a
+    /// link or a pipe); anything else reads as an empty record.
     fn manifest(&self) -> Manifest {
-        fs::read(self.manifest_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        let Some(f) = open_plain(&self.manifest_path()) else {
+            return Manifest::default();
+        };
+        let mut buf = Vec::new();
+        if f.take(MAX_MANIFEST_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || buf.len() as u64 > MAX_MANIFEST_BYTES
+        {
+            return Manifest::default();
+        }
+        serde_json::from_slice(&buf).unwrap_or_default()
     }
 
     fn save(&self, m: &Manifest) -> std::io::Result<()> {
@@ -258,6 +288,12 @@ impl SkillsService {
 
     fn folder(&self, a: &SkillAgent) -> PathBuf {
         self.home.join(a.folder)
+    }
+
+    /// Where a push is staged and the old copy set aside: beside the agents' skills folders, on the same filesystem (so a swap
+    /// is a rename) but outside them, so a program reading a skills folder never meets a half-written or set-aside one.
+    fn work_dir(&self) -> PathBuf {
+        self.home.join(".ozbox-skills-work")
     }
 
     /// Is any part of `rel` under the home directory a symbolic link? Writing through one could put files anywhere.
@@ -278,7 +314,7 @@ impl SkillsService {
         let name = sub.trim_start_matches('/');
         match (method, name) {
             ("GET", "") => self.status(),
-            ("PUT" | "DELETE", n) if skill_name_ok(n) && !dashboard => fail(
+            ("PUT" | "DELETE", n) if legacy_name_ok(n) && !dashboard => fail(
                 403,
                 "skills_write_not_here",
                 "a skill is put on this box through the dashboard's socket, not this one",
@@ -287,7 +323,7 @@ impl SkillsService {
                 let _g = self.gate.lock().unwrap_or_else(|p| p.into_inner());
                 self.push(n, body)
             }
-            ("DELETE", n) if skill_name_ok(n) => {
+            ("DELETE", n) if legacy_name_ok(n) => {
                 let _g = self.gate.lock().unwrap_or_else(|p| p.into_inner());
                 self.remove(n, body)
             }
@@ -325,7 +361,8 @@ impl SkillsService {
         // user's to write, so how many places it names, and how much they hold, is not for it to decide.
         let mut places: Vec<(&Entry, &SkillAgent)> = Vec::new();
         for e in &m.entries {
-            if !skill_name_ok(&e.name) {
+            // a copy under a name from before the format is still shown (and removable); nothing new is put under one
+            if !legacy_name_ok(&e.name) {
                 continue;
             }
             let Some(a) = skill_agent(&e.agent) else {
@@ -360,6 +397,7 @@ impl SkillsService {
             .collect();
         let mut by_name: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         for ((e, a), (state, disk)) in places.iter().zip(seen) {
+            // `others` is best effort: the box user can add or remove folders at any moment, so it is a look, not a ledger.
             // `hash` and `version` are what the record says (the box user can edit it); `disk_hash` is what is there.
             by_name.entry(e.name.clone()).or_default().push(json!({
                 "agent": a.id, "state": state, "hash": e.hash, "disk_hash": disk,
@@ -378,10 +416,7 @@ impl SkillsService {
                 .flatten()
                 .take(1000)
                 .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| {
-                    !n.starts_with('.')
-                        && !m.entries.iter().any(|x| x.agent == a.id && &x.name == n)
-                })
+                .filter(|n| !m.entries.iter().any(|x| x.agent == a.id && &x.name == n))
                 .map(|n| clean(&n, 64))
                 .collect();
             names.sort();
@@ -554,7 +589,16 @@ impl SkillsService {
                 true
             }
         };
-        let stage = folder.join(format!(".ozbox-stage-{}", unique()));
+        let work = self.work_dir();
+        if fs::symlink_metadata(&work).is_ok_and(|m| m.file_type().is_symlink())
+            || fs::create_dir_all(&work).is_err()
+        {
+            return Err((
+                "unsafe_path",
+                "the work folder for a push is not usable; nothing was written".into(),
+            ));
+        }
+        let stage = work.join(format!("stage-{}", unique()));
         let wrote = (|| -> std::io::Result<()> {
             for (p, bytes) in &pack.files {
                 let f = stage.join(p);
@@ -569,7 +613,7 @@ impl SkillsService {
             let _ = fs::remove_dir_all(&stage);
             return Err(("io", "the files could not be written".into()));
         }
-        let aside = folder.join(format!(".ozbox-old-{}", unique()));
+        let aside = work.join(format!("old-{}", unique()));
         if had && fs::rename(&target, &aside).is_err() {
             let _ = fs::remove_dir_all(&stage);
             return Err(("io", "the existing copy could not be moved aside".into()));
@@ -1117,5 +1161,94 @@ mod tests {
             hash_dir_within(&dir, Some(&mut MAX_LOOK_BYTES.clone())).as_deref(),
             Some(p.hash().as_str())
         );
+    }
+
+    #[test]
+    fn a_push_is_staged_outside_the_skills_folders_and_leftovers_are_swept() {
+        let d = tempfile::tempdir().unwrap();
+        let s = svc(d.path());
+        let (p, body) = pack("Do it.");
+        assert_eq!(put(&s, &body).0, 200);
+        let skills = d.path().join("home/.claude/skills");
+        let names: Vec<String> = fs::read_dir(&skills)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["demo"],
+            "nothing but the skill is ever in a folder an agent reads"
+        );
+        assert_eq!(fs::read_dir(s.work_dir()).unwrap().count(), 0);
+        // a push cut short leaves something in the work folder: the next start sweeps it
+        fs::create_dir_all(s.work_dir().join("stage-1/x")).unwrap();
+        let again = svc(d.path());
+        assert!(!again.work_dir().exists());
+        // a dot-folder in an agent's folder is listed, not hidden
+        fs::create_dir_all(skills.join(".hidden-one")).unwrap();
+        let (_, v) = again.route("GET", "", &[], false);
+        assert!(v["others"]["claude-code"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == ".hidden-one"));
+        assert_eq!(
+            hash_dir(&skills.join("demo")).as_deref(),
+            Some(p.hash().as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_is_a_link_or_too_big_reads_as_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let s = svc(d.path());
+        let (_, body) = pack("Do it.");
+        assert_eq!(put(&s, &body).0, 200);
+        let rec = d.path().join("state/skills.json");
+        let real = d.path().join("state/real.json");
+        fs::rename(&rec, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &rec).unwrap();
+        assert!(
+            s.route("GET", "", &[], false).1["skills"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a link is not followed"
+        );
+        fs::remove_file(&rec).unwrap();
+        fs::write(&rec, vec![b' '; 2 * 1024 * 1024]).unwrap();
+        assert!(s.route("GET", "", &[], false).1["skills"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_copy_under_a_name_from_before_the_format_is_shown_and_can_be_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let s = svc(d.path());
+        let dir = d.path().join("home/.claude/skills/Old_Name");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "x").unwrap();
+        let h = hash_dir(&dir).unwrap();
+        fs::create_dir_all(d.path().join("state")).unwrap();
+        fs::write(d.path().join("state/skills.json"), json!({ "entries": [{ "name": "Old_Name", "agent": "claude-code", "hash": h, "version": "1", "pushed_ms": 1 }] }).to_string()).unwrap();
+        let (_, v) = s.route("GET", "", &[], false);
+        assert_eq!(v["skills"][0]["name"], "Old_Name");
+        assert_eq!(v["skills"][0]["places"][0]["state"], "intact");
+        // nothing new goes under such a name, but the old copy goes away on the dashboard's claim
+        assert_eq!(s.route("PUT", "/Old_Name", b"{}", true).0, 400);
+        let (st, _) = s.route(
+            "DELETE",
+            "/Old_Name",
+            json!({ "claims": { "claude-code": h } })
+                .to_string()
+                .as_bytes(),
+            true,
+        );
+        assert_eq!(st, 200);
+        assert!(!dir.exists());
     }
 }

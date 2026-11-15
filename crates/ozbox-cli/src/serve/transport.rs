@@ -43,6 +43,7 @@ pub const DAEMON_SOCKET: &str = "/run/ozboxd/ozboxd.sock";
 pub const DAEMON_SUPERVISOR_SOCKET: &str = "/run/ozbox-supervisor-api/daemon.sock";
 /// Overrides the socket path in a DEBUG build only (the browser tests start a stand-in daemon). A release build ignores it, so
 /// nothing in a box's environment can point the dashboard at another socket.
+#[cfg(debug_assertions)]
 pub const DAEMON_SUPERVISOR_SOCKET_ENV: &str = "OZBOX_DAEMON_SUPERVISOR_SOCKET";
 /// The dashboard's own audit line for a call on its socket to the box daemon (G1 M4, N7): every change, and the terminal
 /// attach, which is a read that puts a keyboard in a session. Only the route's name and method, never a path, id or body.
@@ -273,7 +274,7 @@ impl SshAgent {
     }
 
     /// The agent of a dashboard that runs on the box it shows: the dashboard user's own socket to the daemon (a fixed path;
-    /// a debug build honours `OZBOX_DAEMON_SUPERVISOR_SOCKET` for the browser tests), loopback ports by plain TCP, and
+    /// a debug build honours an environment override for the browser tests), loopback ports by plain TCP, and
     /// nothing that needs an SSH route. The socket must be owned by root, in this process's own group and `0660` before it
     /// is used; there is no other socket to fall back to.
     pub fn local(spawner: Arc<dyn Spawn>, inputs: RouteInputs) -> Result<Self, String> {

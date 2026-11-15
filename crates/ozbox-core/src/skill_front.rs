@@ -280,20 +280,45 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// The lines of a `SKILL.md` body that run a command before the agent reads the page: `` !`…` `` anywhere, or a fenced
-/// block opened with ```` ```! ```` (also with more backticks or with `~`). Over-reports on purpose: a false flag costs one
-/// tick, a miss runs a command.
+/// Does this line hold a way to run a shell command before the agent reads the page? `` !` `` anywhere, or a run of three or
+/// more backticks or tildes (a code fence, however it is introduced: after a list marker or a quote, mid-line, or indented)
+/// followed by optional spaces and a `!`. A true superset of what Claude Code runs: a false flag costs one tick, a miss runs
+/// a command.
+fn runs_a_command(line: &str) -> bool {
+    if line.contains("!`") {
+        return true;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' || c == '~' {
+            let mut j = i;
+            while j < chars.len() && chars[j] == c {
+                j += 1;
+            }
+            if j - i >= 3 {
+                let mut k = j;
+                while k < chars.len() && chars[k] == ' ' {
+                    k += 1;
+                }
+                if chars.get(k) == Some(&'!') {
+                    return true;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// The lines of a `SKILL.md` that run a command. A line ends at `\n`, `\r\n` or a bare `\r` (a skill with a bare `\r` is
+/// refused outright, but this reads as a program would).
 pub fn shell_injection_lines(body: &str) -> Vec<String> {
-    body.lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            t.contains("!`")
-                || ["`", "~"].iter().any(|f| {
-                    t.starts_with(&f.repeat(3))
-                        && t.trim_start_matches(f.chars().next().unwrap_or('`'))
-                            .starts_with('!')
-                })
-        })
+    body.split(['\n', '\r'])
+        .filter(|l| runs_a_command(l))
         .map(clip)
         .collect()
 }

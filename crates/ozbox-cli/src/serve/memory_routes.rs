@@ -260,7 +260,7 @@ impl App {
         match (req.method.as_str(), rest) {
             ("GET", []) => Resp::json(
                 200,
-                &json!({ "skills": host.skills.catalog(), "store": self.memory_store_json() }),
+                &json!({ "skills": host.skills.catalog(), "unreadable": host.skills.unreadable().into_iter().map(|(name, reason)| json!({ "name": name, "reason": reason })).collect::<Vec<_>>(), "store": self.memory_store_json() }),
             ),
             ("GET", ["holdings"]) => self.skill_holdings(),
             ("POST", []) => self.skill_add(req),
