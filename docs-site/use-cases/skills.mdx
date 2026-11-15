@@ -61,7 +61,10 @@ of exactly those files. Change one byte anywhere and the skill needs approving a
 **Claude Code on a box is also told not to run them.** Every box ships `/etc/claude-code/managed-settings.json` with
 `"disableSkillShellExecution": true`, so a `` !`command` `` or ```` ```! ```` block in a skill is replaced by a notice instead of
 run (hooks and `allowed-tools` are not covered by it; that is what the acknowledgements are for). To turn this off for one box,
-delete or edit that root-owned file as root on the box. A box made before this release does not have it until it is rebuilt.
+delete or edit that root-owned file as root on the box. Only boxes made, or upgraded with `ozbox upgrade`, from this release have
+it. The box user's own `~/.claude/settings.json` gets the same key at first boot as a second layer, which an agent running as
+that user can edit. If your organisation uses server-managed settings for Claude Code, set `disableSkillShellExecution` there
+too: Claude Code reads the highest-ranked managed source, and that one ranks above the file on the box.
 
 **What a skill can run.** At the top of the review, **What this skill asks for** lists what Claude Code acts on when the skill is
 used: `hooks` (shell commands registered for the rest of the session), `` !`command` `` or a ```` ```! ```` block in the text

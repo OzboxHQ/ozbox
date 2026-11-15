@@ -66,7 +66,13 @@ skills of their own from the page.
 8. **What the box's own Claude Code will run.** The box image ships `/etc/claude-code/managed-settings.json` with
    `"disableSkillShellExecution": true` (Claude Code's managed setting: each `` !`command` `` and ```` ```! ```` block in a skill is
    replaced by a notice instead of run; it does not touch `hooks` or `allowed-tools`, which the acknowledgement covers). It is on
-   by default for every box; to opt out of it on one box, delete or edit that root-owned file as root on the box. Only the
+   by default for every box made, or upgraded with `ozbox upgrade`, from this release (user data is not re-applied to a box
+   that already exists); to opt out of it on one box, delete or edit that root-owned file as root on the box. A second layer
+   is written to the box user's own `~/.claude/settings.json` at first boot of a disk (only when there is none); an agent
+   running as the box user can edit that file, so only the root-owned one counts as a guard. **Condition:** Claude Code uses the
+   highest-ranked managed source, so server-managed settings from an organisation's claude.ai console rank above the file and,
+   when they exist, the file is not read; the key is not on Claude Code's list of keys honoured across sources. An
+   organisation that uses server-managed settings should set `disableSkillShellExecution` there too. Only the
    root-owned file carries it: a skill cannot switch it off. The scan for what a skill runs treats a bare carriage return as a
    refusal, reads a line end as `\n`, `\r\n` or `\r`, and flags a fence introduced after a list marker, a quote or text, so a
    command cannot hide in a line break or a fence style. Only the top `SKILL.md` counts, since Claude Code also loads a
@@ -84,7 +90,10 @@ skills of their own from the page.
   controls the dashboard's socket can put any files on a box. The box's re-check guards against corruption in transit and a
   stale page, not against that. Signing by a publisher is future work.
 - A push is recorded by the hash that was sent, even when the library has moved on or the approval was withdrawn while it was in
-  flight; the answer then says so. Staging and set-aside folders live in a work folder beside the agents' folders, never inside
+  flight; the answer is then 409 `recorded_unapproved` (the copy is on the box and recorded, approve again before pushing
+  again), and only a copy that could not be recorded is 500 `not_recorded`. If the answer to a push is lost, the page reads
+  the box and records a copy that hashes to what was sent, or says it is not known. "Seen on a box" notes are budgeted per box
+  per day (64, then one summary line). Staging and set-aside folders live in a work folder beside the agents' folders, never inside
   one, and are swept at start. The box's own record is read as a plain file of at most 1 MiB, and what a look reads is opened
   without following a link or waiting on a pipe. A library folder that cannot be read, and a copy a box holds under a name from
   before the format, are listed and can be removed. The list of other folders in an agent's folder is a best-effort look.
