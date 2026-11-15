@@ -106,7 +106,9 @@ export function SkillsPage() {
           <h2 className="text-sm font-semibold">{t('skills.unreadable_title')}</h2>
           <p className="text-xs text-muted-foreground">{t('skills.unreadable_desc')}</p>
           <ul className="space-y-2">
-            {(list.data?.unreadable ?? []).map((u) => (
+            {(list.data?.unreadable ?? []).map((u) => u.name === '' ? (
+              <li key="rest" className="text-xs text-muted-foreground" data-testid="skill-unreadable-rest">{u.reason}</li>
+            ) : (
               <li key={u.name} className="flex flex-wrap items-center gap-2" data-testid="skill-unreadable" data-skill={u.name}>
                 <span className="text-sm font-medium">{u.name}</span>
                 <span className="text-xs text-muted-foreground">{u.reason}</span>
