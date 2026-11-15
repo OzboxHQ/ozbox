@@ -63,7 +63,7 @@ and the Orchestrations page. What it does not have is a way for a real worker to
    compromised `main` could approve on every worker. So cross-box decisions are verified by the worker's own service (§8).
 
 The browser suite makes it concrete. The project's own browser suite runs today on an EC2 fleet (Playwright's blob reporter,
-`--retries=1`, about 2.5 hours for the full run, plan §8). With G5 a declared command can run on `main`. G6 is how `main` runs it
+`--retries=1`, about 2.5 hours for the full run). With G5 a declared command can run on `main`. G6 is how `main` runs it
 on many boxes at once and gets one answer.
 
 ## Decision
@@ -545,7 +545,7 @@ silent for 3 heartbeats (90 seconds) shows as "not answering", never as "working
 `lane_run`, `lane_status`, `lane_report` (§7). `approvals_decide` is limited to the delegation of §8. There is still no tool that
 opens a shell, runs a command or returns a key.
 
-**The automatic MCP connection** (queued item 3, which G6 needs): when the dashboard is installed on a box, box setup writes the
+**The automatic MCP connection** (which G6 needs): when the dashboard is installed on a box, box setup writes the
 engine's MCP settings for the box user and gives each run a scoped token over the box's loopback. On `main` the conductor's
 endpoint is the supervisor's loopback route; the dashboard accepts a loopback `Host` for that route only (ADR 0020 item 1 says
 `Origin` is refused). On a worker the endpoint is the **hub agent's loopback port**: it validates the run token locally and turns
@@ -609,7 +609,7 @@ blocks the merge and returns the failing specs to the worker that owns the featu
 EC2 fleet already uses the blob reporter. The phase 5 agent checks the flags on the installed version before the declaration is
 written.
 
-**This replaces the EC2 browser fleet only on evidence** (plan §8). G6 proves that a lane works. The retirement gate is not
+**This replaces the EC2 browser fleet only on evidence**. G6 proves that a lane works. The retirement gate is not
 changed by this ADR.
 
 ## 8. Approvals with main as the boss
@@ -1124,7 +1124,7 @@ decision is **a passkey asserted on `main`'s dashboard plus presence at the lapt
 
 **The owner chose this over the reviewers' advice, and that is said plainly.** The security review and the second opinion recommended
 ADR 0029's own approval at the laptop alone: a laptop key with presence, or an issuer-verified passkey, with no passkey on `main`.
-The owner (2026-11-13, plan §72.14) wants the person to approve a task on the dashboard where they already work, and to be present at
+The owner (2026-11-13) wants the person to approve a task on the dashboard where they already work, and to be present at
 the laptop when a Production act runs. The reviewers' option is stronger against one threat, a compromised `main` (see the residual
 risk). The owner accepted that difference.
 
