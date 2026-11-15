@@ -118,11 +118,12 @@ impl App {
         let base = self.tg.api_base.clone();
         let need_me = self.tg.bot.is_none();
         let silent_for = now.saturating_sub(self.tg.store.data.last_update_ms);
-        let offset = if self.tg.store.data.last_update_ms > 0 && silent_for > SILENCE_RESETS_OFFSET_MS {
-            0
-        } else {
-            self.tg.store.data.offset
-        };
+        let offset =
+            if self.tg.store.data.last_update_ms > 0 && silent_for > SILENCE_RESETS_OFFSET_MS {
+                0
+            } else {
+                self.tg.store.data.offset
+            };
         let limit = if self.tg.parse_failures > 0 {
             1
         } else {
