@@ -731,9 +731,16 @@ fn the_wipe_stops_journald_writing_to_var_before_it_deletes_the_journal() {
     let w = packer_file("scripts/image-wipe.sh");
     let flush = w.find("journalctl --flush").expect("flush");
     let rotate = w.find("journalctl --rotate").expect("rotate");
-    let relinquish = w.find("journalctl --relinquish-var").expect("relinquish-var");
-    let delete = w.find("find \"$r/var/log/journal\"").expect("journal delete");
-    assert!(flush < rotate && rotate < relinquish, "flush, rotate, then relinquish /var");
+    let relinquish = w
+        .find("journalctl --relinquish-var")
+        .expect("relinquish-var");
+    let delete = w
+        .find("find \"$r/var/log/journal\"")
+        .expect("journal delete");
+    assert!(
+        flush < rotate && rotate < relinquish,
+        "flush, rotate, then relinquish /var"
+    );
     assert!(
         relinquish < delete,
         "journald must stop writing to /var BEFORE the files are removed, or the build boot lands in the image"
@@ -750,9 +757,14 @@ fn the_image_workflow_marks_a_pre_release_version_as_a_github_pre_release() {
 #[test]
 fn the_packer_fallback_policy_has_a_statement_and_ci_validates_both_profile_paths() {
     let hcl = packer_file("ozbox-image.pkr.hcl");
-    let at = hcl.find("temporary_iam_instance_profile_policy_document").unwrap();
+    let at = hcl
+        .find("temporary_iam_instance_profile_policy_document")
+        .unwrap();
     let block = &hcl[at..at + 700];
-    assert!(block.contains("Statement {"), "the policy document needs a Statement block");
+    assert!(
+        block.contains("Statement {"),
+        "the policy document needs a Statement block"
+    );
     let ci = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
     assert!(ci.contains("-var aws_instance_profile= "));
     assert!(ci.contains("-var aws_instance_profile=ozbox-build"));
