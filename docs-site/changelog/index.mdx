@@ -8,6 +8,16 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS setup">
+  ## `ozbox init` no longer refuses a correctly set-up operator role
+
+  The permission check at the start of `ozbox init --provider aws` asked for things the least-privilege operator policy never allows: disks and private networks with no tag, and a listing of every storage bucket. A role set up exactly as the guide says was therefore refused, and only a full administrator could run setup. The check now asks for what Oz Box really does.
+
+  - **It checks creating tagged resources**, the way Oz Box creates them, and looks at the setup state bucket by name instead of listing every bucket in the account. A bucket that is not there yet counts as allowed.
+  - **A refusal says who grants it.** Each denied line names the operator-policy statement to apply, or says the permission belongs to the setup identity. The setup state bucket is the setup identity's, so it is reported but never stops setup.
+  - **Not yet run against a real AWS account.** The check is tested against the policy file; a run with a real least-privilege role is still to come.
+</Update>
+
 <Update label="November 15, 2026" tags={["CLI", "Dashboard", "Security", "Platform"]} description="0.2.0-beta.0: the first public Beta">
   ## Oz Box 0.2.0-beta.0: the first public Beta
 

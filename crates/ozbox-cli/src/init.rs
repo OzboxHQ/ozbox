@@ -237,6 +237,10 @@ pub fn classify_probe(dry: bool, out: &Output) -> (ProbeState, Option<String>) {
     if err.contains("DryRunOperation") {
         return (ProbeState::Allowed, None);
     }
+    // a named-bucket probe: the bucket not being there is not a refusal (a 403 or AccessDenied still is one, never a 404)
+    if err.contains("NoSuchBucket") || err.contains("(404)") {
+        return (ProbeState::Allowed, None);
+    }
     if err.contains("UnauthorizedOperation")
         || err.contains("AccessDenied")
         || err.contains("not authorized")
@@ -265,77 +269,171 @@ pub fn classify_probe(dry: bool, out: &Output) -> (ProbeState, Option<String>) {
     )
 }
 
-fn probe_defs(region: &str) -> Vec<(&'static str, &'static str, bool, Vec<String>)> {
+/// Who grants a probe's permission. The operator policy (`infra/aws/operator-policy.json`) is the daily role; the state
+/// bucket belongs to the setup identity, which no operator statement reaches (README, "AWS: the network and the operator's
+/// permissions"). Only an operator probe can stop setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grant {
+    /// `infra/aws/operator-policy.json`, by the named statement.
+    Operator(&'static str),
+    /// The setup identity (or an administrator), not the operator policy.
+    SetupIdentity,
+}
+
+/// One permission probe: the call it makes, and the IAM action and tag it stands for, so a test can hold it to the policy.
+pub(crate) struct ProbeDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub dry: bool,
+    pub args: Vec<String>,
+    /// The IAM action the call needs.
+    pub action: &'static str,
+    /// The EC2 resource type the call tags on creation (`ozbox-managed=true`, as the OpenTofu modules do), if it creates one.
+    pub tag_resource: Option<&'static str>,
+    pub grant: Grant,
+}
+
+/// The tag every Oz Box resource carries, and the only shape of create the operator policy allows.
+pub(crate) const MANAGED_TAG: &str = "ozbox-managed";
+
+fn tag_spec(resource: &str) -> String {
+    format!("ResourceType={resource},Tags=[{{Key={MANAGED_TAG},Value=true}}]")
+}
+
+pub(crate) fn probe_defs(region: &str, account: Option<&str>) -> Vec<ProbeDef> {
     let az = format!("{region}a");
     let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-    vec![
-        (
-            "ec2_run_instances",
-            "init.probe_run_instances",
-            true,
-            v(&[
-                "ec2",
-                "run-instances",
-                "--dry-run",
-                "--image-id",
-                "ami-0123456789abcdef0",
-                "--instance-type",
-                "t3.nano",
-                "--count",
-                "1",
+    let mut defs = vec![
+        ProbeDef {
+            id: "ec2_run_instances",
+            label: "init.probe_run_instances",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "run-instances",
+                    "--dry-run",
+                    "--image-id",
+                    "ami-0123456789abcdef0",
+                    "--instance-type",
+                    "t3.nano",
+                    "--count",
+                    "1",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("instance"));
+                a
+            },
+            action: "ec2:RunInstances",
+            tag_resource: Some("instance"),
+            grant: Grant::Operator("RunTaggedInstances"),
+        },
+        ProbeDef {
+            id: "ec2_create_volume",
+            label: "init.probe_create_volume",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-volume",
+                    "--dry-run",
+                    "--availability-zone",
+                    &az,
+                    "--size",
+                    "1",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("volume"));
+                a
+            },
+            action: "ec2:CreateVolume",
+            tag_resource: Some("volume"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ec2_create_snapshot",
+            label: "init.probe_create_snapshot",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-snapshot",
+                    "--dry-run",
+                    "--volume-id",
+                    "vol-0123456789abcdef0",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("snapshot"));
+                a
+            },
+            action: "ec2:CreateSnapshot",
+            tag_resource: Some("snapshot"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ec2_create_vpc",
+            label: "init.probe_create_vpc",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-vpc",
+                    "--dry-run",
+                    "--cidr-block",
+                    "10.255.0.0/16",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("vpc"));
+                a
+            },
+            action: "ec2:CreateVpc",
+            tag_resource: Some("vpc"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ssm_describe",
+            label: "init.probe_ssm",
+            dry: false,
+            args: v(&["ssm", "describe-instance-information", "--max-results", "5"]),
+            action: "ssm:DescribeInstanceInformation",
+            tag_resource: None,
+            grant: Grant::Operator("ReadOnly"),
+        },
+    ];
+    // The state bucket init keeps its plans in, by name: never a listing of every bucket in the account. "Not found" means
+    // the permission is there and the bucket is still to be made. It is the setup identity's bucket, so it never stops setup.
+    if let Some(account) = account {
+        defs.push(ProbeDef {
+            id: "s3_state_bucket",
+            label: "init.probe_s3",
+            dry: false,
+            args: v(&[
+                "s3api",
+                "head-bucket",
+                "--bucket",
+                &Init::bucket_name(account, region),
             ]),
+            action: "s3:ListBucket",
+            tag_resource: None,
+            grant: Grant::SetupIdentity,
+        });
+    }
+    defs
+}
+
+/// Which grant to name when a probe is refused, so the person knows who to ask and for what.
+fn grant_hint(def: &ProbeDef) -> String {
+    match def.grant {
+        Grant::Operator(sid) => t(
+            if def.tag_resource.is_some() {
+                "init.grant_operator_tagged"
+            } else {
+                "init.grant_operator"
+            },
+            &[("action", def.action), ("sid", sid), ("tag", MANAGED_TAG)],
         ),
-        (
-            "ec2_create_volume",
-            "init.probe_create_volume",
-            true,
-            v(&[
-                "ec2",
-                "create-volume",
-                "--dry-run",
-                "--availability-zone",
-                &az,
-                "--size",
-                "1",
-            ]),
-        ),
-        (
-            "ec2_create_snapshot",
-            "init.probe_create_snapshot",
-            true,
-            v(&[
-                "ec2",
-                "create-snapshot",
-                "--dry-run",
-                "--volume-id",
-                "vol-0123456789abcdef0",
-            ]),
-        ),
-        (
-            "ec2_create_vpc",
-            "init.probe_create_vpc",
-            true,
-            v(&[
-                "ec2",
-                "create-vpc",
-                "--dry-run",
-                "--cidr-block",
-                "10.255.0.0/16",
-            ]),
-        ),
-        (
-            "ssm_describe",
-            "init.probe_ssm",
-            false,
-            v(&["ssm", "describe-instance-information", "--max-results", "5"]),
-        ),
-        (
-            "s3_list",
-            "init.probe_s3",
-            false,
-            v(&["s3api", "list-buckets"]),
-        ),
-    ]
+        Grant::SetupIdentity => t("init.grant_setup_identity", &[("action", def.action)]),
+    }
 }
 
 // ---------- regions ----------
@@ -1046,18 +1144,36 @@ impl Init<'_> {
         target.region = Some(region.clone());
         let target = &target;
         let mut probes = Vec::new();
-        for (id, label, dry, args) in probe_defs(&region) {
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        // The account names the state bucket. No answer, no bucket probe.
+        let who = self.exec(&self.aws(target, &["sts", "get-caller-identity"]))?;
+        if who.stderr.contains("ExpiredToken")
+            || who.stderr.contains("Unable to locate credentials")
+        {
+            return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
+        }
+        let account = parse_identity(&who.stdout)
+            .ok()
+            .map(|i| i.account)
+            .filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()));
+        for def in probe_defs(&region, account.as_deref()) {
+            let argv: Vec<&str> = def.args.iter().map(String::as_str).collect();
             let out = self.exec(&self.aws(target, &argv))?;
             if out.stderr.contains("ExpiredToken")
                 || out.stderr.contains("Unable to locate credentials")
             {
                 return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
             }
-            let (state, detail) = classify_probe(dry, &out);
+            let (mut state, mut detail) = classify_probe(def.dry, &out);
+            if state == ProbeState::Denied {
+                detail = Some(grant_hint(&def));
+                // a refusal on something the operator policy does not govern is reported, never a stop
+                if def.grant == Grant::SetupIdentity {
+                    state = ProbeState::Unknown;
+                }
+            }
             probes.push(Probe {
-                id: id.into(),
-                label: t(label, &[]),
+                id: def.id.into(),
+                label: t(def.label, &[]),
                 state,
                 detail,
             });
@@ -2768,9 +2884,13 @@ mod tests {
         assert_eq!(init.sign_in(&target()).unwrap_err().code, "tool_missing");
     }
 
+    const ACCOUNT_REPLY: &str =
+        r#"{"Account":"123456789012","Arn":"arn:aws:iam::123456789012:role/ozbox-operator"}"#;
+
     #[test]
-    fn probes_classify_and_only_ever_use_dry_runs_or_listings() {
+    fn probes_classify_and_only_ever_use_dry_runs_or_reads() {
         let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
         e.runner.reply(out(
             254,
             "",
@@ -2798,15 +2918,190 @@ mod tests {
             ]
         );
         assert!(!r.ok);
+        // a refusal names the policy statement that grants it
+        let denied = r
+            .probes
+            .iter()
+            .find(|p| p.state == ProbeState::Denied)
+            .unwrap();
+        let hint = denied.detail.as_deref().unwrap();
+        assert!(
+            hint.contains("CreateTaggedResources") && hint.contains("ozbox-managed=true"),
+            "{hint}"
+        );
         for c in e.runner.calls() {
             let a = &c.args;
             let verb = a.get(1).map(String::as_str).unwrap_or("");
             let dry = a.iter().any(|x| x == "--dry-run");
             assert!(
-                dry || verb.starts_with("list") || verb.starts_with("describe"),
+                dry || verb.starts_with("describe")
+                    || verb == "head-bucket"
+                    || verb == "get-caller-identity",
                 "a probe must not mutate: {a:?}"
             );
+            assert_ne!(verb, "list-buckets", "never list every bucket: {a:?}");
         }
+    }
+
+    #[test]
+    fn the_state_bucket_probe_never_stops_setup_and_absent_is_not_denied() {
+        // absent: allowed
+        let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
+        for _ in 0..5 {
+            e.runner.reply(out(0, "{}", ""));
+        }
+        e.runner.reply(out(
+            254,
+            "",
+            "An error occurred (404) when calling the HeadBucket operation: Not Found",
+        ));
+        let r = e.init().permissions(&target()).unwrap();
+        assert!(r.ok);
+        assert_eq!(r.probes.last().unwrap().state, ProbeState::Allowed);
+        let last = e.runner.calls().last().unwrap().args.clone();
+        assert!(
+            last.contains(&"ozbox-state-123456789012-us-east-1".to_string()),
+            "{last:?}"
+        );
+        // refused: reported (as unknown, with who grants it), never a stop
+        let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
+        for _ in 0..5 {
+            e.runner.reply(out(0, "{}", ""));
+        }
+        e.runner.reply(out(
+            254,
+            "",
+            "An error occurred (AccessDenied) when calling the HeadBucket operation",
+        ));
+        let r = e.init().permissions(&target()).unwrap();
+        assert!(r.ok);
+        let p = r.probes.last().unwrap();
+        assert_eq!(p.state, ProbeState::Unknown);
+        assert!(p.detail.as_deref().unwrap().contains("setup identity"));
+    }
+
+    /// The probes are held to the operator policy: each one asks for what `infra/aws/operator-policy.json` allows, in the
+    /// shape it allows it. Before this, the create probes carried no tag and the bucket probe listed every bucket, so a
+    /// correctly set-up operator role was refused by a check that tested permissions Oz Box never uses.
+    #[test]
+    fn every_probe_is_a_call_the_operator_policy_allows() {
+        let policy: serde_json::Value =
+            serde_json::from_str(include_str!("../../../infra/aws/operator-policy.json")).unwrap();
+        let stmts = policy["Statement"].as_array().unwrap();
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(x) => vec![x.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+                _ => vec![],
+            }
+        };
+        let action_matches = |pat: &str, action: &str| {
+            let (p, a) = (pat.to_ascii_lowercase(), action.to_ascii_lowercase());
+            match p.split_once('*') {
+                None => p == a,
+                Some((h, t)) => a.starts_with(h) && a.ends_with(t) && a.len() >= h.len() + t.len(),
+            }
+        };
+        // the tag a probe sends for its resource type, read back out of the argv like the CLI would
+        let sent_tag = |args: &[String], resource: &str| -> Option<(String, String)> {
+            let i = args.iter().position(|a| a == "--tag-specifications")?;
+            let spec = args.get(i + 1)?;
+            let rest = spec.strip_prefix(&format!("ResourceType={resource},Tags=[{{Key="))?;
+            let (k, rest) = rest.split_once(",Value=")?;
+            let v = rest.strip_suffix("}]")?;
+            Some((k.to_string(), v.to_string()))
+        };
+        let region = "us-east-1";
+        let defs = probe_defs(region, Some("123456789012"));
+        assert!(defs.len() >= 6);
+        for d in &defs {
+            assert!(
+                !d.args.iter().any(|a| a == "list-buckets"),
+                "{}: the operator may not list every bucket",
+                d.id
+            );
+            let allowing: Vec<&serde_json::Value> = stmts
+                .iter()
+                .filter(|s| {
+                    s["Effect"] == "Allow"
+                        && list(&s["Action"])
+                            .iter()
+                            .any(|p| action_matches(p, d.action))
+                })
+                .collect();
+            match d.grant {
+                Grant::Operator(sid) => {
+                    let named = allowing
+                        .iter()
+                        .find(|s| s["Sid"] == sid)
+                        .unwrap_or_else(|| {
+                            panic!("{}: statement {sid} does not allow {}", d.id, d.action)
+                        });
+                    // the hint names a statement that really grants it, with the tag the statement demands
+                    let cond = &named["Condition"]["StringEquals"];
+                    if let Some(want) = cond.get("aws:RequestTag/ozbox-managed") {
+                        let res = d.tag_resource.unwrap_or_else(|| {
+                            panic!("{}: the statement needs a request tag", d.id)
+                        });
+                        let got = sent_tag(&d.args, res)
+                            .unwrap_or_else(|| panic!("{}: sends no tag for {res}", d.id));
+                        assert_eq!(got.0, MANAGED_TAG, "{}", d.id);
+                        assert_eq!(&serde_json::Value::String(got.1), want, "{}", d.id);
+                        let frag = format!(":{res}/");
+                        let frag2 = format!("::{res}/");
+                        assert!(
+                            list(&named["Resource"])
+                                .iter()
+                                .any(|r| r.contains(&frag) || r.contains(&frag2)),
+                            "{}: {sid} does not cover a {res}",
+                            d.id
+                        );
+                    }
+                    // and no tag a statement forbids is invented: an unconditioned allow needs none
+                    let unconditioned = allowing.iter().any(|s| s.get("Condition").is_none());
+                    if !unconditioned && d.tag_resource.is_none() {
+                        assert!(
+                            cond.get("aws:RequestTag/ozbox-managed").is_none(),
+                            "{}: needs a tag the probe cannot send",
+                            d.id
+                        );
+                    }
+                }
+                Grant::SetupIdentity => {
+                    // never presented as an operator permission: the operator policy must not reach that bucket
+                    let bucket = Init::bucket_name("123456789012", region);
+                    let arn = format!("arn:aws:s3:::{bucket}");
+                    for s in &allowing {
+                        for r in list(&s["Resource"]) {
+                            assert!(
+                                !(r.ends_with('*') && arn.starts_with(r.trim_end_matches('*')))
+                                    && r != arn,
+                                "{} is the setup identity's, but {r} reaches it",
+                                d.id
+                            );
+                        }
+                    }
+                    assert!(
+                        d.args.iter().any(|a| a == &bucket),
+                        "{}: names the bucket",
+                        d.id
+                    );
+                }
+            }
+        }
+        // negative control: the probes as they were (no tag) are exactly what this test refuses
+        let untagged: Vec<String> = defs[1]
+            .args
+            .iter()
+            .take_while(|a| *a != "--tag-specifications")
+            .cloned()
+            .collect();
+        assert!(sent_tag(&untagged, "volume").is_none());
     }
 
     #[test]
