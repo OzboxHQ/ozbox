@@ -235,7 +235,9 @@ export function SkillsPage() {
       ) : null}
       {installing ? (
         <InstallSheet
-          skill={installing}
+          // the sheet reads the skill as the library has it now: one opened a moment after an approval, before the list was read
+          // again, would otherwise keep the copy that was not yet approved and refuse a push the box would accept
+          skill={skills.find((x) => x.name === installing.name) ?? installing}
           holdings={boxes}
           onClose={() => setInstalling(null)}
           onDone={(m) => {

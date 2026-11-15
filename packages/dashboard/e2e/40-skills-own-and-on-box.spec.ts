@@ -75,6 +75,11 @@ for (const width of WIDTHS) {
       const hash = ((await api(request, 'GET', '/v1/skills')).body['skills'] as { name: string; hash: string }[]).find((s) => s.name === name)?.hash ?? '';
       const refused = await api(request, 'PUT', `/v1/boxes/alpha/skills/${name}`, { hash });
       expect([refused.status, refused.body['code']]).toEqual([409, 'not_approved']);
+      // the library is read again after an approval; hold that read back so Install is opened BEFORE the page knows the skill is
+      // approved (what a slow machine does by itself). The sheet must still come to see it approved.
+      const slowList = (route: import('@playwright/test').Route) =>
+        route.request().method() === 'GET' ? new Promise<void>((done) => setTimeout(() => void route.continue().then(done), 2000)) : route.continue();
+      await page.route((u) => u.pathname === '/v1/skills', slowList);
       await review.getByRole('button', { name: 'Approve these files' }).click();
       await expect(review).toHaveCount(0);
 
@@ -83,6 +88,7 @@ for (const width of WIDTHS) {
       await sheet.getByLabel('Where', { exact: true }).click();
       await page.getByRole('option', { name: "On a box's disk" }).click();
       await expect(sheet.getByTestId('skill-disk-not-approved')).toHaveCount(0);
+      await page.unroute((u) => u.pathname === '/v1/skills', slowList);
       await sheet.getByLabel('Box', { exact: true }).click();
       // only a running box is offered: delta is paused
       await expect(page.getByRole('option', { name: 'delta' })).toHaveCount(0);
