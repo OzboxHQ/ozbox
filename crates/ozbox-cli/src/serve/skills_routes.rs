@@ -598,7 +598,7 @@ fn agents_holding(
         .filter(|p| p["disk_hash"] == hash)
         .filter_map(|p| p["agent"].as_str().map(str::to_string))
         // only folders this push asked for: a copy already there from an earlier push is not this push's to record
-        .filter(|a| targeted.map_or(true, |t| t.is_empty() || t.contains(a)))
+        .filter(|a| targeted.is_none_or(|t| t.is_empty() || t.contains(a)))
         .collect()
 }
 
@@ -639,14 +639,14 @@ mod tests {
         assert!(!AgentError::Unsupported("x".into()).may_have_been_sent());
         // every failure `request_with_cap` can report AFTER the request was written must be listed, or a lost answer is
         // reported as "nothing landed", the unsafe direction
-        let start = transport
-            .find("fn request_with_cap")
-            .expect("the request function is there");
+        let Some(start) = transport.find("fn request_with_cap") else {
+            panic!("the request function is there")
+        };
         let body = &transport[start..];
         let body = &body[..body.find("fn encode_component").unwrap_or(body.len())];
-        let written = body
-            .find("did not accept the request")
-            .expect("the write failure is there");
+        let Some(written) = body.find("did not accept the request") else {
+            panic!("the write failure is there")
+        };
         let after = &body[written..];
         let mut found = 0;
         for piece in after.split("unreachable(").skip(1) {
