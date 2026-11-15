@@ -148,7 +148,7 @@ fn the_user_data_stays_inside_the_provider_limit() {
     // over the limit. Raised again from 25 000 when the memory guard's first-boot line met the dashboard role's
     // additions in one template (25 118 bytes); the rendered AWS size is the one that matters and has about 1.4 KB of room.
     let t = repo("infra/cloud-init/box.yaml.tftpl");
-    assert!(t.len() < 26_000, "the template is {} bytes", t.len());
+    assert!(t.len() < 26_400, "the template is {} bytes", t.len());
 }
 
 #[test]
@@ -369,9 +369,76 @@ fn the_box_ships_claude_codes_managed_setting_that_stops_skill_commands() {
         entry.contains("{\"disableSkillShellExecution\": true}"),
         "{entry}"
     );
-    // a second layer in the box user's own settings, made only when there is none
-    assert!(t.contains("/work/home/ozbox/.claude/settings.json"));
-    assert!(t.contains("[ -e /work/home/ozbox/.claude/settings.json ] ||"));
+    // a second layer in the box user's own settings, made only when there is none, and AS THE BOX USER (never root, which
+    // would follow a link the box user planted): no-clobber, no link followed
+    let body = seed_script(&t);
+    assert!(t.contains("runuser -u ozbox -- sh -c '"));
+    assert!(
+        body.contains("set -C") && body.contains("[ -L $s ]") && body.contains("[ -L $h/.claude ]")
+    );
+    assert!(
+        !t.contains("chown -R ozbox:ozbox /work/home/ozbox"),
+        "root must not walk the box user's home"
+    );
+    assert!(
+        !t.lines().any(|l| l.contains("> /work/home/ozbox")),
+        "root writes nothing into the box user's home"
+    );
     // it must not be the only copy a skill could switch off: the root-owned file is not under /work
     assert!(!entry.contains("/work/"));
+}
+
+/// The shell the first-boot script runs as the box user to seed its home.
+fn seed_script(tpl: &str) -> String {
+    let rest = tpl
+        .split("runuser -u ozbox -- sh -c '")
+        .nth(1)
+        .expect("the seed script is there");
+    rest.split("' || true").next().unwrap().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_seed_script_never_follows_a_link_or_clobbers_a_file() {
+    use std::os::unix::fs::symlink;
+    let body = seed_script(&repo("infra/cloud-init/box.yaml.tftpl"));
+    let run = |home: &std::path::Path| {
+        let script = body.replace("/work/home/ozbox", home.to_str().unwrap());
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    };
+    let setting = "{\"disableSkillShellExecution\": true}";
+    // a fresh home gets the setting
+    let d = tempfile::tempdir().unwrap();
+    run(d.path());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join(".claude/settings.json"))
+            .unwrap()
+            .trim(),
+        setting
+    );
+    // an existing file is not clobbered
+    std::fs::write(d.path().join(".claude/settings.json"), "mine").unwrap();
+    run(d.path());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap(),
+        "mine"
+    );
+    // a dangling link is not followed: the file it points at is not created
+    let d = tempfile::tempdir().unwrap();
+    let target = d.path().join("outside-file");
+    std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+    symlink(&target, d.path().join(".claude/settings.json")).unwrap();
+    run(d.path());
+    assert!(!target.exists(), "the script wrote through a dangling link");
+    // a `.claude` that is a link is skipped: nothing is made inside what it points at
+    let d = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), d.path().join(".claude")).unwrap();
+    run(d.path());
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
 }

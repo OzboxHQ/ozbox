@@ -141,6 +141,14 @@ jobs:
           set -euo pipefail
           test -f packages/dashboard/dist/index.html
           cargo build --release --locked --target "$TARGET" -p ozbox-cli
+      - name: The program carries none of the debug-only test hooks
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # the dashboard's switch to a stand-in socket exists for the browser tests of a DEBUG build only
+          ! grep -aq 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+            || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: The program serves the real dashboard, not the placeholder page
         env:
           TARGET: ${{ matrix.target }}

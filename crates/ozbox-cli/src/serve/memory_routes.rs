@@ -1228,4 +1228,26 @@ mod tests {
             "a real event was pushed out"
         );
     }
+
+    #[test]
+    fn many_boxes_together_cannot_flush_the_activity_record_either() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app(d.path());
+        a.log_activity("test marker", "-", None, "first");
+        for b in 0..10 {
+            for _ in 0..64 {
+                a.note_unrecorded(&format!("box{b}"));
+            }
+        }
+        let seen = a
+            .activity
+            .iter()
+            .filter(|e| e.action == "skill seen on box")
+            .count();
+        assert_eq!(
+            seen, 256,
+            "ten boxes at 64 each stop at the cap across all of them"
+        );
+        assert!(a.activity.iter().any(|e| e.action == "test marker"));
+    }
 }

@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use super::{unix_ms, App, Req, Resp};
 
 const NOTES_PER_BOX_PER_DAY: usize = 64;
+/// Across every box: a handful of hostile boxes together must not flush the activity ring either.
+const NOTES_ALL_BOXES_PER_DAY: usize = 256;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// What a push that landed on the box answers when recording it did not go cleanly: the status, the code, the audit words and
@@ -355,7 +357,7 @@ impl App {
 
     /// One "seen on box" line, within the budget: at most [`NOTES_PER_BOX_PER_DAY`] per box per day, then a single summary
     /// line (with the count) when the day ends.
-    fn note_unrecorded(&mut self, box_name: &str) {
+    pub(super) fn note_unrecorded(&mut self, box_name: &str) {
         let now = unix_ms();
         let e = self
             .unrecorded_budget
@@ -368,8 +370,13 @@ impl App {
             }
             *e = (now, 0, 0);
         }
-        let write = if e.1 < NOTES_PER_BOX_PER_DAY {
+        let g = &mut self.unrecorded_global;
+        if now.saturating_sub(g.0) >= DAY_MS {
+            *g = (now, 0);
+        }
+        let write = if e.1 < NOTES_PER_BOX_PER_DAY && g.1 < NOTES_ALL_BOXES_PER_DAY {
             e.1 += 1;
+            g.1 += 1;
             true
         } else {
             e.2 += 1;
@@ -438,8 +445,8 @@ impl App {
             body.as_bytes(),
         ) {
             Ok(x) => x,
-            // refused before anything was sent (a dashboard that cannot write): nothing could have landed
-            Err(e @ super::agent::AgentError::Unsupported(_)) => return Self::agent_error(&e),
+            // nothing was sent (a dashboard that cannot write, a socket that refused): nothing could have landed
+            Err(e) if !e.may_have_been_sent() => return Self::agent_error(&e),
             Err(_) => {
                 // The request may have landed before the answer was lost: look at the box. What it holds that hashes to
                 // exactly what was sent is recorded; anything else is said plainly, never as a failure that changed nothing.
@@ -447,7 +454,7 @@ impl App {
                     .agent
                     .skills(&rec, "GET", "", &[])
                     .ok()
-                    .map(|(_, v)| agents_holding(&v, skill, &b.hash))
+                    .map(|(_, v)| agents_holding(&v, skill, &b.hash, b.agents.as_deref()))
                     .unwrap_or_default();
                 if landed.is_empty() {
                     return Resp::error(
@@ -576,7 +583,12 @@ impl App {
 }
 
 /// The agent folders in a box's status where `skill` is held and its files on the box's disk hash to exactly `hash`.
-fn agents_holding(status: &Value, skill: &str, hash: &str) -> Vec<String> {
+fn agents_holding(
+    status: &Value,
+    skill: &str,
+    hash: &str,
+    targeted: Option<&[String]>,
+) -> Vec<String> {
     status["skills"]
         .as_array()
         .into_iter()
@@ -585,6 +597,8 @@ fn agents_holding(status: &Value, skill: &str, hash: &str) -> Vec<String> {
         .flat_map(|s| s["places"].as_array().cloned().unwrap_or_default())
         .filter(|p| p["disk_hash"] == hash)
         .filter_map(|p| p["agent"].as_str().map(str::to_string))
+        // only folders this push asked for: a copy already there from an earlier push is not this push's to record
+        .filter(|a| targeted.map_or(true, |t| t.is_empty() || t.contains(a)))
         .collect()
 }
 
@@ -605,6 +619,27 @@ mod tests {
     }
 
     #[test]
+    fn only_failures_after_the_request_was_written_count_as_possibly_landed() {
+        use super::super::agent::{AgentError, SENT_THEN_FAILED};
+        let transport = include_str!("transport.rs");
+        for m in SENT_THEN_FAILED {
+            assert!(
+                transport.contains(m),
+                "{m} is not a message the transport sends"
+            );
+            assert!(AgentError::Unreachable((*m).into()).may_have_been_sent());
+        }
+        for never in [
+            "the box's agent socket did not accept a connection",
+            "the box's agent did not accept the request",
+        ] {
+            assert!(transport.contains(never));
+            assert!(!AgentError::Unreachable(never.into()).may_have_been_sent());
+        }
+        assert!(!AgentError::Unsupported("x".into()).may_have_been_sent());
+    }
+
+    #[test]
     fn only_a_copy_that_hashes_to_what_was_sent_counts_as_having_landed() {
         let status = json!({ "skills": [
             { "name": "mine", "places": [
@@ -612,7 +647,13 @@ mod tests {
                 { "agent": "agents", "disk_hash": "bb" },
                 { "agent": "other", "disk_hash": null } ] },
             { "name": "yours", "places": [ { "agent": "claude-code", "disk_hash": "aa" } ] } ] });
-        assert_eq!(agents_holding(&status, "mine", "aa"), ["claude-code"]);
-        assert!(agents_holding(&status, "mine", "cc").is_empty());
+        assert_eq!(agents_holding(&status, "mine", "aa", None), ["claude-code"]);
+        assert!(agents_holding(&status, "mine", "cc", None).is_empty());
+        let both = json!({ "skills": [{ "name": "mine", "places": [{ "agent": "claude-code", "disk_hash": "aa" }, { "agent": "agents", "disk_hash": "aa" }] }] });
+        assert_eq!(
+            agents_holding(&both, "mine", "aa", Some(&["agents".to_string()])),
+            ["agents"]
+        );
+        assert_eq!(agents_holding(&both, "mine", "aa", None).len(), 2);
     }
 }

@@ -321,6 +321,8 @@ pub struct App {
     unrecorded_skills: std::collections::BTreeSet<String>,
     /// Per box: when the current day's window began, how many sightings were noted in it, and how many were held back.
     unrecorded_budget: HashMap<String, (u64, usize, usize)>,
+    /// The same window across every box: when it began and how many sightings it has noted.
+    unrecorded_global: (u64, usize),
     /// Changes to boxes that run in the background (see `apply_jobs`).
     apply_jobs: apply_jobs::Jobs,
     version: Arc<AtomicU64>,
@@ -473,6 +475,7 @@ impl App {
             current_actor: Actor::Automation,
             unrecorded_skills: std::collections::BTreeSet::new(),
             unrecorded_budget: HashMap::new(),
+            unrecorded_global: (0, 0),
             apply_jobs: apply_jobs::Jobs::default(),
             version: Arc::new(AtomicU64::new(0)),
             streams: Arc::new(AtomicUsize::new(0)),

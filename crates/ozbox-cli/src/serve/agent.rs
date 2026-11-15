@@ -193,6 +193,22 @@ pub enum AgentError {
     Unsupported(String),
 }
 
+/// What a request that was already written to the box's socket says when it then fails. Anything else (the socket missing, a
+/// refused connection, a write that failed) means nothing was sent.
+pub const SENT_THEN_FAILED: &[&str] = &[
+    "the box's agent did not answer in time",
+    "the box's agent answered with too much data",
+    "the box's agent answered with something that is not HTTP",
+    "the box's agent answered with data that is not understood",
+];
+
+impl AgentError {
+    /// The request may have reached the box before this failure (it was sent and the answer was lost or unreadable).
+    pub fn may_have_been_sent(&self) -> bool {
+        matches!(self, AgentError::Unreachable(m) if SENT_THEN_FAILED.contains(&m.as_str()))
+    }
+}
+
 impl std::fmt::Display for AgentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (Self::Unreachable(m) | Self::Unsupported(m)) = self;
