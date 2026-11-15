@@ -32,6 +32,7 @@ import { TriggersPage } from './pages/triggers-page';
 import { BoxesPage } from './pages/boxes-page';
 import { FleetPage } from './pages/fleet-page';
 import { AccountPage } from './pages/account-page';
+import { GoPage } from './pages/go-page';
 import { SettingsPage } from './pages/settings-page';
 import { TerminalPage } from './pages/terminal-page';
 import { UsagePage } from './pages/usage-page';
@@ -135,6 +136,7 @@ export function App({ client, onSignOut }: { client: ApiClient | null; onSignOut
             {route.page === 'tools' && <ToolsPage key={route.name} name={route.name} />}
             {route.page === 'terminal' && <TerminalPage key={route.name} name={route.name} />}
             {route.page === 'account' && <AccountPage />}
+            {route.page === 'go' && <GoPage />}
             {route.page === 'tasks' && <TasksPage />}
             {route.page === 'orchestrations' && <OrchestrationsPage />}
             {route.page === 'memory' && <MemoryPage />}

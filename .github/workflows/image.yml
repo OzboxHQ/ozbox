@@ -615,11 +615,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: |
           set -euo pipefail
           tag="image-v$VERSION"
-          gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "Machine image $VERSION" --notes "Signed machine image manifest for $VERSION." --target "$GITHUB_SHA"
+          flags=(--title "Machine image $VERSION" --notes "Signed machine image manifest for $VERSION." --target "$GITHUB_SHA")
+          # a version with a pre-release field (0.2.0-beta.0) is a GitHub pre-release
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" "${flags[@]}"
           gh release upload "$tag" out/* --clobber
 
   publish:

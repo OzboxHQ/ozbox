@@ -12,7 +12,7 @@ export interface RouteSample {
   section?: string;
 }
 
-const fixed: Exclude<Route['page'], 'box' | 'files' | 'tools' | 'terminal' | 'settings' | 'missing'>[] = [
+const fixed: Exclude<Route['page'], 'box' | 'files' | 'tools' | 'terminal' | 'settings' | 'missing' | 'go'>[] = [
   'fleet',
   'boxes',
   'account',
@@ -32,6 +32,7 @@ const fixed: Exclude<Route['page'], 'box' | 'files' | 'tools' | 'terminal' | 'se
 ];
 
 export const ROUTE_SAMPLES: RouteSample[] = [
+  { page: 'go', path: () => '/go' },
   ...fixed.map((page): RouteSample => ({ page, path: () => hrefs[page] })),
   { page: 'box', path: (b) => hrefs.box(b) },
   { page: 'files', path: (b) => hrefs.files(b) },

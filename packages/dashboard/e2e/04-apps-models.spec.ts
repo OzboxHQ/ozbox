@@ -48,11 +48,11 @@ test('Apps and alerts lists every channel and keeps secrets write-only', async (
   }
 });
 
-test('Telegram setup is guided and pairing waits for a token', async ({ page }) => {
+test('Telegram setup is guided and linking waits for a token', async ({ page }) => {
   await open(page, '/settings/apps');
   const tg = page.getByTestId('app-telegram');
   await expect(tg.getByText('BotFather').first()).toBeVisible();
-  await expect(tg.getByRole('button', { name: 'Pair a chat' })).toBeDisabled();
+  await expect(tg.getByRole('button', { name: 'Link an account' })).toBeDisabled();
   await expect(tg.getByRole('button', { name: 'Send test alert' })).toBeDisabled();
   await tg.getByRole('button', { name: 'Add bot token' }).click();
   const sheet = page.getByTestId('telegram-token-sheet');
@@ -61,7 +61,7 @@ test('Telegram setup is guided and pairing waits for a token', async ({ page }) 
   await sheet.getByLabel('Bot token').fill('123456:FAKE-TOKEN-FOR-TESTS');
   await sheet.getByRole('button', { name: 'Save' }).click();
   await waitSheetClosed(page, 'telegram-token-sheet');
-  await expect(tg.getByRole('button', { name: 'Pair a chat' })).toBeEnabled();
+  await expect(tg.getByRole('button', { name: 'Link an account' })).toBeEnabled();
   await tg.getByRole('button', { name: 'Remove token' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Remove' }).click();
   await expect(tg.getByRole('button', { name: 'Add bot token' })).toBeVisible();

@@ -13,6 +13,7 @@ dashboard and on the command line, what happens underneath, and how mature that 
 | [Skills for your agents](skills.md) | your own skills, reviewed and approved before any agent sees one, and put on a box's disk for its coding agents |
 | [Orchestrating a fleet](orchestrating-a-fleet.md) | one agent hands features to worker boxes: claims, contracts, a mailbox, a merge queue, rules files |
 | [A secure workspace for AI agents](secure-agent-workspace.md) | an agent with no keys in reach, a limited network, ask-mode, Production out of reach, an audit log, spend limits, and when a per-request sandbox fits better |
+| [Control your boxes from Telegram](telegram-control.md) | link a Telegram account with a passkey, allow a phone to talk to agents on chosen boxes, lock or cut it at any time; a chat never approves anything (Preview) |
 | [Chat with your coding agents](chat.md) | talk to agents from the dashboard, Telegram, Slack or WhatsApp: start, follow, answer, approve |
 | [Models and routing](models-and-routing.md) | your own model keys and cloud accounts, which engine uses which model, local models, spend |
 | [Keeping boxes healthy](keeping-boxes-healthy.md) | upgrades, backups, restores, resizing, self-test, recovery |

@@ -202,7 +202,7 @@ export const enChannels = {
   'routing.chats_none': 'No chat is paired with the bot yet.',
   'routing.chats_hint': 'A person\'s Telegram alerts go only to the chats linked to them. Chats linked to no one receive the alerts of anyone who has none of their own.',
   'routing.chat_linked_other': '{name} (linked to {person})',
-  'routing.chat_pair': 'Pair a chat for this person',
+  'routing.chat_pair': 'Link Telegram in Account',
   'routing.chat_link_failed': 'The chat could not be linked.',
   'routing.devices': 'Devices with notifications',
   'routing.devices_none': 'No device yet.',

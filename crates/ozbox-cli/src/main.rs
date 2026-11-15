@@ -136,6 +136,8 @@ mod state;
 #[cfg(test)]
 mod systemd_props_guard;
 mod telegram;
+mod telegram_store;
+mod telegram_transcript;
 mod telemetry;
 mod telemetry_cli;
 mod this_box;

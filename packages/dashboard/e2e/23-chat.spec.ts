@@ -2,8 +2,8 @@ import { expect, test, type APIRequestContext, type Page } from '@playwright/tes
 
 import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open, axeScan } from './fixtures';
 
-// Chat with coding agents on the demo provider: the same conversation in the dashboard and in Telegram (through the demo
-// bot, with its real one-time pairing code). The agent is the simulated engine, which answers each message as a
+// Chat with coding agents on the demo provider: the conversation in the dashboard, and what a chat linked the old way can and
+// cannot do in Telegram (through the demo bot). The agent is the simulated engine, which answers each message as a
 // conversation and asks for approval when a message holds `sim:command=sudo`. Nothing here reaches an outside service.
 
 const token = () => new URL(process.env['OZBOX_E2E_URL'] ?? '').hash.replace('#token=', '');
@@ -114,7 +114,12 @@ test('a one-time link from a chat opens its approval in the dashboard, and a sec
   await endSession(page, request);
 });
 
-test.describe('the same chat in Telegram, through the demo bot', () => {
+// A Telegram chat is linked with a passkey and talks to an agent only where a person delegated that (ADR 0050); that journey is
+// `46-telegram-links.spec.ts`, behind a sign-in. This server has no sign-in, so the chat below is one linked the old way: told
+// things, allowed to read, and nothing more. What is proved here is the notify-only half, which does not depend on a link: a
+// message names an approval and sends no button, and nothing said or pressed in a chat decides anything. How a delegated chat starts a session,
+// follows it and attaches to a terminal agent is in `46-telegram-links.spec.ts`; the gateway's refusals are also covered by the Rust tests.
+test.describe('a chat linked the old way, through the demo bot', () => {
   const chatId = 4242;
   const api = (request: APIRequestContext) => ({
     call: (method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, data?: unknown) => request.fetch(`${origin()}${path}`, { method, headers: headers(), ...(data === undefined ? {} : { data }) }),
@@ -128,108 +133,38 @@ test.describe('the same chat in Telegram, through the demo bot', () => {
     await a.call('PUT', '/v1/settings', s.settings);
   });
 
-  test('a paired chat starts a session, gets answers, is only notified of approvals, with a link and no button, and an approve attempt from the chat is refused', async ({ request }) => {
+  test('it reads, is told, and cannot talk to an agent, approve, deny, stop or raise a limit; a stranger and a forward are not acted on', async ({ request }) => {
     const a = api(request);
     expect((await a.call('PUT', '/v1/secrets/telegram-bot-token', { value: '123:CHAT_PLAYWRIGHT_SENTINEL' })).ok()).toBe(true);
     const s = (await (await a.call('GET', '/v1/settings')).json()) as { settings: { apps: { telegram: { enabled: boolean } }; [k: string]: unknown } };
     s.settings.apps.telegram.enabled = true;
     expect((await a.call('PUT', '/v1/settings', s.settings)).ok()).toBe(true);
-    const { code } = (await (await a.call('POST', '/v1/apps/telegram/pairing', {})).json()) as { code: string };
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: code, name: 'Ada phone' });
+    await a.call('POST', '/v1/demo/telegram/legacy-chat', { chat_id: chatId, name: 'Ada phone' });
+    const say = (text: string, extra: Record<string, unknown> = {}) => a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text, ...extra });
     const sent = async () => ((await (await a.call('GET', '/v1/demo/telegram/sent')).json()) as { sent: { chat_id: number; text: string; buttons: string[] }[] }).sent.filter((m) => m.chat_id === chatId);
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Paired')), { timeout: 20_000 }).toBe(true);
 
-    // a stranger is not heard and gets no answer
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: 999, text: '/new charlie nope' });
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/new charlie tgstart' });
-    await expect.poll(async () => (await sent()).some((m) => /Started t\d+ on charlie/.test(m.text)), { timeout: 20_000 }).toBe(true);
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Done: tgstart')), { timeout: 40_000 }).toBe(true);
+    // it reads
+    await say('/fleet');
+    await expect.poll(async () => (await sent()).some((m) => /boxes?, \d+ running/.test(m.text)), { timeout: 30_000 }).toBe(true);
+    // a stranger is not heard and gets no answer at all
+    await a.call('POST', '/v1/demo/telegram/message', { chat_id: 999, text: '/fleet' });
+    // talking to an agent is something a person allows in the dashboard first: it is a pointer, not a session
+    await say('/new charlie tgstart');
+    await expect.poll(async () => (await sent()).some((m) => m.text.includes('allow it in the dashboard')), { timeout: 30_000 }).toBe(true);
+    const tasks = (await (await a.call('GET', '/v1/tasks')).json()) as { items: { id: string }[] };
+    expect(tasks.items.some((t) => t.id === 't999')).toBe(false);
     const nope = ((await (await a.call('GET', '/v1/demo/telegram/sent')).json()) as { sent: { chat_id: number }[] }).sent;
     expect(nope.some((m) => m.chat_id === 999)).toBe(false);
 
-    // a chat only notifies (owner decision, 2026-11-12): an ordinary command on the ask list sends a message that names the
-    // action and carries a link to the dashboard, with no Approve or Deny button, and nothing said or pressed in the chat decides it
-    const pendingIds = async (needle: string) => {
-      const chat = (await (await a.call('GET', '/v1/chat')).json()) as { approvals: { id: string; action: string }[] };
-      return chat.approvals.filter((x) => x.action.includes(needle)).map((x) => x.id);
-    };
-    const stateOf = async (id: string) => {
-      const list = (await (await a.call('GET', '/v1/approval-requests')).json()) as { items: { id: string; state: string }[] };
-      return list.items.find((x) => x.id === id)?.state;
-    };
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: 'tidy up sim:command=sudo' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Decide it in the dashboard')), { timeout: 40_000 }).toBe(true);
-    const ask = (await sent()).find((m) => m.text.includes('Decide it in the dashboard'));
-    expect(ask?.text).toContain('sudo');
-    // this server has no public address, so the message says to open the dashboard rather than carry a path that opens nothing
-    expect(ask?.text).toContain('Open the dashboard on the computer that runs it.');
-    expect(ask?.text).not.toContain('/chat?link=');
-    expect(ask?.buttons).toEqual([]);
-    const ordinary = await pendingIds('sudo');
-    expect(ordinary).toHaveLength(1);
-    const ordinaryId = ordinary[0] ?? '';
-
-    // an approve attempt from the chat (a pressed button that is not there, and the word itself) is refused: nothing is decided
-    const before = (await sent()).length;
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, callback: `approve:${ordinaryId}` });
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: 'approve' });
-    await expect.poll(async () => await stateOf(ordinaryId), { timeout: 10_000 }).toBe('pending');
-    await new Promise((r) => setTimeout(r, 2_000));
-    expect(await stateOf(ordinaryId)).toBe('pending');
-    expect((await sent()).slice(before).some((m) => m.text.includes('Approved'))).toBe(false);
-
-    // the decision is made on the dashboard, and the agent goes on and answers in the chat
-    const decided = await a.call('POST', `/v1/approval-requests/${ordinaryId}/approve`, {});
-    expect(decided.ok(), await decided.text()).toBe(true);
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('(approved)')), { timeout: 40_000 }).toBe(true);
-
-    // a push to a protected branch is told the same way, in the passkey words, still with no button
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: 'sim:push=main' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('passkey')), { timeout: 40_000 }).toBe(true);
-    const risky = (await sent()).find((m) => m.text.includes('passkey'));
-    expect(risky?.buttons).toEqual([]);
-    expect(risky?.text).toContain('Open the dashboard on the computer that runs it.');
-    expect(risky?.text).not.toContain('/chat?link=');
-    const riskyIds = await pendingIds('git push origin main');
-    expect(riskyIds).toHaveLength(1);
-    const riskyId = riskyIds[0] ?? '';
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, callback: `approve:${riskyId}` });
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, callback: `deny:${riskyId}` });
-    await new Promise((r) => setTimeout(r, 2_000));
-    expect(await stateOf(riskyId)).toBe('pending');
-    expect((await sent()).some((m) => m.text.includes('Denied'))).toBe(false);
-    // only the dashboard denies it
-    const denied = await a.call('POST', `/v1/approval-requests/${riskyId}/deny`, {});
-    expect(denied.ok(), await denied.text()).toBe(true);
-    expect(((await denied.json()) as { state: string }).state).toBe('denied');
-    await expect.poll(async () => await pendingIds('git push origin main'), { timeout: 10_000 }).toEqual([]);
+    // an approve, a deny, a stop, a spending limit and a secret are refused in words; a pressed button is not even read
+    for (const w of ['/approve', '/deny', '/stop', '/budget +5', '/secret list']) await say(w);
+    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, callback: 'approve:a1' });
+    await expect.poll(async () => (await sent()).filter((m) => /never|dashboard/.test(m.text)).length, { timeout: 30_000 }).toBeGreaterThanOrEqual(5);
+    expect((await sent()).every((m) => m.buttons.length === 0)).toBe(true);
 
     // forwarded text is data, and the bot token appears in nothing it said
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/stop', forwarded: true });
+    await say('/stop', { forwarded: true });
     await expect.poll(async () => (await sent()).some((m) => m.text.includes('is not an instruction')), { timeout: 20_000 }).toBe(true);
     expect(JSON.stringify(await sent())).not.toContain('CHAT_PLAYWRIGHT_SENTINEL');
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/stop' });
-  });
-
-  test('agents in terminals are listed, attached, typed into and read back, and they are experimental', async ({ request }) => {
-    const a = api(request);
-    expect((await a.call('PUT', '/v1/secrets/telegram-bot-token', { value: '123:CHAT_PLAYWRIGHT_SENTINEL' })).ok()).toBe(true);
-    const s = (await (await a.call('GET', '/v1/settings')).json()) as { settings: { apps: { telegram: { enabled: boolean } }; [k: string]: unknown } };
-    s.settings.apps.telegram.enabled = true;
-    await a.call('PUT', '/v1/settings', s.settings);
-    const { code } = (await (await a.call('POST', '/v1/apps/telegram/pairing', {})).json()) as { code: string };
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: code, name: 'Ada phone' });
-    const sent = async () => ((await (await a.call('GET', '/v1/demo/telegram/sent')).json()) as { sent: { chat_id: number; text: string }[] }).sent.filter((m) => m.chat_id === chatId);
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Paired')), { timeout: 20_000 }).toBe(true);
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/sessions charlie' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('charlie:%3') && m.text.includes('hooks, waiting')), { timeout: 20_000 }).toBe(true);
-    // a chat app never forces its way into a terminal: that could answer the agent's own question
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/attach charlie:%3 force' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('does not type into an agent that is not waiting')), { timeout: 20_000 }).toBe(true);
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/attach charlie:%3' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Experimental')), { timeout: 20_000 }).toBe(true);
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: 'run the unit tests' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('charlie:%3:') && m.text.includes('Done: run the unit tests')), { timeout: 40_000 }).toBe(true);
-    await a.call('POST', '/v1/demo/telegram/message', { chat_id: chatId, text: '/detach' });
   });
 });

@@ -17,6 +17,15 @@ use crate::notify::{Alert, BoxObs, BudgetObs, Delivery};
 use crate::orphans::{ItemResult, OrphanScan};
 use crate::pricing::PriceBook;
 
+/// What a poll of Telegram came back with. `me` is present only on the first poll of a run (and after a stop), and `webhook`
+/// when a webhook was looked for (at start, and after a 409).
+pub struct Polled {
+    pub token: String,
+    pub me: Option<Result<crate::telegram::BotInfo, crate::telegram::ApiError>>,
+    pub webhook: Option<Option<String>>,
+    pub polled: Option<Result<(Vec<Value>, i64), crate::telegram::ApiError>>,
+}
+
 /// What a finished job reports.
 pub enum Done {
     Nothing,
@@ -46,9 +55,13 @@ pub enum Done {
         /// Who asked for the delete: the outcome is theirs, whoever's request happens to drain it.
         actor: super::Actor,
     },
-    TelegramUpdates {
-        token: String,
-        result: Result<(Vec<Value>, i64), String>,
+    /// What one poll of Telegram found (see `serve::telegram_bridge`).
+    TelegramPoll(Box<Polled>),
+    /// A message that carries a pointer link was sent: its id, so it can be deleted when the link lapses.
+    TelegramSent {
+        chat_id: i64,
+        message_id: i64,
+        expires_ms: u64,
     },
     Observed {
         now_ms: u64,
