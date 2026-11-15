@@ -319,7 +319,7 @@ fn a_sender_that_restarts_with_new_state_is_heard_again_and_an_old_incarnation_i
     assert_eq!(r.applied, 0);
 }
 
-// ---- M-3: task ids ----------------------------------------------------------------------------------------------
+// ---- task ids ----------------------------------------------------------------------------------------------
 
 #[test]
 fn a_peer_cannot_overwrite_a_task_this_end_sent_by_reusing_its_id() {
@@ -414,7 +414,7 @@ fn the_same_key_with_other_content_is_refused_and_raised_and_still_after_it_was_
     );
 }
 
-// ---- M-2: labels ------------------------------------------------------------------------------------------------
+// ---- labels ------------------------------------------------------------------------------------------------
 
 #[test]
 fn a_person_claim_comes_out_untrusted_with_the_provenance_the_receiver_stamped() {
@@ -456,7 +456,7 @@ fn a_newline_or_a_bidi_override_cannot_make_one_field_look_like_two_rows() {
     );
 }
 
-// ---- M-7: what is screened ---------------------------------------------------------------------------------------
+// ---- what is screened ---------------------------------------------------------------------------------------
 
 #[test]
 fn key_shaped_content_never_leaves_and_is_never_stored_not_even_in_parent_or_while_buffered() {
@@ -523,7 +523,7 @@ fn key_shaped_content_never_leaves_and_is_never_stored_not_even_in_parent_or_whi
     );
 }
 
-// ---- M-8: acts ---------------------------------------------------------------------------------------------------
+// ---- acts ---------------------------------------------------------------------------------------------------
 
 #[test]
 fn an_act_that_could_force_push_or_run_a_remote_helper_is_not_a_valid_act() {
@@ -661,7 +661,7 @@ fn a_production_act_is_refused_at_both_ends_with_no_way_to_turn_it_off() {
     );
 }
 
-// ---- M-11: a cancel is a request --------------------------------------------------------------------------------
+// ---- a cancel is a request --------------------------------------------------------------------------------
 
 #[test]
 fn only_the_receiver_moves_a_state_and_a_finished_task_stays_finished() {
@@ -735,7 +735,7 @@ fn a_cancel_is_a_request_the_receiver_decides() {
     );
 }
 
-// ---- M-6: bounded ------------------------------------------------------------------------------------------------
+// ---- bounded ------------------------------------------------------------------------------------------------
 
 #[test]
 fn limits_stop_a_flood_and_a_deadline_ends_a_task() {
