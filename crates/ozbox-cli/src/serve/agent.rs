@@ -200,6 +200,7 @@ pub const SENT_THEN_FAILED: &[&str] = &[
     "the box's agent answered with too much data",
     "the box's agent answered with something that is not HTTP",
     "the box's agent answered with data that is not understood",
+    "the box's agent answered in a format this version does not read",
 ];
 
 impl AgentError {

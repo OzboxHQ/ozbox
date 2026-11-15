@@ -637,6 +637,33 @@ mod tests {
             assert!(!AgentError::Unreachable(never.into()).may_have_been_sent());
         }
         assert!(!AgentError::Unsupported("x".into()).may_have_been_sent());
+        // every failure `request_with_cap` can report AFTER the request was written must be listed, or a lost answer is
+        // reported as "nothing landed", the unsafe direction
+        let start = transport
+            .find("fn request_with_cap")
+            .expect("the request function is there");
+        let body = &transport[start..];
+        let body = &body[..body.find("fn encode_component").unwrap_or(body.len())];
+        let written = body
+            .find("did not accept the request")
+            .expect("the write failure is there");
+        let after = &body[written..];
+        let mut found = 0;
+        for piece in after.split("unreachable(").skip(1) {
+            let text = piece.trim_start();
+            if let Some(rest) = text.strip_prefix('"') {
+                let msg = rest.split('"').next().unwrap_or_default();
+                assert!(
+                    SENT_THEN_FAILED.contains(&msg),
+                    "{msg} follows the write but is not in SENT_THEN_FAILED"
+                );
+                found += 1;
+            }
+        }
+        assert!(
+            found >= 4,
+            "the scan found only {found} messages after the write"
+        );
     }
 
     #[test]

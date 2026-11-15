@@ -145,6 +145,7 @@ run "comments_are_dropped_from_the_template_text_not_from_what_is_put_into_it" {
     error_message = "what the template puts in is still there after the comments are dropped"
   }
 
+  # The Hetzner render has only about 1 to 2 KB of headroom under 32,768 bytes: measure the next template addition here.
   assert {
     condition     = length(hcloud_server.box.user_data) < 32768
     error_message = "Hetzner takes at most 32 KB of user data"

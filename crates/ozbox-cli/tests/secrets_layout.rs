@@ -376,16 +376,84 @@ fn the_box_ships_claude_codes_managed_setting_that_stops_skill_commands() {
     assert!(
         body.contains("set -C") && body.contains("[ -L $s ]") && body.contains("[ -L $h/.claude ]")
     );
-    assert!(
-        !t.contains("chown -R ozbox:ozbox /work/home/ozbox"),
-        "root must not walk the box user's home"
-    );
-    assert!(
-        !t.lines().any(|l| l.contains("> /work/home/ozbox")),
-        "root writes nothing into the box user's home"
-    );
+    // an allowlist, not a list of forbidden spellings: every line that names the box user's home is one of the known forms,
+    // so a root `cp`, `install`, `tee`, a redirect with or without a space, or a recursive chown cannot be added unseen
+    if let Err(line) = home_lines_are_known(&t) {
+        panic!("a line that touches the box user's home is not a known form: {line}");
+    }
+    if let Err(line) = runuser_lines_are_plain(&t) {
+        panic!("runuser must be `runuser -u ozbox --` without a login shell: {line}");
+    }
     // it must not be the only copy a skill could switch off: the root-owned file is not under /work
     assert!(!entry.contains("/work/"));
+}
+
+/// The only forms in which the work-setup block may mention the box user's home. Anything else (a root `cp -n` into it,
+/// `install -d -o ozbox`, `>/work/home/ozbox/...`, `tee`, `chown -R`) is a way for root to write there, and is refused.
+fn home_lines_are_known(tpl: &str) -> Result<(), String> {
+    const HOME: &str = "/work/home/ozbox";
+    for line in tpl.lines().filter(|l| l.contains(HOME)) {
+        let l = line.trim();
+        let known = l == "homedir: /work/home/ozbox"
+            || l == "mkdir -p /work/home/ozbox"
+            || l.starts_with("useradd $pin_uid --home-dir /work/home/ozbox --no-create-home ")
+            || l == "disk_uid=\"$(stat -c %u /work/home/ozbox)\""
+            || l == "disk_gid=\"$(stat -c %g /work/home/ozbox)\""
+            || l == "chown ozbox:ozbox /work/home/ozbox"
+            || l == "chmod 0750 /work/home/ozbox"
+            || l == "if [ ! -e /work/home/ozbox/.profile ]; then"
+            || l.starts_with("runuser -u ozbox -- sh -c '");
+        if !known {
+            return Err(l.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Every `runuser` is `runuser -u ozbox --`: no `-l`/`-` login shell (it would start a PAM session and systemd user manager).
+fn runuser_lines_are_plain(tpl: &str) -> Result<(), String> {
+    for line in tpl.lines().filter(|l| l.contains("runuser")) {
+        let l = line.trim();
+        let plain = l.starts_with("runuser -u ozbox -- ")
+            && !l.contains("runuser -l")
+            && !l.contains("runuser - ")
+            && !l.contains("--login");
+        if !plain {
+            return Err(l.to_string());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_home_guard_refuses_every_way_root_could_write_there() {
+    let t = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infra/cloud-init/box.yaml.tftpl"),
+    )
+    .expect("the box template is readable");
+    assert!(home_lines_are_known(&t).is_ok());
+    assert!(runuser_lines_are_plain(&t).is_ok());
+    for bad in [
+        "      cp -n /etc/skel/.profile /work/home/ozbox/.profile",
+        "      install -d -o ozbox -g ozbox /work/home/ozbox/.claude",
+        "      echo x >/work/home/ozbox/.profile",
+        "      echo x > /work/home/ozbox/.profile",
+        "      echo x | tee /work/home/ozbox/.profile",
+        "      chown -R ozbox:ozbox /work/home/ozbox",
+        "      mkdir -p /work/home/ozbox/.claude",
+    ] {
+        let with_bad = format!("{t}\n{bad}\n");
+        assert!(home_lines_are_known(&with_bad).is_err(), "{bad}");
+    }
+    for bad in [
+        "      runuser -l ozbox -c 'true'",
+        "      runuser - ozbox -c 'true'",
+        "      runuser ozbox -c 'true'",
+    ] {
+        let with_bad = format!("{t}\n{bad}\n");
+        assert!(runuser_lines_are_plain(&with_bad).is_err(), "{bad}");
+    }
 }
 
 /// The shell the first-boot script runs as the box user to seed its home.
