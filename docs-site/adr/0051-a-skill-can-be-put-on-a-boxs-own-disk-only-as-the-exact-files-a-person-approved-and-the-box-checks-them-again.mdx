@@ -48,7 +48,8 @@ skills of their own from the page.
    guard). They go through the same checks as every other skill, are versioned in the library (the last twenty versions are
    kept and readable), show who added them and how, and need the same review and approval before any agent sees them. A
    **restored version is always a new, unapproved addition**, even when a box or an install still holds the same files and
-   its approval is still on record: the approval is dropped, and the copy already on the box stays where it is. Names are the
+   its approval is still on record: the approval is dropped, and the copy already on the box stays where it is. Adding the
+   identical bytes of a past version again is the same act and comes back unapproved too. Names are the
    Agent Skills format (lower-case letters and digits with single dashes, up to 64), so that on a disk that does not tell `Demo`
    from `demo` two skills can never be one folder; adding never deletes a folder it cannot account for.
 7. **Some of what a `SKILL.md` says is acted on, not only read.** Claude Code runs commands a skill declares: `hooks`
@@ -60,7 +61,18 @@ skills of their own from the page.
    approval, of exactly those files. The review shows them first, with the commands, and shows `model`, `context`, `paths` and
    the other documented fields. How Codex, Gemini CLI and OpenCode treat these fields has not been checked, and nothing here
    says what they do.
-8. **Hidden characters** are refused from a table generated from the Unicode Character Database (every format, separator,
+   The one overwrite this allows: a folder the dashboard recorded putting there is replaced, even when it was edited on the box
+   (that is how pushing again repairs it), because the claim names the hash it recorded and the record or the files agree.
+8. **What the box's own Claude Code will run.** The box image ships `/etc/claude-code/managed-settings.json` with
+   `"disableSkillShellExecution": true` (Claude Code's managed setting: each `` !`command` `` and ```` ```! ```` block in a skill is
+   replaced by a notice instead of run; it does not touch `hooks` or `allowed-tools`, which the acknowledgement covers). It is on
+   by default for every box; to opt out of it on one box, delete or edit that root-owned file as root on the box. Only the
+   root-owned file carries it: a skill cannot switch it off. The scan for what a skill runs treats a bare carriage return as a
+   refusal, reads a line end as `\n`, `\r\n` or `\r`, and flags a fence introduced after a list marker, a quote or text, so a
+   command cannot hide in a line break or a fence style. Only the top `SKILL.md` counts, since Claude Code also loads a
+   `SKILL.md` found anywhere under its skills folder (`synced/<x>/SKILL.md`); a skill has one, and the names `synced` and
+   `trash` (Claude Code's own folders) are reserved.
+9. **Hidden characters** are refused from a table generated from the Unicode Character Database (every format, separator,
    control, private-use and unassigned code point, every default-ignorable code point, and a few blank-looking ones), shared by
    the server, the box and the page and checked against each other in a test.
 
@@ -71,6 +83,11 @@ skills of their own from the page.
 - **A compromised dashboard is not stopped by the box.** The files and hash arrive together with nothing signed, so whoever
   controls the dashboard's socket can put any files on a box. The box's re-check guards against corruption in transit and a
   stale page, not against that. Signing by a publisher is future work.
+- A push is recorded by the hash that was sent, even when the library has moved on or the approval was withdrawn while it was in
+  flight; the answer then says so. Staging and set-aside folders live in a work folder beside the agents' folders, never inside
+  one, and are swept at start. The box's own record is read as a plain file of at most 1 MiB, and what a look reads is opened
+  without following a link or waiting on a pipe. A library folder that cannot be read, and a copy a box holds under a name from
+  before the format, are listed and can be removed. The list of other folders in an agent's folder is a best-effort look.
 - **A skill is guidance, not security** (ADR 0025). Approval means a person read the files and acknowledged what they run, not
   that they are safe to follow. Oz Box's own rules apply to what Oz Box does, not to what an agent program does with a skill.
 - The folders are those each program documents for user-level skills; they were checked against the programs' own

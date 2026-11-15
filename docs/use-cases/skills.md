@@ -53,6 +53,11 @@ what to look for (instructions to ignore rules, to hide what the agent did, to s
 every file as plain text, with a **Script** mark on files an agent may run. **Approve these files** records you as the reviewer
 of exactly those files. Change one byte anywhere and the skill needs approving again.
 
+**Claude Code on a box is also told not to run them.** Every box ships `/etc/claude-code/managed-settings.json` with
+`"disableSkillShellExecution": true`, so a `` !`command` `` or ```` ```! ```` block in a skill is replaced by a notice instead of
+run (hooks and `allowed-tools` are not covered by it; that is what the acknowledgements are for). To turn this off for one box,
+delete or edit that root-owned file as root on the box. A box made before this release does not have it until it is rebuilt.
+
 **What a skill can run.** At the top of the review, **What this skill asks for** lists what Claude Code acts on when the skill is
 used: `hooks` (shell commands registered for the rest of the session), `` !`command` `` or a ```` ```! ```` block in the text
 (run before the agent reads it; the file is marked **Runs commands**), `shell`, `allowed-tools` (tools used without asking) and
