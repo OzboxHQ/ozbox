@@ -37,6 +37,18 @@ fn samples(resource_type: &str) -> Vec<String> {
         "aws_ssm_document" => vec![format!(
             "arn:aws:ssm:us-east-1:{acct}:document/ozbox-adopt-fleet"
         )],
+        "aws_vpc" => vec![format!("arn:aws:ec2:us-east-1:{acct}:vpc/vpc-0")],
+        "aws_internet_gateway" => vec![format!(
+            "arn:aws:ec2:us-east-1:{acct}:internet-gateway/igw-0"
+        )],
+        "aws_subnet" => vec![format!("arn:aws:ec2:us-east-1:{acct}:subnet/subnet-0")],
+        "aws_eip" => vec![format!(
+            "arn:aws:ec2:us-east-1:{acct}:elastic-ip/eipalloc-0"
+        )],
+        "aws_nat_gateway" => vec![format!("arn:aws:ec2:us-east-1:{acct}:natgateway/nat-0")],
+        "aws_route_table" | "aws_route" | "aws_route_table_association" => {
+            vec![format!("arn:aws:ec2:us-east-1:{acct}:route-table/rtb-0")]
+        }
         other => panic!("no sample ARN for {other}"),
     }
 }
@@ -97,6 +109,14 @@ const APPLIED_BY_INIT: [(&str, &str); 3] = [
     ("aws-adopt-command", "adopt-admin-policy.json"),
 ];
 
+/// Every module `ozbox init` applies on a plain run (`ozbox init --provider aws`), all with the one setup identity.
+const SETUP_MODULES: [&str; 4] = [
+    "aws-secrets-key",
+    "aws-box-policy",
+    "aws-adopt-command",
+    "aws-network",
+];
+
 fn infra() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra")
 }
@@ -140,9 +160,8 @@ fn permission_set(file: &str) -> Vec<Value> {
     v["Statement"].as_array().unwrap().clone()
 }
 
-#[test]
-fn every_resource_type_in_a_module_init_applies_is_covered_by_the_identity_that_applies_it() {
-    for (module, policy) in APPLIED_BY_INIT {
+fn check_modules(modules: &[(&str, &str)]) {
+    for (module, policy) in modules.iter().copied() {
         let types = resource_types(module);
         assert!(!types.is_empty(), "{module} has no resources: wrong path?");
         let set = permission_set(policy);
@@ -194,6 +213,24 @@ fn every_resource_type_in_a_module_init_applies_is_covered_by_the_identity_that_
     }
 }
 
+#[test]
+fn every_resource_type_in_a_module_init_applies_is_covered_by_the_identity_that_applies_it() {
+    check_modules(&APPLIED_BY_INIT);
+}
+
+/// Every module `ozbox init` applies by default (not the opt-in security baseline and issuer) is covered by `OzBoxSetup`, the ONE
+/// permission set a person signs in as to run it: on IAM Identity Center a sign-in profile is exactly one permission set, so
+/// a module covered only by a separate file nobody can combine with it is a module init cannot apply. The network, which has
+/// no file of its own, is checked here for the first time.
+#[test]
+fn every_resource_type_in_every_module_init_applies_by_default_is_covered_by_the_setup_policy() {
+    let all: Vec<(&str, &str)> = SETUP_MODULES
+        .iter()
+        .map(|m| (*m, "setup-policy.json"))
+        .collect();
+    check_modules(&all);
+}
+
 fn init_modules() -> BTreeSet<String> {
     let src = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../ozbox-cli/src/init.rs"),
@@ -227,17 +264,20 @@ fn init_modules() -> BTreeSet<String> {
     used
 }
 
-/// Modules `ozbox init` applies WITHOUT a dedicated permission set, each with the reason.
-const EXEMPT: [(&str, &str); 4] = [
-    ("aws-network", "applied with the setup identity's own network rights (no dedicated set exists)"),
-    ("aws-security-baseline", "applied with the setup identity's own rights; its own policy file (security-services-policy.json) is checked by its own tests"),
-    ("aws-issuer", "planned only from a package the person names; applied with the setup identity's own rights"),
+/// Modules `ozbox init` plans that have NO dedicated permission set and are not in `SETUP_MODULES`, each with the reason.
+const EXEMPT: [(&str, &str); 3] = [
+    ("aws-security-baseline", "opt-in: not part of `ozbox init`'s default run but of `ozbox harden` (init_cli.rs, plan_security), which has its own permission set, security-services-policy.json, checked by its own tests"),
+    ("aws-issuer", "opt-in: planned only from a package the person names (`--issuer-package`), and its first apply needs an account administrator (it creates roles in the reserved /obx/ namespace, which the setup policy denies)"),
     ("aws-box", "read by init only to check it exists; boxes are made by `ozbox create` with the daily operator role"),
 ];
 
 #[test]
 fn every_module_init_plans_is_covered_or_exempt_with_a_reason() {
-    let covered: BTreeSet<&str> = APPLIED_BY_INIT.iter().map(|(m, _)| *m).collect();
+    let covered: BTreeSet<&str> = APPLIED_BY_INIT
+        .iter()
+        .map(|(m, _)| *m)
+        .chain(SETUP_MODULES)
+        .collect();
     for m in init_modules() {
         let exempt = EXEMPT.iter().any(|(e, why)| *e == m && !why.is_empty());
         assert!(
@@ -245,7 +285,7 @@ fn every_module_init_plans_is_covered_or_exempt_with_a_reason() {
             "init.rs uses the module {m}, which is neither in APPLIED_BY_INIT (with its permission set) nor in EXEMPT (with a reason)"
         );
     }
-    for (m, _) in APPLIED_BY_INIT {
+    for m in APPLIED_BY_INIT.iter().map(|(m, _)| *m).chain(SETUP_MODULES) {
         assert!(
             init_modules().contains(m),
             "{m} is listed but init no longer applies it"
@@ -288,5 +328,312 @@ fn the_adopt_permission_set_reaches_only_the_adopt_documents() {
                 && strings(&s["Action"]).iter().any(|p| p == a)),
             "{a} must be denied"
         );
+    }
+}
+
+// ---------- the state bucket, which no module makes: the CLI does ----------
+
+/// Statements of `file` as (Allow?, actions, resources, condition keys).
+fn allows_on(set: &[Value], action: &str, arn: &str) -> bool {
+    set.iter().any(|s| {
+        s["Effect"] == "Allow"
+            && strings(&s["Action"]).iter().any(|p| matches(p, action))
+            && reaches(s, &[arn.to_string()])
+            && condition_keys(s).is_empty()
+    })
+}
+
+fn denied_on(set: &[Value], action: &str, arn: &str) -> bool {
+    set.iter().any(|s| {
+        s["Effect"] == "Deny"
+            && strings(&s["Action"]).iter().any(|p| matches(p, action))
+            && reaches(s, &[arn.to_string()])
+    })
+}
+
+/// The `aws s3api <subcommand>` calls init.rs makes: the literal after each `"s3api"`.
+fn s3api_subcommands() -> BTreeSet<String> {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ozbox-cli/src/init.rs"),
+    )
+    .unwrap();
+    // only the production code, before the test module
+    let code = src.split("#[cfg(test)]").next().unwrap();
+    let mut found = BTreeSet::new();
+    let mut rest = code;
+    while let Some(at) = rest.find("\"s3api\"") {
+        rest = &rest[at + "\"s3api\"".len()..];
+        let after = rest.trim_start_matches([',', ' ', '\n', '\t']);
+        if let Some(lit) = after.strip_prefix('"') {
+            found.insert(lit.split('"').next().unwrap().to_string());
+        }
+    }
+    found
+}
+
+#[test]
+fn the_state_bucket_init_makes_is_covered_by_the_setup_policy_and_not_by_the_operators() {
+    use ozbox_provider_aws::init_actions::{
+        s3api_action, STATE_BUCKET_EXTRA_ACTIONS, STATE_OBJECT_ACTIONS,
+    };
+    let cmds = s3api_subcommands();
+    // the scan finds what init really calls, or this test would pass on an empty list
+    for must in ["create-bucket", "head-bucket", "put-bucket-policy"] {
+        assert!(
+            cmds.contains(must),
+            "found only {cmds:?}: did init.rs change shape?"
+        );
+    }
+    let bucket = "arn:aws:s3:::ozbox-state-123456789012-us-east-1";
+    let object = format!("{bucket}/ozbox/network/us-east-1.tfstate");
+    let lock = format!("{bucket}/ozbox/network/us-east-1.tfstate.tflock");
+    let setup = permission_set("setup-policy.json");
+    let operator = permission_set("operator-policy.json");
+    let mut actions: BTreeSet<&str> = STATE_BUCKET_EXTRA_ACTIONS.into_iter().collect();
+    for c in &cmds {
+        actions.insert(s3api_action(c).unwrap_or_else(|| {
+            panic!("init.rs runs `aws s3api {c}`: add it to init_actions::s3api_action and to setup-policy.json")
+        }));
+    }
+    for a in &actions {
+        assert!(
+            allows_on(&setup, a, bucket),
+            "setup-policy.json must allow {a} on {bucket}"
+        );
+        assert!(
+            !denied_on(&setup, a, bucket),
+            "setup-policy.json denies {a} on the state bucket"
+        );
+        // the state bucket is the setup identity's: the daily role has no right to it
+        assert!(
+            !allows_on(&operator, a, bucket),
+            "operator-policy.json must not reach the state bucket ({a})"
+        );
+    }
+    for a in STATE_OBJECT_ACTIONS {
+        for o in [&object, &lock] {
+            assert!(
+                allows_on(&setup, a, o),
+                "setup-policy.json must allow {a} on {o}"
+            );
+            assert!(
+                !allows_on(&operator, a, o),
+                "the operator must not reach state objects ({a})"
+            );
+        }
+    }
+    // only this account's state buckets: another account's, and any other bucket, are out of reach
+    for other in [
+        "arn:aws:s3:::ozbox-state-999999999999-us-east-1",
+        "arn:aws:s3:::some-other-bucket",
+        "arn:aws:s3:::ozbox-tfstate-123456789012-us-east-1",
+    ] {
+        assert!(!allows_on(&setup, "s3:CreateBucket", other), "{other}");
+    }
+    // negative control: take the S3 statements out and the same check fails, so it is not vacuous
+    let stripped: Vec<Value> = setup
+        .iter()
+        .filter(|s| !strings(&s["Action"]).iter().any(|a| a.starts_with("s3:")))
+        .cloned()
+        .collect();
+    assert!(!allows_on(&stripped, "s3:CreateBucket", bucket));
+    assert!(!allows_on(&stripped, "s3:PutObject", &object));
+}
+
+// ---------- the setup policy and the three files it must contain ----------
+
+const IAM_IDENTITY_CENTER_INLINE_LIMIT: usize = 32_768;
+
+#[test]
+fn the_setup_policy_fits_an_identity_center_inline_policy() {
+    let text = std::fs::read_to_string(infra().join("aws/setup-policy.json")).unwrap();
+    // the whole file, whitespace included: stricter than the limit counts, so a reformat cannot push it over
+    assert!(
+        text.len() < IAM_IDENTITY_CENTER_INLINE_LIMIT,
+        "setup-policy.json is {} characters; an Identity Center inline policy holds {IAM_IDENTITY_CENTER_INLINE_LIMIT}",
+        text.len()
+    );
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["Version"], "2012-10-17");
+    // a placeholder account, never a real one
+    assert!(text.contains("${account_id}"));
+    assert!(
+        !regex_like_account_id(&text),
+        "a real-looking account id is in the file"
+    );
+}
+
+fn regex_like_account_id(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start == 12 {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Whether `set` allows `action` on the resource `pattern` of an admin statement: an Allow naming the action whose Resource
+/// covers that whole pattern (a pattern covers another when every ARN of the other matches it) with the same Condition.
+fn covers_resource(have: &str, want: &str) -> bool {
+    have == "*"
+        || have == want
+        || (have.ends_with('*') && want.starts_with(have.trim_end_matches('*')))
+}
+
+#[test]
+fn the_setup_policy_contains_every_statement_of_the_three_admin_policies() {
+    let setup = permission_set("setup-policy.json");
+    for file in [
+        "key-admin-policy.json",
+        "adopt-admin-policy.json",
+        "box-policy-admin-policy.json",
+    ] {
+        for st in permission_set(file) {
+            let sid = st["Sid"].as_str().unwrap();
+            let effect = st["Effect"].as_str().unwrap();
+            let acts = strings(&st["Action"]);
+            let res = strings(&st["Resource"]);
+            // every action of the admin statement, on every resource of it, has a setup statement of the same effect that
+            // reaches it with the same Condition (a Deny: or the named exception below)
+            for a in &acts {
+                for r in &res {
+                    let ok = setup.iter().any(|s| {
+                        s["Effect"] == effect
+                            && strings(&s["Action"]).iter().any(|p| matches(p, a))
+                            && strings(&s["Resource"])
+                                .iter()
+                                .any(|h| covers_resource(h, r))
+                            && s.get("Condition") == st.get("Condition")
+                    });
+                    if ok {
+                        continue;
+                    }
+                    // the one deliberate difference: the key-admin "never use a key" Deny, which in the setup identity must
+                    // let S3 use the account's S3 key for the state bucket (see SETUP_DENY_EXCEPTIONS)
+                    let excepted = SETUP_DENY_EXCEPTIONS.iter().any(|(esid, _)| *esid == sid);
+                    assert!(
+                        excepted,
+                        "{file}: {effect} `{sid}` ({a} on {r}) is not carried by setup-policy.json: the files have drifted"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Deny statements of an admin file that the setup policy carries NARROWER, with the reason.
+const SETUP_DENY_EXCEPTIONS: [(&str, &str); 1] = [(
+    "NeverUseAKey",
+    "the state bucket is encrypted with aws:kms, so S3 calls kms:GenerateDataKey and kms:Decrypt as the caller on every state read and write; the setup policy keeps the Deny for every other use (kms:ViaService must be S3)",
+)];
+
+#[test]
+fn the_setup_policys_narrower_key_deny_still_denies_every_direct_use_of_a_key() {
+    let setup = permission_set("setup-policy.json");
+    let original = permission_set("key-admin-policy.json");
+    let want = original
+        .iter()
+        .find(|s| s["Sid"] == "NeverUseAKey")
+        .unwrap();
+    let ours = setup
+        .iter()
+        .find(|s| s["Sid"] == "NeverUseAKeyExceptThroughTheStateBucket")
+        .unwrap_or_else(|| panic!("the narrowed key Deny is present"));
+    assert_eq!(ours["Effect"], "Deny");
+    assert_eq!(ours["Action"], want["Action"], "it denies the same actions");
+    assert_eq!(ours["Resource"], want["Resource"], "on the same resources");
+    // the only difference is: not when S3 is the caller's proxy
+    assert_eq!(
+        ours["Condition"],
+        serde_json::json!({"StringNotLike": {"kms:ViaService": "s3.*.amazonaws.com"}})
+    );
+    // and nothing in the file allows a direct use of a key at all
+    for s in setup.iter().filter(|s| s["Effect"] == "Allow") {
+        for a in strings(&s["Action"]) {
+            for used in [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:GenerateDataKey",
+                "kms:CreateGrant",
+            ] {
+                assert!(!matches(&a, used), "{a} would allow {used}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_setup_policy_carries_the_operators_explicit_denies_and_nothing_allows_what_they_deny() {
+    let setup = permission_set("setup-policy.json");
+    let operator = permission_set("operator-policy.json");
+    for sid in [
+        "NeverTouchTheReservedObxRoles",
+        "NeverGrantAccessOrOpenInbound",
+    ] {
+        let o = operator.iter().find(|s| s["Sid"] == sid).unwrap();
+        let ours = setup
+            .iter()
+            .find(|s| s["Sid"] == sid)
+            .unwrap_or_else(|| panic!("{sid} missing"));
+        assert_eq!(ours["Action"], o["Action"], "{sid}");
+        assert_eq!(ours["Resource"], o["Resource"], "{sid}");
+    }
+    // the named Denies hold: no users or keys, no Identity Center, Organizations or Account, no open inbound rule
+    for a in [
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "sso:CreateInstance",
+        "organizations:CreateAccount",
+        "account:CloseAccount",
+        "ec2:AuthorizeSecurityGroupIngress",
+    ] {
+        assert!(denied_on(&setup, a, "*"), "{a} must be denied");
+        assert!(
+            !setup
+                .iter()
+                .any(|s| s["Effect"] == "Allow"
+                    && strings(&s["Action"]).iter().any(|p| matches(p, a))),
+            "{a} is allowed"
+        );
+    }
+}
+
+#[test]
+fn the_setup_policy_never_allows_an_action_on_every_resource_for_iam_s3_or_a_wildcard_write() {
+    for s in permission_set("setup-policy.json")
+        .iter()
+        .filter(|s| s["Effect"] == "Allow")
+    {
+        let res = strings(&s["Resource"]);
+        for a in strings(&s["Action"]) {
+            if res.iter().any(|r| r == "*") {
+                let read = a.contains(":Describe")
+                    || a.contains(":List")
+                    || a.contains(":Get")
+                    || a == "ec2:Describe*"
+                    || a == "sts:GetCallerIdentity"
+                    || a.starts_with("tag:Get");
+                // a wildcard-resource key write (creating a key, which has no ARN yet, or tagging one) must carry its tag conditions
+                let tagged_key_write = a.starts_with("kms:") && s.get("Condition").is_some();
+                assert!(
+                    read || tagged_key_write,
+                    "`{a}` is allowed on every resource"
+                );
+            }
+            assert!(
+                !a.starts_with("iam:*") && !a.starts_with("s3:*") && a != "*",
+                "{a}"
+            );
+        }
     }
 }

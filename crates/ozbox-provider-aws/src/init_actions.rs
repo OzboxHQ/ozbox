@@ -50,6 +50,65 @@ pub fn resource_actions(resource_type: &str) -> Option<&'static [&'static str]> 
             "ssm:RemoveTagsFromResource",
             "ssm:ListTagsForResource",
         ],
+        "aws_vpc" => &[
+            "ec2:CreateVpc",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeVpcs",
+            "ec2:DescribeVpcAttribute",
+            "ec2:ModifyVpcAttribute",
+            "ec2:DeleteVpc",
+        ],
+        "aws_internet_gateway" => &[
+            "ec2:CreateInternetGateway",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeInternetGateways",
+            "ec2:AttachInternetGateway",
+            "ec2:DetachInternetGateway",
+            "ec2:DeleteInternetGateway",
+        ],
+        "aws_subnet" => &[
+            "ec2:CreateSubnet",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeSubnets",
+            "ec2:ModifySubnetAttribute",
+            "ec2:DeleteSubnet",
+        ],
+        "aws_eip" => &[
+            "ec2:AllocateAddress",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeAddresses",
+            "ec2:DescribeAddressesAttribute",
+            "ec2:ReleaseAddress",
+        ],
+        "aws_nat_gateway" => &[
+            "ec2:CreateNatGateway",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeNatGateways",
+            "ec2:DeleteNatGateway",
+        ],
+        "aws_route_table" => &[
+            "ec2:CreateRouteTable",
+            "ec2:CreateTags",
+            "ec2:DeleteTags",
+            "ec2:DescribeRouteTables",
+            "ec2:DeleteRouteTable",
+        ],
+        "aws_route" => &[
+            "ec2:CreateRoute",
+            "ec2:ReplaceRoute",
+            "ec2:DeleteRoute",
+            "ec2:DescribeRouteTables",
+        ],
+        "aws_route_table_association" => &[
+            "ec2:AssociateRouteTable",
+            "ec2:DisassociateRouteTable",
+            "ec2:DescribeRouteTables",
+        ],
         _ => return None,
     })
 }
@@ -60,3 +119,32 @@ pub const DELIBERATELY_NOT_GRANTED: [(&str, &str); 1] = [(
     "iam:DeletePolicy",
     "init never destroys an account's box policies: they are shared by every box of the fleet",
 )];
+
+/// The IAM action each `aws s3api` subcommand `ozbox init` runs against the state bucket needs (the bucket is made by the CLI
+/// itself, not by an OpenTofu module). `None` for a subcommand the table does not know: a new call on the bucket is a
+/// deliberate edit here, and in `infra/aws/setup-policy.json`.
+pub fn s3api_action(subcommand: &str) -> Option<&'static str> {
+    Some(match subcommand {
+        "head-bucket" => "s3:ListBucket",
+        "create-bucket" => "s3:CreateBucket",
+        "get-bucket-versioning" => "s3:GetBucketVersioning",
+        "put-bucket-versioning" => "s3:PutBucketVersioning",
+        "get-bucket-encryption" => "s3:GetEncryptionConfiguration",
+        "put-bucket-encryption" => "s3:PutEncryptionConfiguration",
+        "get-public-access-block" => "s3:GetBucketPublicAccessBlock",
+        "put-public-access-block" => "s3:PutBucketPublicAccessBlock",
+        "put-bucket-policy" => "s3:PutBucketPolicy",
+        _ => return None,
+    })
+}
+
+/// What the state bucket is held to beyond the commands above: reading back its policy, tagging it, and (for OpenTofu's S3
+/// backend) its location.
+pub const STATE_BUCKET_EXTRA_ACTIONS: [&str; 3] = [
+    "s3:GetBucketLocation",
+    "s3:GetBucketPolicy",
+    "s3:PutBucketTagging",
+];
+
+/// The actions on the state objects: read and write the state, and take and release the lock (`use_lockfile`, a `.tflock` object).
+pub const STATE_OBJECT_ACTIONS: [&str; 3] = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"];

@@ -187,6 +187,11 @@ pub fn run(
                 ProbeState::Unknown => t("init.mark_unknown", &[]),
             };
             show(out, a.json, format!("  [{mark}] {}", p.label));
+            if p.state != ProbeState::Allowed {
+                if let Some(d) = &p.detail {
+                    show(out, a.json, format!("      {d}"));
+                }
+            }
         }
         if !perms.ok {
             return Err(t("init.cli_perm_denied", &[]));

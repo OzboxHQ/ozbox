@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS setup">
+  ## `ozbox init` runs with one permission set, and no longer refuses a correctly set-up role
+
+  Running `ozbox init --provider aws` needed several permission sets at once (the key, the adopt command, the Session Manager policy, the state bucket and the network), and on IAM Identity Center a sign-in has exactly one. Nobody could run setup without full administrator rights. There is now one permission set, **OzBoxSetup** (`infra/aws/setup-policy.json`), that covers everything `ozbox init` applies and nothing more. The guide gives the steps to create it, assign it and sign in with it. The daily operator role stays separate and cannot touch the setup state.
+
+  The permission check at the start of `ozbox init --provider aws` also asked for things the least-privilege operator policy never allows: disks and private networks with no tag, and a listing of every storage bucket. A role set up exactly as the guide says was therefore refused. The check now asks for what Oz Box really does.
+
+  - **It checks creating tagged resources**, the way Oz Box creates them, and looks at the setup state bucket by name instead of listing every bucket in the account. A bucket that is not there yet counts as allowed.
+  - **A refusal says who grants it.** Each denied line names the operator-policy statement to apply, or says the permission belongs to the setup identity (OzBoxSetup). The setup state bucket is the setup identity's, so it is reported but never stops setup.
+  - **Checked on a real account.** The new permission check passed every line with a least-privilege operator role on a real AWS account; a full setup run with the `OzBoxSetup` permission set is still to come.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Telegram (Preview)">
   ## Link your Telegram account with a passkey, and allow a phone to talk to agents on boxes you choose
 
