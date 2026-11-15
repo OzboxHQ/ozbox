@@ -63,6 +63,10 @@ mod run_transport;
 mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
+mod telegram_bridge;
+mod telegram_link;
+#[cfg(test)]
+mod telegram_tests;
 #[cfg(test)]
 pub(crate) use sim_code::accept_key as sim_code_accept;
 pub(crate) mod runs_routes;
@@ -308,8 +312,8 @@ pub struct App {
     state: ServerState,
     state_path: Option<std::path::PathBuf>,
     engine: Engine,
-    pairing: Option<crate::telegram::Pairing>,
-    bot_name: Option<String>,
+    /// The Telegram bridge's links, delegations, replay set and what is waiting for a passkey (see `telegram_link`).
+    tg: telegram_link::TgRt,
     schedule: apps::Schedule,
     /// The backup schedule's runtime: what is running, and what the worker has finished.
     backup_rt: backups::Runtime,
@@ -460,8 +464,7 @@ impl App {
             state: ServerState::default(),
             state_path: None,
             engine: Engine::default(),
-            pairing: None,
-            bot_name: None,
+            tg: telegram_link::TgRt::in_memory(),
             schedule: apps::Schedule::default(),
             backup_rt: backups::Runtime::default(),
             activity: VecDeque::new(),
@@ -565,6 +568,10 @@ impl App {
         }
         self.prices_path = prices;
         self.state_path = state;
+        if let Some(sp) = self.state_path.clone() {
+            // the Telegram links and the replay set live in their own, durably written file beside the state
+            self.tg = telegram_link::TgRt::beside(&sp);
+        }
         self
     }
 
@@ -839,7 +846,7 @@ impl App {
             ["secrets", name] if req.method == "PUT" => self.put_secret(name, &req.body),
             ["secrets", name] if req.method == "DELETE" => self.delete_secret(name),
             ["apps"] if get => self.apps(),
-            ["apps", "telegram", "pairing"] if post => self.start_pairing(&req.body),
+            ["telegram", rest @ ..] => self.telegram_route(req, rest),
             ["apps", "telegram", "chats", id] if req.method == "PUT" => {
                 self.link_chat(id, &req.body)
             }
@@ -855,6 +862,12 @@ impl App {
             ["alerts", "tests", id] if get => self.test_run(id),
             ["demo", "telegram", "message"] if post && self.demo_telegram.is_some() => {
                 self.demo_telegram_say(&req.body)
+            }
+            ["demo", "telegram", "legacy-chat"] if post && self.demo_telegram.is_some() => {
+                self.demo_telegram_legacy_chat(&req.body)
+            }
+            ["demo", "telegram", "script"] if post && self.demo_telegram.is_some() => {
+                self.demo_telegram_script(&req.body)
             }
             ["demo", "telegram", "fail"] if post && self.demo_telegram.is_some() => {
                 self.demo_telegram_fail(&req.body)
@@ -933,7 +946,6 @@ impl App {
             | ["secrets"]
             | ["secrets", _]
             | ["apps"]
-            | ["apps", "telegram", "pairing"]
             | ["apps", "telegram", "chats", _]
             | ["apps", "webhooks"]
             | ["apps", "webhooks", _]

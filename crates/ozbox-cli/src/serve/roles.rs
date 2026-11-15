@@ -80,6 +80,21 @@ pub(super) fn classify_named(method: &str, path: &str) -> Option<Need> {
         ["orchestrations", ..] => read_or(RunStart),
         ["approval-requests", ..] => read_or(ApprovalDecide),
         ["approval-policy"] => read_or(SettingsChange),
+        // Telegram links (ADR 0050): looking is for anyone signed in; making a link or a delegation is working, and the passkey is
+        // asked inside. What only makes Telegram less able (lock, unlink, revoke) is open to anyone for their own link, and the
+        // handler checks whose it is.
+        ["telegram"] if get => Need::Read,
+        ["telegram", "window" | "link", ..] => Need::Act(RunStart),
+        ["telegram", "links", _, "lock" | "unlock", ..] | ["telegram", "links", _] if !get => {
+            Need::Read
+        }
+        ["telegram", "links", _, "transcript"] => Need::Act(SettingsChange),
+        ["telegram", "links", _, "renew" | "delegations", ..] => Need::Act(RunStart),
+        ["telegram", "delegations", _] if !get => Need::Read,
+        ["telegram", "delegations", _, "cosign", ..] => Need::Act(SettingsChange),
+        ["telegram", "lock-all" | "resume" | "marks"] => Need::Act(SettingsChange),
+        // anything else under here that changes something is an owner's
+        ["telegram", ..] => read_or(SettingsChange),
         // memory is the agents' notes; a skill is code an agent may run, so reviewing one is the owner's
         ["memory", ..] => read_or(FileWrite),
         ["skills", ..] => read_or(SettingsChange),

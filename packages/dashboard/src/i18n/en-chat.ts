@@ -60,7 +60,7 @@ export const enChatApps = {
   'apps.chat_help': 'Talk to the agents on your boxes from Slack or WhatsApp, with your own Slack app and WhatsApp Business number. Only people you link are heard. Telegram is set up above; the Chat page works without any setup.',
   'apps.notify_only': 'For approvals this app only notifies. A request that needs an answer arrives as a message with a link to the dashboard, where it is approved or denied. A chat app cannot approve, deny, stop or raise a spending limit, and it cannot type into a coding agent that is asking its own question.',
   'apps.chat_no_public_url': 'This dashboard has no public address, so these apps cannot send a link that opens it: a message will say to open the dashboard instead. Set the address in Settings, Access.',
-  'apps.tg_demo': 'Demo: this Telegram is a stand-in bot on this server, not a real chat. Nothing reaches a phone, and a pairing code only pairs this demo.',
+  'apps.tg_demo': 'Demo: this Telegram is a stand-in bot on this server, not a real chat. Nothing reaches a phone, and a link made here only links this demo.',
   'apps.remove_off_failed': 'Nothing was removed, because the channel could not be turned off first: {why}',
   'apps.remove_partial': 'It is turned off, but these could not be removed from the secret store and are still stored: {names}. Choose Remove again.',
   'apps.key_saved_settings_not': 'The key was saved, but the settings were not: {why} Choose Save again.',

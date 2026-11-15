@@ -263,6 +263,48 @@ pub fn verify_assertion(
     auth_data_b64: &str,
     signature_b64: &str,
 ) -> Result<u32, WebAuthnError> {
+    verify_assertion_with(
+        rp,
+        challenge,
+        pk,
+        client_data_b64,
+        auth_data_b64,
+        signature_b64,
+        true,
+    )
+}
+
+/// Check an assertion's signature, relying party, origin, challenge, presence and verification, **without** the counter
+/// check: for evidence that was stored when it was made and is checked again later (a delegation), by which time the
+/// passkey's counter has moved on. A new assertion is always checked by [`verify_assertion`].
+pub fn verify_stored_assertion(
+    rp: &Rp,
+    challenge: &[u8],
+    pk: &Passkey,
+    client_data_b64: &str,
+    auth_data_b64: &str,
+    signature_b64: &str,
+) -> Result<u32, WebAuthnError> {
+    verify_assertion_with(
+        rp,
+        challenge,
+        pk,
+        client_data_b64,
+        auth_data_b64,
+        signature_b64,
+        false,
+    )
+}
+
+fn verify_assertion_with(
+    rp: &Rp,
+    challenge: &[u8],
+    pk: &Passkey,
+    client_data_b64: &str,
+    auth_data_b64: &str,
+    signature_b64: &str,
+    check_counter: bool,
+) -> Result<u32, WebAuthnError> {
     let cd = check_client_data(rp, "webauthn.get", challenge, client_data_b64)?;
     let ad = decode_url(auth_data_b64).ok_or(WebAuthnError::BadInput)?;
     let sig = decode_url(signature_b64).ok_or(WebAuthnError::BadInput)?;
@@ -280,7 +322,7 @@ pub fn verify_assertion(
         .verify(&signed, &sig)
         .map_err(|_| WebAuthnError::BadSignature)?;
     // A counter that does not move forward means a cloned authenticator. Many passkeys always report 0: allow that.
-    if (pk.sign_count != 0 || a.counter != 0) && a.counter <= pk.sign_count {
+    if check_counter && (pk.sign_count != 0 || a.counter != 0) && a.counter <= pk.sign_count {
         return Err(WebAuthnError::CounterRegression);
     }
     Ok(a.counter)
