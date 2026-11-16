@@ -8,7 +8,7 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
+<Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 
   - **A real app's command declaration saves.** Declarations are stored as records with a 256 KB limit, so a Next.js app's pins fit, and a refused save no longer uses up your approval code.
@@ -20,7 +20,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** Install with `sh install.sh --version 0.2.0-beta.2`, then `ozbox upgrade <box>`.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes made by 0.1.x">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="AWS boxes made by 0.1.x">
   ## `ozbox adopt-fleet-key` no longer fails half way on a box made by 0.1.x
 
   A box made by `0.1.x` has a system disk that was never tagged. Moving its secrets store to your fleet's KMS key tried to tag that disk, the permissions `ozbox` runs with cannot put a first tag on an existing disk, and the command failed after it had already marked the box as moving. An administrator had to tag the disk by hand before it could go on.
@@ -30,7 +30,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The permissions did not widen.** Neither the daily `ozbox` sign-in nor the setup sign-in can tag an existing disk as Oz Box's, so a disk it did not make cannot be claimed and then changed. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="0.2.0-beta.2: a box moved to your fleet's key starts its secrets service">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="0.2.0-beta.2: a box moved to your fleet's key starts its secrets service">
   ## A box upgraded onto your fleet's KMS key now starts its secrets service
 
   Upgrading a box with a file-kept secrets key onto the fleet's KMS key (`ozbox upgrade <box> --accept-new-secrets-store --use-fleet-key`) could leave its secrets service retrying forever, with the old store unopenable and nothing set aside. This release fixes it.
@@ -55,7 +55,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** Install with `sh install.sh --version 0.2.0-beta.1`, then `ozbox upgrade <box>`.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Declarations of a real application">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="Declarations of a real application">
   ## A real application's command declaration now saves, and a refused one no longer uses up your approval code
 
   `ozbox env policy set` refused a realistic declaration (a service, a folder pin for each package a Next.js build traced, a few file pins and a tool, about 7 KB) with "the value is too long", because it was stored like a short key. And when the box refused a save, your single-use approval code was already spent, so you had to make another by hand each time.
@@ -69,7 +69,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - `ozbox secrets status` no longer counts a declaration among the encoded values.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Upgrading an old box no longer destroys the key to its secrets">
+<Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="Upgrading an old box no longer destroys the key to its secrets">
   ## An upgrade that could lose your secrets store keeps a copy of the old system disk first
 
   A box made on `0.1.x` keeps the key to its secrets store in a file on its system disk, and an upgrade replaces that disk. The upgrade could not prove the key survived, so it refused unless you accepted a new, empty store, and accepting it destroyed the old key for good: every key had to be entered again, and the old store could never be opened.
@@ -136,7 +136,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 <Update label="November 16, 2026" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Importing .env files">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="Importing .env files">
   ## `ozbox secrets import` allows a whole production file in one flag, reads `.env` files properly, and accounts for every line
 
   Importing a production `.env` file meant naming every key with its own `--allow-live`, and the result could say "stored 72" for a file of 73 with no word on the missing one.
@@ -148,7 +148,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A key already stored with the same value is left alone** and reported as unchanged (an import to this computer's store; a box does not say).
 </Update>
 
-<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
+<Update label="November 16, 2026" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 
   Skills could only be added with `ozbox skills add` on the computer running the dashboard, and an installed skill never reached a box's own coding agents.
