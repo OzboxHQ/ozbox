@@ -34,7 +34,6 @@ pub fn provider_named(kind: &str, path: &Path) -> Result<Arc<dyn KeyProvider>, S
                 SecretError("OZBOX_SECRET_KEK=kms needs OZBOX_KMS_KEY_ID to name the key".into())
             })?;
             Ok(Arc::new(KmsProvider::new(
-                runner,
                 &id,
                 env("OZBOX_KMS_REGION").as_deref(),
             )?))

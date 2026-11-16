@@ -42,6 +42,10 @@ pub struct SelfTestConfig {
     /// socket and the import socket. A socket that exists but refuses this user means the service cannot be used at all.
     /// Empty off a box; a socket whose directory does not exist is a box without the service, and is skipped.
     pub secrets_sockets: Vec<PathBuf>,
+    /// What the secrets service says about itself (`/run/ozbox-secrets/state`). When it says the service is not ready, the
+    /// self-test fails and names the key that protects the store, so a box whose key cannot be used is never reported well.
+    /// `None` off a box; a missing file is a box without the service, and is skipped.
+    pub secrets_state_file: Option<PathBuf>,
     /// Root's approval setting files (`approvals-legacy-codes-off`, `approvals-presence-keys`). A file that is there but not
     /// root's, or that others can write, is ignored by the secrets service, so root's setting does not hold: that fails the
     /// test (phase 2 re-check NL9). Empty off a box; absent files are fine (the setting is its default).
@@ -113,6 +117,46 @@ pub const APPROVAL_FLAG_FILES: &[&str] = &[
     "/etc/ozbox/approvals-presence-keys",
 ];
 
+/// Where the secrets service writes its state.
+pub const SECRETS_STATE_FILE: &str = "/run/ozbox-secrets/state";
+
+/// Whether the secrets service can use the key that protects its store, from the state file it writes (the first line is for a
+/// person, `kek=` names the key's kind). Ready passes. Not ready on a KMS key fails, in words a person can act on; not ready
+/// on another kind is `unknown` (the service may only be starting). `None` when there is no state file.
+fn secrets_key_check(host: &dyn HostSource, path: &Path) -> Option<Check> {
+    const NAME: &str = "secrets_key_usable";
+    let text = host.read(&path.to_string_lossy()).ok()?;
+    let first = text.lines().next().unwrap_or("").trim();
+    let kek = text
+        .lines()
+        .find_map(|l| l.strip_prefix("kek="))
+        .map(str::trim)
+        .filter(|k| matches!(*k, "kms" | "tpm2" | "keychain" | "passphrase" | "file"));
+    if first == "ready" || first.starts_with("ready:") {
+        return Some(pass(NAME));
+    }
+    // the first line is the service's own fixed sentence; keep it short and on one line
+    let why: String = first.chars().take(300).collect();
+    Some(match kek {
+        Some("kms") => fail(
+            NAME,
+            "the secrets service's state",
+            format!(
+                "this box is set up for the fleet's KMS key and the secrets service cannot use it, so no secret can be read or saved. The service says: {why}. Check that the box's role may use the key (the key service refuses a role whose tag or policy does not match), that the key service is reachable from the box, and the box's `/etc/ozbox/secrets.env` names the right key; then restart ozbox-secrets.service. `ozbox admin <box> -- collect-logs` shows more"
+            ),
+        ),
+        other => Check {
+            name: NAME.into(),
+            outcome: Outcome::Unknown {
+                reason: format!(
+                    "the secrets service is not ready (key kind: {}): {why}",
+                    other.unwrap_or("not said")
+                ),
+            },
+        },
+    })
+}
+
 /// Where the box user's secrets-service sockets are on a box.
 pub const BOX_USER_SECRETS_SOCKETS: &[&str] = &[
     "/run/ozbox-secrets/box/box.sock",
@@ -132,6 +176,7 @@ impl SelfTestConfig {
             work_encrypted: "unknown".into(),
             tunnel_units: Vec::new(),
             secrets_sockets: Vec::new(),
+            secrets_state_file: None,
             approval_flag_files: Vec::new(),
             dashboard_socket: None,
             user_cgroup_root: None,
@@ -725,6 +770,14 @@ pub fn run(
     if let Some(c) = secrets_sockets_check(&cfg.secrets_sockets) {
         checks.push(c);
     }
+    // ... and the key that protects the store can be used (a KMS key the box cannot reach leaves the service down)
+    if let Some(c) = cfg
+        .secrets_state_file
+        .as_deref()
+        .and_then(|p| secrets_key_check(host, p))
+    {
+        checks.push(c);
+    }
 
     // root's approval setting files, when there are any, are ones the service trusts
     if let Some(c) = approval_flags_check(&cfg.approval_flag_files) {
@@ -948,6 +1001,47 @@ mod tests {
             o => panic!("{o:?}"),
         }
         assert!(check(vec![absent], &mut cfg).is_none());
+    }
+
+    #[test]
+    fn a_kms_box_whose_key_cannot_be_used_fails_the_self_test_in_words_to_act_on() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut cfg, h) = setup(d.path());
+        cfg.secrets_state_file = Some(PathBuf::from(SECRETS_STATE_FILE));
+        let by = |h: &FakeHost| {
+            run(&cfg, h, &RecordingRunner::new(), "/bin", &|| Ok(()), 7)
+                .checks
+                .into_iter()
+                .find(|c| c.name == "secrets_key_usable")
+                .map(|c| c.outcome)
+        };
+        // no state file: a box without the service
+        assert_eq!(by(&h), None);
+        h.set(SECRETS_STATE_FILE, "ready\nkek=kms\n");
+        assert_eq!(by(&h), Some(Outcome::Pass));
+        h.set(
+            SECRETS_STATE_FILE,
+            "not-ready: the key that protects this machine's secrets is not available, so nothing was read or changed (check the key service or the keychain, then try again)\nkek=kms\ncode=transient\n",
+        );
+        match by(&h) {
+            Some(Outcome::Fail { reason, .. }) => {
+                assert!(
+                    reason.contains("KMS key") && reason.contains("not available"),
+                    "{reason}"
+                );
+                assert!(
+                    reason.contains("secrets.env") && reason.contains("collect-logs"),
+                    "{reason}"
+                );
+            }
+            o => panic!("{o:?}"),
+        }
+        // another kind of key that is not ready may only be starting: unknown, never a pass
+        h.set(
+            SECRETS_STATE_FILE,
+            "not-ready: starting\nkek=file\ncode=transient\n",
+        );
+        assert!(matches!(by(&h), Some(Outcome::Unknown { reason }) if reason.contains("file")));
     }
 
     #[test]

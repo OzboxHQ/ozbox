@@ -2001,3 +2001,24 @@ and the migration from the old names; they do not run systemd, nft or the kernel
   says which before anything is replaced, and refuses to lose a store unless the person accepts it (Amendment 8).
 - A laptop signer without proven user presence (a software key, which includes a Secure Enclave key until a proof and verifier
   are named, ADR 0041 §3) is refused for Production, with no override; browser credentials are outside this record.
+
+## Amendment 13 (2026-11-16): the KMS key is called natively, with the box's role, and the self-test says when it cannot be used
+
+A box set up for the fleet's KMS key could not start its secrets service: the key was called through the `aws` command, and the
+box image does not carry it (its installer's signature cannot be verified, so `ozbox tools` refuses it). Every start failed with
+the "key is not available" message and no request ever reached the key service. CI had only run that path against a fake runner.
+
+- **No command, no SDK.** The secrets service calls KMS itself (`Encrypt` and `Decrypt`, AWS JSON signed with SigV4 by the same
+  signer the model broker uses, checked against AWS's published test vector). Credentials are the box's role, read through the
+  instance metadata service (version 2, a token first) and kept in memory until a minute before they expire; the environment's
+  `AWS_ACCESS_KEY_ID` and friends are read first, so a test or a laptop with temporary keys works. Profiles and single sign-on are
+  not read: a box's store is opened by the box's role.
+- **Nothing else changed.** The encryption context is the same (`store`, `scope`, `name`), so the role's condition on the box
+  name and the audit trail read as before. The region is the setting, else the key ARN's, else the environment's, else the
+  machine's own. An access-denied answer is still told apart from every other failure; nothing from the service, the credentials or
+  the request is in an error.
+- **The self-test says it.** It reads the service's state file and fails, naming the KMS key and what to check, when a box set up
+  for KMS cannot use its key (`secrets_key_usable`). Another kind of key that is not ready is reported as unknown.
+- **Not covered.** Reading box secrets from Parameter Store (`box-secrets`) still starts the `aws` command and has the same
+  problem on an image without it; it is the next thing to move to the same client. The native client was tested against loopback
+  fakes, not a real account.

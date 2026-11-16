@@ -128,6 +128,11 @@ then mark any disk in the account as its own.
 
 ## 1a. A box whose secrets store can no longer be opened
 
+**A box set up for the fleet's KMS key** keeps its store's key in KMS and reaches it with the box's own role: no `aws` command is
+needed on the box. If the role cannot use the key, the secrets service stays down and the box's self-test fails `secrets_key_usable`,
+naming the KMS key and what to check (the role's access to the key, the key service being reachable, the key named in
+`/etc/ozbox/secrets.env`). That is not a lost store: nothing is set aside, and it starts again by itself once the key works.
+
 **You want:** to start a new secrets store on a box whose store's key was lost with its system disk (no escrow).
 
 ```

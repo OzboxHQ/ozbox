@@ -11,6 +11,7 @@ mod approval_wait;
 mod attestation;
 mod audit_service;
 mod auth_cli;
+mod aws_native;
 mod awscli;
 mod backup_ops;
 mod backups;
