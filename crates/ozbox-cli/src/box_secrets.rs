@@ -10,9 +10,11 @@
 //! the same rule as an import.
 
 use ozbox_core::{CommandRunner, CommandSpec};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use crate::aws_native::{service_base, valid_region, AwsJson, Failure};
 use crate::workload::live_reason;
 
 /// Environments a box's own keys may belong to. Production is never one of them.
@@ -31,57 +33,121 @@ pub trait Backend {
     fn fetch(&self, root: &str) -> Result<Vec<Param>, String>;
 }
 
-/// AWS Systems Manager Parameter Store, through the `aws` command (no SDK: ADR 0008). The instance role is the credential;
-/// its policy reads the role's path and nothing else.
-pub struct AwsSsm<'a> {
-    pub runner: &'a dyn CommandRunner,
-    pub region: String,
+/// AWS Systems Manager Parameter Store, called natively (ADR 0008: no SDK, and no `aws` command: the box image does not carry
+/// it). The request is AWS JSON (`AmazonSSM.GetParametersByPath`) signed with SigV4 by the box's own role (see
+/// [`crate::aws_native`]); its policy reads the role's path and nothing else. A value is in the answer only, zeroized, and
+/// never in an argument, a file, a log or an error.
+pub struct AwsSsm {
+    client: AwsJson,
+    region: String,
+    /// The service's address, for a test; `None` is the real one for the region.
+    base: Option<String>,
 }
 
-impl Backend for AwsSsm<'_> {
+/// The most pages one read follows (ten parameters each), so a service that never stops answering cannot hold the loader.
+const MAX_PAGES: usize = 100;
+
+pub const SSM_DENIED: &str =
+    "the parameter store refused this box's role (check the role's policy and the path)";
+pub const SSM_UNAVAILABLE: &str = "the parameter store could not be read (check the box's role, the path and that the box can reach the parameter store)";
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ByPathRequest<'a> {
+    path: &'a str,
+    recursive: bool,
+    with_decryption: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_token: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct ByPathAnswer {
+    #[serde(rename = "Parameters", default)]
+    parameters: Vec<RawParam>,
+    #[serde(rename = "NextToken", default)]
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawParam {
+    #[serde(rename = "Name", default)]
+    name: Option<String>,
+    #[serde(rename = "Value", default, deserialize_with = "zeroizing_opt")]
+    value: Option<Zeroizing<String>>,
+}
+
+fn zeroizing_opt<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Zeroizing<String>>, D::Error> {
+    Option::<String>::deserialize(d).map(|o| o.map(Zeroizing::new))
+}
+
+impl AwsSsm {
+    /// `region` is the declared one, or empty for the environment's, else this machine's own.
+    pub fn new(region: &str) -> Self {
+        Self::build(AwsJson::new(), region, None)
+    }
+
+    fn build(client: AwsJson, region: &str, base: Option<&str>) -> Self {
+        Self {
+            client,
+            region: region.to_string(),
+            base: base.map(str::to_string),
+        }
+    }
+}
+
+impl Backend for AwsSsm {
     fn label(&self) -> &'static str {
         "AWS Parameter Store"
     }
     fn fetch(&self, root: &str) -> Result<Vec<Param>, String> {
-        let mut args = vec![
-            "ssm".to_string(),
-            "get-parameters-by-path".into(),
-            "--path".into(),
-            root.to_string(),
-            "--recursive".into(),
-            "--with-decryption".into(),
-            "--output".into(),
-            "json".into(),
-        ];
-        if !self.region.is_empty() {
-            args.push("--region".into());
-            args.push(self.region.clone());
+        let region = if self.region.is_empty() {
+            self.client.region_or_default(None)
+        } else if valid_region(&self.region) {
+            Some(self.region.clone())
+        } else {
+            return Err("the box's parameter store region is not valid".into());
         }
-        let out = self
-            .runner
-            .run(&CommandSpec::new("aws").args(args))
-            .map_err(|_| "the aws command could not be started".to_string())?;
-        if out.status != Some(0) {
-            // the tool's own words can name an account or a path: say only what failed
-            return Err(
-                "the parameter store could not be read (check the box's role and the path)".into(),
+        .ok_or_else(|| SSM_UNAVAILABLE.to_string())?;
+        let base = self
+            .base
+            .clone()
+            .unwrap_or_else(|| service_base("ssm", &region));
+        let mut out = Vec::new();
+        let mut token: Option<Zeroizing<String>> = None;
+        for _ in 0..MAX_PAGES {
+            let body = Zeroizing::new(
+                serde_json::to_vec(&ByPathRequest {
+                    path: root,
+                    recursive: true,
+                    with_decryption: true,
+                    next_token: token.as_deref().map(String::as_str),
+                })
+                .map_err(|_| SSM_UNAVAILABLE.to_string())?,
             );
+            let answer = self
+                .client
+                .call(&base, &region, "ssm", "AmazonSSM.GetParametersByPath", body)
+                .map_err(|f| match f {
+                    Failure::Denied => SSM_DENIED.to_string(),
+                    Failure::Unavailable => SSM_UNAVAILABLE.to_string(),
+                })?;
+            // the parser's own words can quote the text it choked on: say only that it was bad
+            let page: ByPathAnswer = serde_json::from_slice(&answer)
+                .map_err(|_| "the parameter store answered badly".to_string())?;
+            for p in page.parameters {
+                if let (Some(path), Some(value)) = (p.name, p.value) {
+                    out.push(Param { path, value });
+                }
+            }
+            match page.next_token.filter(|t| !t.is_empty()) {
+                Some(t) => token = Some(Zeroizing::new(t)),
+                None => return Ok(out),
+            }
         }
-        let v: Value = serde_json::from_str(&out.stdout)
-            .map_err(|_| "the parameter store answered badly".to_string())?;
-        Ok(v["Parameters"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|p| {
-                        Some(Param {
-                            path: p["Name"].as_str()?.to_string(),
-                            value: Zeroizing::new(p["Value"].as_str()?.to_string()),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default())
+        Err("the parameter store has more parameters under this path than the box reads".into())
     }
 }
 
@@ -324,36 +390,271 @@ mod tests {
         }
     }
 
+    use crate::aws_native::fakes::{self, json, seen_of, Fake, Seen};
+    use std::sync::{Arc, Mutex};
+
+    type Handler = dyn Fn(usize, &Seen) -> (u16, String) + Send + Sync;
+
+    /// A loopback parameter store: every request is recorded, and `handler(n, request)` says what the n-th one gets.
+    struct Ssm {
+        base: String,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    fn ssm(handler: Arc<Handler>) -> Ssm {
+        let srv = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", srv.server_addr().to_ip().unwrap());
+        let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut r in srv.incoming_requests() {
+                let s = seen_of(&mut r);
+                let n = {
+                    let mut l = log.lock().unwrap();
+                    l.push(s.clone());
+                    l.len() - 1
+                };
+                let (code, body) = handler(n, &s);
+                let _ = r.respond(json(code, &body));
+            }
+        });
+        Ssm { base, seen }
+    }
+
+    fn against(f: &Fake, s: &Ssm, region: &str) -> AwsSsm {
+        AwsSsm::build(AwsJson::with_imds(&f.imds), region, Some(&s.base))
+    }
+
+    fn page(names: &[(&str, &str)], next: Option<&str>) -> String {
+        let ps: Vec<Value> = names
+            .iter()
+            .map(|(n, v)| serde_json::json!({"Name": n, "Value": v, "Type": "SecureString"}))
+            .collect();
+        match next {
+            Some(t) => serde_json::json!({"Parameters": ps, "NextToken": t}),
+            None => serde_json::json!({"Parameters": ps}),
+        }
+        .to_string()
+    }
+
     #[test]
-    fn the_parameter_store_is_read_through_the_aws_command_and_a_failure_names_no_path() {
-        let r = RecordingRunner::new();
-        r.reply(Output {
-            status: Some(0),
-            stdout: format!(
-                "{{\"Parameters\":[{{\"Name\":\"/r/a/staging/K\",\"Value\":\"{SENTINEL}\"}}]}}"
-            ),
-            stderr: String::new(),
-        });
-        let b = AwsSsm {
-            runner: &r,
-            region: "us-east-1".into(),
-        };
-        let p = b.fetch("/r").unwrap();
-        assert_eq!(p[0].path, "/r/a/staging/K");
-        let c = &r.calls()[0];
-        let joined = c.args.join(" ");
-        assert!(
-            joined.contains("get-parameters-by-path")
-                && joined.contains("--with-decryption")
-                && !joined.contains(SENTINEL)
+    fn the_parameter_store_is_called_natively_with_a_signed_request_for_the_path_recursively_decrypted(
+    ) {
+        let f = Fake::start();
+        let s = ssm(Arc::new(|_, _| {
+            (200, page(&[("/r/a/staging/K", SENTINEL)], None))
+        }));
+        let p = against(&f, &s, "us-east-1").fetch("/r").unwrap();
+        assert_eq!((p.len(), p[0].path.as_str()), (1, "/r/a/staging/K"));
+        assert_eq!(p[0].value.as_str(), SENTINEL);
+        let seen = s.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let r = &seen[0];
+        assert_eq!(r.method, "POST");
+        assert_eq!(
+            r.header("x-amz-target"),
+            Some("AmazonSSM.GetParametersByPath")
         );
-        r.reply(Output {
-            status: Some(255),
-            stdout: String::new(),
-            stderr: "AccessDenied for arn:aws:ssm:secret-path".into(),
-        });
-        let e = b.fetch("/r").err().unwrap();
-        assert!(!e.contains("arn") && !e.contains("secret-path"));
+        assert_eq!(r.header("content-type"), Some("application/x-amz-json-1.1"));
+        assert_eq!(r.header("x-amz-security-token"), Some(fakes::SESSION_TOKEN));
+        let auth = r.header("authorization").unwrap();
+        assert!(auth.contains(&format!("Credential={}/", fakes::ACCESS_KEY)));
+        assert!(auth.contains("/us-east-1/ssm/aws4_request"), "{auth}");
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["Path"], "/r");
+        assert_eq!(body["Recursive"], true);
+        assert_eq!(body["WithDecryption"], true);
+        assert!(body.get("NextToken").is_none());
+        // the secret key never leaves the signer
+        assert!(!format!("{:?}", r.headers).contains(fakes::SECRET_KEY));
+    }
+
+    #[test]
+    fn three_pages_are_followed_by_their_tokens_and_all_of_them_returned() {
+        let f = Fake::start();
+        let s = ssm(Arc::new(|n, req| {
+            let body: Value = serde_json::from_str(&req.body).unwrap();
+            match n {
+                0 => {
+                    assert!(body.get("NextToken").is_none());
+                    (200, page(&[("/r/a/test/A", "one-one-one")], Some("tok-1")))
+                }
+                1 => {
+                    assert_eq!(body["NextToken"], "tok-1");
+                    (200, page(&[("/r/a/test/B", "two-two-two")], Some("tok-2")))
+                }
+                _ => {
+                    assert_eq!(body["NextToken"], "tok-2");
+                    (200, page(&[("/r/a/test/C", SENTINEL)], None))
+                }
+            }
+        }));
+        let p = against(&f, &s, "us-east-1").fetch("/r").unwrap();
+        let names: Vec<&str> = p.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(names, ["/r/a/test/A", "/r/a/test/B", "/r/a/test/C"]);
+        assert_eq!(s.seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_store_that_never_stops_paging_is_cut_off_with_an_error_not_a_partial_read() {
+        let f = Fake::start();
+        let s = ssm(Arc::new(|_, _| (200, page(&[], Some("again")))));
+        let e = against(&f, &s, "us-east-1").fetch("/r").err().unwrap();
+        assert!(e.contains("more parameters"), "{e}");
+        assert_eq!(s.seen.lock().unwrap().len(), MAX_PAGES);
+    }
+
+    #[test]
+    fn access_denied_and_unreachable_are_told_apart_and_name_no_path_or_value() {
+        let f = Fake::start();
+        let denied = ssm(Arc::new(|_, _| {
+            (
+                400,
+                format!(
+                    r#"{{"__type":"AccessDeniedException","message":"User: arn:aws:sts::123456789012:assumed-role/x is not authorized to perform ssm:GetParametersByPath on /secret-path {SENTINEL}"}}"#
+                ),
+            )
+        }));
+        let e = against(&f, &denied, "us-east-1").fetch("/r").err().unwrap();
+        assert_eq!(e, SSM_DENIED);
+        for bad in ["arn", "secret-path", "assumed-role", SENTINEL] {
+            assert!(!e.contains(bad), "{e}");
+        }
+        // a throttle and a server error are a reason to try again, never a refusal
+        for (code, body) in [
+            (400, r#"{"__type":"ThrottlingException"}"#.to_string()),
+            (500, format!("boom {SENTINEL}")),
+        ] {
+            let s = ssm(Arc::new(move |_, _| (code, body.clone())));
+            let e = against(&f, &s, "us-east-1").fetch("/r").err().unwrap();
+            assert_eq!(e, SSM_UNAVAILABLE);
+            assert!(!e.contains(SENTINEL));
+        }
+        // nothing listens
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let b = AwsSsm::build(AwsJson::with_imds(&f.imds), "us-east-1", Some(&dead));
+        assert_eq!(b.fetch("/r").err().unwrap(), SSM_UNAVAILABLE);
+        // no metadata service and no environment: no credentials, so unavailable (never denied)
+        let s = ssm(Arc::new(|_, _| (200, page(&[], None))));
+        let down = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let b = AwsSsm::build(AwsJson::with_imds(&down), "us-east-1", Some(&s.base));
+        assert_eq!(b.fetch("/r").err().unwrap(), SSM_UNAVAILABLE);
+        assert!(s.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_answer_that_is_not_what_the_store_sends_is_one_plain_error_with_no_value_in_it() {
+        let f = Fake::start();
+        // truncated JSON that carries a value, and a wrong shape that carries one
+        for body in [
+            format!(r#"{{"Parameters":[{{"Name":"/r/a/test/K","Value":"{SENTINEL}""#),
+            format!(r#"{{"Parameters":"{SENTINEL}"}}"#),
+        ] {
+            let s = ssm(Arc::new(move |_, _| (200, body.clone())));
+            let e = against(&f, &s, "us-east-1").fetch("/r").err().unwrap();
+            assert_eq!(e, "the parameter store answered badly");
+        }
+        // an entry with no name or no value is skipped, as before
+        let s = ssm(Arc::new(|_, _| {
+            (
+                200,
+                r#"{"Parameters":[{"Name":"/r/a/test/K"},{"Value":"v"},{"Name":"/r/a/test/J","Value":"jjjjjjjj"}]}"#.into(),
+            )
+        }));
+        let p = against(&f, &s, "us-east-1").fetch("/r").unwrap();
+        assert_eq!(p.len(), 1);
+        // a region that is not one is refused before anything is sent
+        let e = against(&f, &s, "US EAST;1").fetch("/r").err().unwrap();
+        assert!(e.contains("region"));
+    }
+
+    #[test]
+    fn the_region_comes_from_the_setting_else_the_machine_and_is_what_the_request_is_signed_for() {
+        let f = Fake::start();
+        let s = ssm(Arc::new(|_, _| (200, page(&[], None))));
+        against(&f, &s, "ap-south-1").fetch("/r").unwrap();
+        if std::env::var("AWS_REGION").is_err() && std::env::var("AWS_DEFAULT_REGION").is_err() {
+            against(&f, &s, "").fetch("/r").unwrap();
+            let seen = s.seen.lock().unwrap();
+            assert!(seen[0]
+                .header("authorization")
+                .unwrap()
+                .contains("/ap-south-1/ssm/"));
+            // the fake metadata service says eu-west-2
+            assert!(seen[1]
+                .header("authorization")
+                .unwrap()
+                .contains("/eu-west-2/ssm/"));
+        }
+    }
+
+    #[test]
+    fn the_parameter_store_works_with_no_aws_command_anywhere() {
+        // Run a read in a child process whose PATH holds nothing, so any attempt to start the `aws` command (the defect this
+        // replaces) would fail it. The child is this same test binary, asked for one test.
+        if std::env::var("OZBOX_SSM_NO_AWS_CHILD").is_ok() {
+            let f = Fake::start();
+            let s = ssm(Arc::new(|_, _| {
+                (200, page(&[("/r/a/test/K", SENTINEL)], None))
+            }));
+            let p = against(&f, &s, "us-east-1").fetch("/r").unwrap();
+            assert_eq!(p[0].value.as_str(), SENTINEL);
+            return;
+        }
+        let empty = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "box_secrets::tests::the_parameter_store_works_with_no_aws_command_anywhere",
+                "--nocapture",
+            ])
+            .env("OZBOX_SSM_NO_AWS_CHILD", "1")
+            .env("PATH", empty.path())
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
+    }
+
+    #[test]
+    fn the_box_secrets_path_never_starts_the_aws_command() {
+        // a guard on the source: a loader that needs a program the image does not carry is the defect. Only the code before
+        // the tests, and not a comment, is read; the aws program is named by building the needle, so this file passes.
+        let src = include_str!("box_secrets.rs");
+        let code: String = src
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // the OpenBao backend still runs `bao` (see the follow-up in the changelog); nothing here may run `aws`
+        let (ssm_part, _) = code.split_once("pub struct OpenBao").unwrap();
+        for needle in [
+            ["CommandSpec::new(", "\"aws\")"].concat(),
+            ["program: ", "\"aws\""].concat(),
+            ["Command", "::new("].concat(),
+            ["\"get-parameters", "-by-path\""].concat(),
+            ["\"--with", "-decryption\""].concat(),
+        ] {
+            assert!(!ssm_part.contains(&needle), "{needle}");
+        }
+        assert!(
+            !ssm_part.contains("runner"),
+            "the parameter store takes no command runner"
+        );
     }
 
     #[test]

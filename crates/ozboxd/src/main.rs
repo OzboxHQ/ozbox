@@ -520,6 +520,10 @@ mod daemon {
             stcfg.secrets_state_file = Some(std::path::PathBuf::from(selftest::SECRETS_STATE_FILE));
         }
         if cfg.selftest.require_mount {
+            stcfg.box_secrets_declaration =
+                Some(std::path::PathBuf::from(selftest::BOX_SECRETS_DECLARATION));
+        }
+        if cfg.selftest.require_mount {
             stcfg.approval_flag_files = selftest::APPROVAL_FLAG_FILES
                 .iter()
                 .map(std::path::PathBuf::from)

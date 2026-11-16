@@ -320,20 +320,20 @@ jobs:
           fi
           # the release job requires this file for every architecture it publishes
           printf '%s\n' "$got" >"out/ozbox-linux-$ARCH.first-boot"
-      - name: The program reaches its secrets key itself (the image has no aws command, so a store on KMS must not need one)
+      - name: The program reaches its secrets key and its parameter store itself (the image has no aws command, so neither may need one)
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # The behaviour (a signed round trip against loopback fakes of the key service and the metadata service, whose
+          # The release program carries the native KMS and Parameter Store clients. The behaviour (a signed round trip against loopback fakes of the key service and the metadata service, whose
           # signatures a separate verifier recomputes from the raw request) is tested in this same run's unit tests
           # (aws_native / secrets_enc). It cannot be run from the SHIPPED program here without putting a test hook into it:
           # the program's client only calls https://kms.<region>.amazonaws.com and the metadata address, and the release
           # build refuses debug hooks (see "The release programs carry none of the debug-only test sockets"). So this checks
           # that the program that is shipped is the one that has the native client and no longer builds the aws command line.
-          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'x-amz-json-1.1' 'AWS4-HMAC-SHA256'; do
+          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'AmazonSSM.GetParametersByPath' 'x-amz-json-1.1' 'AWS4-HMAC-SHA256'; do
             LC_ALL=C grep -aqF "$needle" "out/ozbox-linux-$ARCH" \
-              || { echo "::error title=No native KMS client::the $ARCH ozbox program does not carry $needle, so a box set up for KMS could not open its secrets store"; exit 1; }
+              || { echo "::error title=No native AWS client::the $ARCH ozbox program does not carry $needle, so a box set up for KMS could not open its secrets store, or a box with secrets of its own could not load them"; exit 1; }
           done
           # the old way piped the key to `aws kms` as fileb:///dev/stdin: a program still carrying that argument is not the fix
           ! LC_ALL=C grep -aqF 'fileb:///dev/stdin' "out/ozbox-linux-$ARCH" \

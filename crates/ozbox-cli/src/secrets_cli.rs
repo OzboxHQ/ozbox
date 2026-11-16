@@ -668,11 +668,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
     let root = root_for(&prefix, &role).map_err(CliError::Msg)?;
     let runner = ozbox_core::SystemRunner;
     let params = match backend.as_str() {
-        "aws-ssm" => AwsSsm {
-            runner: &runner,
-            region: env("OZBOX_BOX_SECRETS_REGION"),
-        }
-        .fetch(&root),
+        "aws-ssm" => AwsSsm::new(&env("OZBOX_BOX_SECRETS_REGION")).fetch(&root),
         "openbao" => OpenBao {
             runner: &runner,
             mount: std::env::var("OZBOX_BOX_SECRETS_MOUNT").unwrap_or_else(|_| "secret".into()),
@@ -687,11 +683,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
     .map_err(CliError::Msg)?;
     let (items, skipped) = plan(&root, params);
     let from = match backend.as_str() {
-        "aws-ssm" => AwsSsm {
-            runner: &runner,
-            region: String::new(),
-        }
-        .label(),
+        "aws-ssm" => AwsSsm::new("").label(),
         _ => OpenBao {
             runner: &runner,
             mount: String::new(),
