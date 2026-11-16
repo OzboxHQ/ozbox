@@ -441,6 +441,120 @@ mod tests {
         Ok(())
     }
 
+    /// Every file a module reads (`file("${path.module}/…")`, `templatefile`, `filebase64`) is in the program. An
+    /// installed program unpacks only its embedded copy, so a module that reads a file left out cannot be planned
+    /// (the adopt command's `adopt-document.yaml` was left out until this test existed).
+    #[test]
+    fn every_file_a_module_reads_is_embedded() -> R {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra");
+        let names: std::collections::BTreeSet<&str> =
+            EMBEDDED_INFRA.iter().map(|(p, _)| *p).collect();
+        let mut tf = Vec::new();
+        walk(&repo, "", &mut tf)?;
+        let mut seen = 0;
+        for (rel, path) in tf.iter().filter(|(r, _)| r.ends_with(".tf")) {
+            let text = std::fs::read_to_string(path)?;
+            let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+            for want in module_file_refs(&text) {
+                seen += 1;
+                let resolved = normalize(dir, &want).ok_or_else(|| {
+                    format!(
+                        "{rel}: {want} leaves the infra folder, which the program does not carry"
+                    )
+                })?;
+                // A file, or a folder (`scripts_dir`) whose files are embedded (the other test checks none is dropped).
+                let folder = format!("{resolved}/");
+                assert!(
+                    names.contains(resolved.as_str())
+                        || names.iter().any(|n| n.starts_with(&folder)),
+                    "{rel} reads {want} ({resolved}), which the program does not embed"
+                );
+            }
+        }
+        assert!(
+            seen >= 3,
+            "the scan found only {seen} file reads; has the syntax changed?"
+        );
+        Ok(())
+    }
+
+    /// Nothing under the bundle folders is silently dropped: each file is embedded, or is documentation.
+    #[test]
+    fn no_module_file_is_silently_dropped() -> R {
+        /// Left out on purpose, with the reason.
+        const NOT_EMBEDDED: &[(&str, &str)] = &[("md", "documentation, read by people")];
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra");
+        let names: std::collections::BTreeSet<&str> =
+            EMBEDDED_INFRA.iter().map(|(p, _)| *p).collect();
+        let mut all = Vec::new();
+        for dir in infra::BUNDLE_DIRS {
+            walk(&repo.join(dir), dir, &mut all)?;
+        }
+        let dropped: Vec<&str> = all
+            .iter()
+            .map(|(r, _)| r.as_str())
+            .filter(|r| !names.contains(r))
+            .filter(|r| {
+                let ext = r.rsplit_once('.').map_or("", |(_, e)| e);
+                !NOT_EMBEDDED.iter().any(|(e, _)| *e == ext)
+            })
+            .collect();
+        assert!(dropped.is_empty(), "left out of the program: {dropped:?}");
+        Ok(())
+    }
+
+    /// Every non-hidden file outside `tests` folders under `dir`, as (path relative to the infra root, file).
+    fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) -> R {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "tests" {
+                continue;
+            }
+            let here = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.path().is_dir() {
+                walk(&e.path(), &here, out)?;
+            } else {
+                out.push((here, e.path()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The paths after `${path.module}/` in string literals of one `.tf` file.
+    fn module_file_refs(text: &str) -> Vec<String> {
+        const MARK: &str = "${path.module}/";
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(i) = rest.find(MARK) {
+            rest = &rest[i + MARK.len()..];
+            if let Some(end) = rest.find('"') {
+                out.push(rest[..end].to_string());
+            }
+        }
+        out
+    }
+
+    /// `want` joined onto `dir` and normalized, or `None` when it climbs out of the infra root.
+    fn normalize(dir: &str, want: &str) -> Option<String> {
+        let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+        for p in want.split('/') {
+            match p {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                p => parts.push(p),
+            }
+        }
+        Some(parts.join("/"))
+    }
+
     /// M1: the build carries only what a module is made of, and refuses state, variables or a saved plan lying in the
     /// tree (a module folder held box state before 2026-11-10, and state can hold secrets).
     mod build_rule {
@@ -518,6 +632,9 @@ mod tests {
                 "main.tf",
                 "box.yaml.tftpl",
                 "a.sh",
+                "adopt-document.yaml",
+                "policy.json",
+                "x.tfvars.json",
                 "README.md",
                 "x.tfvars",
                 ".tf",

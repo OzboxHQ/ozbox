@@ -15,6 +15,14 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The self-test** no longer reports "enabled but not running" for a one-time service that finished, or that did not start because its start condition was not met (for example, resuming a session after an upgrade that left nothing to resume). A service that should keep running and does not, a service whose last run failed, and a user manager that never started its services are still reported.
 </Update>
 
+<Update label="[Release date]" tags={["CLI"]} description="Adopt command setup">
+  ## `ozbox init` can now set up the adopt command from an installed program
+
+  Setting up the adopt command during `ozbox init` stopped with "no file exists" for a file named `adopt-document.yaml`, because the installed program did not carry it. The program now carries every data file its setup modules read, and a check on every build fails if a module reads a file the program leaves out. Nothing is needed from you: a new program unpacks its own fresh copy of the setup files next to the old one, and the old copy is never reused.
+
+  - **Checked on a source build.** Running `ozbox init` end to end from an installed release is still to come.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 
