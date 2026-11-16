@@ -27,7 +27,7 @@ ozbox-provider-aws = { path = "../ozbox-provider-aws" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
-toml = "0.8"
+toml = "1.2"
 toml_edit = "0.22"
 dirs = "5"
 tiny_http = { version = "0.12", default-features = false }

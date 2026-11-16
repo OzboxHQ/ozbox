@@ -12,7 +12,7 @@ publish.workspace = true
 ozbox-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-toml = "0.8"
+toml = "1.2"
 ring = "0.17"
 getrandom = "0.2"
 rusqlite = { version = "0.41", features = ["bundled"] }
