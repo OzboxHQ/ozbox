@@ -18,13 +18,13 @@ serde.workspace = true
 serde_json.workspace = true
 ozbox-core = { workspace = true, optional = true }
 ring = { version = "0.17", optional = true }
-toml = { version = "0.8", optional = true }
+toml = { version = "1.2", optional = true }
 
 [dev-dependencies]
 ozbox-core.workspace = true
 tempfile = "3"
 ring = "0.17"
-toml = "0.8"
+toml = "1.2"
 
 [[test]]
 name = "host"

@@ -23,7 +23,7 @@ ozbox-listenfd = { path = "../ozbox-listenfd" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-toml = "0.8"
+toml = "1.2"
 ring = "0.17"
 signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
 
