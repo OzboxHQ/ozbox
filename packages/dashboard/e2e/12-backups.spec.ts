@@ -2,7 +2,7 @@ import { applyPlan } from './apply';
 
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
-import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open, axeScan } from './fixtures';
+import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open, axeScan, settled } from './fixtures';
 
 // Backups on the demo provider: the fleet policy in Settings (the repository credentials are write-only), then a box's
 // Backups tab: back up now to the provider and to the repository, restore (to a new box, over /work, into a folder),
@@ -247,6 +247,8 @@ for (const width of WIDTHS) {
       await expect(dialog).toContainText(`Turn off backups on ${name}?`);
       await expect(dialog).toContainText('repository credentials are removed from the box');
       await expect(dialog).toContainText('Backups already made stay where they are');
+      // the dialog zooms in (95% to 100%): measure it at rest, or a 44px button reads 43
+      await settled(page);
       if (width < 1024) await expectTouchTargets(page, dialog);
       await dialog.getByRole('button', { name: 'Cancel' }).click();
       await expect(dialog).toHaveCount(0);
