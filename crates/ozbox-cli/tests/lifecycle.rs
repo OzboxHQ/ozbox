@@ -222,7 +222,10 @@ fn version_is_the_semver_of_the_workspace() -> TestResult {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains(format!("ozbox {}", env!("CARGO_PKG_VERSION"))));
+        .stdout(predicate::str::contains(format!(
+            "ozbox {}",
+            env!("CARGO_PKG_VERSION")
+        )));
     Ok(())
 }
 
