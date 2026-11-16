@@ -387,6 +387,10 @@ struct PlanRequest {
     /// as the command's --accept-new-secrets-store). Absent means refuse such an upgrade.
     #[serde(default)]
     accept_new_secrets_store: bool,
+    /// Upgrade only, AWS: do not keep a copy of the old system disk (the same as the command's --no-pre-upgrade-snapshot). Absent
+    /// means a copy is kept when the store's key cannot be shown to survive.
+    #[serde(default)]
+    no_pre_upgrade_snapshot: bool,
 }
 
 #[derive(Deserialize)]
@@ -1193,6 +1197,9 @@ impl App {
             Ok(p) => p,
             Err(e) => return Resp::from_core(&e),
         };
+        // what the provider itself said; the replan that adds a copy of the old system disk keeps what is added after it
+        let base_notes = plan.notes.len();
+        let mut store_warning: Option<String> = None;
         if let (Operation::Upgrade { name, image, .. }, false) =
             (&request.operation, plan.is_noop())
         {
@@ -1270,7 +1277,34 @@ impl App {
                     name.as_str(),
                     request.accept_new_secrets_store,
                 ) {
-                    Ok(note) => plan.notes.push(note),
+                    Ok(note) => {
+                        // The same rule as the command: a store whose key may be destroyed with the old system disk gets a copy
+                        // of that disk first, in the plan, and the warning in words ahead of every other note.
+                        let old_disk = crate::run::upgrade::OldDisk::choose(
+                            &self.provider_id,
+                            request.no_pre_upgrade_snapshot,
+                            false,
+                        );
+                        if crate::run::upgrade::old_disk_copy_wanted(check.fate, old_disk) {
+                            plan = match crate::run::upgrade::with_old_disk_copy(
+                                self.provider.as_ref(),
+                                plan,
+                                base_notes,
+                            ) {
+                                Ok(p) => p,
+                                Err(e) => return Resp::from_core(&e),
+                            };
+                        }
+                        plan.notes.push(note);
+                        store_warning = crate::run::upgrade::store_loss_warning(
+                            &check,
+                            name.as_str(),
+                            old_disk,
+                        );
+                        if let Some(w) = &store_warning {
+                            plan.notes.insert(0, w.clone());
+                        }
+                    }
                     Err(refusal) => {
                         return Resp::json(
                             409,
@@ -1334,7 +1368,10 @@ impl App {
             Ok(id) => id,
             Err(m) => return Resp::error(500, "internal", &m),
         };
-        let body = plan_body(&plan_id, &plan, self.plan_ttl.as_secs());
+        let mut body = plan_body(&plan_id, &plan, self.plan_ttl.as_secs());
+        if let Some(w) = &store_warning {
+            body["secrets_store_warning"] = json!(w);
+        }
         let (verb, name, risk) = (
             plan.operation.verb(),
             plan.operation.box_name().to_string(),
@@ -3140,6 +3177,7 @@ mod tests {
         let p = a.provider.plan(&Operation::Destroy {
             name: name.clone(),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })?;
         a.provider.apply(&p)?;
         create(&mut a, "dev")?;

@@ -1145,6 +1145,7 @@ mod tests {
             name: name.clone(),
             image: image.into(),
             reprovision: false,
+            keep_old_system_disk: false,
         }
     }
 
@@ -1595,6 +1596,7 @@ mod tests {
         match p.plan(&Operation::Destroy {
             name: n.clone(),
             final_snapshot: true,
+            keep_old_system_disks: false,
         }) {
             Err(Error::Unsupported { why, .. }) => {
                 assert!(why.contains("cannot be snapshotted"), "{why}")
@@ -1605,6 +1607,7 @@ mod tests {
         let destroy = p.plan(&Operation::Destroy {
             name: n.clone(),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })?;
         assert!(
             destroy
@@ -1655,6 +1658,7 @@ mod tests {
                 name: n.clone(),
                 image: image.into(),
                 reprovision: false,
+                keep_old_system_disk: false,
             })
             .err()
             .ok_or_else(|| Error::Provider(format!("{image} must be refused")))?
@@ -1802,6 +1806,7 @@ mod tests {
         let plan = p.plan(&Operation::Destroy {
             name: n.clone(),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })?;
         assert!(p.apply(&plan)?.is_none());
         let calls = sim.tofu_calls();
@@ -1849,6 +1854,7 @@ mod tests {
             Operation::Destroy {
                 name: n.clone(),
                 final_snapshot: true,
+                keep_old_system_disks: false,
             },
         ] {
             assert!(
@@ -1873,6 +1879,7 @@ mod tests {
             Operation::Destroy {
                 name: n.clone(),
                 final_snapshot: true,
+                keep_old_system_disks: false,
             },
         ] {
             let plan = p.plan(&op)?;

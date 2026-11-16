@@ -106,6 +106,7 @@ fn a_provider_plugin_runs_the_whole_lifecycle_through_the_shared_engine() {
         .plan(&Operation::Destroy {
             name: name("dev"),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })
         .unwrap();
     engine.apply(&destroy).unwrap();

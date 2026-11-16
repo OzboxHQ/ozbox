@@ -89,6 +89,17 @@ struct Account {
     releases: BTreeMap<String, String>,
     /// Make `cosign verify-blob` refuse the signature.
     cosign_refuses: bool,
+    /// Report system disks (and so their snapshots) as not encrypted.
+    plain_system_disks: bool,
+    /// Calls that fail, by what they are: `create-snapshot`, or `describe-snapshots` read by id (the look at a snapshot just made).
+    failing: Vec<String>,
+    /// The state a new snapshot reports instead of `completed` (`pending` forever, or `error`).
+    new_snapshot_state: Option<String>,
+    /// What a copy of an old system disk reports about its encryption instead of the truth: `(Encrypted, KmsKeyId)`, either left
+    /// out of the answer when `None`.
+    copy_encryption: Option<(Option<bool>, Option<String>)>,
+    /// What a system disk reports about its key instead of the truth: left out of the answer when `None`.
+    system_disk_encryption: Option<(Option<bool>, Option<String>)>,
 }
 
 #[derive(Default)]
@@ -546,6 +557,63 @@ impl FakeAws {
         })
     }
 
+    /// Report every system disk as not encrypted (a box made outside Oz Box's module).
+    pub fn unencrypted_system_disks(&self) {
+        self.with(|a| a.plain_system_disks = true);
+    }
+
+    /// Make one kind of call fail: `create-snapshot`, `delete-snapshot`, or `describe-snapshots` when it asks for snapshots by id
+    /// (what an upgrade does to look at the copy it just made).
+    pub fn fail_calls(&self, what: &str) {
+        let what = what.to_string();
+        self.with(|a| a.failing.push(what));
+    }
+
+    /// Every snapshot made from now on reports this state instead of `completed` (`pending` never finishes).
+    pub fn new_snapshots_report(&self, state: &str) {
+        let state = state.to_string();
+        self.with(|a| a.new_snapshot_state = Some(state));
+    }
+
+    /// What a copy of a system disk says about its encryption, in place of the truth; a `None` is left out of the answer.
+    pub fn copies_report_encryption(&self, encrypted: Option<bool>, kms: Option<&str>) {
+        let kms = kms.map(str::to_string);
+        self.with(|a| a.copy_encryption = Some((encrypted, kms)));
+    }
+
+    /// What a system disk says about its encryption, in place of the truth; a `None` is left out of the answer.
+    pub fn system_disks_report_encryption(&self, encrypted: Option<bool>, kms: Option<&str>) {
+        let kms = kms.map(str::to_string);
+        self.with(|a| a.system_disk_encryption = Some((encrypted, kms)));
+    }
+
+    /// Take the `ozbox-managed` tag off a box's system disk (what a box from before the module tagged it would look like).
+    pub fn untag_system_disk(&self, name: &BoxName) {
+        self.with(|a| {
+            for v in a.volumes.iter_mut().filter(|v| {
+                v.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                    && v.tags.get("ozbox-role").map(String::as_str) == Some("root")
+            }) {
+                v.tags.remove("ozbox-managed");
+            }
+        });
+    }
+
+    /// The ids and tags of the snapshots of a box's system disk that an upgrade kept, oldest first.
+    pub fn system_disk_snapshots(&self, name: &BoxName) -> Vec<(String, BTreeMap<String, String>)> {
+        self.with(|a| {
+            a.snapshots
+                .iter()
+                .filter(|s| {
+                    s.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                        && s.tags.get("ozbox-purpose").map(String::as_str)
+                            == Some("pre-upgrade-root")
+                })
+                .map(|s| (s.id.clone(), s.tags.clone()))
+                .collect()
+        })
+    }
+
     pub fn clear_calls(&self) {
         self.with(|a| a.calls.clear());
     }
@@ -720,6 +788,8 @@ impl FakeAws {
             }
             "describe-volumes" => {
                 let wanted = filters(args);
+                let wanted_ids = values_after(args, "--volume-ids");
+                let plain = a.plain_system_disks;
                 let in_use = |id: &str| {
                     a.instances
                         .iter()
@@ -728,6 +798,7 @@ impl FakeAws {
                 let list: Vec<Value> = a
                     .volumes
                     .iter()
+                    .filter(|v| wanted_ids.is_empty() || wanted_ids.contains(&v.id.as_str()))
                     .filter(|v| {
                         wanted.iter().all(|(k, val)| match k.strip_prefix("tag:") {
                             Some(t) => v.tags.get(t).map(String::as_str) == Some(val.as_str()),
@@ -735,13 +806,31 @@ impl FakeAws {
                         })
                     })
                     .map(|v| {
-                        json!({
+                        let root = v.tags.get("ozbox-role").map(String::as_str) == Some("root");
+                        let mut j = json!({
                             "VolumeId": v.id,
                             "Size": v.size,
                             "State": if in_use(&v.id) { "in-use" } else { "available" },
                             "SnapshotId": v.snapshot,
+                            "Encrypted": !(plain && root),
+                            "KmsKeyId": root.then_some("arn:aws:kms:us-east-1:123456789012:key/fake"),
                             "Tags": tags_json(&v.tags),
-                        })
+                        });
+                        if let (Some((enc, kms)), true) = (&a.system_disk_encryption, root) {
+                            match enc {
+                                Some(e) => j["Encrypted"] = json!(e),
+                                None => {
+                                    j.as_object_mut().map(|o| o.remove("Encrypted"));
+                                }
+                            }
+                            match kms {
+                                Some(k) => j["KmsKeyId"] = json!(k),
+                                None => {
+                                    j.as_object_mut().map(|o| o.remove("KmsKeyId"));
+                                }
+                            }
+                        }
+                        j
                     })
                     .collect();
                 ok(json!({"Volumes": list}).to_string())
@@ -749,6 +838,9 @@ impl FakeAws {
             "describe-snapshots" => {
                 // The filters the adapter uses: a tag's value, and specific ids.
                 let wanted_ids = values_after(args, "--snapshot-ids");
+                if !wanted_ids.is_empty() && a.failing.iter().any(|f| f == "describe-snapshots") {
+                    return fail("InternalError: could not read the snapshot");
+                }
                 let tag_filters: Vec<(String, String)> = values_after(args, "--filters")
                     .iter()
                     .filter_map(|f| {
@@ -766,11 +858,34 @@ impl FakeAws {
                             .iter()
                             .all(|(k, v)| s.tags.get(k).map(String::as_str) == Some(v.as_str()))
                     })
-                    .map(|s| json!({"SnapshotId": s.id, "StartTime": s.start, "State": s.state, "VolumeSize": s.size, "Tags": tags_json(&s.tags)}))
+                    .map(|s| {
+                        // a snapshot of a disk is encrypted when the disk is
+                        let plain_disk = a.plain_system_disks
+                            && s.tags.get("ozbox-purpose").map(String::as_str) == Some("pre-upgrade-root");
+                        let mut v = json!({"SnapshotId": s.id, "StartTime": s.start, "State": s.state, "VolumeSize": s.size, "Encrypted": !plain_disk, "KmsKeyId": s.tags.contains_key("ozbox-purpose").then_some("arn:aws:kms:us-east-1:123456789012:key/fake"), "Tags": tags_json(&s.tags)});
+                        if let (Some((enc, kms)), true) = (&a.copy_encryption, s.tags.contains_key("ozbox-purpose")) {
+                            match enc {
+                                Some(e) => v["Encrypted"] = json!(e),
+                                None => {
+                                    v.as_object_mut().map(|o| o.remove("Encrypted"));
+                                }
+                            }
+                            match kms {
+                                Some(k) => v["KmsKeyId"] = json!(k),
+                                None => {
+                                    v.as_object_mut().map(|o| o.remove("KmsKeyId"));
+                                }
+                            }
+                        }
+                        v
+                    })
                     .collect();
                 ok(json!({"Snapshots": list}).to_string())
             }
             "delete-snapshot" => {
+                if a.failing.iter().any(|f| f == "delete-snapshot") {
+                    return fail("InternalError: could not delete the snapshot");
+                }
                 let Some(id) = flag(args, "--snapshot-id") else {
                     return fail("--snapshot-id required");
                 };
@@ -865,6 +980,9 @@ impl FakeAws {
                 ok("{}".into())
             }
             "create-snapshot" => {
+                if a.failing.iter().any(|f| f == "create-snapshot") {
+                    return fail("InternalError: could not create the snapshot");
+                }
                 let Some(vol) = flag(args, "--volume-id") else {
                     return fail("--volume-id required");
                 };
@@ -881,7 +999,10 @@ impl FakeAws {
                     start: format!("2026-01-01T00:00:{:02}+00:00", a.next % 60),
                     tags,
                     size,
-                    state: "completed".into(),
+                    state: a
+                        .new_snapshot_state
+                        .clone()
+                        .unwrap_or_else(|| "completed".into()),
                 });
                 ok(json!({"SnapshotId": id}).to_string())
             }
