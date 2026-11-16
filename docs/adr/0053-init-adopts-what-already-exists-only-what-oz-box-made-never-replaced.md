@@ -1,0 +1,39 @@
+# 0053 — `ozbox init` adopts what already exists: only what Oz Box made, never replaced, and a lookup that cannot answer stops the step
+
+**Status.** Decided. **Preview**: built and tested in CI only, with a fake command runner. It has not run against a real AWS
+account.
+
+**Decision.** Each OpenTofu step of `ozbox init` keeps its state in the encrypted state bucket, and on a fresh bucket that state
+is empty. On an account set up by an earlier version, or by hand, the resources a step would make may already exist. Without
+help the plan looks clean and the apply then makes a second copy (a second network and its hourly NAT gateway), makes a key and
+fails because the alias is taken (leaving an orphan key), or fails "already exists". So a step now looks in the account for what
+it would make, and **adopts** it.
+
+1. **Look first, read only.** After the backend is initialised, `tofu state list` says what the step already holds. For each
+   resource the module would create that the state does not hold, init reads the account by the names Oz Box itself uses: the KMS
+   alias `alias/ozbox-<fleet>-secrets` and its key (`kms list-aliases`, `kms list-resource-tags`), the document
+   `ozbox-adopt-<fleet>` (`ssm describe-document`), and the policies `arn:aws:iam::<account>:policy/ozbox-box-*`
+   (`iam get-policy`). A resource already in the state is never looked up.
+2. **Imports are written into the root.** What is found is written as OpenTofu `import` blocks in `adopt.tf` beside the step's
+   generated `main.tf` (rewritten or removed on every run, so a stale file never imports something no longer wanted). Blocks, not
+   `tofu import`, because they appear in the plan: the person sees **Adopt existing <thing> <id> as <address>**, then the plan's
+   real remaining difference.
+3. **Only what Oz Box made.** The resource must carry `ozbox-managed=true`. A look-alike without it, or a key whose tags the
+   setup identity may not read (its rights read only tagged keys), is **refused** with the reason and a fix. Nothing is changed.
+4. **Never a silent replacement.** A difference that can be made in place (a key policy, a document's content) is shown as a
+   change. A plan that would **replace or destroy** an adopted resource is refused at plan time, so no apply command exists.
+5. **A lookup that cannot answer stops the step.** Only the service's own not-found answer means "absent". A denied, failed or
+   unreadable answer is never taken as absent, because that would plan a create that then fails or duplicates.
+6. **The config and the account must agree.** If the config records a fleet key and the alias points at another, nothing is
+   adopted. If the alias is gone but the recorded key still exists and is tagged, the key alone is adopted.
+7. **A general mechanism.** Each step passes a list of adoptable resources (address in the module, how to find it, what to call
+   it). The key, the adopt document and the box policies use it now. The network (found by the `ozbox-managed` tag and the
+   configured subnet) and the issuer (its roles live in the reserved namespace and need an administrator) can be added to the list
+   later; they are not adopted yet.
+
+**Why.** Reality, not a progress file, is what init reads (the module's own rule), and the state bucket is new to every account
+that predates it. Adoption keeps a re-run safe and cheap without asking anyone to import by hand.
+
+**What it costs.** Up to a handful of read calls per step, each already in `OzBoxSetup` (a test lists every lookup and checks
+the permission sets allow it). An adopted resource whose settings differ is changed in place on apply, which is what the module
+says it should be, and the plan shows it first.

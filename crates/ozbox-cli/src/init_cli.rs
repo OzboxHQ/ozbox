@@ -275,7 +275,10 @@ pub fn run(
                     }
                     Err(f) => {
                         show(out, a.json, f.to_string());
-                        show(out, a.json, t("init.key_unknown", &[]));
+                        // an adoption refusal is not a permission question: the hint would point the wrong way
+                        if !f.code.starts_with("adopt_") {
+                            show(out, a.json, t("init.key_unknown", &[]));
+                        }
                     }
                 }
             }
@@ -319,7 +322,9 @@ pub fn run(
                     }
                     Err(f) => {
                         show(out, a.json, f.to_string());
-                        show(out, a.json, t("init.adopt_unknown", &[]));
+                        if !f.code.starts_with("adopt_") {
+                            show(out, a.json, t("init.adopt_unknown", &[]));
+                        }
                     }
                 }
             }
@@ -338,7 +343,9 @@ pub fn run(
                 }
                 Err(f) => {
                     show(out, a.json, f.to_string());
-                    show(out, a.json, t("init.box_policy_denied", &[]));
+                    if !f.code.starts_with("adopt_") {
+                        show(out, a.json, t("init.box_policy_denied", &[]));
+                    }
                 }
             }
             if let Some(pkg) = &a.issuer_package {
@@ -926,6 +933,8 @@ mod tests {
         r.reply(o(0, "", "")); // head-bucket
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        r.reply(o(0, r#"{"Aliases":[]}"#, "")); // no alias to adopt
         r.reply(o(0, "", "")); // plan: nothing to do
                                // an existing key is still read back and recorded, so a config that lacks it is repaired
         r.reply(o(
@@ -938,13 +947,19 @@ mod tests {
         r.reply(o(0, "", "")); // head-bucket
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        r.reply(o(254, "", "InvalidDocument")); // no document to adopt
         r.reply(o(0, "", "")); // plan: nothing to do
         r.reply(o(0, r#"{"Version":"2012-10-17","Statement":[]}"#, ""));
         // the box Session Manager policy: head-bucket, version, init, plan with nothing to do
         r.reply(o(0, "", ""));
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
-        r.reply(o(0, "", ""));
-        r.reply(o(0, "", ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        for _ in 0..3 {
+            r.reply(o(254, "", "NoSuchEntity")); // none of the three policies exists yet
+        }
+        r.reply(o(0, "", "")); // plan: nothing to do
         r.reply(o(0, sso, "")); // sign in again for the security check
         let mut a = args();
         a.provider = Some("aws".into());
