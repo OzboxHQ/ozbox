@@ -114,8 +114,10 @@ pub enum StoreFate {
     /// cancel the move first.
     MovingKey,
     /// The store cannot be opened where it is, but a copy of its file key IS held (this computer's keychain or the box's vault),
-    /// so it is not lost and setting it aside would destroy something that can be mended. Never accepted: put the key back and
-    /// finish the move first. Additive.
+    /// so the old store is not lost: setting it aside (renamed, never deleted) leaves the key where it is, and the store can be
+    /// reopened later (see "Recovering an old secrets store" in the keeping-boxes-healthy use case). Refused without
+    /// `--accept-new-secrets-store`; with it the upgrade sets the old store aside and starts a new one on the fleet's key, which is the
+    /// only path that works from here (`adopt-fleet-key` refuses a box whose service is not ready). Additive.
     KeyHeld,
 }
 
@@ -660,6 +662,16 @@ pub fn fleet_key_store_check(check: StoreCheck, box_name: &str) -> StoreCheck {
     }
 }
 
+/// Whether, after the machine is replaced, the upgrade sets the old store aside (`recover_store_step`): the person accepted a new
+/// store, and the store is one that would be lost, could not be asked about, cannot be opened, or is held by a key kept elsewhere.
+pub fn sets_store_aside(accept_new_store: bool, fate: StoreFate) -> bool {
+    accept_new_store
+        && matches!(
+            fate,
+            StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost | StoreFate::KeyHeld
+        )
+}
+
 /// Whether the upgrade may go ahead, given what happens to the store. `Ok` carries the plan's note (the store's fate is
 /// always in the plan); `Err` is the refusal: a store that would be lost, or a box that could not be asked, needs the
 /// person's explicit acceptance (`--accept-new-secrets-store`).
@@ -670,7 +682,21 @@ pub fn store_gate(
 ) -> std::result::Result<String, String> {
     match check.fate {
         // not even with --accept-new-secrets-store: a new machine on the KMS key over a file-sealed store never opens it
-        StoreFate::MovingKey | StoreFate::KeyHeld => Err(check.detail.clone()),
+        StoreFate::MovingKey => Err(check.detail.clone()),
+        // the old store is set aside, never deleted, and its key stays where it is held: accepting loses nothing for good
+        StoreFate::KeyHeld if accept => Ok(format!(
+            "{} {}",
+            check.detail,
+            t(
+                "upgrade.store_accepted",
+                &[("box", box_name), ("lost", NEW_STORE_LOSES)]
+            )
+        )),
+        StoreFate::KeyHeld => Err(format!(
+            "{} {}",
+            check.detail,
+            t("upgrade.err_key_held", &[("box", box_name)])
+        )),
         StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost if accept => Ok(format!(
             "{} {}",
             check.detail,
@@ -2186,11 +2212,7 @@ pub(super) fn execute(
         |after| refresh_ssh(rec.provider_id.as_deref(), after),
     );
     let kept_by_laptop = store.fate == StoreFate::KeptByLaptop;
-    let accepted = around.accept_new_store
-        && matches!(
-            store.fate,
-            StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost
-        );
+    let accepted = sets_store_aside(around.accept_new_store, store.fate);
     let settled = settle_after_replace(
         p,
         agent,
@@ -4674,19 +4696,33 @@ mod tests {
             let c = kms_labelled_fate_with(Ok(f), laptop)?;
             assert_eq!(c.fate, StoreFate::KeyHeld, "{}", c.detail);
             assert!(c.detail.contains(place), "{}", c.detail);
-            assert!(c.detail.contains("adopt-fleet-key main"), "{}", c.detail);
+            assert!(!c.detail.contains("adopt-fleet-key"), "{}", c.detail);
             assert!(
                 !c.detail.contains("ALREADY UNOPENABLE") && !c.detail.contains("no copy held"),
                 "{}",
                 c.detail
             );
-            // refused with and without the person's acceptance (accepting would set aside a store that can be mended), in the
-            // words that name the copy and with no "two ways forward" that offers to accept a new store
-            for accept in [false, true] {
-                let refusal = store_gate(&c, "main", accept).unwrap_err();
-                assert!(refusal.contains("IS held"), "{refusal}");
-                assert!(!refusal.contains("Two ways forward"), "{refusal}");
-            }
+            // refused without the person's acceptance, in words that name the way forward (the flag, and where the old store can be
+            // reopened from), and never with the advice that cannot work (`adopt-fleet-key` refuses a box whose service is not ready)
+            let refusal = store_gate(&c, "main", false).unwrap_err();
+            assert!(refusal.contains("IS held"), "{refusal}");
+            assert!(refusal.contains("--accept-new-secrets-store"), "{refusal}");
+            assert!(
+                refusal.contains("Recovering an old secrets store"),
+                "{refusal}"
+            );
+            assert!(refusal.contains("never deleted"), "{refusal}");
+            assert!(!refusal.contains("adopt-fleet-key"), "{refusal}");
+            assert!(!refusal.contains("Two ways forward"), "{refusal}");
+            // with it the upgrade goes ahead, sets the old store aside after the replace, and says so
+            let note = store_gate(&c, "main", true)?;
+            assert!(
+                note.contains("set aside") && note.contains("Accepted"),
+                "{note}"
+            );
+            assert!(!note.contains("adopt-fleet-key"), "{note}");
+            assert!(sets_store_aside(true, c.fate));
+            assert!(!sets_store_aside(false, c.fate));
             assert_eq!(store_refusal_code(c.fate), "secrets_key_held");
         }
         // and with no copy anywhere it is still said to be lost
