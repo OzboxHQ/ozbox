@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
+  ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
+
+  - **Boxes on AWS reach their secrets without the `aws` command.** The secrets service and a box's own secrets load straight from AWS with the box's role, and the self-test says when they cannot.
+  - **An upgrade is honest about the secrets store, and commits keep working while the secrets service is down.**
+  - **Upgrades keep your backups and your hosted dashboard**, and check that backups work afterwards.
+  - **The dashboard no longer freezes while your cloud or a box is slow.**
+  - **`ozbox init` gives you the complete operator policy**, and `latest` means the newest image whose signed release verifies.
+
+  **How to get it.** Install with `sh install.sh --version 0.2.0-beta.3`, then `ozbox upgrade <box>`.
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes with secrets of their own">
   ## A box's own secrets now load from Parameter Store
 
