@@ -35,10 +35,11 @@ pub const RECORD_FILE: &str = ".ozbox-infra.json";
 /// The root-owned file on a box that says which first-boot configuration it was made with.
 pub const BOX_RECORD_PATH: &str = "/etc/ozbox/first-boot";
 
-/// The kinds of file a box module is made of: OpenTofu files, the first-boot template and its scripts. Nothing else is
-/// part of the bundle (state, variables or a saved plan above all). The same rule as the program's build
+/// The kinds of file a box module is made of: OpenTofu files, the first-boot template and its scripts, and the YAML/JSON
+/// data files a module reads with `file()`. Nothing else is part of the bundle (state, variables or a saved plan above all;
+/// the build refuses those, and `*.tfvars.json` is one of them). The same rule as the program's build
 /// (`crates/ozbox-cli/infra_select.rs`) and `scripts/first-boot-hash.sh`.
-pub const BUNDLE_EXTENSIONS: &[&str] = &["tf", "tftpl", "sh"];
+pub const BUNDLE_EXTENSIONS: &[&str] = &["tf", "tftpl", "sh", "yaml", "yml", "json"];
 
 /// Is `rel` (a `/`-separated path relative to the bundle root) a file of the bundle?
 pub fn is_bundle_path(rel: &str) -> bool {

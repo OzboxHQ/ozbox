@@ -93,6 +93,9 @@ impl Rig {
         tool(&b, "systemctl", &format!("echo systemctl \"$@\" >>'{l}'; case \"$1\" in restart) touch '{0}/active';; disable) [ \"$2\" = --now ] && rm -f '{0}/active';; is-active) [ -e '{0}/active' ];; esac; exit 0", r.display()));
         // the installed daemon: one that takes its socket from systemd carries the marker (G1 N4)
         std::fs::write(r.join("ozboxd"), "ELF....ozbox-listenfd-protocol-1....").unwrap();
+        // the dashboard answers on its port (a test that wants it silent points the probe at `false`)
+        tool(&b, "probe", "exit 0");
+        tool(&b, "probe-silent", "exit 1");
         Self { dir }
     }
 
@@ -119,6 +122,9 @@ impl Rig {
             .env("OZBOX_RUNUSER", b.join("runuser"))
             .env("OZBOX_GPASSWD", b.join("gpasswd"))
             .env("OZBOX_DAEMON_BIN", r.join("ozboxd"))
+            .env("OZBOX_DASHBOARD_SETTLE_S", "0")
+            .env("OZBOX_DASHBOARD_PROBE", b.join("probe"))
+            .env("OZBOX_DASHBOARD_PROBE_S", "0")
             .envs(extra.iter().map(|(k, v)| (*k, v.as_os_str())))
             .output()
             .unwrap()
@@ -1195,6 +1201,146 @@ fn a_backup_copy_that_fails_does_not_abort_the_script() {
     assert!(
         rig.log().contains("agent-mcp install"),
         "the settings step still ran:\n{}",
+        rig.log()
+    );
+}
+
+// ---- after an upgrade: the folder on /work outlives the unit, and so does its `.migrated` marker ----
+
+fn sha_hex(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn have_sha256sum() -> bool {
+    Command::new("sha256sum").arg("--version").output().is_ok()
+}
+
+/// A box that was moved before an upgrade: the folder and its marker are there, the dashboard's settings are not (the
+/// person then runs `ozbox dashboard install`, which stages the unit and the settings again).
+fn upgraded_box_without_settings() -> Rig {
+    let rig = Rig::new(Some(OLD_UNIT));
+    let home = rig.dir.path().join("work/ozbox-supervisor");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".migrated"), "").unwrap();
+    rig
+}
+
+fn home_auth(rig: &Rig) -> Option<String> {
+    std::fs::read_to_string(rig.dir.path().join("work/ozbox-supervisor/auth.toml")).ok()
+}
+
+#[test]
+fn a_fresh_install_after_an_upgrade_installs_the_verified_settings_and_starts_the_dashboard() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = upgraded_box_without_settings();
+    let o = rig.run(&["--expect-auth", &sha_hex(b"y = 2\n")]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(home_auth(&rig).as_deref(), Some("y = 2\n"));
+    assert!(
+        rig.log().contains("restart ozbox-dashboard"),
+        "{}",
+        rig.log()
+    );
+    assert!(
+        text(&o).contains("runs as ozbox-supervisor"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn after_an_upgrade_settings_that_are_not_the_ones_sent_are_refused_and_nothing_changes() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = upgraded_box_without_settings();
+    let o = rig.run(&["--expect-auth", &"0".repeat(64)]);
+    assert!(!o.status.success());
+    assert!(
+        text(&o).contains("not the ones your computer sent"),
+        "{}",
+        text(&o)
+    );
+    assert!(home_auth(&rig).is_none());
+    assert!(rig.unit().is_empty());
+    assert!(!rig.log().contains("restart ozbox-dashboard"));
+    assert!(!rig
+        .dir
+        .path()
+        .join("work/ozbox-supervisor/auth.toml.verified")
+        .exists());
+}
+
+#[test]
+fn a_dashboard_that_has_settings_keeps_them_against_a_request_the_box_user_can_make() {
+    if !have_sha256sum() {
+        return;
+    }
+    // the box user stages a file of its own and asks with that file's own sha256: that proves nothing about the person
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    let before = home_auth(&rig);
+    assert_eq!(before.as_deref(), Some("y = 2\n"));
+    let staged = rig
+        .dir
+        .path()
+        .join("work/home/ozbox/ozbox-dashboard/auth.toml");
+    std::fs::write(&staged, "attacker = true\n").unwrap();
+    std::fs::write(
+        rig.dir
+            .path()
+            .join("work/home/ozbox/.config/systemd/user/ozbox-dashboard.service"),
+        OLD_UNIT,
+    )
+    .unwrap();
+    let n = rig.log().matches("restart ozbox-dashboard").count();
+    let o = rig.run(&["--expect-auth", &sha_hex(b"attacker = true\n")]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("already has sign-in settings of its own"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(home_auth(&rig), before);
+    assert_eq!(rig.log().matches("restart ozbox-dashboard").count(), n);
+}
+
+#[test]
+fn a_dashboard_with_no_settings_to_read_is_not_started_and_the_setup_fails_loudly() {
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    std::fs::remove_file(rig.dir.path().join("work/ozbox-supervisor/auth.toml")).unwrap();
+    let n = rig.log().matches("restart ozbox-dashboard").count();
+    let o = rig.run(&[]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("sign-in settings are missing"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(rig.log().matches("restart ozbox-dashboard").count(), n);
+}
+
+#[test]
+fn a_dashboard_that_runs_but_does_not_answer_is_reported_as_failed_not_ok() {
+    let rig = Rig::new(Some(OLD_UNIT));
+    let silent = rig.dir.path().join("bin/probe-silent");
+    let o = rig.run_env(&[], &[("OZBOX_DASHBOARD_PROBE", &silent)]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("nothing answers on port 7878"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        rig.log().contains("disable --now ozbox-dashboard"),
+        "{}",
         rig.log()
     );
 }
