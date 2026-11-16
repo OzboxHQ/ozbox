@@ -119,7 +119,7 @@ then mark any disk in the account as its own.
   ready on that key and the store and its copy on `/work` are sealed by it), **will be lost** (the store is still sealed by a key
   kept in a file: finish the move with `ozbox adopt-fleet-key`, or accept a new store), **already unopenable** (its file key is gone,
   so its secrets service cannot start; `--accept-new-secrets-store` upgrades and then sets the old store aside and starts a new one,
-  or run `ozbox admin <name> -- recover-secrets` first) or **unknown** (the box could not be asked, so it is never called kept; the
+  or run `ozbox admin <name> -- recover-secrets` first; never said when this computer's keychain or the box's vault holds a copy of the key: then the plan says the store is not lost and to put the key back and run `ozbox adopt-fleet-key`) or **unknown** (the box could not be asked, so it is never called kept; the
   upgrade asks for `--accept-new-secrets-store`). A box that is stopped is unknown too: start it and plan again.
 - It reads the box first and changes nothing if the box keeps its key anywhere but a file, cannot be asked, or cannot move
   its own store. A box made on `0.1.1` or earlier cannot: upgrade it first, **to an image built from a release that includes

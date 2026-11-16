@@ -24,6 +24,7 @@ use crate::guard::{
     Scanner, Sent, Verdict,
 };
 use crate::guard_scan::{held_text, REQUEST_MAX};
+use crate::messages::t;
 
 /// What a held change is bound to, ready to file or spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,7 +496,7 @@ pub fn pre_push(
     }
 }
 
-// ---- when the secrets service cannot be reached (ADR 0029 Amendment 12) -------------------------------------------------------
+// ---- when the secrets service cannot be reached (ADR 0029 Amendment 15) -------------------------------------------------------
 
 /// What a hook decided while the box's secrets service could not be reached.
 #[derive(Debug, PartialEq, Eq)]
@@ -506,9 +507,11 @@ pub enum Degraded {
     Stop(String),
 }
 
-/// The line that says what to do about the service itself. Whoever runs the box does it from their computer: the box user can
-/// neither read the service's log nor restart it.
-const OUTAGE_FIX: &str = "To see why it stopped and bring it back, ask whoever runs this box to run, from their computer, `ozbox admin <box> -- collect-logs` and then `ozbox admin <box> -- restart-services`. If the log says the store can no longer be opened, `ozbox admin <box> -- recover-secrets` sets the old store aside and starts a new one (the secrets that were entered by hand are entered again).";
+/// The line that says what to do about the service itself (see `commit_guard.fix` in the message catalogue). Whoever runs the box
+/// does it from their computer: the box user can neither read the service's log nor restart it.
+fn outage_fix() -> String {
+    t("commit_guard.fix", &[])
+}
 
 /// `pre-commit` while the service cannot be asked. Everything that does not need it still runs: the shapes of keys, the names of
 /// files and `.env` files. A commit that holds one is stopped, and no approval can be given while the service that records approvals
@@ -520,12 +523,17 @@ pub fn pre_commit_degraded(repo: &Path, why: &str) -> Result<Degraded, String> {
     let v = check_diff(&tree_diff(repo, &tree)?, None)?;
     if !v.clean() {
         return Ok(Degraded::Stop(format!(
-            "{}ozbox: this box's secrets service is not running ({why}), so a person's approval cannot be recorded right now and nothing can be let through with one. Nothing was lost: your files are untouched and still staged. Remove the key and commit again. If it is a public value (a web address, a key meant for the browser), say so with `ozbox secrets import --public NAME` once the service is back.\n{OUTAGE_FIX}\n",
-            report(&v)
+            "{}{}",
+            report(&v),
+            t(
+                "commit_guard.commit_stopped",
+                &[("why", why), ("fix", &outage_fix())]
+            )
         )));
     }
-    Ok(Degraded::Pass(Some(format!(
-        "ozbox: this box's secrets service is not running ({why}), so this commit was checked for the shapes of keys but NOT against the secrets stored on this box. Nothing was lost: your work is committed here. A push is held until the service is back and has checked everything again.\n{OUTAGE_FIX}\n"
+    Ok(Degraded::Pass(Some(t(
+        "commit_guard.commit_passed",
+        &[("why", why), ("fix", &outage_fix())],
     ))))
 }
 
@@ -551,7 +559,11 @@ pub fn pre_push_degraded(
         _ => String::new(),
     };
     format!(
-        "{said}ozbox: this push was stopped because this box's secrets service is not running ({why}), so the commits could not be checked against the secrets stored on this box. Nothing was lost and nothing left the box: your commits are safe here. Push again once the service is back; the push then checks everything.\n{OUTAGE_FIX}\n"
+        "{said}{}",
+        t(
+            "commit_guard.push_stopped",
+            &[("why", why), ("fix", &outage_fix())]
+        )
     )
 }
 
@@ -603,12 +615,14 @@ pub fn pre_push_or_degrade(
     }
 }
 
-/// The short reason for a message: "its socket is missing" for a service with no socket, "it did not answer" for one that did not.
+/// The short reason for a message. Only an outage reaches here (see [`crate::guard::service_outage`]), and both of its causes are
+/// a service that is not running: its socket is missing, or the socket is there and nothing is listening on it. A service that
+/// is running but "did not answer" is not an outage and never reaches this: its change is held, with that error as it is.
 fn outage_reason(e: &str) -> String {
     if e.starts_with(crate::guard::OUTAGE_PREFIX) {
-        "its socket is missing".into()
+        t("commit_guard.reason_no_socket", &[])
     } else {
-        "it did not answer".into()
+        t("commit_guard.reason_not_listening", &[])
     }
 }
 
@@ -722,7 +736,7 @@ mod tests {
         }
     }
 
-    // ---- the secrets service is down (ADR 0029 Amendment 12) ----------------------------------------------------------
+    // ---- the secrets service is down (ADR 0029 Amendment 15) ----------------------------------------------------------
 
     /// A scanner whose service does not answer: every call is the "not reachable" error.
     struct Down;
@@ -888,6 +902,74 @@ mod tests {
         assert!(!crate::guard::service_outage(
             "too many scans: wait a minute"
         ));
+    }
+
+    /// A service that is THERE but did not answer (a read that timed out, a reply that was not one, a socket that refuses this
+    /// user) is not an outage: the change is held, exactly as it was before the outage rule. Before the connection failure was
+    /// told apart from the rest, every one of these degraded and let a clean commit through unscanned.
+    #[test]
+    fn a_service_that_is_there_but_did_not_answer_holds_the_change_and_is_never_an_outage() {
+        let no_answer = crate::secrets_service::SERVICE_NO_ANSWER;
+        assert!(!crate::guard::service_outage(no_answer));
+        assert_ne!(no_answer, crate::secrets_service::SERVICE_DOWN);
+        let d = staged(&[("notes.txt", "clean\n")]);
+        let e = pre_commit_or_degrade(d.path(), Err(no_answer.to_string()), "", None).unwrap_err();
+        assert_eq!(e, no_answer);
+        struct Silent;
+        impl Scanner for Silent {
+            fn scan(&self, _: &str) -> Result<Vec<String>, String> {
+                Err(crate::secrets_service::SERVICE_NO_ANSWER.into())
+            }
+            fn override_ok(&self, _: &str, _: &Binding) -> Result<(), String> {
+                Err(crate::secrets_service::SERVICE_NO_ANSWER.into())
+            }
+        }
+        // half way through a check, too
+        let e = pre_commit_or_degrade(d.path(), Ok(Some(&Silent)), "", None).unwrap_err();
+        assert_eq!(e, no_answer);
+        // and a push is not "stopped as an outage": it fails as a barrier failure, the error as it was
+        let refs = [];
+        let e = pre_push_or_degrade(
+            d.path(),
+            "origin",
+            URL,
+            &refs,
+            Err(no_answer.to_string()),
+            "",
+            None,
+        );
+        assert_eq!(e.unwrap_err(), no_answer);
+    }
+
+    #[test]
+    fn the_reason_says_not_running_for_both_outages_and_never_claims_a_silence() {
+        for e in [
+            no_socket(),
+            crate::secrets_service::SERVICE_DOWN.to_string(),
+        ] {
+            let why = outage_reason(&e);
+            assert!(
+                why.contains("socket") && !why.contains("did not answer"),
+                "{why}"
+            );
+            let note = match pre_commit_degraded(staged(&[("a.txt", "x\n")]).path(), &why).unwrap()
+            {
+                Degraded::Pass(Some(n)) => n,
+                o => panic!("{o:?}"),
+            };
+            assert!(
+                note.contains("is not running") && !note.contains("did not answer"),
+                "{note}"
+            );
+        }
+        assert_eq!(
+            outage_reason(&no_socket()),
+            crate::messages::t("commit_guard.reason_no_socket", &[])
+        );
+        assert_ne!(
+            outage_reason(crate::secrets_service::SERVICE_DOWN),
+            outage_reason(&no_socket())
+        );
     }
 
     #[test]

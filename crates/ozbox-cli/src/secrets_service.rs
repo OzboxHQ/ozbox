@@ -302,9 +302,21 @@ pub struct Gates {
     pub presence_keys: std::sync::OnceLock<bool>,
 }
 
-/// What a call says when the service did not answer at all (not there, restarting, or an answer that is not one): the only
-/// failure worth waiting out. An answer that says no is a refusal, and fails at once.
+/// What a call says when the connection itself failed: the socket is missing or nothing is listening on it (the service is not
+/// there, or restarting). This is the one failure the commit hooks treat as an outage and degrade for (ADR 0029 Amendment 15).
+/// It is worth waiting out. An answer that says no is a refusal, and fails at once.
 pub const SERVICE_DOWN: &str = "the box's secrets service is not reachable";
+
+/// What a call says when it could not get an answer although it may well be there: a socket that refuses this user, a service too
+/// busy to accept, a read that timed out, a write that failed, or a reply that is not one. Worth waiting out like
+/// [`SERVICE_DOWN`], but NOT an outage: the hooks hold the change for it, as they did before the outage rule, because a service
+/// that is up and slow or confused must not be a way to commit unscanned.
+pub const SERVICE_NO_ANSWER: &str = "the box's secrets service did not answer";
+
+/// Whether a call's error is one of the two "no answer" kinds (the ones a poll waits out).
+pub fn is_no_answer(e: &str) -> bool {
+    e == SERVICE_DOWN || e == SERVICE_NO_ANSWER
+}
 
 /// What a refused code is told: this box takes approvals as requests.
 pub const CODES_REFUSED: &str = "this box takes approvals as requests, not as codes: ask for the change so it is filed, then approve that request on the Approvals page or from your computer (a code that is not tied to a request is not made or accepted here)";
@@ -2151,17 +2163,25 @@ impl SocketSecrets {
     }
 
     pub(crate) fn call(&self, req: Value) -> Result<Value, SecretError> {
-        let down = || SecretError(SERVICE_DOWN.into());
-        let mut s = UnixStream::connect(&self.path).map_err(|_| down())?;
+        // only a connection that could not be made at all (no socket, nothing listening) is "down"; everything after it, and a
+        // connect that fails for any other reason, is a service that did not answer
+        let silent = || SecretError(SERVICE_NO_ANSWER.into());
+        let mut s = UnixStream::connect(&self.path).map_err(|e| {
+            if connect_means_down(e.kind()) {
+                SecretError(SERVICE_DOWN.into())
+            } else {
+                silent()
+            }
+        })?;
         s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
             .ok();
         s.write_all(format!("{req}\n").as_bytes())
-            .map_err(|_| down())?;
+            .map_err(|_| silent())?;
         let mut line = String::new();
         BufReader::new(&s)
             .read_line(&mut line)
-            .map_err(|_| down())?;
-        let v: Value = serde_json::from_str(&line).map_err(|_| down())?;
+            .map_err(|_| silent())?;
+        let v: Value = serde_json::from_str(&line).map_err(|_| silent())?;
         if v["ok"].as_bool() == Some(true) {
             Ok(v)
         } else {
@@ -2173,6 +2193,15 @@ impl SocketSecrets {
             ))
         }
     }
+}
+
+/// Whether a failed `connect` means nobody is there: the socket file is missing (`ENOENT`) or nothing is listening on it
+/// (`ECONNREFUSED`). A refusal of this user (`EACCES`), a full backlog and the rest are not an outage.
+pub(crate) fn connect_means_down(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 /// An approval code a person brought for the next tunnel-token change (`ozbox tunnel setup --approval`, or the dashboard
@@ -2642,6 +2671,71 @@ mod tests {
         assert!(SocketSecrets::new(d.path().join("none.sock"))
             .get("a")
             .is_err());
+    }
+
+    /// Only a connection that could not be made at all is "down" (the one failure the commit hooks degrade for); a service that
+    /// accepts and then says nothing useful, or a socket that refuses this user, "did not answer" and holds the change.
+    #[test]
+    fn only_a_failed_connection_is_down_everything_after_it_did_not_answer() {
+        use std::os::unix::net::UnixListener;
+        let d = tempfile::tempdir().unwrap();
+        // no socket file: down
+        let none = SocketSecrets::new(d.path().join("none.sock"));
+        assert_eq!(none.call(json!({"op": "x"})).unwrap_err().0, SERVICE_DOWN);
+        // a socket file nothing listens on (ECONNREFUSED): down
+        let stale = d.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert_eq!(
+            SocketSecrets::new(stale)
+                .call(json!({"op": "x"}))
+                .unwrap_err()
+                .0,
+            SERVICE_DOWN
+        );
+        // a service that accepts and hangs up, and one that answers with something that is not a reply: did not answer
+        for reply in [None, Some("this is not json\n")] {
+            let sock = d.path().join(format!("r{}.sock", reply.is_some()));
+            let l = UnixListener::bind(&sock).unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut line = String::new();
+                    let _ = BufReader::new(&c).read_line(&mut line);
+                    if let Some(r) = reply {
+                        let _ = c.write_all(r.as_bytes());
+                    }
+                }
+            });
+            assert_eq!(
+                SocketSecrets::new(sock)
+                    .call(json!({"op": "x"}))
+                    .unwrap_err()
+                    .0,
+                SERVICE_NO_ANSWER
+            );
+        }
+        // a socket that refuses this user (EACCES): not an outage either
+        use std::os::unix::fs::PermissionsExt;
+        let locked = d.path().join("locked.sock");
+        let _l = UnixListener::bind(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(&locked).is_ok()
+            && UnixStream::connect(&locked)
+                .err()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            assert_eq!(
+                SocketSecrets::new(locked)
+                    .call(json!({"op": "x"}))
+                    .unwrap_err()
+                    .0,
+                SERVICE_NO_ANSWER
+            );
+        }
+        assert!(connect_means_down(std::io::ErrorKind::NotFound));
+        assert!(connect_means_down(std::io::ErrorKind::ConnectionRefused));
+        assert!(!connect_means_down(std::io::ErrorKind::PermissionDenied));
+        assert!(!connect_means_down(std::io::ErrorKind::WouldBlock));
+        assert!(!connect_means_down(std::io::ErrorKind::TimedOut));
     }
 
     /// The box socket store with every hostile value: stored through the admin socket as base64 and read back exactly;

@@ -147,7 +147,7 @@ fn wait(id: &str, json: bool) -> Result<(), CliError> {
 /// Whether a failed poll is waited out: only when the service did not answer, within a minute, and nobody pressed Ctrl-C.
 #[cfg(unix)]
 fn worth_waiting(err: &str, waited_ms: u64, stopped: bool) -> bool {
-    err == crate::secrets_service::SERVICE_DOWN && waited_ms < 60_000 && !stopped
+    crate::secrets_service::is_no_answer(err) && waited_ms < 60_000 && !stopped
 }
 
 #[cfg(all(test, unix))]
@@ -156,6 +156,14 @@ mod wait_tests {
 
     #[test]
     fn only_a_service_that_did_not_answer_is_waited_for() {
+        for down in [
+            crate::secrets_service::SERVICE_DOWN,
+            crate::secrets_service::SERVICE_NO_ANSWER,
+        ] {
+            assert!(worth_waiting(down, 0, false));
+            assert!(!worth_waiting(down, 60_000, false));
+            assert!(!worth_waiting(down, 0, true));
+        }
         let down = crate::secrets_service::SERVICE_DOWN;
         assert!(worth_waiting(down, 0, false));
         assert!(!worth_waiting(down, 60_000, false));
@@ -200,7 +208,7 @@ fn hook(name: &str, args: &[String]) -> Result<(), CliError> {
     let s = scanner();
     // A box whose secrets service is not there cannot check stored keys. `post-commit` cannot stop a commit, so it still checks
     // what it can (the shapes of keys, the names of files and `.env` files) and says the stored values were not checked; the
-    // push will check them again. `pre-commit` and `pre-push` degrade as ADR 0029 Amendment 12 says (see `guard_hold`).
+    // push will check them again. `pre-commit` and `pre-push` degrade as ADR 0029 Amendment 15 says (see `guard_hold`).
     if let (Err(e), "post-commit") = (&s, name) {
         eprint!("{}", post_commit_unscanned(&repo, e));
         return Ok(());

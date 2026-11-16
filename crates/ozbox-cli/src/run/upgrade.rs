@@ -113,6 +113,10 @@ pub enum StoreFate {
     /// machine configured for KMS over a store the file key still seals would never open it. Never accepted: finish or
     /// cancel the move first.
     MovingKey,
+    /// The store cannot be opened where it is, but a copy of its file key IS held (this computer's keychain or the box's vault),
+    /// so it is not lost and setting it aside would destroy something that can be mended. Never accepted: put the key back and
+    /// finish the move first. Additive.
+    KeyHeld,
 }
 
 /// The `Err` a root-facts reader gives when the box answered in a shape this program does not know.
@@ -212,6 +216,7 @@ fn kms_labelled_store_check(
     name: &str,
     arn: &str,
     facts: Option<std::result::Result<crate::secrets_adopt_facts::Facts, String>>,
+    laptop_escrow: bool,
 ) -> StoreCheck {
     use crate::secrets_adopt_facts::Kek;
     let check = |fate, detail: String| StoreCheck { fate, detail };
@@ -229,6 +234,24 @@ fn kms_labelled_store_check(
         Some(Ok(f)) => f,
     };
     if store_cannot_open(&f) {
+        // "no copy held anywhere" is a claim about two places the facts name: this computer's keychain and the box's vault.
+        // Either holding the key means the store is NOT lost, so it is never called lost and never offered to be set aside.
+        let held = if laptop_escrow {
+            Some("in this computer's keychain")
+        } else if f.service_escrow == Some(true) {
+            Some("in the box's vault")
+        } else {
+            None
+        };
+        if let Some(held) = held {
+            return check(
+                StoreFate::KeyHeld,
+                t(
+                    "upgrade.store_kms_key_held",
+                    &[("box", name), ("held", held)],
+                ),
+            );
+        }
         return check(
             StoreFate::AlreadyLost,
             t("upgrade.store_kms_unopenable", &[("box", name)]),
@@ -302,7 +325,7 @@ pub fn store_check(
     // that is gone, or a service that is not ready, behind a correct label is what a person was told was "kept" on 2026-11-16, so
     // the verdict is read from the box's root, never from the label alone.
     if let Some(arn) = rec.spec.labels.get(ozbox_provider_aws::SECRETS_KEY_LABEL) {
-        return kms_labelled_store_check(name, arn, root.map(|r| r(rec)));
+        return kms_labelled_store_check(name, arn, root.map(|r| r(rec)), laptop_escrow);
     }
     if let Some(root) = root {
         return match root(rec) {
@@ -383,6 +406,7 @@ pub fn store_check(
 pub fn store_refusal_code(fate: StoreFate) -> &'static str {
     match fate {
         StoreFate::MovingKey => "secrets_key_moving",
+        StoreFate::KeyHeld => "secrets_key_held",
         _ => "secrets_store_lost",
     }
 }
@@ -646,7 +670,7 @@ pub fn store_gate(
 ) -> std::result::Result<String, String> {
     match check.fate {
         // not even with --accept-new-secrets-store: a new machine on the KMS key over a file-sealed store never opens it
-        StoreFate::MovingKey => Err(check.detail.clone()),
+        StoreFate::MovingKey | StoreFate::KeyHeld => Err(check.detail.clone()),
         StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost if accept => Ok(format!(
             "{} {}",
             check.detail,
@@ -4484,6 +4508,13 @@ mod tests {
     fn kms_labelled_fate(
         facts: std::result::Result<crate::secrets_adopt_facts::Facts, String>,
     ) -> std::result::Result<StoreCheck, Box<dyn std::error::Error>> {
+        kms_labelled_fate_with(facts, false)
+    }
+
+    fn kms_labelled_fate_with(
+        facts: std::result::Result<crate::secrets_adopt_facts::Facts, String>,
+        laptop_escrow: bool,
+    ) -> std::result::Result<StoreCheck, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let (_, mut rec) = running_box(dir.path(), "main")?;
         rec.spec.labels.insert(
@@ -4491,7 +4522,13 @@ mod tests {
             FLEET_ARN.into(),
         );
         let root = move |_: &BoxRecord| facts.clone();
-        Ok(store_check(&agent(), &rec, false, false, Some(&root)))
+        Ok(store_check(
+            &agent(),
+            &rec,
+            false,
+            laptop_escrow,
+            Some(&root),
+        ))
     }
 
     /// The 2026-11-16 finding: `ozbox upgrade main --dry-run` said "kept" from the box's label while its secrets service was
@@ -4593,6 +4630,70 @@ mod tests {
             assert_eq!(c.fate, StoreFate::Unknown, "{}", c.detail);
             assert!(store_gate(&c, "main", false).is_err());
         }
+        Ok(())
+    }
+
+    /// A plan must never say "no copy held anywhere" while a copy is held: this computer's keychain, or the box's vault, holding
+    /// the file key means the store is not lost, so it is neither called already lost nor offered to be set aside.
+    #[test]
+    fn a_kms_labelled_box_whose_file_key_is_held_somewhere_is_never_called_lost() -> TestResult {
+        use crate::secrets_adopt_facts::{tests::on_kms, Facts, Kek};
+        let incident = Facts {
+            service_ready: false,
+            service_kek: Kek::Kms,
+            store_kek: Kek::File,
+            persist_kek: Kek::File,
+            key_file: false,
+            backup: false,
+            ..on_kms()
+        };
+        let cases = [
+            // this computer's keychain holds the key
+            (incident.clone(), true, "keychain"),
+            // the box's vault holds it
+            (
+                Facts {
+                    service_escrow: Some(true),
+                    ..incident.clone()
+                },
+                false,
+                "vault",
+            ),
+            // the service's own "lost" state, while the vault says it holds a copy
+            (
+                Facts {
+                    service_no_escrow: true,
+                    service_escrow: Some(true),
+                    ..on_kms()
+                },
+                false,
+                "vault",
+            ),
+        ];
+        for (f, laptop, place) in cases {
+            let c = kms_labelled_fate_with(Ok(f), laptop)?;
+            assert_eq!(c.fate, StoreFate::KeyHeld, "{}", c.detail);
+            assert!(c.detail.contains(place), "{}", c.detail);
+            assert!(c.detail.contains("adopt-fleet-key main"), "{}", c.detail);
+            assert!(
+                !c.detail.contains("ALREADY UNOPENABLE") && !c.detail.contains("no copy held"),
+                "{}",
+                c.detail
+            );
+            // refused with and without the person's acceptance (accepting would set aside a store that can be mended), in the
+            // words that name the copy and with no "two ways forward" that offers to accept a new store
+            for accept in [false, true] {
+                let refusal = store_gate(&c, "main", accept).unwrap_err();
+                assert!(refusal.contains("IS held"), "{refusal}");
+                assert!(!refusal.contains("Two ways forward"), "{refusal}");
+            }
+            assert_eq!(store_refusal_code(c.fate), "secrets_key_held");
+        }
+        // and with no copy anywhere it is still said to be lost
+        assert_eq!(
+            kms_labelled_fate_with(Ok(incident), false)?.fate,
+            StoreFate::AlreadyLost
+        );
         Ok(())
     }
 
