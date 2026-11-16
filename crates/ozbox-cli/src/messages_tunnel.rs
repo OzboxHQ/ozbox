@@ -84,6 +84,7 @@ pub const EN: &[(&str, &str)] = &[
     ("dashboard.install_failed", "The installation failed on the box. Nothing is left half-done that running this command again does not fix."),
     ("dashboard.installed", "The dashboard runs on {box} as its own user (ozbox-supervisor), not as the box user. First-time setup: read the setup code on this computer with `ozbox secrets ingress setup-code --box {box}` (it is not in the box's logs), then open {address}."),
     ("dashboard.token_stored", "The new tunnel token is stored on {box}, and the tunnel is restarting with it."),
-    ("dashboard.already_supervisor", "The dashboard on {box} already runs as its own user, so its sign-in settings are its own and were not changed from here. To move it again or restart it: ozbox admin {box} -- ensure-supervisor."),
+    ("dashboard.already_supervisor", "The dashboard on {box} already runs as its own user with sign-in settings of its own, and they were not changed. Replacing them needs your approval, which this command cannot take yet. To restart it: ozbox admin {box} -- ensure-supervisor."),
+    ("dashboard.not_running", "The dashboard's files and settings are on {box}, but the dashboard is not staying up ({state}). If the box is still on an earlier program, upgrade it first (ozbox admin {box} -- reinstall-ozboxd) and run this command again; otherwise read why with: ozbox admin {box} -- collect-logs. Nothing runs as the box user."),
     ("dashboard.supervisor_failed", "The dashboard's files are on {box}, but its root helper did not start it as its own user ({why}). Nothing runs as the box user. Fix what it says, then run this command again, or: ozbox admin {box} -- ensure-supervisor."),
 ];

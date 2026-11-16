@@ -339,6 +339,19 @@ impl Install {
         ])
     }
 
+    /// Ask the box, over the same route, whether the dashboard stayed up (`sh`, so it is not taken for the installer's script).
+    fn health_command(&self) -> CommandSpec {
+        CommandSpec::new("ssh")
+            .args([
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                crate::sshconfig::host_alias(self.name.as_str()),
+                "sh".to_string(),
+                "-s".to_string(),
+            ])
+            .stdin(HEALTH_SCRIPT.as_bytes().to_vec())
+    }
+
     pub fn command(&self, script: String) -> CommandSpec {
         CommandSpec::new("ssh")
             .args([
@@ -872,19 +885,17 @@ pub fn run_with_release(
             // read. Success is reported only once the dashboard runs that way; it never runs as the box user.
             let already = o.stdout.contains("dashboard-setup: supervisor-present");
             let token_stored = o.stdout.contains("dashboard-setup: tunnel-token-stored");
-            let moved = if already {
-                None
-            } else {
-                Some(start_as_supervisor(runner, &install)?)
-            };
+            // On a box that already has a supervisor the settings are staged too, and the helper decides: it installs them
+            // when the dashboard has none to read (after an upgrade), and keeps the ones it has otherwise.
+            let moved = start_as_supervisor(runner, &install)?;
+            let kept = matches!(moved, Moved::Kept(_));
             if !json_out {
-                if let Some(m) = &moved {
-                    println!("{m}");
-                }
+                let (Moved::Started(m) | Moved::Kept(m)) = &moved;
+                println!("{m}");
                 println!(
                     "{}",
                     t(
-                        if already {
+                        if kept {
                             "dashboard.already_supervisor"
                         } else {
                             "dashboard.installed"
@@ -898,8 +909,8 @@ pub fn run_with_release(
             } else {
                 println!(
                     "{}",
-                    json!({ "installed": !already, "box": name.as_str(), "runs_as": "ozbox-supervisor",
-                        "settings_changed": !already, "tunnel_token_stored": token_stored || (!already && token.is_some()) })
+                    json!({ "installed": !kept, "box": name.as_str(), "runs_as": "ozbox-supervisor",
+                        "settings_changed": !kept, "tunnel_token_stored": token_stored || (!kept && token.is_some()) })
                 );
             }
             Ok(())
@@ -948,7 +959,7 @@ pub fn run_with_release(
 
 /// Ask the box's root helper to start the staged dashboard as its own user, then to destroy the box user's copies. An error
 /// says what happened; in every case nothing runs as the box user (the helper starts no box-user copy of a staged one).
-fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<String, CliError> {
+fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<Moved, CliError> {
     let box_name = install.name.as_str();
     let ask = |request: &str| -> Result<String, CliError> {
         let o = runner
@@ -970,15 +981,54 @@ fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<
         "ensure-supervisor expect {}",
         install.auth_sha256()
     ))?;
+    // The dashboard already has sign-in settings of its own: the helper kept them (it cannot replace them on a request the box
+    // user could have made) and changed nothing, so there is nothing to finish or check.
+    if moved.contains("already has sign-in settings of its own") {
+        return Ok(Moved::Kept(moved));
+    }
     if !moved.contains("runs as ozbox-supervisor") {
         return Err(CliError::Msg(t(
             "dashboard.supervisor_failed",
             &[("box", box_name), ("why", moved.trim())],
         )));
     }
+    // A helper from an earlier program says "runs" as soon as the process forks, so a dashboard that exits at once (settings
+    // it cannot read) was reported as running. Ask the box, after the restart delay, whether it stayed up.
+    let health = runner
+        .run(&install.health_command())
+        .map_err(|_| CliError::Msg(t("dashboard.reach_failed", &[("box", box_name)])))?;
+    if !health.stdout.contains("dashboard-health: ok") {
+        let state = health
+            .stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("dashboard-health: "))
+            .unwrap_or("unknown")
+            .trim()
+            .to_string();
+        return Err(CliError::Msg(t(
+            "dashboard.not_running",
+            &[("box", box_name), ("state", &state)],
+        )));
+    }
     let finished = ask("ensure-supervisor finish")?;
-    Ok(format!("{moved}\n{finished}"))
+    Ok(Moved::Started(format!("{moved}\n{finished}")))
 }
+
+/// What the root helper did with the staged dashboard.
+enum Moved {
+    /// It runs as its own user with the settings sent from here.
+    Started(String),
+    /// It already had sign-in settings of its own and kept them.
+    Kept(String),
+}
+
+/// Run on the box, after the helper: is the dashboard still up once its restart delay (5 s) has passed, and has it not been
+/// restarted by systemd on its own?
+const HEALTH_SCRIPT: &str = "sleep 8
+s=$(systemctl is-active ozbox-dashboard.service 2>/dev/null || true)
+n=$(systemctl show -p NRestarts --value ozbox-dashboard.service 2>/dev/null || echo 0)
+if [ \"$s\" = active ] && [ \"${n:-0}\" = 0 ]; then echo 'dashboard-health: ok'; else echo \"dashboard-health: ${s:-unknown}, restarted ${n:-0} times\"; fi
+";
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1188,15 +1238,15 @@ mod tests {
         queue_installed(&r);
         run_with(&cmd(true), true, false, false, &r, &mut stdin, false).unwrap();
         let calls = r.calls();
-        // the installer, then the root helper starting it as its own user and finishing the move
-        assert_eq!(calls.len(), 3);
+        // the installer, then the root helper starting it as its own user, the box asked whether it stayed up, and the finish
+        assert_eq!(calls.len(), 4);
         assert_eq!(calls[0].program, "ssh");
         assert!(calls[1]
             .args
             .last()
             .unwrap()
             .starts_with("/usr/local/bin/ozbox-admin-request ensure-supervisor expect "));
-        assert!(calls[2]
+        assert!(calls[3]
             .args
             .last()
             .unwrap()
@@ -1253,6 +1303,7 @@ mod tests {
         r.reply(ok_out(
             "status=ok\nozbox-supervisor-setup: the dashboard runs as ozbox-supervisor (port 7878)",
         ));
+        r.reply(ok_out("dashboard-health: ok"));
         r.reply(ok_out(
             "status=ok\nozbox-supervisor-setup: the old dashboard state is destroyed",
         ));
@@ -1480,7 +1531,7 @@ mod tests {
             assert_eq!(assets.asked(), [(ReleaseKind::Image, asset.to_string())]);
             let calls = r.calls();
             // the program reaches the box on standard input of its own command, never in an argument
-            let upload = &calls[calls.len() - 4];
+            let upload = &calls[calls.len() - 5];
             assert!(upload
                 .args
                 .iter()
@@ -1768,7 +1819,7 @@ mod tests {
         )
         .unwrap();
         let calls = r.calls();
-        assert_eq!(calls.len(), 3, "no probe, no upload, no download here");
+        assert_eq!(calls.len(), 4, "no probe, no upload, no download here");
         let script = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
         assert!(script.contains("BINARY_URL='https://downloads.example.com/ozbox'"));
         assert!(script.contains("BINARY_FILE=''") && script.contains("BOX_PROGRAM=''"));
@@ -1830,11 +1881,63 @@ mod tests {
         ));
         assert!(install_with(&r, &by_hand(), &FakeAssets::ok()).is_err());
 
-        // a box whose dashboard already runs as its own user: nothing is staged or moved, and that is said
+        // a box whose dashboard already has sign-in settings of its own keeps them, and that is said: the helper is asked,
+        // and answers that it changed nothing, so there is nothing to finish
         let r = Arc::new(RecordingRunner::new());
         r.reply(ok_out("dashboard-setup: supervisor-present"));
+        r.reply(ok_out("status=ok\nozbox-supervisor-setup: the dashboard on this box already has sign-in settings of its own, so the ones sent from your computer were not applied"));
         install_with(&r, &by_hand(), &FakeAssets::ok()).unwrap();
-        assert_eq!(r.calls().len(), 1);
+        assert_eq!(r.calls().len(), 2);
+    }
+
+    /// Found on a real box (2026-11-15): after an upgrade the supervisor's folder (kept on /work) had no sign-in settings, the
+    /// installer said "supervisor-present" and stopped, and the dashboard crash-looped. On a box with a supervisor the staged
+    /// settings are now handed to the root helper with their sha256, exactly as on any other box.
+    #[test]
+    fn on_a_box_with_a_supervisor_the_settings_are_handed_to_the_root_helper() {
+        let r = Arc::new(RecordingRunner::new());
+        r.reply(ok_out("dashboard-setup: supervisor-present"));
+        r.reply(ok_out(
+            "status=ok\nozbox-supervisor-setup: the dashboard runs as ozbox-supervisor (port 7878)",
+        ));
+        r.reply(ok_out("dashboard-health: ok"));
+        r.reply(ok_out("status=ok\nozbox-supervisor-setup: done"));
+        install_with(&r, &by_hand(), &FakeAssets::ok()).unwrap();
+        let calls = r.calls();
+        assert_eq!(calls.len(), 4);
+        assert!(calls[1]
+            .args
+            .last()
+            .unwrap()
+            .starts_with("/usr/local/bin/ozbox-admin-request ensure-supervisor expect "));
+        assert!(calls[3]
+            .args
+            .last()
+            .unwrap()
+            .ends_with("ensure-supervisor finish"));
+    }
+
+    /// The same real box: the helper said "ok" while the service died and restarted. Whatever the helper says, the box is
+    /// asked whether the dashboard stayed up, and a dashboard that did not is an error that names what to do.
+    #[test]
+    fn a_dashboard_that_does_not_stay_up_is_an_error_not_a_success() {
+        let r = Arc::new(RecordingRunner::new());
+        r.reply(ok_out("dashboard-setup: staged"));
+        r.reply(ok_out(
+            "status=ok\nozbox-supervisor-setup: the dashboard runs as ozbox-supervisor (port 7878)",
+        ));
+        r.reply(ok_out("dashboard-health: activating, restarted 3 times"));
+        let e = install_with(&r, &by_hand(), &FakeAssets::ok())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("not staying up")
+                && e.contains("restarted 3 times")
+                && e.contains("reinstall-ozboxd"),
+            "{e}"
+        );
+        // no finish: the old copies are kept while the dashboard is not running
+        assert_eq!(r.calls().len(), 3);
     }
 
     /// Found on a real box (2026-11-12): once the dashboard ran as its own user, running the installer again with a new
