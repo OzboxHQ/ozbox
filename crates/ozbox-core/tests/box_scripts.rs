@@ -1052,6 +1052,22 @@ fn recover_secrets_never_touches_a_running_service_and_otherwise_sets_the_store_
         "a request never stops the service"
     );
 
+    // a service still in its retry loop reads `activating`: refused, and the refusal says which state the unit is in
+    let c = Admin::new();
+    recorder(c.dir.path(), "ozbox");
+    let sc = c.dir.path().join("systemctl");
+    fs::write(&sc, "#!/bin/sh\n[ \"$1\" = is-active ] && [ \"${2:-}\" != --quiet ] && echo activating\nexit 0\n")?;
+    fs::set_permissions(&sc, fs::Permissions::from_mode(0o755))?;
+    c.request("ffffffff07", "recover-secrets challenge");
+    assert!(c.process("").status.success());
+    let said = c.answer("ffffffff07");
+    assert!(said.starts_with("status=failed"), "{said}");
+    assert!(
+        said.contains("unit state: activating") && said.contains("nothing is recorded as lost"),
+        "{said}"
+    );
+    assert_eq!(log(c.dir.path(), "ozbox"), "");
+
     // a service that is not running (not ready: its key is gone): the program sets the store aside, then it starts
     let b = Admin::new();
     recorder(b.dir.path(), "ozbox");
