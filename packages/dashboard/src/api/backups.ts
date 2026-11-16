@@ -89,7 +89,9 @@ export interface BoxBackups {
   state: string;
   items: BackupItem[];
   provider: { supported: boolean; includes_work: boolean | null; error: string | null };
-  restic: { target_set: boolean; configured_on_box: boolean | null; error: string | null; running: unknown };
+  restic: { target_set: boolean; configured_on_box: boolean | null; error: string | null; running: unknown; /** A prune holds the repository: its list was not read, which is not "no backups" and not an error. Absent from an older server. */ busy?: boolean; /** `false`: the box's secrets service is not up yet, so "no credentials" is "not known". Absent from an older server (ready). */ secrets_ready?: boolean };
+  /** Backups were switched off for this box (Settings, or "Turn off backups on this box"). Absent from an older server. */
+  turned_off?: boolean;
   /** The /work disks a restore replaced and kept; they keep costing storage until deleted. `pending` while a restore is unfinished. */
   old_disks?: { id: string; size_gb: number | null; restored_from: string | null; state: 'kept' | 'pending' }[];
   /** A restore into this (new) box that is still being carried out. */
@@ -110,6 +112,8 @@ export interface BackupsApi {
   /** Put the repository credentials on the box now (from the server's secret store). */
   pushCredentials(name: string, signal?: AbortSignal): Promise<void>;
   removeCredentials(name: string, signal?: AbortSignal): Promise<void>;
+  /** Retire this box's backups: remove its repository credentials from the box and switch its schedule off. Existing backups stay. */
+  turnOff(name: string, signal?: AbortSignal): Promise<void>;
 }
 
 export function createBackupsApi(request: Request): BackupsApi {
@@ -123,6 +127,9 @@ export function createBackupsApi(request: Request): BackupsApi {
     },
     removeCredentials: async (n, s) => {
       await request('DELETE', `${box(n)}/credentials`, undefined, s);
+    },
+    turnOff: async (n, s) => {
+      await request('POST', `${box(n)}/off`, undefined, s);
     },
   };
 }

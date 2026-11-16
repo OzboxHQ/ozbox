@@ -17,7 +17,7 @@ ozbox upgrade main
 ```
 
 **Underneath:** the image's release signature is checked first (an unverified image is refused unless you pass
-`--allow-unverified-image`); work in progress is checkpointed; the machine is rebuilt (on Hetzner, replaced) from the new image; `/work` is
+`--allow-unverified-image`; with no `--image` the newest image whose signed release verifies is chosen, and the plan names any newer one it passed over); work in progress is checkpointed; the machine is rebuilt (on Hetzner, replaced) from the new image; `/work` is
 reattached untouched; the self-test runs; your SSH entry follows the new machine.
 
 The plan also says what happens to the box's **secrets store**. Its copy on `/work` comes back; whether the new machine can
@@ -25,8 +25,11 @@ open it depends on where the store's key is. A key in a cloud key service (AWS: 
 `[aws]`, and make the box with them, or move an existing box with `ozbox adopt-fleet-key main`: see 1b) or a TPM is kept, and so is a key escrowed in the box's own vault (box secrets on OpenBao
 with a token). A key kept only in a file on the system disk is lost with that disk: the upgrade is then refused and the plan
 lists what you would have to enter again. Escrow the key first, or run it again with `--accept-new-secrets-store`; the old
-store is then set aside (never deleted) with the key this computer pinned when it made the box, and the backup credentials
-and the web IDE's tunnel token are put back from this computer. A box that is not running cannot be asked, so start it first
+store is then set aside (never deleted) with the key this computer pinned when it made the box, and the backup credentials,
+the web IDE's tunnel token and a hosted dashboard (its settings and tunnel token, kept on this computer when you installed it) are put
+back from this computer (if it does not hold the backup credentials, backups on that box stop, and the upgrade says so: see 4b). The report has a line for each. The dashboard's token can need your approval first, because the box's new
+store asks for one: the report then says so and names the one command, `ozbox dashboard restore <box> --approve-with-laptop-key`;
+an upgrade never makes that approval for you (see [run the dashboard on a box](coding-from-anywhere.md)). A box that is not running cannot be asked, so start it first
 (`ozbox resume main`) or accept a new store.
 
 **On AWS, an upgrade that may lose the store's key keeps a copy of the old system disk first.** When the key is a file on the
@@ -79,8 +82,7 @@ back through KMS before anything is replaced), then stops the service, swaps the
 down for that swap and its start-up: a few seconds, plus a little for every secret it unlocks when it starts (a store with 100
 secrets can take a minute or two to be ready; `ozbox env run` and the dashboard's secret reads wait or retry meanwhile). The box
 keeps its key file until you commit: this command reads `main`'s state **as root through AWS Systems Manager**, with a document
-of your fleet's own that runs only fixed `ozbox` programs (the `aws-adopt-command` module makes it, a step of `ozbox init`; attach the policy it outputs as
-`operator_adopt_policy_json` to whoever runs this command, and to nobody else; the box user's SSH answer is never trusted for this),
+of your fleet's own that runs only fixed `ozbox` programs (the `aws-adopt-command` module makes it, a step of `ozbox init`; the statements it needs are in the operator policy `ozbox init` writes to `operator-policy.json` on every run: an administrator applies that file to whoever runs this command, and to nobody else; the box user's SSH answer is never trusted for this),
 and only when the service, the store and the copy on `/work` are all on KMS does it write the label that makes `ozbox upgrade`
 keep the store. Then `main` destroys its key file and the copy beside the store, and the command waits for `main` to say so.
 What the store holds is kept.
@@ -114,6 +116,13 @@ then mark any disk in the account as its own.
   not applied, the policy is missing, the secrets service is not ready right now, or the box's program is older than the check),
   it says the store is unknown, says which, and asks for `--accept-new-secrets-store`, never "kept". A store kept by escrow on a
   box that answers needs no flag.
+- The same holds for a box whose record names the fleet's KMS key. The record only says which key the new machine will be given,
+  so the plan asks the box's root whether the store really opens under it, and says one of four things: **kept** (the service is
+  ready on that key and the store and its copy on `/work` are sealed by it), **will be lost** (the store is still sealed by a key
+  kept in a file: finish the move with `ozbox adopt-fleet-key`, or accept a new store), **already unopenable** (its file key is gone,
+  so its secrets service cannot start; `--accept-new-secrets-store` upgrades and then sets the old store aside and starts a new one,
+  or run `ozbox admin <name> -- recover-secrets` first; never said when this computer's keychain or the box's vault holds a copy of the key: then the plan says the store is not lost, and that `--accept-new-secrets-store` sets it aside (never deleted) and starts a new one, with the old store reopenable later: see 1c) or **unknown** (the box could not be asked, so it is never called kept; the
+  upgrade asks for `--accept-new-secrets-store`). A box that is stopped is unknown too: start it and plan again.
 - It reads the box first and changes nothing if the box keeps its key anywhere but a file, cannot be asked, or cannot move
   its own store. A box made on `0.1.1` or earlier cannot: upgrade it first, **to an image built from a release that includes
   this command** (an image from an older release gains nothing). If the plan says the store would be lost,
@@ -127,6 +136,16 @@ then mark any disk in the account as its own.
 **Status:** Preview (tested in CI against a simulated account and box; not yet on a real one).
 
 ## 1a. A box whose secrets store can no longer be opened
+
+**A box with secrets of its own** (kept in AWS Parameter Store) loads them with the box's role too: no `aws` command is needed on
+the box. If it could not (the role may not read its path, or Parameter Store is not reachable), the box's self-test fails
+`box_secrets_loaded`, and `ozbox admin <box> -- collect-logs` shows the loader's reason (never a value). The box tries again every
+fifteen minutes. A box whose secrets are in OpenBao still needs the `bao` program on it.
+
+**A box set up for the fleet's KMS key** keeps its store's key in KMS and reaches it with the box's own role: no `aws` command is
+needed on the box. If the role cannot use the key, the secrets service stays down and the box's self-test fails `secrets_key_usable`
+(once the key has been failing for three minutes; sooner than that the self-test says it could not verify), naming the KMS key and what to check (the role's access to the key, the key service being reachable, the key named in
+`/etc/ozbox/secrets.env`). That is not a lost store: nothing is set aside, and it starts again by itself once the key works.
 
 **You want:** to start a new secrets store on a box whose store's key was lost with its system disk (no escrow).
 
@@ -210,6 +229,12 @@ store back **displaces the new one**, so keys entered since the upgrade are not 
    (the key file on the box is destroyed by it). When it says it finished, delete the snapshot: `ozbox backup delete main snap-OLD`.
    The new store you set aside in step 3 can be reopened the same way, or its keys entered again.
 
+**If the old key is held in your keychain or the box's vault instead.** That is the case when the upgrade's plan said the key is held. The
+upgrade still set the old store aside the same way (renamed, never deleted), and the held key was not touched, so the old store can be
+reopened from it. The steps are 3 to 6 with one change: the old key (`kek.key`) comes from the held copy, not from a snapshot's disk,
+so there is no volume to attach in steps 1 and 2. ozbox does not show a held key, so it is retrieved by whoever set the keychain or
+the vault up. Where no copy of the key is held, the old store cannot be reopened, and the plan says it is already unopenable.
+
 The on-box half (that the old disk's `kek.key` reopens the store the upgrade set aside, and no other key does) is checked by a
 test in CI. The AWS half (a volume from the snapshot, attached and mounted) has not been run against a real account.
 **Status:** Preview.
@@ -249,6 +274,37 @@ deduplicated (restic).
 ```
 ozbox backup now main --to both
 ```
+
+**Status:** Preview.
+
+## 4b. Keep backups through an upgrade
+
+**You want:** an upgrade that never leaves a box quietly un-backed-up.
+
+An upgrade replaces the box's system disk and keeps `/work`. For backups to a repository that means:
+
+- **The repository, its password and its keys** stay in the box's encrypted secrets store, never in a file. A store that can
+  be opened on the new machine comes through the upgrade with them, so a box you set up backups on yourself (not from this
+  computer) keeps them without this computer holding anything.
+- **What is backed up and how often** (`paths`, `excludes` and `interval_hours` in the `[backup]` section of
+  `/etc/ozbox/ozboxd.toml`, if you changed them) is kept by root in a folder on `/work` the box's own programs cannot change, so
+  the new system disk starts with your choice. The dashboard owns the schedule, so `enabled` and where credentials come from
+  are always the image's, never `/work`'s.
+- **After the self-test** the upgrade asks the box whether backups are configured and whether the repository answers, and says
+  so: the report line starts "Backups:". If backups were set up and are not working, the self-test **fails**, the report says
+  **BACKUPS HAVE STOPPED** (or **ARE NOT WORKING**) with the command, and `ozbox upgrade` exits with an error. A box that never
+  had backups is not failed for it.
+- **A new secrets store** (you accepted `--accept-new-secrets-store`) starts without the credentials. The upgrade puts them back
+  from this computer when it holds them. If it does not, backups stop and this is what to run:
+
+```
+ozbox backup credentials main
+```
+
+It sends the repository's password and keys from this computer's secret store to the box (they are never printed). If this
+computer never held them, add the repository in **Settings → Backups** first. To retire backups on a box on purpose, turn them off for it: open the box's **Backups** tab in the dashboard and choose **Turn off backups on this box**, or run `ozbox backup off main`. Either one says what stops and asks first, then removes the repository credentials from the box (the box forgets that backups were set up, so the self-test and an upgrade stop expecting them) and switches the box's schedule off on this computer, so the next slot does not send them again. Backups already made stay where they are. To turn them on again, set the box to follow the fleet schedule (**Settings → Backups**, or `ozbox backup schedule --box main --every daily --at 02:00`) and send the credentials again with `ozbox backup credentials main`. Removing the repository from **Settings → Backups** is not the same: it only stops this computer from sending credentials, and a box that holds them keeps them.
+
+**Underneath:** the record is never restored from a snapshot, so an old backup cannot bring back a set-up you removed. It is brought up to date every time the box starts (a box that held credentials before the record existed gets one, and a `[backup]` edit you made is kept). A kept value does not go back to the default by setting `/etc` to the default, because the default is what a new system disk starts with: to go back, delete `/work/ozbox-backup/backup.toml` as root and it is written again from `/etc` at the next start. The secrets service starts at the same time as the box does, so when there is no record yet the helper waits for it (up to 90 seconds, with growing pauses, never for ever) before deciding the box has no backups, and logs which it found. A `[backup]` setting the record cannot hold is skipped on its own and named in that log, so one odd setting never stops the record from being written: `paths` must be folders under `/work`, and `excludes` may be paths under `/work` or relative patterns such as `*.tmp` and `node_modules`. The repository check the self-test runs has a two-minute limit (restic is stopped at it, and the repository is then called unreachable); while a new check runs, the self-test reports the last answer and how old it is, and it says "not checked" only when there has never been one. A box whose secrets service is not up yet is reported as that, never as backups that stopped, and nothing is sent to it.
 
 **Status:** Preview.
 

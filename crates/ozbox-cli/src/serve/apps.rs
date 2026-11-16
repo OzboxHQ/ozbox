@@ -230,7 +230,7 @@ impl App {
     }
 
     fn start_prices(&mut self, now_ms: u64) {
-        let Ok(recs) = self.provider.list() else {
+        let Some(recs) = self.boxes_quietly() else {
             return;
         };
         let wanted = pricing::wanted_types(&recs);
@@ -257,7 +257,7 @@ impl App {
 
     /// Fetch public prices when the cache says so (or `force`). A failure keeps the old prices and says why.
     fn refresh_prices(&mut self, now_ms: u64, force: bool) -> Option<Result<(), String>> {
-        let recs = self.provider.list().ok()?;
+        let recs = self.boxes_quietly()?;
         let wanted = pricing::wanted_types(&recs);
         if !force && !self.prices.refresh_due(now_ms, &wanted) {
             return None;
@@ -284,7 +284,7 @@ impl App {
     /// Start an alert round: account the cost (cheap, here), then ask every running box how it is doing (slow, on the
     /// worker). The result comes back as [`Done::Observed`].
     fn start_alerts(&mut self, now_ms: u64) {
-        let Ok(recs) = self.provider.list() else {
+        let Some(recs) = self.boxes_quietly() else {
             return;
         };
         // Cost first: the budget alert needs this month's total.
@@ -551,7 +551,7 @@ impl App {
 
     /// Names and states only.
     pub(super) fn fleet_summary(&self) -> String {
-        match self.provider.list() {
+        match self.boxes_for_loop() {
             Ok(recs) if recs.is_empty() => "No boxes yet.".into(),
             Ok(recs) => {
                 let running = recs.iter().filter(|r| r.state == BoxState::Running).count();
@@ -573,9 +573,9 @@ impl App {
     // ---------- cost ----------
 
     pub(super) fn cost(&self) -> Resp {
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let now = unix_ms();
         let book = self.prices.book.as_ref();

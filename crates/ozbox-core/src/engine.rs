@@ -50,8 +50,8 @@ pub const PRE_UPGRADE_COPY_LABEL: &str = "ozbox-pre-upgrade-copy";
 /// Providers that record it put it in [`BoxRecord`]'s `spec.labels`; they never pass it back as a label to set.
 pub const FIRST_BOOT_LABEL: &str = "ozbox-first-boot";
 
-/// Said in every upgrade plan: what lives only on the system disk is replaced, backup settings included.
-pub const UPGRADE_BACKUP_NOTE: &str = "Backups: if this box backs up /work with restic, its settings (the [backup] section of /etc/ozbox/ozboxd.toml, and the repository credentials in the box's encrypted secrets store) live on the system disk, so the new system disk starts without them. When a repository is set up in Settings -> Backups, its credentials are put back after the self-test; otherwise they are NOT restored, and are never stored on /work: put them back after the upgrade, and the final report repeats this.";
+/// Said in every upgrade plan: what an upgrade does to a box's restic backups.
+pub const UPGRADE_BACKUP_NOTE: &str = "Backups: if this box backs up /work with restic, the repository credentials stay in the box's encrypted secrets store, which an upgrade keeps on /work when the store can be opened on the new machine, and the non-secret settings (what is backed up, and how often) are kept by root on /work. After the self-test the upgrade checks that backups are still configured and that the repository answers, and says plainly if they are not. If the secrets store starts again (a new store), backups STOP until the credentials are sent again: the report then gives the command, `ozbox backup credentials <box>`, and the self-test fails until it is done. Credentials are never stored on /work in plain text.";
 
 /// A size mapped to a provider machine type, with an optional note a person should read in the plan
 /// (for example when the nearest type is larger than the size promises).

@@ -8,6 +8,113 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
+  ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
+
+  - **Boxes on AWS reach their secrets without the `aws` command.** The secrets service and a box's own secrets load straight from AWS with the box's role, and the self-test says when they cannot.
+  - **An upgrade is honest about the secrets store, and commits keep working while the secrets service is down.**
+  - **Upgrades keep your backups and your hosted dashboard**, and check that backups work afterwards.
+  - **The dashboard no longer freezes while your cloud or a box is slow.**
+  - **`ozbox init` gives you the complete operator policy**, and `latest` means the newest image whose signed release verifies.
+
+  **How to get it.** Install with `sh install.sh --version 0.2.0-beta.3`, then `ozbox upgrade <box>`.
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes with secrets of their own">
+  ## A box's own secrets now load from Parameter Store
+
+  A box set up with secrets of its own in AWS Parameter Store could not load them: the loader used the AWS command, which the box image does not carry, and the only sign was a failed unit. The secrets never appeared.
+
+  - **The loader reads Parameter Store itself**, with the box's own role. Nothing needs installing on the box, and which parameters it reads (its own path, non-production only) is unchanged.
+  - **The box's self-test now says it.** When a box that declares secrets could not load them, the self-test fails with `box_secrets_loaded` and says where to look, instead of the box looking well.
+  - **Known limit.** A box whose secrets are in OpenBao still needs the `bao` program on it.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes set up for the fleet's KMS key">
+  ## A box set up for the fleet's KMS key now starts its secrets service
+
+  A box set up for the fleet's KMS key could not start its secrets service. Every start said the key that protects the box's secrets was not available, and no secret could be read or saved. The box image does not carry the AWS command the service used to reach the key.
+
+  - **The secrets service reaches the key itself**, with the box's own role. Nothing needs installing on the box, and the key's access rules (the role may use the key only for its own box) are unchanged.
+  - **The box's self-test now says it.** When a box set up for KMS cannot use its key, the self-test fails with `secrets_key_usable` once the key has been failing for three minutes (the service keeps count across its restarts), names the KMS key and lists what to check; sooner than that, or when the service has not written its state yet, it says it could not verify, never a pass. A store that cannot be opened for good is pointed at `recover-secrets` or `adopt-fleet-key`, not at the network.
+  - **Nothing is lost on the way.** A store waiting on its key is kept as it was and opens again once the key works. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Secrets service outages">
+  ## An upgrade plan no longer says "kept" about a store it has not checked, and you can still commit while the secrets service is down
+
+  **The upgrade plan tells the truth about the secrets store.** For a box on your fleet's KMS key, `ozbox upgrade` used to say the store was kept because the box's record named the key, even when the box's secrets service could not open its store. The plan now asks the box itself and says one of four things: kept, will be lost, already cannot be opened (and how to start a new store, as part of the upgrade with `--accept-new-secrets-store` or beforehand with `ozbox admin <box> -- recover-secrets`), or unknown because the box could not be asked. It only says a store cannot be opened when no copy of its key is held anywhere: if your computer's keychain or the box's vault holds one, it says the store is not lost, and that `--accept-new-secrets-store` sets the old store aside (never deleted) and starts a new one, so the old one can be reopened later from the held key. Unknown is never "kept". See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+
+  **Commits are not blocked while the secrets service is down.** Before, every commit on the box was stopped until the service came back, so work could not be saved. Now a commit is still checked for private keys, provider keys, signed tokens, passwords in addresses and `.env` files. A clean commit goes through, with a note that stored secrets were not compared; nothing is lost. A commit that looks like it holds a key is stopped, and the message says so. A push is held until the service is back, because that is what leaves the box, and the message says how to bring the service back. See the [CLI reference](/cli-reference).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Backups through an upgrade">
+  ## An upgrade no longer leaves a box quietly un-backed-up
+
+  An upgrade replaces a box's system disk. If the box backed up `/work` to a repository, nothing told you afterwards whether those backups still worked, and settings you had made on the box itself could be gone.
+
+  - **Your backup settings come through.** The repository's password and keys stay in the box's encrypted secrets store, which an upgrade keeps when the store can be opened on the new machine, so backups you set up on the box itself no longer depend on this computer holding anything. What is backed up and how often, if you changed it on the box, is kept by root on `/work` and applies on the new system disk.
+  - **The upgrade checks that backups work.** After the self-test it asks the box whether backups are configured and whether the repository answers, and the report says so. A box whose backups were set up and are not working now fails its self-test, and the upgrade ends with an error naming what to run. A box that never had backups is not failed for it.
+  - **If a new secrets store was started** (`--accept-new-secrets-store`), backups stop until their credentials are sent again. The upgrade puts them back from this computer when it holds them; otherwise it says **BACKUPS HAVE STOPPED** and the command: `ozbox backup credentials <box>`.
+  - **A box that already has its credentials keeps them.** The upgrade no longer sends this computer's copy over a box's own.
+  - **New command:** `ozbox backup credentials <box>` sends the repository's password and keys from this computer's secret store to a box. They are never printed.
+  - **Turn off backups on a box, on purpose.** In the box's **Backups** tab choose **Turn off backups on this box**, or run `ozbox backup off <box>`. It says what stops, removes the repository credentials from the box and switches its schedule off, so the self-test and an upgrade stop expecting backups and the next slot does not send the credentials back. Backups already made stay where they are.
+  - **A busy repository is not an empty one.** While a backup is pruning, listing a box's backups says it is busy instead of showing none, and the dashboard keeps the last list on screen.
+  - **A box that is still starting is not "stopped".** If the box's secrets service is not up yet, the report says backups were not checked and sends nothing, instead of saying they stopped. The repository check has a time limit, and the self-test shows the last answer and its age while a new check runs.
+  - **Real-world exclude settings are kept.** Patterns such as `*.tmp` and `node_modules` in the `[backup]` section no longer stop the box from remembering that backups were set up.
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Hosted dashboard">
+  ## An upgrade puts your hosted dashboard back, with its tunnel token
+
+  Installing the dashboard on a box with a tunnel token used to leave that token only on the box. An upgrade that started a new secrets store lost it, and the dashboard stayed down until you had the token again.
+
+  - **This computer keeps the token.** `ozbox dashboard install ... --token-stdin` now keeps the token in this computer's keychain (never in a file, never shown), together with the address, people and tunnel you gave it.
+  - **`ozbox upgrade` puts the dashboard back** after it replaces the box's machine, and its report has a **Dashboard** line: put back, not put back (with the one command to run), or not installed.
+  - **When the box asks for your approval of the token,** the upgrade does not make it for you. Run `ozbox dashboard restore <box> --approve-with-laptop-key`: it uses the token this computer kept and approves that one token with the key this computer pinned when the box was made.
+  - **`ozbox dashboard restore <box>`** brings the dashboard back by hand; **`ozbox dashboard install --token-from-keychain`** reuses the kept token; **`ozbox dashboard forget <box>`** removes what this computer kept.
+  - **A dashboard installed before this release** is kept the next time you install it with `--token-stdin`. **Not yet run on a real box.**
+
+  See [run the dashboard on a box](/use-cases/coding-from-anywhere) and [keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
+<Update label="[Release date]" tags={["Dashboard"]} description="Dashboard stays responsive">
+  ## The dashboard no longer freezes while your cloud or a box is slow
+
+  With a real fleet, the Fleet and Boxes pages could stop with "This page could not ask the server what it is". Listing your boxes in the cloud and asking each one how it is doing can take a long time, and while it did, every other request waited behind it.
+
+  - **Pages load while the cloud is slow.** `ozbox serve` answers what the server is, the dashboard's files and sign-in at once, however long a box takes to reply.
+  - **The box list shows what was last read, and says so.** When your cloud is slow, the Fleet and Boxes pages show the last list with how old it is and that it is being read again, instead of an error. The first read after `ozbox serve` starts says it is reading your boxes and can take up to half a minute.
+  - **A box that does not answer is reported as not reached** after a few seconds. The other boxes and the list are not held up for it, and asking again does not pile more questions on it.
+  - **A busy server says so.** If far more boxes are being asked about at once than the server will take on, the extra requests are told to try again in a moment instead of waiting without end.
+  - **A page that could not reach the server brings itself back** as soon as the server answers, without pressing Try again.
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS operator permissions">
+  ## `ozbox init` now gives you the complete operator policy, including what `ozbox adopt-fleet-key` needs
+
+  Setting up again on an account made by an earlier release did not add the permissions `ozbox adopt-fleet-key` needs, so the command failed with "Systems Manager refused" until an administrator pasted them in by hand.
+
+  - **One complete policy, written every run.** `ozbox init` writes the whole operator policy for your account, region and fleet to `operator-policy.json` in its working folder and prints the path, whether or not anything else changed. It already includes the three Systems Manager statements the adopt command needs.
+  - **It tells you if your daily sign-in is out of date.** When your config names the daily profile, `ozbox init` checks, read only, whether that sign-in can read a Systems Manager command's result. If not, it prints the three missing statements and the one step: an administrator replaces the daily role's inline policy with the file. Applying it twice is safe.
+  - **`ozbox init` still does not change the operator role itself.** The setup sign-in has no right over the operator's permissions, so a person who could rewrite them could not widen them. Nothing is widened: still no `kms:` action, and still no first tag on an existing disk. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
+<Update label="[Release date]" tags={["CLI"]} description="ozbox upgrade and create">
+  ## `latest` now means the newest image whose signed release verifies
+
+  `ozbox upgrade <box>` (and `ozbox create` with no image) used to take the newest Oz image it could see. When that image's release had not been published or signed yet, the upgrade was then refused, even though the release before it was fine.
+
+  - **A newer image that cannot be verified is passed over** for the newest one that can: its release was never published, does not list the image for your region, or is a pre-release a stable program does not use.
+  - **The plan says which ones were passed over,** one line each, with the reason.
+  - **If no image verifies, the command refuses** and names the two ways forward: `--image <id>`, or `--allow-unverified-image`.
+  - **Naming an image with `--image` works as before.** A check that could not be made (a network or signature-tool failure) still stops the command instead of falling back to an older image.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 

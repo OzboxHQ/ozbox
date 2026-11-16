@@ -598,7 +598,7 @@ impl App {
             _ => return,
         }
         {
-            if let Ok(recs) = self.provider.list() {
+            if let Some(recs) = self.boxes_quietly() {
                 self.runs.host.boxes = recs
                     .iter()
                     .map(|r| {

@@ -56,6 +56,9 @@ impl Default for BackupConfig {
 pub enum BackupError {
     #[error("backup environment is incomplete: {0} is not set")]
     MissingEnv(&'static str),
+    /// The secrets service did not answer (it is not up yet): not the same as credentials that are missing.
+    #[error("the box's secrets service is not ready")]
+    ServiceUnavailable,
     #[error("invalid snapshot id")]
     BadSnapshot,
     #[error("restore target must be an absolute path")]
@@ -114,10 +117,14 @@ impl Restic {
         if let Some(sock) = cfg.service_socket.clone() {
             // The credentials live with the secrets service; only whether they exist is asked here.
             let boxs = crate::secrets_link::box_socket_for(&sock);
-            if !crate::secrets_link::exists(&boxs, "restic-env") {
+            let has = |name: &str| {
+                crate::secrets_link::exists_checked(&boxs, name)
+                    .map_err(|_| BackupError::ServiceUnavailable)
+            };
+            if !has("restic-env")? {
                 return Err(BackupError::MissingEnv("the backup credentials"));
             }
-            if !crate::secrets_link::exists(&boxs, "restic-password") {
+            if !has("restic-password")? {
                 return Err(BackupError::MissingEnv("the backup password"));
             }
             let runner: Arc<dyn CommandRunner> =
@@ -200,7 +207,18 @@ impl Restic {
 
     /// The snapshots this box made (tagged for it), oldest first.
     pub fn snapshots(&self) -> Result<Vec<ResticSnapshot>, BackupError> {
-        let out = match self.runner.run(&self.snapshots_cmd()) {
+        self.snapshots_within(None)
+    }
+
+    /// As [`Self::snapshots`], with a limit on how long restic may take (a runner that can stops it at the limit, and the
+    /// answer is then a failure, like a repository that does not answer).
+    pub fn snapshots_within(
+        &self,
+        limit: Option<std::time::Duration>,
+    ) -> Result<Vec<ResticSnapshot>, BackupError> {
+        let mut cmd = self.snapshots_cmd();
+        cmd.timeout_secs = limit.map(|d| d.as_secs().max(1));
+        let out = match self.runner.run(&cmd) {
             Ok(o) if o.status == Some(0) => o,
             Ok(o) => return Err(BackupError::Failed("snapshots", o.status)),
             Err(_) => return Err(BackupError::Failed("snapshots", None)),
@@ -407,9 +425,19 @@ mod tests {
                 "--exclude",
                 "/work/ozbox-secrets-private",
                 "--exclude",
-                "/work/ozbox-audit"
+                "/work/ozbox-audit",
+                "--exclude",
+                "/work/ozbox-backup"
             ]
         );
+        // the record root keeps of the backup set-up is never put back from an old snapshot: the exclusion is the folder the
+        // helper writes to, whatever it is called
+        #[cfg(unix)]
+        assert!(ozbox_core::backup_scope::NEVER_RESTORED.contains(
+            &crate::backup_state::dir_for(std::path::Path::new("/work"))
+                .to_str()
+                .unwrap()
+        ));
         assert!(r.restore_cmd("deadbeef01", "/x").is_ok());
         assert_eq!(
             r.restore_cmd("--include=/etc", "/x").unwrap_err(),

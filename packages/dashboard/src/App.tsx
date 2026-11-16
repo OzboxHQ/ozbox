@@ -46,12 +46,24 @@ export function useApp() {
 }
 
 const TOKEN_KEY = 'ozbox.token';
+/** How often a page that could not ask the server what it is asks again, in ms. */
+const INFO_RECOVER_MS = 5000;
 
 export function App({ client, onSignOut }: { client: ApiClient | null; onSignOut?: () => void }) {
   const route = useRoute();
   const [ended, setEnded] = useState(false);
   const info = useAsync((s) => (client ? client.info(s) : Promise.reject(new Error('no client'))), [client], undefined, REQUIRED_LOAD_RETRY);
   const value = useMemo(() => (client ? { client, info: info.data } : null), [client, info.data]);
+
+  // With no answer after the tries, the page says so and keeps asking, so a server that was only busy brings the page back
+  // by itself instead of leaving it on the error until someone presses Try again.
+  const infoFailed = info.data === null && info.error !== null;
+  const reloadInfo = info.reload;
+  useEffect(() => {
+    if (!infoFailed) return;
+    const id = setInterval(reloadInfo, INFO_RECOVER_MS);
+    return () => clearInterval(id);
+  }, [infoFailed, reloadInfo]);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pending, setPending] = useState<{ box: BoxRecord; kind: ActionKind } | null>(null);

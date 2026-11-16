@@ -359,7 +359,12 @@ impl App {
     /// An upgrade just replaced a box's machine, whose system disk held its repository credentials. Finish it the way
     /// `ozbox upgrade` does (the same code): wait for the box, self-test it, put the credentials back. It runs on the
     /// worker, never on the request that applied the upgrade, and ends in Activity (and an alert if it failed).
-    pub(super) fn after_upgrade_applied(&mut self, plan: &Plan, new_store: bool) {
+    pub(super) fn after_upgrade_applied(
+        &mut self,
+        plan: &Plan,
+        new_store: bool,
+        backups_before: bool,
+    ) {
         let (name, what) = match &plan.operation {
             Operation::Upgrade { name, .. } => (name, "upgrade"),
             // A restored /work leaves the system disk alone, so only the check applies (no credentials to put back).
@@ -400,6 +405,10 @@ impl App {
                         None
                     }
                 },
+                // read from the box before the replace (see `Applied`): a box made before the record existed has no record on
+                // /work to say its backups were set up, so what was seen while it was still the old machine is what tells a
+                // stop from "never had any". A restore leaves the system disk alone and reads nothing.
+                backups_before,
             );
             let (ready, selftest, backup) = (settled.ready, settled.selftest, settled.backup);
             if let Some(r) = settled.recovery {
@@ -1085,9 +1094,9 @@ impl App {
     fn backups_overview(&self) -> Resp {
         let zone = self.zone();
         let now = unix_ms();
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let b = &self.settings.backups;
         let price = self
@@ -1156,6 +1165,7 @@ impl App {
             ("GET", []) => self.box_backup_list(&rec),
             ("POST", ["credentials"]) => self.box_backup_credentials(&rec, true),
             ("DELETE", ["credentials"]) => self.box_backup_credentials(&rec, false),
+            ("POST", ["off"]) => self.box_backup_off(&rec),
             _ => Resp::error(404, "not_found", "no such endpoint"),
         }
     }
@@ -1178,11 +1188,14 @@ impl App {
             }
             Err(e) => json!({ "supported": true, "includes_work": null, "error": e.to_string() }),
         };
-        let mut restic = json!({ "target_set": b.restic.is_some(), "configured_on_box": null, "error": null, "running": null });
+        let mut restic = json!({ "target_set": b.restic.is_some(), "configured_on_box": null, "secrets_ready": true, "error": null, "busy": false, "running": null });
         if b.restic.is_some() && rec.state == BoxState::Running {
             match call(self.agent.as_ref(), rec, "GET", "/status", &Value::Null) {
                 Ok((200, v)) => {
                     restic["configured_on_box"] = v["configured"].clone();
+                    // false: the box's secrets service is not up yet, so "not configured" is "not known" (an older box
+                    // says nothing and reads as ready)
+                    restic["secrets_ready"] = json!(!crate::backup_ops::status_not_ready(&v));
                     restic["running"] = v["running"].clone();
                     restic["last"] = v["last"].clone();
                     if v["configured"] == json!(true) {
@@ -1200,6 +1213,13 @@ impl App {
                                         "scheduled": false,
                                     }));
                                 }
+                            }
+                            // an operation is using the repository: that is not "no backups" and not a failure, so the
+                            // list says so and the page keeps the last list it had
+                            Ok((409, l))
+                                if l.get("code").and_then(Value::as_str) == Some("busy") =>
+                            {
+                                restic["busy"] = json!(true)
                             }
                             Ok((_, l)) => {
                                 restic["error"] =
@@ -1237,12 +1257,56 @@ impl App {
                 // A restore into this (new) box that is still being carried out.
                 "new_box_restore": st.and_then(|s| s.new_box_restore.clone()),
                 "schedule": sch,
+                // switched off for this box (Settings -> Backups, or "Turn off backups on this box")
+                "turned_off": b.is_off_for(&name),
                 "zone": zone,
                 "next_run_ms": sch.next_slot(&zone, unix_ms()),
                 "last": st.and_then(|s| s.last.clone()),
                 "running": self.backup_rt.busy.contains(&name),
             }),
         )
+    }
+
+    /// Retire a box's backups for good reason: its repository credentials leave the box (and with them the record that
+    /// backups were set up, so the self-test and an upgrade stop expecting them), and its schedule is switched off so the
+    /// next slot does not send them again. What was already backed up stays where it is. Credentials first: when the box
+    /// cannot be reached nothing is changed, and the person is told.
+    fn box_backup_off(&mut self, rec: &BoxRecord) -> Resp {
+        let name = rec.spec.name.to_string();
+        if rec.state != BoxState::Running {
+            return Resp::error(
+                409,
+                "box_not_running",
+                &format!(
+                    "box {name} is {}, so its credentials cannot be removed; start it first (nothing was changed)",
+                    rec.state
+                ),
+            );
+        }
+        if let Err(e) = crate::backup_ops::remove_credentials(self.agent.as_ref(), rec) {
+            return Resp::error(422, "provision_failed", &e);
+        }
+        let mut next = self.settings.clone();
+        next.backups.turn_off_box(&name);
+        if let Some(p) = &self.settings_path {
+            if let Err(e) = next.save_to(p) {
+                return Resp::error(
+                    500,
+                    "cannot_save",
+                    &format!(
+                        "the credentials were removed from the box, but the setting could not be saved ({e}); switch this box's backups off in Settings -> Backups"
+                    ),
+                );
+            }
+        }
+        self.settings = next;
+        self.log_activity(
+            "turn off backups",
+            &name,
+            None,
+            "credentials removed from the box, its schedule switched off",
+        );
+        Resp::json(200, &json!({ "ok": true, "box": name }))
     }
 
     fn box_backup_credentials(&mut self, rec: &BoxRecord, set: bool) -> Resp {
@@ -1273,20 +1337,7 @@ impl App {
             )
             .map(|_| ())
         } else {
-            call(
-                self.agent.as_ref(),
-                rec,
-                "DELETE",
-                "/credentials",
-                &Value::Null,
-            )
-            .and_then(|(s, v)| {
-                if s == 200 {
-                    Ok(())
-                } else {
-                    Err(reason(&v, "the box did not remove the credentials"))
-                }
-            })
+            crate::backup_ops::remove_credentials(self.agent.as_ref(), rec)
         };
         match result {
             Ok(()) => {
@@ -2010,6 +2061,286 @@ mod tests {
             !text.contains("sekrit") && !text.contains("correct-horse"),
             "no secret reaches Activity"
         );
+    }
+
+    /// A box that backs up to a repository, keeps no record of it (made before the record existed), and whose new machine
+    /// starts without the credentials (a new secrets store): what the dashboard's own upgrade has to catch.
+    struct LosesItsStore {
+        configured: std::sync::Mutex<bool>,
+        /// Answers what getting the box ready for the stop asks (runs, quiesce, checkpoint), as the demo box does.
+        stand_in: crate::serve::agent::SimulatedAgent,
+        /// What the box answers to listing its repository, and whether its secrets service is up.
+        held: std::sync::Mutex<Held>,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct Held {
+        /// A prune holds the repository: the list answers 409 `busy`.
+        busy: bool,
+        /// The secrets service is not up yet.
+        not_ready: bool,
+    }
+
+    impl crate::serve::BoxAgent for LosesItsStore {
+        fn metrics_now(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+        ) -> std::result::Result<ozbox_core::MetricsSample, crate::serve::agent::AgentError>
+        {
+            Err(crate::serve::agent::AgentError::Unsupported("none".into()))
+        }
+        fn metrics_series(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> std::result::Result<Vec<ozbox_core::MetricsSample>, crate::serve::agent::AgentError>
+        {
+            Err(crate::serve::agent::AgentError::Unsupported("none".into()))
+        }
+        fn incidents(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+            _: u64,
+        ) -> std::result::Result<Vec<crate::serve::agent::Incident>, crate::serve::agent::AgentError>
+        {
+            Ok(Vec::new())
+        }
+        fn selftest(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+        ) -> std::result::Result<crate::serve::agent::SelfTest, crate::serve::agent::AgentError>
+        {
+            // the new machine's first self-test: from here the store is new
+            *self.configured.lock().unwrap() = false;
+            Ok(crate::serve::agent::SelfTest {
+                ts_ms: 1,
+                ok: true,
+                all_verified: true,
+                checks: Vec::new(),
+            })
+        }
+        fn checkpoint(
+            &self,
+            rec: &BoxRecord,
+        ) -> std::result::Result<
+            crate::serve::agent::CheckpointOutcome,
+            crate::serve::agent::AgentError,
+        > {
+            self.stand_in.checkpoint(rec)
+        }
+        fn runs(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            sub: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.runs(rec, m, sub, b)
+        }
+        fn quiesce_call(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.quiesce_call(rec, m, b)
+        }
+        fn agent_call(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            p: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.agent_call(rec, m, p, b)
+        }
+        fn restic(
+            &self,
+            _: &BoxRecord,
+            method: &str,
+            sub: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            let configured = *self.configured.lock().unwrap();
+            let held = *self.held.lock().unwrap();
+            Ok(match (method, sub) {
+                ("GET", "/status") => (
+                    200,
+                    json!({ "configured": configured && !held.not_ready, "secrets_ready": !held.not_ready, "expected": false, "running": null, "last": null }),
+                ),
+                ("GET", "/snapshots") if configured && held.busy => (
+                    409,
+                    json!({ "error": "a backup operation is using the repository right now", "code": "busy" }),
+                ),
+                ("GET", "/snapshots") if configured => (200, json!({ "items": [] })),
+                _ => (
+                    409,
+                    json!({ "error": "no repository", "code": "not_configured" }),
+                ),
+            })
+        }
+    }
+
+    #[test]
+    fn a_dashboard_upgrade_reads_the_box_before_the_replace_so_backups_that_stopped_are_not_taken_for_none(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        // this computer holds no repository: nothing to put back, so the only way to tell is what the box said before
+        let mut a = app(dir.path(), Backups::default()).with_agent(Box::new(LosesItsStore {
+            configured: std::sync::Mutex::new(true),
+            stand_in: Default::default(),
+            held: Default::default(),
+        }));
+        make_box(&mut a, "dev");
+        a.backup_rt.upgrade_waits = Some(crate::run::upgrade::Waits {
+            timeout: std::time::Duration::from_secs(5),
+            poll: std::time::Duration::from_millis(1),
+        });
+        let (s, v) = plan_and_apply(
+            &mut a,
+            json!({ "op": "upgrade", "name": "dev", "image": "latest" }),
+            None,
+        );
+        assert_eq!(s, 200, "{v}");
+        a.tick(unix_ms() + 1_000);
+        let (_, act) = call_api(&mut a, "GET", "/v1/activity", Value::Null);
+        let text = act.to_string();
+        assert!(
+            text.contains("HAVE STOPPED") && text.contains("ozbox backup credentials dev"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_box_whose_repository_is_busy_says_so_and_is_not_an_error_or_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), restic_target_only()).with_agent(Box::new(LosesItsStore {
+            configured: std::sync::Mutex::new(true),
+            stand_in: Default::default(),
+            held: std::sync::Mutex::new(Held {
+                busy: true,
+                not_ready: false,
+            }),
+        }));
+        make_box(&mut a, "dev");
+        let (s, v) = call_api(&mut a, "GET", "/v1/boxes/dev/backups", Value::Null);
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["restic"]["busy"], json!(true), "{v}");
+        assert!(
+            v["restic"]["error"].is_null(),
+            "a busy repository is not an error: {v}"
+        );
+        assert_eq!(v["restic"]["configured_on_box"], json!(true));
+    }
+
+    #[test]
+    fn a_box_whose_secrets_service_is_not_up_is_not_offered_credentials_as_if_it_had_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), restic_target_only()).with_agent(Box::new(LosesItsStore {
+            configured: std::sync::Mutex::new(true),
+            stand_in: Default::default(),
+            held: std::sync::Mutex::new(Held {
+                busy: false,
+                not_ready: true,
+            }),
+        }));
+        make_box(&mut a, "dev");
+        let (_, v) = call_api(&mut a, "GET", "/v1/boxes/dev/backups", Value::Null);
+        assert_eq!(v["restic"]["secrets_ready"], json!(false), "{v}");
+        // an unforced send (what a scheduled backup and an upgrade do) never goes on a guess
+        let rec = a
+            .provider
+            .get(&BoxName::new("dev").unwrap())
+            .unwrap()
+            .unwrap();
+        let t = ResticTarget {
+            kind: ResticKind::S3,
+            location: "https://objects.example.com/bucket".into(),
+        };
+        set_secrets(&a);
+        let e = crate::backup_ops::ensure_credentials(
+            a.agent.as_ref(),
+            &rec,
+            &t,
+            a.secrets.as_ref(),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("not ready") && e.contains("nothing was sent"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn turning_a_box_off_removes_its_credentials_and_its_schedule_so_nothing_puts_them_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), restic_backups());
+        make_box(&mut a, "dev");
+        make_box(&mut a, "other");
+        set_secrets(&a);
+        for b in ["dev", "other"] {
+            let (s, _) = call_api(
+                &mut a,
+                "POST",
+                &format!("/v1/boxes/{b}/backups/credentials"),
+                Value::Null,
+            );
+            assert_eq!(s, 200);
+        }
+        assert!(configured_on_box(&mut a, "dev"));
+        let (_, before) = call_api(&mut a, "GET", "/v1/boxes/dev/backups", Value::Null);
+        assert_eq!(before["turned_off"], json!(false));
+        assert_eq!(before["schedule"]["kind"], "daily");
+        let (s, v) = call_api(&mut a, "POST", "/v1/boxes/dev/backups/off", Value::Null);
+        assert_eq!(s, 200, "{v}");
+        // the box holds nothing, and its schedule is off, so the next slot sends nothing
+        assert!(!configured_on_box(&mut a, "dev"));
+        let (_, after) = call_api(&mut a, "GET", "/v1/boxes/dev/backups", Value::Null);
+        assert_eq!(after["turned_off"], json!(true));
+        assert_eq!(after["schedule"]["kind"], "off");
+        assert!(a.settings.backups.is_off_for("dev"));
+        settle(&mut a, ms("2026-11-09T12:00:00Z"));
+        let t1 = ms("2026-11-10T02:05:00Z");
+        settle(&mut a, t1);
+        settle(&mut a, t1 + 40_000);
+        assert!(
+            !configured_on_box(&mut a, "dev"),
+            "a scheduled slot must not send the credentials back"
+        );
+        // another box is untouched
+        assert!(configured_on_box(&mut a, "other"));
+        // it is in Activity, with no secret
+        let (_, act) = call_api(&mut a, "GET", "/v1/activity", Value::Null);
+        let text = act.to_string();
+        assert!(text.contains("turn off backups"), "{text}");
+        assert!(!text.contains("sekrit") && !text.contains("correct-horse"));
+        // a box that does not exist
+        let (s, _) = call_api(&mut a, "POST", "/v1/boxes/ghost/backups/off", Value::Null);
+        assert_eq!(s, 404);
+    }
+
+    #[test]
+    fn turning_a_box_off_when_it_cannot_be_reached_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), restic_backups());
+        make_box(&mut a, "dev");
+        let plan = a
+            .provider
+            .plan(&Operation::Pause {
+                name: BoxName::new("dev").unwrap(),
+            })
+            .unwrap();
+        a.provider.apply(&plan).unwrap();
+        let (s, v) = call_api(&mut a, "POST", "/v1/boxes/dev/backups/off", Value::Null);
+        assert_eq!(s, 409, "{v}");
+        assert_eq!(v["code"], "box_not_running");
+        assert!(!a.settings.backups.is_off_for("dev"), "nothing was changed");
     }
 
     #[test]

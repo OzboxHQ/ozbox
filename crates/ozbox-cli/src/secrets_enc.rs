@@ -7,9 +7,9 @@
 //!
 //! The KEK comes from a [`KeyProvider`]:
 //!
-//! * [`KmsProvider`]: AWS KMS through the `aws kms` command. The plaintext data key travels on the tool's standard
-//!   input (`fileb:///dev/stdin`), never in an argument and never in a file, and its answer is read from the tool's
-//!   standard output. The encryption context repeats the AAD, so the key policy and the audit trail see what was opened.
+//! * [`KmsProvider`]: AWS KMS, called natively with the box's own role (no `aws` command: the box image does not carry it).
+//!   The plaintext data key is only in the request and the answer, never in an argument or a file. The encryption context
+//!   repeats the AAD, so the key policy and the audit trail see what was opened.
 //! * [`LocalKekProvider`]: a 256-bit KEK held outside the store file: in the operating system's keychain on a laptop,
 //!   sealed to the machine's TPM on a server that has one, or derived from a passphrase an operator types at start
 //!   (never written anywhere).
@@ -184,21 +184,28 @@ impl KeyProvider for LocalKekProvider {
     }
 }
 
-/// AWS KMS through the `aws` command (ADR 0008: no SDK). The plaintext data key is handed to the tool on its standard
-/// input as `fileb:///dev/stdin`, so it is never in an argument list (`ps`) and never in a file; the call's answer comes
-/// back on standard output. The operator's or the instance's role decides who may call it.
+/// AWS KMS, called natively (ADR 0008: no SDK, and no `aws` command: the box image does not carry it). The request is AWS
+/// JSON signed with SigV4 by the box's own role (see [`crate::aws_native`]). The plaintext data key is in the request body
+/// and the answer only, both zeroized, and never in an argument, a file or an error. The encryption context repeats the AAD,
+/// so the key policy and the audit trail see what was opened.
 pub struct KmsProvider {
-    runner: Arc<dyn CommandRunner>,
+    client: crate::aws_native::AwsJson,
     key_id: String,
     region: Option<String>,
-    program: String,
+    /// The key service's address, for a test; `None` is the real one for the region.
+    base: Option<String>,
 }
 
 impl KmsProvider {
-    pub fn new(
-        runner: Arc<dyn CommandRunner>,
+    pub fn new(key_id: &str, region: Option<&str>) -> Result<Self, SecretError> {
+        Self::build(crate::aws_native::AwsJson::new(), key_id, region, None)
+    }
+
+    fn build(
+        client: crate::aws_native::AwsJson,
         key_id: &str,
         region: Option<&str>,
+        base: Option<&str>,
     ) -> Result<Self, SecretError> {
         let plain = |s: &str| {
             !s.is_empty()
@@ -206,48 +213,105 @@ impl KmsProvider {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-_/:.".contains(&b))
         };
-        if !plain(key_id) || region.is_some_and(|r| !plain(r)) {
+        if !plain(key_id)
+            || region.is_some_and(|r| !plain(r) || !crate::aws_native::valid_region(r))
+        {
             return Err(err("the key service settings are not valid"));
         }
         Ok(Self {
-            runner,
+            client,
             key_id: key_id.to_string(),
             region: region.map(str::to_string),
-            program: "aws".into(),
+            base: base.map(str::to_string),
         })
     }
 
-    fn base(&self, sub: &str, aad: &[u8]) -> CommandSpec {
-        let mut c = CommandSpec::new(&self.program).args(["kms", sub, "--output", "text"]);
+    /// The region to call: the setting, else the one a key ARN names, else the environment's, else this machine's own.
+    fn region(&self) -> Option<String> {
+        use crate::aws_native::valid_region;
         if let Some(r) = &self.region {
-            c = c.args(["--region", r.as_str()]);
+            return Some(r.clone());
         }
-        c.arg("--encryption-context").arg(context_arg(aad))
+        if let Some(r) = self
+            .key_id
+            .strip_prefix("arn:")
+            .and_then(|t| t.split(':').nth(2))
+        {
+            if valid_region(r) {
+                return Some(r.to_string());
+            }
+        }
+        ["AWS_REGION", "AWS_DEFAULT_REGION"]
+            .iter()
+            .find_map(|n| std::env::var(n).ok().filter(|v| valid_region(v)))
+            .or_else(|| self.client.imds_region())
+    }
+
+    fn call(
+        &self,
+        target: &'static str,
+        body: &impl Serialize,
+    ) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+        use crate::aws_native::{service_base, Failure};
+        let region = self.region().ok_or(KEK_UNAVAILABLE)?;
+        let base = self
+            .base
+            .clone()
+            .unwrap_or_else(|| service_base("kms", &region));
+        // sized up front, so writing the request (which holds the data key's text) never grows the buffer and leaves an
+        // unwiped copy of it behind
+        let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
+        serde_json::to_writer(&mut *bytes, body).map_err(|_| KEK_UNAVAILABLE)?;
+        self.client
+            .call(&base, &region, "kms", target, bytes)
+            .map_err(|f| match f {
+                Failure::Denied => KEK_DENIED,
+                Failure::Unavailable => KEK_UNAVAILABLE,
+            })
     }
 }
 
-/// [`KEK_DENIED`] when the tool's complaint is the key service's own access-denied answer, [`KEK_UNAVAILABLE`] for anything else
-/// (including a timeout, a refused connection or a missing network). Only the exact error name counts, and only the fixed
-/// message leaves this function.
-fn refusal_or_unavailable(stderr: &str) -> &'static str {
-    if stderr.contains("(AccessDeniedException)") {
-        KEK_DENIED
-    } else {
-        KEK_UNAVAILABLE
-    }
+/// The encryption context for KMS, from the AAD parts `store\0scope\0name`.
+#[derive(Serialize)]
+struct KmsContext {
+    store: String,
+    scope: String,
+    name: String,
 }
 
-/// The encryption context for KMS, from the AAD parts `store\0scope\0name`. The parts are validated plain characters
-/// (`,` and `=` cannot occur), so the CLI's shorthand cannot be confused.
-fn context_arg(aad: &[u8]) -> String {
+fn context_of(aad: &[u8]) -> KmsContext {
     let text = String::from_utf8_lossy(aad);
-    let mut parts = text.split('\0').skip(1);
-    format!(
-        "store={},scope={},name={}",
-        parts.next().unwrap_or(""),
-        parts.next().unwrap_or(""),
-        parts.next().unwrap_or("")
-    )
+    let mut parts = text.split('\0').skip(1).map(str::to_string);
+    KmsContext {
+        store: parts.next().unwrap_or_default(),
+        scope: parts.next().unwrap_or_default(),
+        name: parts.next().unwrap_or_default(),
+    }
+}
+
+/// The request bodies borrow the data key's text, so no unzeroized copy of it is made here.
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct EncryptRequest<'a> {
+    key_id: &'a str,
+    plaintext: &'a str,
+    encryption_context: KmsContext,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct DecryptRequest<'a> {
+    ciphertext_blob: &'a str,
+    encryption_context: KmsContext,
+}
+
+/// The one field of a KMS answer that is read.
+#[derive(Deserialize)]
+struct KmsAnswer {
+    #[serde(rename = "CiphertextBlob", default)]
+    ciphertext: Option<String>,
+    #[serde(rename = "Plaintext", default)]
+    plaintext: Option<String>,
 }
 
 impl KeyProvider for KmsProvider {
@@ -255,31 +319,38 @@ impl KeyProvider for KmsProvider {
         "kms".into()
     }
     fn wrap(&self, data_key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>, SecretError> {
-        let cmd = self
-            .base("encrypt", aad)
-            .args(["--key-id", self.key_id.as_str()])
-            .args(["--plaintext", "fileb:///dev/stdin"])
-            .args(["--query", "CiphertextBlob"])
-            .stdin(data_key.to_vec());
-        let out = self.runner.run(&cmd).map_err(|_| err(KEK_UNAVAILABLE))?;
-        if out.status != Some(0) {
-            return Err(err(refusal_or_unavailable(&out.stderr)));
-        }
-        decode_std(out.stdout.trim()).ok_or_else(|| err(KEK_UNAVAILABLE))
+        let plain = Zeroizing::new(encode_std(data_key));
+        let out = self
+            .call(
+                "TrentService.Encrypt",
+                &EncryptRequest {
+                    key_id: &self.key_id,
+                    plaintext: plain.as_str(),
+                    encryption_context: context_of(aad),
+                },
+            )
+            .map_err(err)?;
+        let a: KmsAnswer = serde_json::from_slice(&out).map_err(|_| err(KEK_UNAVAILABLE))?;
+        a.ciphertext
+            .as_deref()
+            .and_then(decode_std)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| err(KEK_UNAVAILABLE))
     }
     fn unwrap(&self, wrapped: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, SecretError> {
-        let cmd = self
-            .base("decrypt", aad)
-            .args(["--ciphertext-blob", "fileb:///dev/stdin"])
-            .args(["--query", "Plaintext"])
-            .stdin(wrapped.to_vec());
-        let mut out = self.runner.run(&cmd).map_err(|_| err(KEK_UNAVAILABLE))?;
-        if out.status != Some(0) {
-            out.stdout.zeroize();
-            return Err(err(refusal_or_unavailable(&out.stderr)));
-        }
-        let plain = decode_std(out.stdout.trim());
-        out.stdout.zeroize();
+        let out = self
+            .call(
+                "TrentService.Decrypt",
+                &DecryptRequest {
+                    ciphertext_blob: &encode_std(wrapped),
+                    encryption_context: context_of(aad),
+                },
+            )
+            .map_err(err)?;
+        let a: KmsAnswer = serde_json::from_slice(&out).map_err(|_| err(KEK_UNAVAILABLE))?;
+        let mut text = a.plaintext.unwrap_or_default();
+        let plain = decode_std(text.trim());
+        text.zeroize();
         plain
             .map(Zeroizing::new)
             .filter(|p| p.len() == 32)
@@ -1370,8 +1441,6 @@ pub(crate) mod hostile {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use ozbox_core::{Output, RecordingRunner};
-
     /// The fleet-key policy `ozbox init` makes (aws-box-policy) lets a box's role use the key only when `kms:EncryptionContext:scope`
     /// equals the role's `ozbox-box` tag, which is the box's name, which is also the store's scope. The probe and the re-wrap send
     /// their scope in that context, so a probe that said `local` (or a policy that changed its variable) would be refused as if
@@ -1399,10 +1468,10 @@ mod tests {
             box_tf.contains("resource \"aws_iam_role\" \"box\"") && box_tf.contains("local.tags,")
         );
         // a box named dev-1 has the store scope dev-1 (first boot passes its name), and the probe and a secret both send it
-        let probe = context_arg(&aad_for("probe", "dev-1", "probe"));
-        let secret = context_arg(&aad_for("sid", "dev-1", "workload.app.staging.KEY"));
+        let probe = context_of(&aad_for("probe", "dev-1", "probe"));
+        let secret = context_of(&aad_for("sid", "dev-1", "workload.app.staging.KEY"));
         for ctx in [probe, secret] {
-            assert!(ctx.split(',').any(|kv| kv == "scope=dev-1"), "{ctx}");
+            assert_eq!(ctx.scope, "dev-1");
         }
     }
 
@@ -1989,93 +2058,244 @@ mod tests {
         assert!(LocalKekProvider::from_passphrase("passphrase", "short", &salt).is_err());
     }
 
+    use crate::aws_native::fakes::{self, Fake, Kms};
+    use crate::aws_native::AwsJson;
+
+    fn kms_against(f: &Fake, region: Option<&str>) -> KmsProvider {
+        KmsProvider::build(
+            AwsJson::with_imds(&f.imds),
+            "alias/ozbox-fleet",
+            region,
+            Some(&f.kms),
+        )
+        .unwrap()
+    }
+
+    /// What the fake KMS verified for every request it saw: it recomputes each signature from the raw request, by its own
+    /// canonicalisation, and refuses a request whose SignedHeaders leave out `content-type` or `x-amz-target`.
+    fn assert_signed_by_the_role(s: &fakes::Seen, f: &Fake, region: &str) {
+        assert_eq!(fakes::verify_sigv4(s), Ok(()));
+        assert!(f.sig_errors.lock().unwrap().is_empty());
+        let auth = s.header("authorization").unwrap();
+        assert!(auth.contains(&format!("Credential={}/", fakes::ACCESS_KEY)));
+        assert!(auth.contains(&format!("/{region}/kms/aws4_request")));
+        assert!(auth.contains(
+            "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target,"
+        ));
+        // the session token travels as the role's temporary credential, and the secret key never
+        assert_eq!(s.header("x-amz-security-token"), Some(fakes::SESSION_TOKEN));
+        assert!(!s.body.contains(fakes::SECRET_KEY));
+        assert!(s
+            .headers
+            .iter()
+            .all(|(_, v)| !v.contains(fakes::SECRET_KEY)));
+    }
+
     #[test]
-    fn kms_calls_carry_the_data_key_on_stdin_and_the_context_in_the_arguments() {
-        let runner = Arc::new(RecordingRunner::new());
-        let kms = KmsProvider::new(runner.clone(), "alias/ozbox-fleet", Some("us-east-1")).unwrap();
-        runner.reply(Output {
-            status: Some(0),
-            stdout: format!("{}\n", encode_std(b"wrapped-blob-bytes")),
-            stderr: String::new(),
-        });
+    fn kms_round_trips_natively_signed_by_the_roles_credentials() {
+        let f = Fake::start();
+        let kms = kms_against(&f, Some("us-east-1"));
         let dk = [9u8; 32];
         let aad = aad_for("sid", "box-a", "model-key-a");
-        let w = kms.wrap(&dk, &aad).unwrap();
-        assert_eq!(w, b"wrapped-blob-bytes");
-        let calls = runner.calls();
-        let c = &calls[0];
-        let argv = c.args.join(" ");
-        assert!(argv.contains("kms encrypt") && argv.contains("--key-id alias/ozbox-fleet"));
-        assert!(argv.contains("--plaintext fileb:///dev/stdin"));
-        assert!(argv.contains("--encryption-context store=sid,scope=box-a,name=model-key-a"));
-        assert_eq!(c.stdin.as_deref(), Some(&dk[..]));
-        // no argument carries the key, in any encoding
-        assert!(!argv.contains(&encode_std(&dk)) && !argv.contains(&crate::notify::hex(&dk)));
-
-        runner.reply(Output {
-            status: Some(0),
-            stdout: format!("{}\n", encode_std(&dk)),
-            stderr: String::new(),
-        });
-        let back = kms.unwrap(b"wrapped-blob-bytes", &aad).unwrap();
+        let wrapped = kms.wrap(&dk, &aad).unwrap();
+        let back = kms.unwrap(&wrapped, &aad).unwrap();
         assert_eq!(back.as_slice(), &dk);
-        let calls = runner.calls();
-        assert!(calls[1].args.join(" ").contains("kms decrypt"));
-        assert_eq!(calls[1].stdin.as_deref(), Some(&b"wrapped-blob-bytes"[..]));
-    }
 
-    #[test]
-    fn kms_failures_are_one_plain_message_with_nothing_from_the_tool() {
-        let runner = Arc::new(RecordingRunner::new());
-        let kms = KmsProvider::new(runner.clone(), "alias/ozbox-fleet", None).unwrap();
-        runner.reply(Output {
-            status: Some(255),
-            stdout: String::new(),
-            stderr: "AccessDenied arn:aws:iam::123456789012:role/x".into(),
-        });
-        let e = kms.unwrap(b"x", &aad_for("s", "b", "n")).unwrap_err();
-        assert_eq!(e.0, KEK_UNAVAILABLE);
-        assert!(KmsProvider::new(runner, "bad key;id", None).is_err());
-    }
-
-    #[test]
-    fn only_the_key_services_own_refusal_is_reported_as_a_refusal() {
-        let denied = "An error occurred (AccessDeniedException) when calling the Decrypt operation: User: arn:aws:sts::123456789012:assumed-role/box/i-0 is not authorized to perform: kms:Decrypt";
-        for (stderr, want) in [
-            (denied, KEK_DENIED),
-            (
-                "Connect timeout on endpoint URL: \"https://kms.us-east-1.amazonaws.com/\"",
-                KEK_UNAVAILABLE,
-            ),
-            ("Could not connect to the endpoint URL", KEK_UNAVAILABLE),
-            (
-                "An error occurred (ThrottlingException) when calling the Decrypt operation",
-                KEK_UNAVAILABLE,
-            ),
-            (
-                "AccessDenied arn:aws:iam::123456789012:role/x",
-                KEK_UNAVAILABLE,
-            ),
-            ("", KEK_UNAVAILABLE),
-        ] {
-            let runner = Arc::new(RecordingRunner::new());
-            let kms = KmsProvider::new(runner.clone(), "alias/ozbox-fleet", None).unwrap();
-            runner.reply(Output {
-                status: Some(255),
-                stdout: String::new(),
-                stderr: stderr.into(),
-            });
-            let e = kms.unwrap(b"x", &aad_for("s", "b", "n")).unwrap_err();
-            assert_eq!(e.0, want, "{stderr}");
-            assert!(!e.0.contains("arn:") && !e.0.contains("assumed-role"));
-            runner.reply(Output {
-                status: Some(255),
-                stdout: String::new(),
-                stderr: stderr.into(),
-            });
-            let e = kms.wrap(&[1; 32], &aad_for("s", "b", "n")).unwrap_err();
-            assert_eq!(e.0, want, "{stderr}");
+        let seen = f.kms_seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        for (s, target) in seen
+            .iter()
+            .zip(["TrentService.Encrypt", "TrentService.Decrypt"])
+        {
+            assert_eq!(s.method, "POST");
+            assert_eq!(s.header("x-amz-target"), Some(target));
+            assert_eq!(s.header("content-type"), Some("application/x-amz-json-1.1"));
+            assert_signed_by_the_role(s, &f, "us-east-1");
+            // the same encryption context the key policy's condition and the audit trail have always seen
+            let v: serde_json::Value = serde_json::from_str(&s.body).unwrap();
+            assert_eq!(
+                v["EncryptionContext"],
+                serde_json::json!({"store": "sid", "scope": "box-a", "name": "model-key-a"})
+            );
         }
+        let enc: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+        assert_eq!(enc["KeyId"], "alias/ozbox-fleet");
+        assert_eq!(enc["Plaintext"], encode_std(&dk));
+        let dec: serde_json::Value = serde_json::from_str(&seen[1].body).unwrap();
+        assert_eq!(dec["CiphertextBlob"], encode_std(&wrapped));
+    }
+
+    #[test]
+    fn kms_credentials_come_from_the_instance_role_and_are_kept_until_they_expire() {
+        let f = Fake::start();
+        let kms = kms_against(&f, Some("us-east-1"));
+        let aad = aad_for("s", "b", "n");
+        kms.wrap(&[1; 32], &aad).unwrap();
+        kms.wrap(&[2; 32], &aad).unwrap();
+        // one token, one role lookup and one credentials read served both calls
+        assert_eq!(f.imds_seen.lock().unwrap().len(), 3);
+        assert_eq!(f.imds_seen.lock().unwrap()[0].method, "PUT");
+
+        // credentials about to expire are read again for the next call
+        *f.expiration.lock().unwrap() = "2001-01-01T00:00:00Z".into();
+        let kms = kms_against(&f, Some("us-east-1"));
+        f.imds_seen.lock().unwrap().clear();
+        kms.wrap(&[1; 32], &aad).unwrap();
+        kms.wrap(&[2; 32], &aad).unwrap();
+        assert_eq!(f.imds_seen.lock().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn the_region_comes_from_the_setting_then_the_key_arn_then_the_machine() {
+        let f = Fake::start();
+        let aad = aad_for("s", "b", "n");
+        let signed_region = |k: &KmsProvider| {
+            f.kms_seen.lock().unwrap().clear();
+            k.wrap(&[1; 32], &aad).unwrap();
+            let s = f.kms_seen.lock().unwrap()[0].clone();
+            let auth = s.header("authorization").unwrap().to_string();
+            auth.split('/').nth(2).unwrap().to_string()
+        };
+        let arn = "arn:aws:kms:ap-south-1:123456789012:key/abcd";
+        let by_arn =
+            KmsProvider::build(AwsJson::with_imds(&f.imds), arn, None, Some(&f.kms)).unwrap();
+        assert_eq!(signed_region(&by_arn), "ap-south-1");
+        let set = KmsProvider::build(
+            AwsJson::with_imds(&f.imds),
+            arn,
+            Some("us-west-2"),
+            Some(&f.kms),
+        )
+        .unwrap();
+        assert_eq!(signed_region(&set), "us-west-2");
+        // an alias with no setting: this machine's own region, from the metadata service
+        let none =
+            KmsProvider::build(AwsJson::with_imds(&f.imds), "alias/x", None, Some(&f.kms)).unwrap();
+        if std::env::var("AWS_REGION").is_err() && std::env::var("AWS_DEFAULT_REGION").is_err() {
+            assert_eq!(signed_region(&none), "eu-west-2");
+        }
+    }
+
+    #[test]
+    fn kms_works_with_no_aws_command_anywhere() {
+        // Run the round trip in a child process whose PATH holds nothing, so any attempt to start the `aws` command (the
+        // defect this replaces) would fail it. The child is this same test binary, asked for one test.
+        if std::env::var("OZBOX_KMS_NO_AWS_CHILD").is_ok() {
+            let f = Fake::start();
+            let kms = kms_against(&f, Some("us-east-1"));
+            let aad = aad_for("s", "b", "n");
+            let w = kms.wrap(&[5; 32], &aad).unwrap();
+            assert_eq!(kms.unwrap(&w, &aad).unwrap().as_slice(), &[5u8; 32]);
+            return;
+        }
+        let empty = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "secrets_enc::tests::kms_works_with_no_aws_command_anywhere",
+                "--nocapture",
+            ])
+            .env("OZBOX_KMS_NO_AWS_CHILD", "1")
+            .env("PATH", empty.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("1 passed"), "{text}");
+    }
+
+    #[test]
+    fn the_secrets_path_never_starts_the_aws_command() {
+        // a guard on the source: a store that needs a program the image does not carry is the defect
+        for (name, src) in [
+            ("secrets_enc.rs", include_str!("secrets_enc.rs")),
+            ("aws_native.rs", include_str!("aws_native.rs")),
+        ] {
+            let code: String = src
+                .split("\nmod tests {")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let needle = ["CommandSpec::new(", "\"aws\""].concat();
+            assert!(!code.contains(&needle), "{name} starts the aws command");
+            assert!(!code.contains(&["program: ", "\"aws\""].concat()), "{name}");
+            assert!(!code.contains(&["Command", "::new("].concat()), "{name}");
+        }
+    }
+
+    #[test]
+    fn kms_failures_are_one_plain_message_with_nothing_from_the_service() {
+        let f = Fake::start();
+        let aad = aad_for("s", "b", "n");
+        for (mode, want) in [
+            (Kms::Denied, KEK_DENIED),
+            (Kms::Throttled, KEK_UNAVAILABLE),
+            (Kms::ServerError, KEK_UNAVAILABLE),
+        ] {
+            *f.mode.lock().unwrap() = mode;
+            let kms = kms_against(&f, Some("us-east-1"));
+            for e in [
+                kms.unwrap(b"x", &aad).unwrap_err(),
+                kms.wrap(&[1; 32], &aad).map(|_| ()).unwrap_err(),
+            ] {
+                assert_eq!(e.0, want, "{mode:?}");
+                assert!(!e.0.contains("arn:") && !e.0.contains("assumed-role"));
+                assert!(!e.0.contains(fakes::SECRET_KEY) && !e.0.contains(fakes::SESSION_TOKEN));
+            }
+        }
+        // a name that merely contains the refusal's is not a refusal, and a bad answer is unavailable, not a panic
+        *f.mode.lock().unwrap() = Kms::Works;
+        let kms = kms_against(&f, Some("us-east-1"));
+        assert_eq!(
+            kms.unwrap(b"not-a-blob", &aad).unwrap_err().0,
+            KEK_UNAVAILABLE
+        );
+        assert!(KmsProvider::new("bad key;id", None).is_err());
+        assert!(KmsProvider::new("alias/x", Some("US EAST")).is_err());
+    }
+
+    #[test]
+    fn an_unreachable_key_service_or_metadata_service_is_unavailable_never_denied() {
+        let aad = aad_for("s", "b", "n");
+        // the key service: nothing listens
+        let f = Fake::start();
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        let kms = KmsProvider::build(
+            AwsJson::with_imds(&f.imds),
+            "alias/x",
+            Some("us-east-1"),
+            Some(&dead),
+        )
+        .unwrap();
+        assert_eq!(kms.wrap(&[1; 32], &aad).unwrap_err().0, KEK_UNAVAILABLE);
+        // the metadata service: down, so no credentials
+        *f.imds_up.lock().unwrap() = false;
+        let kms = kms_against(&f, Some("us-east-1"));
+        assert_eq!(kms.wrap(&[1; 32], &aad).unwrap_err().0, KEK_UNAVAILABLE);
+        assert!(
+            f.kms_seen.lock().unwrap().is_empty(),
+            "a call was made with no credentials"
+        );
+        // and no metadata service at all
+        let kms = KmsProvider::build(
+            AwsJson::with_imds(&dead),
+            "alias/x",
+            Some("us-east-1"),
+            Some(&f.kms),
+        )
+        .unwrap();
+        assert_eq!(kms.unwrap(b"x", &aad).unwrap_err().0, KEK_UNAVAILABLE);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use serde_json::json;
 
-use super::{unix_ms, App, FleetMode, Resp};
+use super::unix_ms;
 
 /// An error from a provider can carry a long command line's output; a person needs the start of it.
 const MAX_ERROR_CHARS: usize = 300;
@@ -142,54 +142,47 @@ fn reason_class(s: &str) -> &'static str {
     }
 }
 
-impl App {
-    pub(super) fn provider_check(&mut self) -> Resp {
-        if let Some((at, body)) = &self.provider_check_last {
-            if at.elapsed() < REUSE {
-                return Resp::json(200, body);
-            }
+/// Ask the provider the one read-only question and say what came back. Runs off the request loop (see `lane`).
+pub(super) fn ask(
+    provider: &dyn ozbox_core::Provider,
+    provider_id: &str,
+    mode: &str,
+) -> serde_json::Value {
+    let started = std::time::Instant::now();
+    let listed = provider.list();
+    let (ok, boxes, error, reason) = match &listed {
+        Ok(v) => (true, Some(v.len()), None, None),
+        Err(e) => {
+            let raw = e.to_string();
+            (
+                false,
+                None,
+                Some(safe_error(&raw)),
+                Some(reason_class(&raw)),
+            )
         }
-        let mode = match self.fleet_mode() {
-            FleetMode::Connected => "connected",
-            FleetMode::ThisBox => "this_box",
-            FleetMode::Demo => "demo",
-        };
-        let started = std::time::Instant::now();
-        let listed = self.provider.list();
-        let (ok, boxes, error, reason) = match &listed {
-            Ok(v) => (true, Some(v.len()), None, None),
-            Err(e) => {
-                let raw = e.to_string();
-                (
-                    false,
-                    None,
-                    Some(safe_error(&raw)),
-                    Some(reason_class(&raw)),
-                )
-            }
-        };
-        let body = json!({
-            "mode": mode,
-            "provider": self.provider_id,
-            // a demo "answers" too: the mode says it is not real
-            "ok": ok,
-            "boxes": boxes,
-            "searched": self.provider.searched(),
-            "error": error,
-            "reason": reason,
-            "checked_ms": unix_ms(),
-            "took_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        });
-        self.provider_check_last = Some((std::time::Instant::now(), body.clone()));
-        Resp::json(200, &body)
-    }
+    };
+    json!({
+        "mode": mode,
+        "provider": provider_id,
+        // a demo "answers" too: the mode says it is not real
+        "ok": ok,
+        "boxes": boxes,
+        "searched": provider.searched(),
+        "error": error,
+        "reason": reason,
+        "checked_ms": unix_ms(),
+        "took_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
 }
+
+/// How long the last check is reused (see the module docs).
+pub(super) const REUSE_FOR: std::time::Duration = REUSE;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
-    use crate::serve::Req;
+    use crate::serve::{App, Req};
     use ozbox_core::{BoxName, BoxRecord, Error, Operation, Plan, Provider};
     use serde_json::Value;
     use std::collections::HashMap;

@@ -57,7 +57,8 @@ Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects
   every resource is tagged `ozbox-managed=true`. Its `private_subnet_id` output is what the box module and `subnet_id` in the CLI
   config take. The NAT gateway bills by the hour while the network exists, so destroy the network when no box needs it.
 - **Operator policy** (`aws/operator-policy.json`): the least-privilege IAM policy for the person (or role) who runs `ozbox` against an
-  account. Replace `${account_id}` with the 12-digit account id before attaching it. In short: read-only describes, the Service Quotas
+  account. It is a template: `ozbox init` writes it filled in for your account, region and fleet (`operator-policy.json` in its working
+  folder, on every run) and `ozbox_provider_aws::operator_policy::render` is the only code that fills it. By hand, replace `${account_id}`, `${region}` and `${fleet}` (the fleet name in `[aws]`, `ozbox` by default). In short: read-only describes, the Service Quotas
   and Pricing reads, the two Cost Explorer reads (`ce:GetCostAndUsage` and `ce:GetTags`, for the real bill), and the public image
   parameters; EC2 resources can be created only when tagged `ozbox-managed=true` and changed or
   deleted only when they carry that tag; IAM only for roles and instance profiles named `ozbox-*` (only the Session Manager policy can
@@ -277,8 +278,15 @@ state, and applies it with the setup identity (`OzBoxSetup`, which includes **`O
 document actions on `document/ozbox-adopt-*` only; it can neither send a command nor share a document). It is not part of the key
 module, whose `OzBoxKeyAdmin` set is KMS-only. Setup checks that permission before it plans, and a refusal never stops the key or
 the rest of setup. When it is applied, setup writes the policy for whoever runs `ozbox adopt-fleet-key` to
-`operator-adopt-policy.json` in the step's working folder and prints the path; an administrator attaches it to that sign-in and to
-nobody else. A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
+`operator-adopt-policy.json` in the step's working folder. Those three statements (`SendOnlyTheAdoptDocument`, `ToBoxesOzBoxManages`,
+`ReadACommandThatWasSent`) are also part of the daily operator policy, and **setup writes that whole policy on every run**, applied
+document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. Setup never applies it: it has
+no right over the operator's permissions, on purpose (an identity that could rewrite them could widen them). An account administrator
+replaces the daily role's policy with the file (Identity Center: Permission sets, the daily set, Inline policy). At about 8,500 characters it
+is longer than a managed policy may be (6,144), so it is an inline policy. If the config records the daily `profile`, setup also reads, as
+that profile, a Systems Manager command that does not exist: "not found" means the sign-in may ask, a refusal means its policy is from
+before the adopt statements, and setup prints those statements and the step. A test reads every AWS call out of the program's source and
+fails when the operator policy does not allow one (or it is not named as setup's). A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
 covered by the permission set that applies it.
 
 ## The box role's Session Manager policy, once per account (and what to run on an account that already has boxes)

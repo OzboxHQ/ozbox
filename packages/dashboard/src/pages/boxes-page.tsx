@@ -22,6 +22,7 @@ import { t } from '../lib/i18n';
 import { hrefs, navigate } from '../lib/router';
 import { useFleet } from '../lib/use-fleet';
 import { openFlow } from '../lib/flows';
+import { ListNote, WarmingNote } from '../components/list-note';
 import { UnreachableNote } from '../components/unreachable-note';
 
 const PAGE_SIZE = 8;
@@ -119,6 +120,7 @@ export function BoxesPage() {
           </Button>
         }
       />
+      <ListNote list={fleet.data?.list} />
       <UnreachableNote items={fleet.data?.unreachable ?? []} />
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -131,7 +133,12 @@ export function BoxesPage() {
         </Button>
       </div>
 
-      {!fleet.data && !fleet.error && <Skeleton className="h-64 w-full" />}
+      {!fleet.data && !fleet.error && (
+        <>
+          <Skeleton className="h-64 w-full" />
+          <WarmingNote />
+        </>
+      )}
       {fleet.error && !fleet.data && (
         <div role="alert" className="rounded-lg border border-destructive/40 p-4 text-sm">
           {fleet.error.message}

@@ -873,6 +873,17 @@ pub fn on_box_at(marker: &Path) -> bool {
     marker.is_file()
 }
 
+/// How the error for a box whose secrets service has no socket begins (see [`service_outage`]).
+pub const OUTAGE_PREFIX: &str = "this box's secrets service is not answering";
+
+/// Whether a scanner's error says the secrets service is not running: its socket is missing, or the connection to it was refused
+/// (nothing is listening). That is an outage, the one failure the hooks degrade for (ADR 0029 Amendment 15). A service that is
+/// there but did not answer (a timeout, a reply that is not one, a socket that refuses this user), a refusal, a busy minute, a
+/// file that could not be read and every other error stay what they were: the change is held.
+pub fn service_outage(e: &str) -> bool {
+    e == crate::secrets_service::SERVICE_DOWN || e.starts_with(OUTAGE_PREFIX)
+}
+
 /// The socket to use: the box's own on a box; elsewhere (a laptop, a test) the environment's, when it names one.
 pub fn socket_path(on_box: bool, from_env: Option<String>, default: &str) -> PathBuf {
     if on_box {
@@ -901,7 +912,7 @@ impl ServiceScanner {
             }));
         }
         if on_box {
-            return Err("this box's secrets service is not answering (its socket is missing), so stored keys cannot be checked; start it with `ozbox secrets serve` or restart the box's services, then try again".into());
+            return Err(format!("{OUTAGE_PREFIX} (its socket is missing), so stored keys cannot be checked; start it with `ozbox secrets serve` or restart the box's services, then try again"));
         }
         Ok(None)
     }

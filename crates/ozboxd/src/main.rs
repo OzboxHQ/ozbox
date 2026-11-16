@@ -209,6 +209,16 @@ mod daemon {
         log(&format!(
             "backup credentials helper: {n} request(s) handled"
         ));
+        // every start: a box that held credentials before the record existed gets one, and a [backup] edit is kept
+        match br::refresh_record(&t) {
+            Ok((outcome, skipped)) => {
+                log(&format!("backup record: {outcome}"));
+                for why in skipped {
+                    log(&format!("backup record: {why}"));
+                }
+            }
+            Err(e) => log(&format!("backup record: {e}")),
+        }
         Ok(())
     }
 
@@ -268,7 +278,15 @@ mod daemon {
             Some("interruption-watch") => return interruption_watch(),
             _ => {}
         }
-        let cfg = load_config()?;
+        let mut cfg = load_config()?;
+        // What an upgrade must not lose (see `backup_state`): settings root's /etc no longer holds because the system disk
+        // was replaced. A record that cannot be trusted is ignored and said, never obeyed.
+        let backup_state_dir = ozboxd::backup_state::dir_for(&cfg.work_dir);
+        match ozboxd::backup_state::read(&backup_state_dir, 0) {
+            Ok(Some(c)) => cfg.backup = ozboxd::backup_state::effective(cfg.backup, Some(&c)),
+            Ok(None) => {}
+            Err(why) => log(&why),
+        }
         if std::env::args().nth(1).as_deref() == Some("growfs") {
             return growfs_once(&cfg);
         }
@@ -289,7 +307,8 @@ mod daemon {
                 },
                 runner.clone(),
                 clock.clone(),
-            ),
+            )
+            .with_state_dir(backup_state_dir.clone()),
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -517,6 +536,13 @@ mod daemon {
                 .collect();
         }
         if cfg.selftest.require_mount {
+            stcfg.secrets_state_file = Some(std::path::PathBuf::from(selftest::SECRETS_STATE_FILE));
+        }
+        if cfg.selftest.require_mount {
+            stcfg.box_secrets_declaration =
+                Some(std::path::PathBuf::from(selftest::BOX_SECRETS_DECLARATION));
+        }
+        if cfg.selftest.require_mount {
             stcfg.approval_flag_files = selftest::APPROVAL_FLAG_FILES
                 .iter()
                 .map(std::path::PathBuf::from)
@@ -540,6 +566,21 @@ mod daemon {
         }
         if cfg.backup.enabled {
             stcfg.tools.push("restic".into());
+        }
+        // backups that were set up on this box must still work after a boot, an upgrade or a restore: the check exists only
+        // for a box that has the record, and fails when the credentials are gone or the repository does not answer
+        if let Some(svc) = ozboxd::backup_service::global() {
+            // the repository is asked in the background (one check at a time), never inside the self-test: a slow network
+            // must not make the self-test, and the upgrade waiting on it, time out. Start the first check now.
+            let first = svc.clone();
+            std::thread::spawn(move || {
+                let _ = first.health();
+            });
+            let svc = svc.clone();
+            stcfg.backups = Some(selftest::BackupsProbe {
+                box_name: name.to_string(),
+                health: Arc::new(move || svc.health()),
+            });
         }
         let selftest_fn: Arc<dyn Fn() -> SelfTestResult + Send + Sync> = {
             let (host, runs, clock, runner) =

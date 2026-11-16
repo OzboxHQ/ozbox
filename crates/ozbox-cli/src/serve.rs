@@ -50,6 +50,9 @@ mod code_routes;
 mod cost_routes;
 mod demo_telegram;
 mod files;
+mod lane;
+#[cfg(test)]
+mod lane_tests;
 mod memory_routes;
 mod metrics_sim;
 mod models_routes;
@@ -135,7 +138,7 @@ impl Req {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Resp {
     pub status: u16,
     pub content_type: &'static str,
@@ -296,6 +299,8 @@ pub struct App {
     simulated_metrics: bool,
     /// The usage reads of each box and range: one in flight at a time, and the last answer kept to show when the box is slow.
     reads: Mutex<BTreeMap<String, Arc<Mutex<ReadSlot>>>>,
+    /// What the reads that wait on the cloud or on a box share, so they run off this loop (see `lane`).
+    lane: Arc<lane::Lane>,
     /// How long a read waits for a box it has no earlier answer for, and for one it has.
     read_budget: Duration,
     read_grace: Duration,
@@ -308,7 +313,6 @@ pub struct App {
     quiesce_jobs: HashMap<String, (QuiesceSlot, BoxRecord)>,
     plan_ttl: Duration,
     /// The last provider check and when it was made (reused for a few seconds).
-    provider_check_last: Option<(std::time::Instant, serde_json::Value)>,
     domain: Option<String>,
     settings: Settings,
     settings_path: Option<std::path::PathBuf>,
@@ -452,7 +456,9 @@ impl App {
             allowed_hosts.push(format!("localhost:{port}"));
         }
         let provider_id = provider.id().to_string();
+        let version = Arc::new(AtomicU64::new(0));
         App {
+            lane: lane::Lane::new(Arc::clone(&version), lane::Budgets::for_app()),
             provider: Arc::from(provider),
             provider_id,
             simulated_metrics,
@@ -467,7 +473,6 @@ impl App {
                 .iter()
                 .any(|p| std::path::Path::new(p).exists()),
             plan_ttl: PLAN_TTL,
-            provider_check_last: None,
             domain: None,
             settings: Settings::default(),
             settings_path: None,
@@ -495,7 +500,7 @@ impl App {
             unrecorded_budget: HashMap::new(),
             unrecorded_global: (0, 0),
             apply_jobs: apply_jobs::Jobs::default(),
-            version: Arc::new(AtomicU64::new(0)),
+            version,
             streams: Arc::new(AtomicUsize::new(0)),
             files: files::Proxy::default(),
             tools_cfg: tools_routes::ToolsCfg::default(),
@@ -657,6 +662,12 @@ impl App {
     }
 
     #[cfg(test)]
+    fn with_lane_budgets(mut self, budgets: lane::Budgets) -> Self {
+        self.lane = lane::Lane::new(Arc::clone(&self.version), budgets);
+        self
+    }
+
+    #[cfg(test)]
     fn with_plan_ttl(mut self, ttl: Duration) -> Self {
         self.plan_ttl = ttl;
         self
@@ -734,12 +745,28 @@ impl App {
         self
     }
 
+    /// Answer `req`, waiting for anything that has to be waited for (tests; the server loop uses [`App::begin`] instead, so
+    /// that a read that waits on the cloud or on a box is run by a worker and not here; the answers are the same).
+    #[cfg(test)]
     pub fn handle(&mut self, req: &Req) -> Resp {
+        match self.begin(req) {
+            lane::Step::Done(resp) => resp,
+            lane::Step::Later(job) => {
+                let (resp, headers) = job();
+                self.extra_headers = headers;
+                resp
+            }
+        }
+    }
+
+    /// The first half of answering `req`, on the request loop: everything that checks who is asking and everything that
+    /// changes state happens here. A read that only waits on the cloud or on a box comes back as a job, to be run anywhere.
+    fn begin(&mut self, req: &Req) -> lane::Step {
         self.current_actor = Actor::Automation;
-        let resp = self.handle_request(req);
+        let step = self.begin_request(req);
         // whatever logs next without a request (a timer, a finished background change) is not this person's
         self.current_actor = Actor::Automation;
-        resp
+        step
     }
 
     /// Who `req` is from: the signed-in person behind a sign-in, the access link without one. Only a request that passed
@@ -751,43 +778,114 @@ impl App {
         }
     }
 
-    fn handle_request(&mut self, req: &Req) -> Resp {
+    fn begin_request(&mut self, req: &Req) -> lane::Step {
         self.drain_file_activity();
         self.extra_headers.clear();
         if let Some(a) = self.auth.clone() {
             if let Some(out) = a.route(req) {
                 self.extra_headers = out.headers;
-                return out.resp;
+                return lane::Step::Done(out.resp);
             }
         } else if req.path == "/auth/session" && req.method == "GET" {
             // The dashboard asks which way in this server uses before it shows anything.
-            return Resp::json(200, &json!({ "mode": "token" }));
+            return lane::Step::Done(Resp::json(200, &json!({ "mode": "token" })));
         }
         if req.path == "/hooks/chat/whatsapp" {
             // public and signed by Meta, not by the dashboard's sign-in
-            return self.whatsapp_hook(req);
+            return lane::Step::Done(self.whatsapp_hook(req));
         }
         if req.path.starts_with("/hooks/") {
             // Public and signed: the trigger's own secret is the credential, not the dashboard's sign-in.
-            return self.hook_route(req);
+            return lane::Step::Done(self.hook_route(req));
         }
         if req.path == "/code/enter" && req.method == "GET" {
-            return self.code_enter(req);
+            return lane::Step::Done(self.code_enter(req));
         }
         if files::is_files_path(&req.path) {
-            return self.files_inline(req);
+            return lane::Step::Done(self.files_inline(req));
         }
         if let Some(r) = self.guard(req, req.path == "/v1" || req.path.starts_with("/v1/")) {
-            return r;
+            return lane::Step::Done(r);
         }
         if req.path == "/v1" || req.path.starts_with("/v1/") {
             self.current_actor = self.actor_of(req);
-            return self.api(req);
+            if let Some(job) = self.lane_job(req) {
+                return lane::Step::Later(job);
+            }
+            return lane::Step::Done(self.api(req));
         }
         if req.method != "GET" && req.method != "HEAD" {
-            return Resp::error(405, "method_not_allowed", "method not allowed");
+            return lane::Step::Done(Resp::error(405, "method_not_allowed", "method not allowed"));
         }
-        serve_static(&req.path)
+        lane::Step::Done(serve_static(&req.path))
+    }
+
+    /// The boxes, for a read this loop answers itself: the last read of the cloud, never a whole read of it (see `lane`).
+    fn boxes_for_loop(&self) -> Result<Vec<BoxRecord>, Resp> {
+        self.lane.boxes_for_loop(&self.provider)
+    }
+
+    /// The boxes, for work the server starts on its own: the last read, and never a wait. `None` before the first read.
+    fn boxes_quietly(&self) -> Option<Vec<BoxRecord>> {
+        self.lane.boxes_quietly(&self.provider)
+    }
+
+    /// A read that only waits on the cloud or on a box, as a job that holds shared handles and none of this server's
+    /// state (see `lane`). `None` for everything else, which is answered here by [`App::api`].
+    fn lane_job(&self, req: &Req) -> Option<lane::Job> {
+        if req.method != "GET" {
+            return None;
+        }
+        let segs: Vec<&str> = req
+            .path
+            .trim_start_matches('/')
+            .split('/')
+            .skip(1) // "v1"
+            .filter(|s| !s.is_empty())
+            .collect();
+        let ctx = lane::ReadCtx {
+            lane: Arc::clone(&self.lane),
+            provider: Arc::clone(&self.provider),
+            agent: Arc::clone(&self.agent),
+            simulated: self.simulated_metrics,
+            provider_id: self.provider_id.clone(),
+            mode: match self.fleet_mode() {
+                FleetMode::Connected => "connected",
+                FleetMode::ThisBox => "this_box",
+                FleetMode::Demo => "demo",
+            },
+        };
+        let query = req.query.clone();
+        let name = |n: &str| n.to_string();
+        Some(match segs.as_slice() {
+            ["provider", "check"] => Box::new(move || ctx.provider_check()),
+            ["boxes"] => Box::new(move || ctx.boxes()),
+            ["boxes", n] => {
+                let n = name(n);
+                Box::new(move || ctx.get_box(&n))
+            }
+            ["boxes", n, "metrics", "now"] => {
+                let n = name(n);
+                Box::new(move || ctx.metrics_now(&n))
+            }
+            ["boxes", n, "metrics"] => {
+                let n = name(n);
+                Box::new(move || ctx.metrics_series(&n, &query))
+            }
+            ["boxes", n, "selftest"] => {
+                let n = name(n);
+                Box::new(move || ctx.selftest(&n))
+            }
+            ["boxes", n, "incidents"] => {
+                let n = name(n);
+                Box::new(move || ctx.incidents(&n, &query))
+            }
+            ["boxes", n, "image"] => {
+                let n = name(n);
+                Box::new(move || ctx.image_info(&n))
+            }
+            _ => return None,
+        })
     }
 
     fn api(&mut self, req: &Req) -> Resp {
@@ -810,14 +908,6 @@ impl App {
         }
         match segs.as_slice() {
             ["info"] if get => self.info(),
-            ["boxes"] if get => match self.provider.list() {
-                Ok(recs) => Resp::json(200, &recs),
-                Err(e) => Resp::from_core(&e),
-            },
-            ["boxes", name] if get => match self.record(name) {
-                Ok(rec) => Resp::json(200, &rec),
-                Err(r) => r,
-            },
             ["catalog"] if get => self.catalog_json(),
             ["memory", rest @ ..] => self.memory_route(req, rest),
             ["skills", rest @ ..] => self.skills_route(req, rest),
@@ -840,9 +930,6 @@ impl App {
             ["terminal", id] if req.method == "DELETE" => self.terminal_close(id),
             ["boxes", name, "ssh"] if get => self.ssh(name, false),
             ["boxes", name, "ssh"] if post => self.ssh(name, true),
-            ["boxes", name, "image"] if get => self.image_info(name),
-            ["boxes", name, "selftest"] if get => self.selftest(name),
-            ["boxes", name, "incidents"] if get => self.incidents(name, &req.query),
             ["usage"] if get => self.usage(&req.query),
             ["cost"] if get => self.cost(),
             ["cost", "refresh"] if post => self.refresh_prices_now(),
@@ -904,7 +991,6 @@ impl App {
             ["demo", "telegram", "sent"] if get && self.demo_telegram.is_some() => {
                 self.demo_telegram_sent()
             }
-            ["provider", "check"] if get => self.provider_check(),
             ["models"] if get => self.models(),
             ["models", "catalog"] if get => self.models_catalog(),
             ["models", "usage"] if get => self.models_usage(&req.query),
@@ -918,8 +1004,6 @@ impl App {
             ["suggestions"] if get => self.suggestions(),
             ["settings"] if get => self.get_settings(),
             ["settings"] if req.method == "PUT" => self.put_settings(req),
-            ["boxes", name, "metrics", "now"] if get => self.metrics_now(name),
-            ["boxes", name, "metrics"] if get => self.metrics_series(name, &req.query),
             ["runs"] if get => self.runs(),
             ["runs", id, "logs"] if get => self.run_logs(id),
             ["tasks", rest @ ..] => self.tasks_route(req, rest),
@@ -1059,85 +1143,6 @@ impl App {
             Ok(Some(r)) => Ok(r),
             Ok(None) => Err(Resp::from_core(&Error::NotFound(name.to_string()))),
             Err(e) => Err(Resp::from_core(&e)),
-        }
-    }
-
-    /// The box, provided it is running (only then does it report usage).
-    fn metered(&self, name: &str) -> Result<BoxRecord, Resp> {
-        let rec = self.record(name)?;
-        if rec.state != BoxState::Running {
-            return Err(Resp::error(
-                409,
-                "box_not_running",
-                &format!(
-                    "box {} is {}, so it reports no usage",
-                    rec.spec.name, rec.state
-                ),
-            ));
-        }
-        Ok(rec)
-    }
-
-    fn metrics_now(&self, name: &str) -> Resp {
-        let rec = match self.metered(name) {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
-        match self.agent.metrics_now(&rec, unix_ms()) {
-            Ok(sample) => Resp::json(
-                200,
-                &json!({ "source": self.data_source(), "sample": sample }),
-            ),
-            Err(e) => Self::agent_error(&e),
-        }
-    }
-
-    fn metrics_series(&self, name: &str, query: &str) -> Resp {
-        let rec = match self.metered(name) {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
-        let params = parse_query(query);
-        let step_label = params.get("step").map(String::as_str).unwrap_or("5s");
-        let step_ms: u64 = match step_label {
-            "5s" => 5_000,
-            "1m" => 60_000,
-            "1h" => 3_600_000,
-            _ => {
-                return Resp::error(400, "bad_request", "step must be 5s, 1m or 1h");
-            }
-        };
-        let now = metrics_sim::bucket(unix_ms(), step_ms);
-        let since = match params.get("since") {
-            Some(s) => match parse_rfc3339_ms(s) {
-                Some(ms) => ms,
-                None => {
-                    return Resp::error(400, "bad_request", "since must be an RFC 3339 timestamp")
-                }
-            },
-            None => now.saturating_sub(step_ms * 180),
-        };
-        let start = since.div_ceil(step_ms) * step_ms;
-        let source = self.data_source();
-        if start > now {
-            return Resp::json(
-                200,
-                &json!({ "source": source, "step": step_label, "samples": Vec::<MetricsSample>::new() }),
-            );
-        }
-        if (now - start) / step_ms + 1 > MAX_SERIES_POINTS {
-            return Resp::error(
-                400,
-                "range_too_large",
-                "that range has too many points; ask for a shorter range or a coarser step",
-            );
-        }
-        match self.agent.metrics_series(&rec, start, now, step_ms) {
-            Ok(samples) => Resp::json(
-                200,
-                &json!({ "source": source, "step": step_label, "samples": samples }),
-            ),
-            Err(e) => Self::agent_error(&e),
         }
     }
 
@@ -1564,7 +1569,7 @@ impl App {
         let applied = self
             .apply_restic(&plan)
             .unwrap_or_else(|| self.provider.apply(&plan));
-        match self.finish_apply(&plan, applied, None, None, new_store_accepted) {
+        match self.finish_apply(&plan, applied, None, None, new_store_accepted, false) {
             Ok(body) => Resp::json(200, &body),
             Err(r) => r,
         }
@@ -1708,70 +1713,6 @@ impl App {
         }
     }
 
-    /// Which image a box runs and which is the newest this account can see, for the Upgrade action. A box that is not
-    /// running still answers: nothing here asks the box itself.
-    fn image_info(&self, name: &str) -> Resp {
-        let rec = match self.record(name) {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
-        let (latest, latest_error) = match self.provider.latest_image(rec.spec.region.as_deref()) {
-            Ok(i) => (Some(i), None),
-            Err(e) => (None, Some(e.to_string())),
-        };
-        let current = rec.spec.image.clone();
-        let upgrade_available = match (&current, &latest) {
-            (Some(c), Some(l)) => Some(*c != l.id),
-            _ => None,
-        };
-        Resp::json(
-            200,
-            &json!({
-                "box_name": rec.spec.name,
-                "current": current,
-                "latest": latest,
-                "latest_error": latest_error,
-                "upgrade_available": upgrade_available,
-                "unfinished_upgrade_to": rec.spec.labels.get(ozbox_core::UPGRADE_TO_LABEL),
-            }),
-        )
-    }
-
-    fn selftest(&self, name: &str) -> Resp {
-        let rec = match self.running_box(name) {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
-        match self.agent.selftest(&rec, unix_ms()) {
-            Ok(t) => Resp::json(200, &json!({ "source": self.data_source(), "result": t })),
-            Err(e) => Self::agent_error(&e),
-        }
-    }
-
-    fn incidents(&self, name: &str, query: &str) -> Resp {
-        let rec = match self.running_box(name) {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
-        let now = unix_ms();
-        let since = match parse_query(query).get("since") {
-            Some(s) => match parse_rfc3339_ms(s) {
-                Some(ms) => ms,
-                None => {
-                    return Resp::error(400, "bad_request", "since must be an RFC 3339 timestamp")
-                }
-            },
-            None => now.saturating_sub(7 * 24 * 3_600_000),
-        };
-        match self.agent.incidents(&rec, since, now) {
-            Ok(v) => Resp::json(
-                200,
-                &json!({ "source": self.data_source(), "incidents": v }),
-            ),
-            Err(e) => Self::agent_error(&e),
-        }
-    }
-
     fn data_source(&self) -> &'static str {
         if self.simulated_metrics {
             "simulated"
@@ -1787,9 +1728,9 @@ impl App {
         else {
             return Resp::error(400, "bad_request", "range must be 5s, 1m or 1h");
         };
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let now = unix_ms();
         let running: Vec<BoxRecord> = recs
@@ -1892,9 +1833,9 @@ impl App {
     /// The weekly "downsize or pause?" suggestions. Never applied here: each carries the operation that applying it
     /// would plan, and the dashboard sends it through the normal plan, confirm, apply flow.
     fn suggestions(&self) -> Resp {
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let now = unix_ms();
         let running: Vec<BoxRecord> = recs
@@ -2040,9 +1981,9 @@ impl App {
         if !self.simulated_metrics {
             return Resp::error(501, "metrics_unavailable", "runs need the box agent");
         }
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let now = metrics_sim::bucket(unix_ms(), 5_000);
         let runs: Vec<Value> = recs
@@ -2696,8 +2637,31 @@ pub fn serve(
     }
     flush_stdout();
 
+    run_loop(
+        &server,
+        &mut app,
+        &stop,
+        lane::POOL_WORKERS,
+        lane::POOL_QUEUE,
+    );
+    app.sched_shutdown();
+    app.tunnel_shutdown(unix_ms());
+    Ok(())
+}
+
+/// Serve until `stop` turns true or the listener fails. The loop owns `app` and answers everything that checks who is
+/// asking or changes something; a read that waits on the cloud or on a box goes to the pool (see `lane`), so it never holds
+/// the next request.
+fn run_loop(
+    server: &tiny_http::Server,
+    app: &mut App,
+    stop: &AtomicBool,
+    workers: usize,
+    queue: usize,
+) {
+    let pool = lane::Pool::new(workers, queue);
     loop {
-        // Ctrl+C or a service manager's stop: leave the loop, so the tunnel is taken down below.
+        // Ctrl+C or a service manager's stop: leave the loop, so the tunnel is taken down by the caller.
         if stop.load(Ordering::SeqCst) {
             use std::io::Write;
             let _ = writeln!(
@@ -2792,17 +2756,17 @@ pub fn serve(
         }
         let too_big = request.body_length().is_some_and(|n| n > limit);
         let mut body = Vec::new();
-        let resp = if too_big {
-            Resp::error(413, "too_large", "request body too large")
+        let step = if too_big {
+            lane::Step::Done(Resp::error(413, "too_large", "request body too large"))
         } else {
             let _ = request
                 .as_reader()
                 .take(limit as u64 + 1)
                 .read_to_end(&mut body);
             if body.len() > limit {
-                Resp::error(413, "too_large", "request body too large")
+                lane::Step::Done(Resp::error(413, "too_large", "request body too large"))
             } else {
-                app.handle(&Req {
+                app.begin(&Req {
                     method: method.clone(),
                     path,
                     query,
@@ -2811,29 +2775,47 @@ pub fn serve(
                 })
             }
         };
+        let resp = match step {
+            lane::Step::Done(resp) => resp,
+            lane::Step::Later(job) => {
+                // Checked and authorised above; what is left is waiting on the cloud or a box, which a worker does. A full
+                // queue is answered at once instead of being queued without limit.
+                let work = Box::new(lane::Work {
+                    request,
+                    method,
+                    job,
+                });
+                if let Err(refused) = pool.submit(work) {
+                    let (resp, extra) = lane::busy_reply();
+                    send_answer(refused.request, &refused.method, resp, &extra);
+                }
+                continue;
+            }
+        };
         if resp.stream {
             spawn_stream(request, app.version(), app.streams());
             continue;
         }
         let extra = app.take_extra_headers();
-        let status = resp.status;
-        // An answer that could not be written is the one way a request is lost after it was handled. A browser that closed
-        // the connection itself (a page left, a request cancelled) is its own choice and is not worth a line; any other
-        // failure is said, with what is safe to say: the kind of failure, the verb and the status. Never the path or query
-        // (they can carry a trigger's secret) and never the body.
-        if let Err(e) = request.respond(to_http(resp, method == "HEAD", &extra)) {
-            use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
-            if !matches!(e.kind(), BrokenPipe | ConnectionReset | ConnectionAborted) {
-                eprintln!(
-                    "ozbox: serve: could not send the answer to a {method} request (status {status}): {:?}",
-                    e.kind()
-                );
-            }
+        send_answer(request, &method, resp, &extra);
+    }
+}
+
+/// Write `resp` to `request`. An answer that could not be written is the one way a request is lost after it was handled. A
+/// browser that closed the connection itself (a page left, a request cancelled) is its own choice and is not worth a line;
+/// any other failure is said, with what is safe to say: the kind of failure, the verb and the status. Never the path or
+/// query (they can carry a trigger's secret) and never the body.
+fn send_answer(request: tiny_http::Request, method: &str, resp: Resp, extra: &[(String, String)]) {
+    let status = resp.status;
+    if let Err(e) = request.respond(to_http(resp, method == "HEAD", extra)) {
+        use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+        if !matches!(e.kind(), BrokenPipe | ConnectionReset | ConnectionAborted) {
+            eprintln!(
+                "ozbox: serve: could not send the answer to a {method} request (status {status}): {:?}",
+                e.kind()
+            );
         }
     }
-    app.sched_shutdown();
-    app.tunnel_shutdown(unix_ms());
-    Ok(())
 }
 
 /// A flag that turns true when the process is asked to stop (SIGINT, SIGTERM). A second request while it is already

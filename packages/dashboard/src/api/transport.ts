@@ -39,6 +39,8 @@ export interface UploadInit {
 export interface Transport {
   /** A call answered with JSON. A refusal is an `ApiError`. */
   request<T>(method: Method, path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
+  /** A call answered with JSON, and the headers it came with (what the answer says about itself). A refusal is an `ApiError`. */
+  requestWithHeaders<T>(method: Method, path: string, signal?: AbortSignal): Promise<{ data: T; headers: Headers }>;
   /** The same, with a text body (a file's new contents). */
   requestText<T>(method: Method, path: string, text: string, signal?: AbortSignal): Promise<T>;
   /** The call itself, for an answer that is not JSON (a stream, a file). The status is the caller's to read; a network failure is an `ApiError`. */
@@ -93,6 +95,11 @@ export function createTransport(opts: TransportOptions): Transport {
 
   return {
     request: (method, path, body, signal) => json(method, path, { ...(body !== undefined ? { json: body } : {}), ...(signal ? { signal } : {}) }),
+    requestWithHeaders: async <T>(method: Method, path: string, signal?: AbortSignal) => {
+      const res = await send(method, path, signal ? { signal } : {});
+      if (!res.ok) throw await refuse(res);
+      return { data: (await res.json()) as T, headers: res.headers };
+    },
     requestText: (method, path, text, signal) => json(method, path, { body: text, contentType: 'text/plain; charset=utf-8', ...(signal ? { signal } : {}) }),
     send,
     blob: async (path, signal) => {

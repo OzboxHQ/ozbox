@@ -505,6 +505,58 @@ pub fn run(
                     }
                 }
             }
+            // The complete operator policy, every run: the adopt statements live in the one file, whether or not the document
+            // step above changed anything. Setup cannot apply it, so it is written, checked and explained (never a stop).
+            match init.operator_policy(&target, &account) {
+                Ok(op) => {
+                    let sids = op.added_statements.join(", ");
+                    let profile = init
+                        .recorded("aws")
+                        .get("profile")
+                        .cloned()
+                        .unwrap_or_default();
+                    show(
+                        out,
+                        a.json,
+                        t(
+                            "init.operator_policy_written",
+                            &[
+                                ("region", &op.region),
+                                ("fleet", &op.fleet),
+                                ("path", &op.file),
+                                ("sids", &sids),
+                            ],
+                        ),
+                    );
+                    let key = match op.operator_check {
+                        crate::init::OperatorCheck::Allowed => Some("init.operator_check_ok"),
+                        crate::init::OperatorCheck::Denied => Some("init.operator_check_denied"),
+                        crate::init::OperatorCheck::Unknown => Some("init.operator_check_unknown"),
+                        crate::init::OperatorCheck::NotChecked => {
+                            Some("init.operator_check_unchecked")
+                        }
+                    };
+                    if let Some(key) = key {
+                        show(
+                            out,
+                            a.json,
+                            t(key, &[("profile", &profile), ("sids", &sids)]),
+                        );
+                    }
+                    if op.operator_check != crate::init::OperatorCheck::Allowed {
+                        for s in &op.adopt_statements {
+                            show(
+                                out,
+                                a.json,
+                                serde_json::to_string_pretty(s).unwrap_or_default(),
+                            );
+                        }
+                        show(out, a.json, t("init.operator_policy_apply", &[]));
+                    }
+                    steps.push(json!({ "step": "operator_policy", "report": op }));
+                }
+                Err(f) => show(out, a.json, f.to_string()),
+            }
             // The account's policies for boxes' roles (Session Manager, and with the key and bucket above, the fleet key and session logs), made once with this identity, after the key so it can name it. Boxes cannot be created or
             // upgraded without it, so a failure says what to ask an administrator for and never stops the rest of setup.
             match init.plan_box_policy(&target, &account) {
@@ -1205,6 +1257,13 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("operator-adopt-policy.json"), "{text}");
+        // the complete operator policy is written and explained on every run, with the adopt statements named
+        assert!(text.contains("operator-policy.json"), "{text}");
+        assert!(text.contains("SendOnlyTheAdoptDocument"), "{text}");
+        assert!(
+            text.contains("Setup does not change your daily operator role"),
+            "{text}"
+        );
         // Everything up to the guard rail was done and recorded; nothing is marked complete.
         let c = crate::config::Config::load_from(&d.path().join("config.toml")).unwrap();
         assert_eq!(c.aws.unwrap().subnet_id.as_deref(), Some("subnet-0abc"));
