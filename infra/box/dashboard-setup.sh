@@ -34,7 +34,8 @@ if [ ! -d /work ] || ! mountpoint -q /work; then
   exit 1
 fi
 # Since ADR 0023 the dashboard runs as the supervisor user from a system unit, not as the box user: this script can neither
-# replace that program nor its settings (they are not the box user's to change). Changing them is the root helper's job.
+# replace that program nor its settings (they are not the box user's to change). It stages the new settings and the root helper
+# decides what to take (below).
 if [ -e /etc/systemd/system/ozbox-dashboard.service ]; then
   # Its program and sign-in settings are not the box user's to change, but a new tunnel token still is to hand over. It goes
   # through the box's root helper, the one route every image has: the helper reads the token itself, asks the secrets service
@@ -73,7 +74,16 @@ if [ -e /etc/systemd/system/ozbox-dashboard.service ]; then
     echo "dashboard-setup: tunnel-token-stored"
   fi
   [ -z "${TUNNEL_TOKEN:-}" ] || echo "dashboard-setup: the public address was not changed: this box's dashboard keeps the address it already has" >&2
-  echo "dashboard-setup: this box's dashboard runs as the supervisor user, so its program and sign-in settings cannot be changed from here. To move or refresh it run: ozbox admin <box> -- ensure-supervisor" >&2
+  # The sign-in settings and the description of the service are staged here, as on any box, and the person's computer then asks
+  # the root helper to take them (`ensure-supervisor expect SHA256`). The helper checks the file is the one the person's computer
+  # sent, installs it when the dashboard has no sign-in settings to read (a box whose system disk an upgrade replaced), and keeps
+  # the settings it has otherwise. Nothing is started from here, and no program is staged: the supervisor runs the root-owned one.
+  install -d -m 0750 "$home" "$home/state"
+  printf '%s\n' "$AUTH_TOML" >"$home/auth.toml"
+  chmod 0640 "$home/auth.toml"
+  mkdir -p "$(dirname "$unit")"
+  printf '%s\n' "$UNIT_BODY" >"$unit"
+  chmod 0644 "$unit"
   echo "dashboard-setup: supervisor-present"
   exit 0
 fi

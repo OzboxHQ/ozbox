@@ -48,6 +48,17 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **If both `config.toml` and `fleet.toml` exist**, every command now warns which one is read and that the other is ignored.
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="After an upgrade">
+  ## After upgrading a box, `ozbox dashboard install` brings the dashboard back instead of leaving it failing to start
+
+  On a box that kept its disk through an upgrade, the dashboard could be left restarting every few seconds with "the sign-in settings file could not be read", while `ozbox dashboard install` and the box's helper both said it was fine.
+
+  - **Your settings are put back.** A run of `ozbox dashboard install` now hands the sign-in settings it sent to the box's helper, which checks they are exactly the ones your computer sent and installs them when the dashboard has none to read.
+  - **Settings it already has are kept.** If the dashboard already has sign-in settings, a later run does not replace them, and says so: changing who may approve needs your approval, which this command cannot take yet.
+  - **No false "ok".** The helper no longer starts a dashboard that has no settings, and it checks the dashboard stays up and answers on its port before it says it runs. `ozbox dashboard install` asks the box too, and reports a dashboard that keeps restarting as an error. A box still on an earlier program needs `ozbox admin <box> -- reinstall-ozboxd` first, then run the install again.
+  - **A clearer message when the box's helper cannot switch to the box user**: the Oz Box tools are then not added to the coding agents' settings (run `ozbox agent-mcp install` on the box), and the dashboard is not affected.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 

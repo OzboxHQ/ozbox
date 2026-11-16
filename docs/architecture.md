@@ -87,7 +87,7 @@ start a public address that has neither. The address is the single source of the
 and Origin, and the session cookie's scope. Settings, Dashboard access shows the tunnel's state and has a guide for each
 provider; `ozbox tunnel status --json` says the same on the command line. `ozbox dashboard install <box>` runs the dashboard
 and its tunnel as a service on a box: it stages the settings, and the root helper runs the box's own program as the
-supervisor user from a system unit (ADR 0023, Amendment 1); the dashboard then goes down whenever that box is upgraded or paused.
+supervisor user from a system unit (ADR 0023, Amendment 1). The helper installs the settings only after checking they are the ones the person's computer sent, and only when the dashboard has none to read (a box whose system disk an upgrade replaced keeps its folder on `/work`); settings it already has are kept, because the box user can make the same request. It reports success only once the dashboard stays up and answers on its port. The dashboard then goes down whenever that box is upgraded or paused.
 
 ### Who may do what at the dashboard
 
