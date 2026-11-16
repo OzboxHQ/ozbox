@@ -14,6 +14,9 @@
 //! * `kek`: what protects the store's key (`kms`, `tpm2`, `keychain`, `passphrase` or `file`).
 //! * `escrow`: for a file-kept key, whether a copy is escrowed off the box (`vault`) or not (`none`).
 //! * `store`: with `code=kind-mismatch`, what sealed the store the service found (`file`): not the kind in `kek`.
+//! * `failing_since`: unix seconds when the service first stopped being ready, kept across the unit's restarts (it is carried
+//!   over while the file before said not-ready too, and left out once ready). The box's self-test reads it to tell a failure
+//!   that has lasted from one that is only starting; a file from an older service has no such line.
 //! * `code`: why the service is not ready: `no-escrow` (the store is there, its key is not, and nothing holds a copy) or
 //!   `kind-mismatch` (the store is sealed by a key kept in a file, the service is configured for another kind, and the file
 //!   key is gone with no copy): the only two states in which `recover-store` may set the store aside, both meaning the store
@@ -41,6 +44,9 @@ pub struct State {
     /// How many secrets the owner or an agent put in the store (the service's own keys and records are not counted). `Some(0)`:
     /// the store holds nothing a new one would lose, so a box may move to another key without losing anything. `None`: not said.
     pub names: Option<u32>,
+    /// Unix seconds when the service first stopped being ready, carried across restarts while it stays not ready. `None`: ready,
+    /// or written by a service that does not say.
+    pub failing_since: Option<u64>,
 }
 
 /// The one not-ready code under which a store may be set aside.
@@ -62,6 +68,7 @@ impl State {
             store_kek: None,
             adopt: true,
             names: None,
+            failing_since: None,
         }
     }
 
@@ -75,12 +82,18 @@ impl State {
             store_kek: None,
             adopt: true,
             names: None,
+            failing_since: None,
         }
     }
 
     /// What sealed the store the service found (said with `kind-mismatch`).
     pub fn with_store_kek(mut self, kind: &str) -> Self {
         self.store_kek = Some(kind.to_string());
+        self
+    }
+
+    pub fn with_failing_since(mut self, unix_secs: u64) -> Self {
+        self.failing_since = Some(unix_secs);
         self
     }
 
@@ -115,6 +128,9 @@ impl State {
         }
         if let Some(n) = self.names {
             out.push_str(&format!("names={n}\n"));
+        }
+        if let Some(t) = self.failing_since {
+            out.push_str(&format!("failing_since={t}\n"));
         }
         out
     }
@@ -151,6 +167,7 @@ impl State {
                 Some(("store", v)) if KEKS.contains(&v) => s.store_kek = Some(v.to_string()),
                 Some(("adopt", "kms")) => s.adopt = true,
                 Some(("names", v)) => s.names = v.parse().ok(),
+                Some(("failing_since", v)) => s.failing_since = v.parse().ok(),
                 _ => {}
             }
         }
@@ -181,6 +198,15 @@ impl State {
     pub fn is_unopenable(&self) -> bool {
         self.is_no_escrow() || self.is_kind_mismatch()
     }
+}
+
+/// The time a not-ready service first failed, from the state file as it was before this start: carried over while that file said
+/// not-ready and named a time (a restart is not a new failure). `None` when it was ready, absent, or from a service that does
+/// not say, and the new failure then starts now.
+pub fn previous_failing_since(previous: &str) -> Option<u64> {
+    State::parse(previous)
+        .filter(|p| !p.ready)
+        .and_then(|p| p.failing_since)
 }
 
 /// Read the state file as root would trust it: a plain file (not a link), owned by `owner` (the secrets user), that no one
@@ -261,6 +287,28 @@ pub fn parse_remote(out: &str) -> (Option<State>, bool) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failing_since_is_kept_across_restarts_and_cleared_when_ready() {
+        let first = State::not_ready("x (trying again in 2 s)", "transient", Some("kms"), None)
+            .with_failing_since(100);
+        let text = first.render();
+        assert!(text.contains("failing_since=100\n"));
+        assert_eq!(State::parse(&text).unwrap().failing_since, Some(100));
+        // the next process carries it over while the file before said not-ready
+        assert_eq!(previous_failing_since(&text), Some(100));
+        // ready leaves it out, so the next failure starts a new clock
+        let ready = State::ready("", "kms", None).render();
+        assert!(!ready.contains("failing_since"));
+        assert_eq!(previous_failing_since(&ready), None);
+        // a file from an older service, a ready file that still names a time, and garbage carry nothing
+        assert_eq!(previous_failing_since("not-ready: x\nkek=kms\n"), None);
+        assert_eq!(previous_failing_since("ready\nfailing_since=5\n"), None);
+        assert_eq!(
+            previous_failing_since("not-ready: x\nfailing_since=abc\n"),
+            None
+        );
+    }
 
     #[test]
     fn a_state_round_trips_and_says_what_protects_the_store() {
