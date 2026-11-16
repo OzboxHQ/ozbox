@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
+  ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
+
+  - **A real app's command declaration saves.** Declarations are stored as records with a 256 KB limit, so a Next.js app's pins fit, and a refused save no longer uses up your approval code.
+  - **Importing keys is easier and honest.** `--allow-live-all` allows every production-looking key in a file behind one typed confirmation, and the report accounts for every line.
+  - **An upgrade that could lose a box's secrets store keeps the old system disk** as an encrypted snapshot first, so the old store stays recoverable, and says so loudly in the plan.
+  - **The box list no longer closes a menu you just opened** when the server's details arrive late.
+  - **macOS programs are released again**, built on a current runner and checked by asking the program which dashboard it carries.
+
+  **How to get it.** Install with `sh install.sh --version 0.2.0-beta.2`, then `ozbox upgrade <box>`.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
   ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
 
