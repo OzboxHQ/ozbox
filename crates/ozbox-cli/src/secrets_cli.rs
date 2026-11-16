@@ -966,8 +966,21 @@ fn serve(
     let escrow = (kek == Some("file")).then(|| {
         crate::secrets_escrow::Escrow::from_env(&|k| std::env::var(k).ok(), &scope).is_some()
     });
-    let not_ready =
-        |m: &str, code: &str| crate::secrets_state::State::not_ready(m, code, kek, escrow);
+    // When this stopped being ready, kept across the unit's restarts so the self-test can tell a failure that lasts from one that
+    // is only starting. Fixed at the first not-ready write; carried over from the file before when that was not ready too.
+    let failing_since: std::cell::Cell<Option<u64>> = std::cell::Cell::new(
+        std::fs::read_to_string(&state)
+            .ok()
+            .and_then(|t| crate::secrets_state::previous_failing_since(&t)),
+    );
+    let not_ready = |m: &str, code: &str| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let since = failing_since.get().map_or(now, |t| t.min(now));
+        failing_since.set(Some(since));
+        crate::secrets_state::State::not_ready(m, code, kek, escrow).with_failing_since(since)
+    };
     for attempt in 1..=attempts {
         let failed = match serve_inner(
             box_socket,
