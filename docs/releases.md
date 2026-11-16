@@ -30,7 +30,8 @@ The machine images are built and published by the image workflow, from a dedicat
 retired after a successful release ([ADR 0052](adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest.md)).
 `ozbox create` with no image named, and `ozbox upgrade`, use the newest Oz image in your own account if there is one, and
 otherwise the newest public one that the publisher account owns and the release's signed manifest lists. Nothing else is
-accepted: an image from another account, or one the signed manifest does not list, is refused with the reason.
+accepted: an image from another account, or one the signed manifest does not list, is refused with the reason. When the newest image's release is not published, does not list it, or is a pre-release a stable program does not use, it is
+passed over for the newest one that verifies, and the plan names each one passed over; if none verifies the command refuses.
 
 The workflow's two AWS-signing jobs (the build and the publish job) run in the GitHub environment **`image`**, whose required
 reviewer approves a release; the build role trusts that environment alone. This is Preview until the first public release has

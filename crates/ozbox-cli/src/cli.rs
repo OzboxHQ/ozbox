@@ -141,7 +141,8 @@ pub enum Command {
     Upgrade {
         #[arg(value_parser = parse_name)]
         name: BoxName,
-        /// An image id, or `latest` (the default): the newest Oz image this account can see.
+        /// An image id, or `latest` (the default): the newest Oz image whose signed release verifies (newer ones whose release
+        /// cannot be found or does not list them are passed over, and the plan says which).
         #[arg(long)]
         image: Option<String>,
         /// Use an image whose release signature could not be verified. The plan prints a warning. Without this, such an

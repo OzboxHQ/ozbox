@@ -82,6 +82,9 @@ struct State {
     /// Make the sandbox's newest image report an unverified signature (for testing the refusal).
     #[serde(default)]
     unsigned_images: bool,
+    /// Lines the sandbox's `latest` reports as candidates it passed over (for testing that a plan names them).
+    #[serde(default)]
+    latest_skipped: Vec<String>,
     /// When each snapshot was taken and how large its disk was, by snapshot id.
     #[serde(default)]
     snapshot_meta: BTreeMap<String, SnapMeta>,
@@ -324,7 +327,8 @@ impl Backend for FakeBackend {
     }
 
     fn latest_image(&self, _region: Option<&str>) -> Result<ImageInfo> {
-        let unsigned = self.load()?.unsigned_images;
+        let state = self.load()?;
+        let (unsigned, latest_skipped) = (state.unsigned_images, state.latest_skipped);
         Ok(ImageInfo {
             id: LATEST_IMAGE.to_string(),
             release: Some("2026.12.0".into()),
@@ -341,6 +345,7 @@ impl Backend for FakeBackend {
             signature_applicable: unsigned,
             first_boot_sha256: None,
             upgrade: None,
+            skipped: latest_skipped,
         })
     }
 

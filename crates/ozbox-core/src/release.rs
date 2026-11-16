@@ -76,7 +76,8 @@ pub struct Verdict {
     pub verified: bool,
     pub detail: String,
     /// `true` only when the answer is final about THIS image: its release's signature verified and the signed manifest
-    /// does not list the image (or is for another release). A download or signature failure is never definitive: it says
+    /// does not list the image (or is for another release), or the release (or its manifest or signature) is not
+    /// published at all (HTTP 404: a release whose publish step never ran, or a private repository). A download or signature failure is never definitive: it says
     /// nothing about the image, and a caller choosing among images must stop rather than fall back to an older one.
     pub definitive: bool,
 }
@@ -688,7 +689,12 @@ impl ReleaseVerifier {
             Subject::Release => format!("the release {tag}"),
             Subject::File(n) => format!("{n} of release {tag}"),
         };
-        Verdict::no(match f {
+        let verdict = if f == Fetch::NotFound {
+            Verdict::refused
+        } else {
+            Verdict::no
+        };
+        verdict(match f {
             Fetch::NoCurl => "curl is not installed, so the release could not be downloaded".to_string(),
             Fetch::NotFound if with_token => format!(
                 "{what} was not found in {repo}, or the GitHub token cannot see that repository"

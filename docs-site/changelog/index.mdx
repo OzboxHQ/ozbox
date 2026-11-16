@@ -8,6 +8,17 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI"]} description="ozbox upgrade and create">
+  ## `latest` now means the newest image whose signed release verifies
+
+  `ozbox upgrade <box>` (and `ozbox create` with no image) used to take the newest Oz image it could see. When that image's release had not been published or signed yet, the upgrade was then refused, even though the release before it was fine.
+
+  - **A newer image that cannot be verified is passed over** for the newest one that can: its release was never published, does not list the image for your region, or is a pre-release a stable program does not use.
+  - **The plan says which ones were passed over,** one line each, with the reason.
+  - **If no image verifies, the command refuses** and names the two ways forward: `--image <id>`, or `--allow-unverified-image`.
+  - **Naming an image with `--image` works as before.** A check that could not be made (a network or signature-tool failure) still stops the command instead of falling back to an older image.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 

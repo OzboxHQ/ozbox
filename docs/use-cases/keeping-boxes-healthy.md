@@ -17,7 +17,7 @@ ozbox upgrade main
 ```
 
 **Underneath:** the image's release signature is checked first (an unverified image is refused unless you pass
-`--allow-unverified-image`); work in progress is checkpointed; the machine is rebuilt (on Hetzner, replaced) from the new image; `/work` is
+`--allow-unverified-image`; with no `--image` the newest image whose signed release verifies is chosen, and the plan names any newer one it passed over); work in progress is checkpointed; the machine is rebuilt (on Hetzner, replaced) from the new image; `/work` is
 reattached untouched; the self-test runs; your SSH entry follows the new machine.
 
 The plan also says what happens to the box's **secrets store**. Its copy on `/work` comes back; whether the new machine can

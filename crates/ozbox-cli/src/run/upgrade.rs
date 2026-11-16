@@ -1102,6 +1102,45 @@ pub fn trust_gate(
     signature_notes(info, image, allow_unverified, notes)
 }
 
+/// One plan note for each candidate `latest` passed over, newest first: the image, its release and why (see
+/// [`ozbox_core::ImageInfo::skipped`]).
+pub fn latest_skipped_notes(info: Option<&ImageInfo>) -> Vec<String> {
+    info.map(|i| {
+        i.skipped
+            .iter()
+            .map(|line| t("upgrade.latest_skipped", &[("line", line)]))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// `latest` found no image whose signed release verifies: the refusal, naming every candidate passed over and the two ways
+/// forward. `None` when the chosen image verifies, the provider has no signed releases, or the person asked for
+/// unverified images.
+pub fn latest_unverified(info: Option<&ImageInfo>, allow_unverified: bool) -> Option<String> {
+    let info = info?;
+    if info.signature_verified || !info.signature_applicable || allow_unverified {
+        return None;
+    }
+    let detail = info
+        .signature_detail
+        .as_deref()
+        .unwrap_or("no reason was given");
+    let skipped: String = info
+        .skipped
+        .iter()
+        .map(|l| t("upgrade.latest_none_line", &[("line", l)]))
+        .collect();
+    Some(t(
+        "upgrade.err_latest_none",
+        &[
+            ("image", &info.id),
+            ("detail", detail),
+            ("skipped", &skipped),
+        ],
+    ))
+}
+
 /// The part of [`trust_gate`] about the image's signature, after its version has been looked at.
 fn signature_notes(
     info: &ImageInfo,
@@ -1857,6 +1896,9 @@ pub(super) fn execute(
     // what the provider itself said; the replan that adds the copy of the old system disk keeps what is added after it
     let base_notes = plan.notes.len();
     plan.notes.extend(first_boot_notes);
+    if requested == "latest" {
+        plan.notes.extend(latest_skipped_notes(info.as_ref()));
+    }
     plan.notes.extend(crate::infra_cli::plan_notes());
     // Which kind of upgrade the two signed releases call for, and why (ADR 0038, informational: this version of ozbox
     // carries out every upgrade as a replace). Only asked when there is something to do, and never an error: a manifest
@@ -1882,6 +1924,11 @@ pub(super) fn execute(
     if !plan.is_noop() {
         // An image whose release signature could be checked and was not is refused before anything is confirmed,
         // unless the person asks for it by name; the plan then carries the warning.
+        if requested == "latest" {
+            if let Some(refusal) = latest_unverified(info.as_ref(), allow_unverified) {
+                return Err(CliError::Msg(refusal));
+            }
+        }
         match trust_gate(info.as_ref(), &target, allow_unverified) {
             Ok(notes) => plan.notes.extend(notes),
             Err(refusal) => return Err(CliError::Msg(refusal)),
@@ -3211,6 +3258,7 @@ mod tests {
             signature_applicable: applicable,
             first_boot_sha256: None,
             upgrade: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -3260,6 +3308,36 @@ mod tests {
                 "{r:?}: {notes:?}"
             );
         }
+    }
+
+    #[test]
+    fn latest_with_nothing_verified_is_refused_naming_what_was_passed_over_and_both_ways_forward() {
+        let mut none = info(false, true);
+        none.skipped = vec!["ami-0b (release 0.2.0-beta.1): not found".into()];
+        let refusal = latest_unverified(Some(&none), false).unwrap_or_default();
+        for want in [
+            "ami-1",
+            "ami-0b (release 0.2.0-beta.1)",
+            "--image",
+            "--allow-unverified-image",
+        ] {
+            assert!(refusal.contains(want), "{want}: {refusal}");
+        }
+        // verified, unsigned-by-design (sandbox), or asked for: not refused here
+        assert!(latest_unverified(Some(&info(true, true)), false).is_none());
+        assert!(latest_unverified(Some(&info(false, false)), false).is_none());
+        assert!(latest_unverified(Some(&none), true).is_none());
+        assert!(latest_unverified(None, false).is_none());
+    }
+
+    #[test]
+    fn what_latest_passed_over_is_a_plan_note_each() {
+        let mut i = info(true, true);
+        i.skipped = vec!["ami-1 (release 1): a".into(), "ami-2 (release 2): b".into()];
+        let notes = latest_skipped_notes(Some(&i));
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("ami-1") && notes[1].contains("ami-2"));
+        assert!(latest_skipped_notes(Some(&info(true, true))).is_empty());
     }
 
     #[test]
