@@ -1,3 +1,5 @@
+import { useEffect } from 'react';
+
 import type { ApiClient } from '../api/client';
 import type { BoxRecord, Info, MetricsNow } from '../api/types';
 import { useAsync } from './use-async';
@@ -18,7 +20,7 @@ export interface Fleet {
 /** The boxes plus each running box's current usage, refreshed every 5 s. */
 export function useFleet(client: ApiClient, info: Info | null) {
   const wantMetrics = info !== null;
-  return useAsync<Fleet>(
+  const fleet = useAsync<Fleet>(
     async (signal) => {
       const boxes = await client.listBoxes(signal);
       const metrics: Record<string, MetricsNow | undefined> = {};
@@ -40,7 +42,15 @@ export function useFleet(client: ApiClient, info: Info | null) {
       unreachable.sort((a, b) => a.name.localeCompare(b.name));
       return { boxes, metrics, unreachable };
     },
-    [client, wantMetrics],
+    // The inputs are the client only. Whether usage is read follows `info`, which arrives a moment after the page: it is not a
+    // new question, so it must not start the list from a clean slate (that unmounted every row, and with it a menu a person
+    // had just opened). The load reads the current value, and the effect below refreshes once when it changes.
+    [client],
     5000,
   );
+  const { reload } = fleet;
+  useEffect(() => {
+    if (wantMetrics) reload();
+  }, [wantMetrics, reload]);
+  return fleet;
 }

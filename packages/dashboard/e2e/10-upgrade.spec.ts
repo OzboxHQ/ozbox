@@ -238,6 +238,35 @@ for (const width of WIDTHS) {
   });
 }
 
+// The list is asked for before the server's information arrives, and again once it has (the second read also gets each running
+// box's usage). That second read must not start the list from nothing: a row menu a person had just opened was unmounted with its
+// row. The information is held back here so the order is the same on every machine; before the fix this failed every time.
+test('a row menu that is open stays open when the server information arrives after it', async ({ page, request }) => {
+  const name = 'menu-late-info';
+  await withBox(request, name, {}, async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((ok) => (release = ok));
+    await page.route((u) => u.pathname === '/v1/info', async (route) => {
+      await held;
+      await route.continue().catch(() => undefined);
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await open(page, '/boxes');
+    await page.locator(`button[aria-label="Actions for ${name}"]:visible`).click();
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+
+    const info = page.waitForResponse((r) => new URL(r.url()).pathname === '/v1/info');
+    release();
+    await info;
+    // the read the page makes because the information arrived
+    await page.waitForResponse((r) => new URL(r.url()).pathname === '/v1/boxes');
+    await expect(menu).toBeVisible();
+    await expect(page.locator(`button[aria-label="Actions for ${name}"]:visible`)).toHaveCount(1);
+    await page.keyboard.press('Escape');
+  });
+});
+
 test('a box with no machine can be destroyed from its page, with the name typed and the plan naming /work', async ({ page, request }) => {
   const name = 'miss-destroy';
   await makeBox(request, name);
