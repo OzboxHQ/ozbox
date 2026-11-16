@@ -17,7 +17,7 @@
     "e2e:real": "playwright test -c playwright.real.config.ts"
   },
   "dependencies": {
-    "@hookform/resolvers": "5.9.2",
+    "@hookform/resolvers": "7.0.6",
     "@hugeicons/core-free-icons": "3.1.1",
     "@hugeicons/react": "1.1.4",
     "@radix-ui/react-alert-dialog": "1.1.15",
