@@ -637,3 +637,127 @@ fn the_setup_policy_never_allows_an_action_on_every_resource_for_iam_s3_or_a_wil
         }
     }
 }
+
+// ---------- the lookups that let init adopt what already exists (ADR 0053) ----------
+
+/// The (service, subcommand) of every `aws <service> <subcommand>` call written as `&["<service>", "<subcommand>", ...]` in the
+/// adoption code (`init/adopt.rs`, production code only).
+fn adoption_lookup_calls() -> BTreeSet<(String, String)> {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ozbox-cli/src/init/adopt.rs"),
+    )
+    .unwrap();
+    let code = src.split("#[cfg(test)]").next().unwrap();
+    let mut found = BTreeSet::new();
+    let mut rest = code;
+    while let Some(at) = rest.find("&[\"") {
+        rest = &rest[at + 3..];
+        let service = rest.split('"').next().unwrap().to_string();
+        let after = &rest[service.len() + 1..];
+        let after = after.trim_start_matches([',', ' ', '\n', '\t']);
+        if let Some(lit) = after.strip_prefix('"') {
+            found.insert((service, lit.split('"').next().unwrap().to_string()));
+        }
+    }
+    found
+}
+
+#[test]
+fn every_lookup_init_makes_to_adopt_what_exists_is_a_call_both_the_setup_set_and_the_steps_own_set_allow(
+) {
+    use ozbox_provider_aws::init_actions::ADOPTION_LOOKUPS;
+    let made = adoption_lookup_calls();
+    // the scan finds what the code really calls, or this test would pass on an empty list
+    assert!(
+        made.contains(&("kms".into(), "list-aliases".into()))
+            && made.contains(&("iam".into(), "get-policy".into())),
+        "found only {made:?}: did init/adopt.rs change shape?"
+    );
+    let listed: BTreeSet<(String, String)> = ADOPTION_LOOKUPS
+        .iter()
+        .map(|(s, c, ..)| (s.to_string(), c.to_string()))
+        .collect();
+    assert_eq!(
+        made, listed,
+        "init/adopt.rs makes lookups the coverage table does not list (or the table lists one it no longer makes): edit init_actions::ADOPTION_LOOKUPS"
+    );
+    let setup = permission_set("setup-policy.json");
+    for (service, call, actions, arn, step_set) in ADOPTION_LOOKUPS {
+        let own = permission_set(step_set);
+        for a in actions {
+            for (label, set) in [("setup-policy.json", &setup), (step_set, &own)] {
+                let allowed = set.iter().any(|s| {
+                    s["Effect"] == "Allow"
+                        && strings(&s["Action"]).iter().any(|p| matches(p, a))
+                        && reaches(s, &[arn.to_string()])
+                        && condition_keys(s)
+                            .iter()
+                            .all(|k| SATISFIABLE_CONDITION_KEYS.contains(&k.as_str()))
+                });
+                assert!(
+                    allowed,
+                    "`aws {service} {call}` needs {a}, which {label} does not allow on {arn}: init would fail finding what to adopt"
+                );
+                let denied = set.iter().any(|s| {
+                    s["Effect"] == "Deny"
+                        && strings(&s["Action"]).iter().any(|p| matches(p, a))
+                        && reaches(s, &[arn.to_string()])
+                });
+                assert!(!denied, "{label} denies {a} on {arn}");
+            }
+        }
+        // a lookup is a read: never a write action in the table
+        assert!(
+            actions
+                .iter()
+                .all(|a| a.contains(":List") || a.contains(":Describe") || a.contains(":Get")),
+            "{service} {call} must be a read"
+        );
+    }
+}
+
+/// Every address init adopts (`init.rs`, `init/adopt.rs`) names a resource its module really declares, so an import block can
+/// never point at something the generated root does not have (OpenTofu refuses the plan if it does).
+#[test]
+fn every_address_init_adopts_is_a_resource_its_module_declares() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ozbox-cli/src/init.rs"),
+    )
+    .unwrap();
+    let code = src.split("#[cfg(test)]").next().unwrap();
+    let mut seen = 0;
+    for (module_name, module_dir) in [
+        ("key", "aws-secrets-key"),
+        ("adopt", "aws-adopt-command"),
+        ("policy", "aws-box-policy"),
+    ] {
+        let prefix = format!("\"module.{module_name}.");
+        let declared = {
+            let dir = infra().join("tofu/modules").join(module_dir);
+            let mut all = String::new();
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.extension().and_then(|x| x.to_str()) == Some("tf") {
+                    all.push_str(&std::fs::read_to_string(p).unwrap());
+                }
+            }
+            all
+        };
+        let mut rest = code;
+        while let Some(at) = rest.find(&prefix) {
+            rest = &rest[at + prefix.len()..];
+            let addr = rest.split('"').next().unwrap();
+            let (ty, name) = addr.split_once('.').unwrap();
+            let name = name.split('[').next().unwrap();
+            assert!(
+                declared.contains(&format!("resource \"{ty}\" \"{name}\"")),
+                "init adopts module.{module_name}.{addr}, but {module_dir} declares no such resource"
+            );
+            seen += 1;
+        }
+    }
+    assert!(
+        seen >= 7,
+        "found only {seen} adopted addresses: did init.rs change shape?"
+    );
+}

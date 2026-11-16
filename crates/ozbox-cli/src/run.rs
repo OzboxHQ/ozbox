@@ -67,6 +67,9 @@ pub fn run(cli: Cli) -> Result<()> {
     use_plugin_cache();
     crate::infra_cli::set_dev_flag(cli.dev_modules);
     let (config, source) = Config::load_found()?;
+    if let Some(w) = crate::config::both_files_warning(&Config::candidates()) {
+        eprintln!("{w}");
+    }
     let kind = match (cli.provider, config.provider_kind()?) {
         (Some(k), _) | (None, Some(k)) => k,
         (None, None) => ProviderKind::Fake,
