@@ -8,6 +8,20 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
+  ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
+
+  Upgrading a real box to 0.2.0-beta.0 turned up problems in setup and upgrade. This release fixes the ones a box needs, and its image carries them.
+
+  - **Upgrading a box brings its dashboard back.** Running `ozbox dashboard install` again after an upgrade installs your sign-in settings instead of leaving the dashboard failing to start.
+  - **A box's secrets store can move to your fleet's KMS key** even when only the disks' tags change.
+  - **The self-test no longer reports a failure** for a one-time service that had nothing to do.
+  - **`ozbox init` can set up the adopt command**, and adopts what Oz Box already made in your account instead of making it twice.
+  - **Upgrading from 0.1.x:** a 0.1.x box keeps its secrets store's key on the system disk, which an upgrade replaces, and its program is too old to move the store first. Upgrading it starts a new store (`--accept-new-secrets-store`): put the keys back with `ozbox secrets import` afterwards, then run `ozbox adopt-fleet-key` so later upgrades keep the store. Boxes on 0.2.0-beta.0 and later are not affected.
+
+  **How to get it.** Install with `sh install.sh --version 0.2.0-beta.1`, then `ozbox upgrade <box>`.
+</Update>
+
 <Update label="[Release date]" tags={["CLI"]} description="AWS setup">
   ## `ozbox init` now takes over what is already in your account instead of making it a second time
 
@@ -57,20 +71,6 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Settings it already has are kept.** If the dashboard already has sign-in settings, a later run does not replace them, and says so: changing who may approve needs your approval, which this command cannot take yet.
   - **No false "ok".** The helper no longer starts a dashboard that has no settings, and it checks the dashboard stays up and answers on its port before it says it runs. `ozbox dashboard install` asks the box too, and reports a dashboard that keeps restarting as an error. A box still on an earlier program needs `ozbox admin <box> -- reinstall-ozboxd` first, then run the install again.
   - **A clearer message when the box's helper cannot switch to the box user**: the Oz Box tools are then not added to the coding agents' settings (run `ozbox agent-mcp install` on the box), and the dashboard is not affected.
-</Update>
-
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
-  ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
-
-  Upgrading a real box to 0.2.0-beta.0 turned up problems in setup and upgrade. This release fixes the ones a box needs, and its image carries them.
-
-  - **Upgrading a box brings its dashboard back.** Running `ozbox dashboard install` again after an upgrade installs your sign-in settings instead of leaving the dashboard failing to start.
-  - **A box's secrets store can move to your fleet's KMS key** even when only the disks' tags change.
-  - **The self-test no longer reports a failure** for a one-time service that had nothing to do.
-  - **`ozbox init` can set up the adopt command**, and adopts what Oz Box already made in your account instead of making it twice.
-  - **Upgrading from 0.1.x:** a 0.1.x box keeps its secrets store's key on the system disk, which an upgrade replaces, and its program is too old to move the store first. Upgrading it starts a new store (`--accept-new-secrets-store`): put the keys back with `ozbox secrets import` afterwards, then run `ozbox adopt-fleet-key` so later upgrades keep the store. Boxes on 0.2.0-beta.0 and later are not affected.
-
-  **How to get it.** Install with `sh install.sh --version 0.2.0-beta.1`, then `ozbox upgrade <box>`.
 </Update>
 
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
