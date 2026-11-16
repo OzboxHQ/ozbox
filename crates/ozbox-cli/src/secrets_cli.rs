@@ -380,7 +380,7 @@ fn runner_setup(project: &str, socket: Option<&std::path::Path>) -> Result<(), C
         .call(serde_json::json!({"op": "get", "name": name}))
         .map_err(fail)?;
     let policy = match v["value"].as_str() {
-        Some(h) => Some(crate::workload_policy::Policy::from_hex(h).map_err(fail)?),
+        Some(h) => Some(crate::workload_policy::Policy::from_stored(h).map_err(fail)?),
         None => None,
     };
     let home = std::env::var("OZBOX_BOX_HOME")

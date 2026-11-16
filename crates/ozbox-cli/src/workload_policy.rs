@@ -1,7 +1,7 @@
 //! What a project declares about its commands: which secret names each named command may receive, which environment
 //! variables carry them, the program the command must start with, and where it runs. The declaration is stored in the
-//! encrypted store under `workload-policy.<project>` (hex of JSON, because the store keeps plain single-line values) and
-//! is what `ozbox env run --named NAME` follows. A caller's own `--allow` list is not consulted once a policy exists:
+//! encrypted store under `workload-policy.<project>` as a structured record (the compact JSON, up to [`MAX_DECLARATION_BYTES`]; an
+//! earlier version kept it as hex of JSON, which is still read) and is what `ozbox env run --named NAME` follows. A caller's own `--allow` list is not consulted once a policy exists:
 //! an agent does not get to widen what its command may receive by asking for more.
 
 use std::collections::BTreeMap;
@@ -148,6 +148,13 @@ impl Serialize for ToolRef {
 pub const BROWSERS: [&str; 3] = ["chromium", "firefox", "webkit"];
 /// The most a plain variable's value may hold.
 pub const MAX_VAR_VALUE: usize = 512;
+/// The most a stored declaration may be, as the compact JSON the box keeps. A real application's declaration (a service, a few
+/// file pins, a folder pin for every package its build traced) is several KB; this is the limit of the RECORD, not of a secret.
+/// Every other limit of a declaration is a count: commands ([`MAX_COMMANDS`]), pinned files ([`MAX_PINS`]) and folders
+/// ([`MAX_TREE_PINS`]) per command, plain variables ([`MAX_VAR_VALUE`] each), tools and browsers.
+pub const MAX_DECLARATION_BYTES: usize = crate::secrets::MAX_RECORD_VALUE;
+/// The most commands one declaration names.
+pub const MAX_COMMANDS: usize = 64;
 /// The most files one command may pin.
 pub const MAX_PINS: usize = 16;
 /// The most folders one command may pin (a package and the packages it needs).
@@ -273,10 +280,13 @@ fn err(m: &str) -> SecretError {
     SecretError(m.to_string())
 }
 
+/// The name every project's stored declaration starts with.
+pub const POLICY_NAME_PREFIX: &str = "workload-policy.";
+
 pub fn secret_name(project: &str) -> Result<String, SecretError> {
     // a project name is checked the way a workload secret's is
     workload_name(project, "x", "X")?;
-    Ok(format!("workload-policy.{project}"))
+    Ok(format!("{POLICY_NAME_PREFIX}{project}"))
 }
 
 fn seg_ok(s: &str, max: usize) -> bool {
@@ -734,7 +744,7 @@ impl Policy {
         {
             return Err(err("production identifiers are at most 32 words of 4 to 128 letters, digits and . _ - :"));
         }
-        if self.commands.is_empty() || self.commands.len() > 64 {
+        if self.commands.is_empty() || self.commands.len() > MAX_COMMANDS {
             return Err(err("declare between 1 and 64 commands"));
         }
         for (name, c) in &self.commands {
@@ -1279,9 +1289,38 @@ impl Policy {
         Ok(p)
     }
 
+    /// The text the store keeps: the compact JSON. Refused, naming the size and the limit, when it is over
+    /// [`MAX_DECLARATION_BYTES`]. Every place that is about to write a declaration (the laptop before it sends one, the box before
+    /// it spends an approval, and the write itself) asks this, so one rule decides.
+    pub fn to_record(&self) -> Result<String, SecretError> {
+        let json = serde_json::to_string(self).map_err(|_| err("that is not a valid policy"))?;
+        if json.len() > MAX_DECLARATION_BYTES {
+            return Err(SecretError(format!(
+                "this declaration is {} KB once written out, and a box keeps at most {} KB: pin fewer folders, or split the project's commands into a smaller declaration",
+                json.len().div_ceil(1024),
+                MAX_DECLARATION_BYTES / 1024
+            )));
+        }
+        Ok(json)
+    }
+
+    /// The form an earlier version stored: hex of the JSON (the store then kept only plain single-line values, which capped a
+    /// declaration at about 2 KB).
     pub fn to_hex(&self) -> String {
         let json = serde_json::to_string(self).unwrap_or_default();
         json.bytes().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A stored declaration, in either form: the record (it starts with `{`) or the hex an earlier version wrote (hex digits
+    /// only, so never `{`). The next save writes the record.
+    pub fn from_stored(stored: &str) -> Result<Policy, SecretError> {
+        if stored.starts_with('{') {
+            let p: Policy =
+                serde_json::from_str(stored).map_err(|_| err("the stored policy is damaged"))?;
+            p.validate_shape()?;
+            return Ok(p);
+        }
+        Policy::from_hex(stored)
     }
 
     pub fn from_hex(h: &str) -> Result<Policy, SecretError> {
@@ -1299,6 +1338,15 @@ impl Policy {
             serde_json::from_str(&text).map_err(|_| err("the stored policy is damaged"))?;
         p.validate_shape()?;
         Ok(p)
+    }
+
+    /// Every check a declaration meets before anything is written, in one place: the rules of its shape, of a command that
+    /// receives a secret, and its size. What the box's own checks decide that depend on the box (whether a second factor is
+    /// enrolled) are not here. The laptop runs this before it sends a request, and the box runs it before it spends an approval.
+    pub fn check_before_write(&self) -> Result<String, SecretError> {
+        self.validate()?;
+        self.secret_rules(None)?;
+        self.to_record()
     }
 
     /// The declaration a request must follow: the named command, and a program that starts as declared.
@@ -1324,14 +1372,38 @@ impl Policy {
 
 pub fn load(store: &dyn SecretStore, project: &str) -> Result<Option<Policy>, SecretError> {
     match store.get(&secret_name(project)?)? {
-        Some(h) => Policy::from_hex(&h).map(Some),
+        Some(h) => Policy::from_stored(&h).map(Some),
         None => Ok(None),
     }
 }
 
 pub fn save(store: &dyn SecretStore, project: &str, p: &Policy) -> Result<(), SecretError> {
+    let record = p.to_record()?;
     p.validate()?;
-    store.set(&secret_name(project)?, &p.to_hex())
+    store.set_record(&secret_name(project)?, &record)
+}
+
+/// A declaration shaped like a real Next.js application's: `commands` services, each pinning `pins` files and `trees` folders (the
+/// packages a build's trace lists), plus a pinned tool. Test support, shared with the box's and the laptop's tests.
+#[cfg(test)]
+pub(crate) fn realistic_declaration(commands: usize, trees: usize, pins: usize) -> String {
+    let h = "ab".repeat(32);
+    let cmds: serde_json::Map<String, serde_json::Value> = (0..commands)
+        .map(|c| {
+            let pin: Vec<_> = (0..pins)
+                .map(|i| serde_json::json!({"file": format!("server/chunks/chunk-{c}-{i}.js"), "sha256": h}))
+                .collect();
+            let tree: Vec<_> = (0..trees)
+                .map(|i| serde_json::json!({"path": format!("node_modules/@scope-{c}/package-name-{i}"), "sha256": h}))
+                .collect();
+            (
+                format!("web{c}"),
+                serde_json::json!({"allow": [], "service": true, "port": 3100 + c, "argv": ["node", "server.js"],
+                    "health": "/healthz", "pin": pin, "pin_tree": tree}),
+            )
+        })
+        .collect();
+    serde_json::json!({"dir": "/work/projects/app", "tools": [{"name": "pnpm", "sha256": h}], "commands": cmds}).to_string()
 }
 
 #[cfg(test)]
@@ -1385,9 +1457,9 @@ mod tests {
     fn a_policy_round_trips_through_the_store_and_a_command_follows_its_declaration() {
         let s = MemorySecrets::default();
         save(&s, "app", &sample()).unwrap();
-        // the store holds plain single-line text, not JSON with quotes
+        // the store holds the declaration as a record (its compact JSON)
         let raw = s.get("workload-policy.app").unwrap().unwrap();
-        assert!(raw.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(raw, serde_json::to_string(&sample()).unwrap());
         let p = load(&s, "app").unwrap().unwrap();
         assert_eq!(p, sample());
         assert!(load(&s, "other").unwrap().is_none());
@@ -2161,5 +2233,53 @@ mod tests {
         assert!(p.production_hit("https://abcdprodref.supabase.co"));
         assert!(p.production_hit("https://ABCDPRODREF.supabase.co"));
         assert!(!p.production_hit("https://stagingref.supabase.co"));
+    }
+
+    /// A real application's declaration (one service, the folders its build traced, a few pinned files, a tool) is about 7 KB. It is
+    /// a record, not a short credential, so it is stored whole and read back identically.
+    #[test]
+    fn a_realistic_declaration_is_stored_whole_and_read_back_identically() {
+        let text = realistic_declaration(1, 45, 11);
+        assert!(text.len() > 6000, "{}", text.len());
+        let p = Policy::parse(&text).unwrap();
+        let s = MemorySecrets::default();
+        save(&s, "app", &p).unwrap();
+        assert_eq!(load(&s, "app").unwrap().unwrap(), p);
+    }
+
+    /// The limit is enforced and says what it is: the size of the declaration and the size a box keeps.
+    #[test]
+    fn a_declaration_over_the_limit_is_refused_with_its_size_and_the_limit() {
+        // valid by every count (64 commands, 64 folders and 16 files each) and still too big to keep
+        let p = Policy::parse(&realistic_declaration(64, 64, 16)).unwrap();
+        let s = MemorySecrets::default();
+        let e = save(&s, "app", &p).unwrap_err().0;
+        assert!(
+            e.contains("256 KB") && e.contains(" KB once written out"),
+            "{e}"
+        );
+        assert!(load(&s, "app").unwrap().is_none(), "nothing was stored");
+        assert_eq!(p.to_record().unwrap_err().0, e);
+        assert!(p.check_before_write().is_err());
+        // one declaration just inside it is kept
+        assert!(save(
+            &s,
+            "ok",
+            &Policy::parse(&realistic_declaration(8, 64, 16)).unwrap()
+        )
+        .is_ok());
+    }
+
+    /// An earlier version stored the declaration as hex: it still loads, and the next save replaces it with the record.
+    #[test]
+    fn a_declaration_stored_as_hex_still_loads_and_the_next_save_writes_the_record() {
+        let p = Policy::parse(&realistic_declaration(1, 4, 2)).unwrap();
+        let s = MemorySecrets::default();
+        s.set("workload-policy.app", &p.to_hex()).unwrap();
+        assert_eq!(load(&s, "app").unwrap().unwrap(), p);
+        save(&s, "app", &p).unwrap();
+        let raw = s.get("workload-policy.app").unwrap().unwrap();
+        assert!(raw.starts_with('{'), "{raw}");
+        assert_eq!(load(&s, "app").unwrap().unwrap(), p);
     }
 }

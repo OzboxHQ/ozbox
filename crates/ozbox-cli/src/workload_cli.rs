@@ -544,19 +544,36 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
         } => {
             let text = std::fs::read_to_string(file)
                 .map_err(|_| CliError::Msg(t("secrets.import_unreadable", &[])))?;
+            // Every check that needs no answer from the box runs HERE, before anything is sent: the declaration's shape and its
+            // variable rules (a reserved name such as NODE_ENV), the rules of a command that receives a secret, and the size the
+            // box keeps. The box repeats them, but a request the box would refuse should never reach it: a person's approval code is
+            // made by hand, for one use.
             let p = Policy::parse(&text).map_err(fail)?;
-            let compact = serde_json::to_string(&p).unwrap_or_default();
+            let compact = p.check_before_write().map_err(fail)?;
             match on_box {
                 Some(b) => {
                     // A box from before this format would read the declaration, drop what it does not know and store the
                     // rest, with the owner's approval covering a declaration that is not the one written. So ask first.
-                    if p.needs_v2() || p.needs_runner_uids() || p.needs_public_values() {
+                    // A box from before declaration records keeps a declaration as one short value, so it would spend the approval and
+                    // then refuse anything over about 2 KB. The size the box would hold it at is twice the JSON (hex).
+                    let needs_records = compact.len() * 2 > crate::secrets::MAX_VALUE;
+                    if p.needs_v2()
+                        || p.needs_runner_uids()
+                        || p.needs_public_values()
+                        || needs_records
+                    {
                         let caps = ssh_receive(runner, b.as_str(), &json!({"op": "capabilities"}));
                         let has = |k: &str| {
                             caps.as_ref()
                                 .map(|v| v["result"][k] == json!(true))
                                 .unwrap_or(false)
                         };
+                        if needs_records && !has("declaration_records") {
+                            return Err(CliError::Msg(t(
+                                "secrets.policy_needs_newer_box_size",
+                                &[],
+                            )));
+                        }
                         if p.needs_v2() && !has("declaration_v2") {
                             return Err(CliError::Msg(t("secrets.policy_needs_newer_box", &[])));
                         }
@@ -1673,6 +1690,99 @@ mod tests {
             vec![("A".to_string(), "b=c".to_string())]
         );
         assert!(parse_pass(&["A".into()]).is_err() && parse_pass(&["=x".into()]).is_err());
+    }
+
+    /// A declaration the box would refuse is refused on this computer, before anything is sent: the box's approval code is made by
+    /// hand for one use, so a doomed request must never reach it.
+    #[test]
+    fn a_declaration_the_box_would_refuse_is_refused_here_and_nothing_is_sent() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let set = |text: &str| {
+            let f = d.path().join("p.json");
+            std::fs::write(&f, text).unwrap();
+            let r = RecordingRunner::new();
+            let out = policy(
+                &PolicyCommand::Set {
+                    file: f,
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                &r,
+                true,
+            );
+            (out, r.calls().len())
+        };
+        let too_big = crate::workload_policy::realistic_declaration(64, 64, 16);
+        let reserved_secret = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":["K"],"env":["NODE_OPTIONS"],"envs":["staging"],"argv":["node","t.mjs"],"pin":[{"file":"t.mjs","sha256":"%"}]}}}"#
+            .replace('%', &"a".repeat(64));
+        let reserved_var = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":[],"vars":{"NODE_ENV":"production"}}}}"#;
+        for (what, text) in [
+            ("too large", too_big.as_str()),
+            ("a reserved variable", reserved_var),
+            ("a reserved name for a secret", reserved_secret.as_str()),
+            ("not a declaration", "{"),
+        ] {
+            let (out, sent) = set(text);
+            assert!(out.is_err(), "{what} was accepted");
+            assert_eq!(sent, 0, "{what} reached the box");
+        }
+    }
+
+    /// A declaration whose stored form is over what an older box keeps (about 2 KB) is refused on this computer for a box that does
+    /// not say it keeps declarations as records: the older box would spend the approval code and then refuse it. A box that says so
+    /// is sent it.
+    #[test]
+    fn a_big_declaration_is_not_sent_to_a_box_from_before_declaration_records() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("p.json");
+        let text = crate::workload_policy::realistic_declaration(3, 3, 8);
+        assert!(
+            text.len() * 2 > crate::secrets::MAX_VALUE
+                && text.len() < crate::secrets::MAX_RECORD_VALUE,
+            "{}",
+            text.len()
+        );
+        std::fs::write(&f, &text).unwrap();
+        let set = |r: &RecordingRunner| {
+            policy(
+                &PolicyCommand::Set {
+                    file: f.clone(),
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                r,
+                true,
+            )
+        };
+        let reply = |r: &RecordingRunner, body: &str| {
+            r.reply(Output {
+                status: Some(0),
+                stdout: body.into(),
+                stderr: String::new(),
+            })
+        };
+        // a box that has every earlier capability but not records: refused here, only the question went
+        let old = RecordingRunner::new();
+        reply(
+            &old,
+            "{\"ok\":true,\"result\":{\"encoded_values\":true,\"declaration_v2\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        let e = set(&old).unwrap_err().to_string();
+        assert!(e.contains("Nothing was sent"), "{e}");
+        assert_eq!(old.calls().len(), 1, "only the capabilities question went");
+        // a box that keeps records gets it
+        let new = RecordingRunner::new();
+        reply(
+            &new,
+            "{\"ok\":true,\"result\":{\"declaration_v2\":true,\"declaration_records\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        reply(&new, "{\"ok\":true}\n");
+        assert!(set(&new).is_ok());
+        assert_eq!(new.calls().len(), 2);
     }
 
     #[test]

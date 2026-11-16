@@ -22,6 +22,20 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** Install with `sh install.sh --version 0.2.0-beta.1`, then `ozbox upgrade <box>`.
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Declarations of a real application">
+  ## A real application's command declaration now saves, and a refused one no longer uses up your approval code
+
+  `ozbox env policy set` refused a realistic declaration (a service, a folder pin for each package a Next.js build traced, a few file pins and a tool, about 7 KB) with "the value is too long", because it was stored like a short key. And when the box refused a save, your single-use approval code was already spent, so you had to make another by hand each time.
+
+  - **Declarations up to 256 KB are kept as they are**, with the same protection as before. A declaration saved by an earlier version still loads, and is replaced by the new form the next time you save. Keys and tokens keep their own, shorter limit.
+  - **A declaration that is too big says so**: it names its size and the limit. The [guide](/use-cases/secure-agent-workspace) lists every limit of a declaration.
+  - **Your computer checks first.** The declaration's rules (including names a command cannot set, such as `NODE_OPTIONS`) and its size are checked before anything is sent, and the box checks them again before it looks at your approval code.
+  - **An approval code is used up only by a save that happened.** If the box cannot save, the same code works for your next try; a save that went through spends it, and it cannot be used twice.
+  - **An older box is not sent what it would refuse.** If a declaration is too big for a box that has not been upgraded, your computer says so before it sends anything, and your approval code is not used. Run `ozbox upgrade` on the box, or make the declaration smaller.
+  - A box running this version stores declarations in the new form. If you later move a box back to an earlier version, that version reads a stored declaration as damaged, so set your declarations again after a downgrade.
+  - `ozbox secrets status` no longer counts a declaration among the encoded values.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI"]} description="AWS setup">
   ## `ozbox init` now takes over what is already in your account instead of making it a second time
 
