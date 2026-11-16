@@ -107,6 +107,17 @@ const NOT_BUILT_PAGE: &str = "<!doctype html><html lang=\"en\"><head><meta chars
 <p>Run <code>npm ci &amp;&amp; npm run build</code> in <code>packages/dashboard</code>, then rebuild <code>ozbox</code>.</p>\
 </main></body></html>";
 
+/// What UI this program carries, read from the program itself: whether a dashboard is embedded, the content hash of
+/// exactly what was, and whether the placeholder page is compiled in. `ozbox build-info` prints it, which is how a release
+/// check learns the truth by RUNNING the program (a hash the compiler may split across a binary cannot be searched for).
+pub fn dashboard_build() -> (bool, &'static str, bool) {
+    (
+        !embedded::EMBEDDED.is_empty(),
+        env!("OZBOX_DASHBOARD_SHA256"),
+        !NOT_BUILT_PAGE.is_empty(),
+    )
+}
+
 /// A parsed HTTP request, independent of the server library.
 #[derive(Debug, Clone)]
 pub struct Req {

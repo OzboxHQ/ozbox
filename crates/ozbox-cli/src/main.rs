@@ -157,7 +157,10 @@ use clap::Parser;
 fn main() -> ExitCode {
     // clap prints usage errors and exits with 2 (and `--help` / `--version` with 0).
     let args = cli::Cli::parse();
-    let is_telemetry = matches!(args.command, cli::Command::Telemetry { .. });
+    let is_telemetry = matches!(
+        args.command,
+        cli::Command::Telemetry { .. } | cli::Command::BuildInfo
+    );
     match run::run(args) {
         Ok(()) => {
             telemetry_cli::after_command(is_telemetry);

@@ -64,6 +64,11 @@ fn use_plugin_cache() {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    // Answers about the program itself, so it reads no configuration and touches no provider: it must work on a build
+    // machine with nothing set up.
+    if let Command::BuildInfo = &cli.command {
+        return build_info(cli.json);
+    }
     use_plugin_cache();
     crate::infra_cli::set_dev_flag(cli.dev_modules);
     let (config, source) = Config::load_found()?;
@@ -434,6 +439,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Sizes
+        | Command::BuildInfo
         | Command::Infra
         | Command::Providers
         | Command::Serve { .. }
@@ -2102,6 +2108,28 @@ fn providers(json: bool) -> Result<()> {
         );
     }
     println!("\nPick one with --provider, or `provider = \"...\"` in the config file. `fake` needs no account.");
+    Ok(())
+}
+
+/// `ozbox build-info`: the version and the dashboard this program embeds, as the program itself reports them.
+fn build_info(json: bool) -> Result<()> {
+    let (embedded, sha256, placeholder) = crate::serve::dashboard_build();
+    let version = env!("CARGO_PKG_VERSION");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": version,
+                "dashboard": { "embedded": embedded, "sha256": sha256 },
+                "placeholder_page": placeholder,
+            })
+        );
+    } else {
+        println!("ozbox {version}");
+        println!("dashboard embedded: {embedded}");
+        println!("dashboard sha256: {sha256}");
+        println!("placeholder page compiled in: {placeholder}");
+    }
     Ok(())
 }
 

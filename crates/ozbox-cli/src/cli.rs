@@ -404,6 +404,10 @@ pub enum Command {
     },
     /// The box modules and first-boot configuration this program renders: its version, their hashes, and the folder in use.
     Infra,
+    /// What this program was built with: its version and the dashboard it embeds (the content hash, or `none`, and whether
+    /// the placeholder page is compiled in). The release build runs this to check what it built. Reads no configuration.
+    #[command(hide = true)]
+    BuildInfo,
     /// The size catalogue and the machine type each provider maps it to.
     Sizes,
     /// The providers and what each can do.

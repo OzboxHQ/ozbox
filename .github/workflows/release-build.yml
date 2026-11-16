@@ -72,16 +72,36 @@ jobs:
             || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: The program serves the real dashboard, not the placeholder page
         env:
+          ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
           DASH: ${{ needs.dashboard.outputs.sha256 }}
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
+          # the placeholder page is a literal that exists only in a build without a dashboard, so a search for it is sound
           if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          LC_ALL=C grep -aqF "$DASH" "$f"
+          # the program says which dashboard it embedded (a hash the compiler may split up cannot be searched for)
+          case "$ARCH" in
+            x86_64) sh scripts/release/check-embedded-dashboard.sh "$DASH" "./$f" ;;
+            aarch64)
+              sudo apt-get update -qq
+              # Ubuntu 26.04 replaced qemu-user-static; install whichever this runner offers, then use the binary it ships.
+              sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                echo "::error title=No dashboard check::no qemu-aarch64 is available, so the arm64 program cannot be asked what it embedded"
+                exit 1
+              fi
+              sh scripts/release/check-embedded-dashboard.sh "$DASH" "$q" "./$f"
+              ;;
+            *)
+              echo "::error title=No dashboard check::there is no way to run the $ARCH program here"
+              exit 1
+              ;;
+          esac
       - name: Check it is one self-contained file, and (where this runner can) that it starts
         env:
           ARCH: ${{ matrix.arch }}
@@ -151,16 +171,34 @@ jobs:
             || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: The program serves the real dashboard, not the placeholder page
         env:
+          ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
           DASH: ${{ needs.dashboard.outputs.sha256 }}
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
+          # the placeholder page is a literal that exists only in a build without a dashboard, so a search for it is sound
           if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          LC_ALL=C grep -aqF "$DASH" "$f"
+          # the program says which dashboard it embedded (a hash the compiler may split up cannot be searched for).
+          # arm64 runs natively on this runner; x86_64 runs under Rosetta, which is installed here if it is missing.
+          if [ "$ARCH" = "x86_64" ]; then
+            if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+              echo "Rosetta is not installed on this runner; installing it"
+              sudo softwareupdate --install-rosetta --agree-to-license || true
+            fi
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              sh scripts/release/check-embedded-dashboard.sh "$DASH" arch -x86_64 "./$f"
+            else
+              # Without Rosetta the program cannot be asked. The placeholder search above still ran, and the arm64 program of
+              # this same job matrix is built from the same dashboard files and checked by hash. Say so, and do not pretend.
+              echo "::warning title=Dashboard hash not checked::Rosetta is unavailable, so the x86_64 program could not be asked which dashboard it embedded. Only the placeholder-page search ran."
+            fi
+          else
+            sh scripts/release/check-embedded-dashboard.sh "$DASH" "./$f"
+          fi
       - name: Check it is a macOS program for the right processor, and (where this runner can) that it starts
         env:
           ARCH: ${{ matrix.arch }}

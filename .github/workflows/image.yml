@@ -219,19 +219,39 @@ jobs:
           # makes crates/ozbox-cli/build.rs refuse to build without the dashboard (passed into cross by Cross.toml)
           OZBOX_RELEASE: "1"
         run: cross build --release --locked --target "$TARGET" -p ozboxd -p ozbox-cli
-      - name: The program serves the real dashboard, not the placeholder page
+      - name: The program serves the real dashboard, not the placeholder page (asked of the program itself, every architecture)
         env:
+          ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
           DASH: ${{ needs.dashboard.outputs.sha256 }}
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
+          # the placeholder page is a literal that exists only in a build without a dashboard, so a search for it is sound
           if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          # it records the hash of the dashboard it embedded, and it is the one that was built
-          LC_ALL=C grep -aqF "$DASH" "$f"
+          # the program says which dashboard it embedded, and it is the one that was built. (A hash the compiler may split
+          # into pieces cannot be found by searching the file.)
+          case "$ARCH" in
+            amd64) sh scripts/release/check-embedded-dashboard.sh "$DASH" "./$f" ;;
+            arm64)
+              sudo apt-get update -qq
+              # Ubuntu 26.04 replaced qemu-user-static; install whichever this runner offers, then use the binary it ships.
+              sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                echo "::error title=No dashboard check::no qemu-aarch64 is available, so the arm64 program cannot be asked what it embedded"
+                exit 1
+              fi
+              sh scripts/release/check-embedded-dashboard.sh "$DASH" "$q" "./$f"
+              ;;
+            *)
+              echo "::error title=No dashboard check::there is no way to run the $ARCH program here"
+              exit 1
+              ;;
+          esac
       - name: The box daemon carries the marker the setup script looks for
         env:
           TARGET: ${{ matrix.target }}
