@@ -371,6 +371,8 @@ pub fn run(
     dry_run: bool,
     json_out: bool,
 ) -> Result<(), CliError> {
+    let secrets = crate::serve::secret_store();
+    let keys = crate::approval_key_cli::keychain();
     run_with(
         cmd,
         yes,
@@ -379,10 +381,15 @@ pub fn run(
         &ozbox_core::SystemRunner,
         &mut std::io::stdin().lock(),
         std::io::stdin().is_terminal(),
+        &Stores {
+            secrets: secrets.as_ref(),
+            keys: keys.as_ref(),
+        },
     )
 }
 
-pub fn run_with(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with(
     cmd: &DashboardCommand,
     yes: bool,
     dry_run: bool,
@@ -390,9 +397,45 @@ pub fn run_with(
     runner: &dyn CommandRunner,
     input: &mut dyn BufRead,
     tty: bool,
+    stores: &Stores<'_>,
 ) -> Result<(), CliError> {
-    let DashboardCommand::Install { release_repo, .. } = cmd;
-    let repo = release_repo.as_deref().unwrap_or(DEFAULT_RELEASE_REPO);
+    let restored;
+    let cmd = match cmd {
+        DashboardCommand::Forget { name } => {
+            crate::dashboard_keep::forget(stores.secrets, name.as_str());
+            let text = t("dashboard.forgotten", &[("box", name.as_str())]);
+            if json_out {
+                println!("{}", json!({ "box": name.as_str(), "forgotten": true }));
+            } else {
+                println!("{text}");
+            }
+            return Ok(());
+        }
+        DashboardCommand::Restore {
+            name,
+            release,
+            approve_with_laptop_key,
+        } => {
+            let kept =
+                crate::dashboard_keep::recall(stores.secrets, name.as_str()).ok_or_else(|| {
+                    CliError::Msg(t("dashboard.nothing_kept", &[("box", name.as_str())]))
+                })?;
+            let with_token = crate::dashboard_keep::has_token(stores.secrets, name.as_str());
+            restored = kept.to_command(
+                name.clone(),
+                release.clone(),
+                *approve_with_laptop_key,
+                with_token,
+            );
+            &restored
+        }
+        other => other,
+    };
+    let release_repo = match cmd {
+        DashboardCommand::Install { release_repo, .. } => release_repo.as_deref(),
+        _ => None,
+    };
+    let repo = release_repo.unwrap_or(DEFAULT_RELEASE_REPO);
     if !ozbox_core::release::is_repo_slug(repo) {
         return Err(CliError::Msg(t("dashboard.bad_repo", &[])));
     }
@@ -409,6 +452,7 @@ pub fn run_with(
         },
         input,
         tty,
+        stores,
     )
 }
 
@@ -690,8 +734,53 @@ fn source_line(c: &Chosen) -> String {
     )
 }
 
+/// Where a dashboard install keeps and finds what this computer holds about it: the secret store that keeps the tunnel token and
+/// the install settings (the keychain on a laptop), and the one that holds the pinned approval key.
+pub(crate) struct Stores<'a> {
+    pub secrets: &'a dyn crate::secrets::SecretStore,
+    pub keys: &'a dyn crate::secrets::SecretStore,
+}
+
+/// How one install is run: `quiet` prints nothing (an upgrade reports in its own words).
+#[derive(Clone, Copy)]
+pub(crate) struct Opts {
+    pub yes: bool,
+    pub dry_run: bool,
+    pub json_out: bool,
+    pub quiet: bool,
+}
+
+/// What a finished install left on the box.
+pub(crate) struct Installed {
+    /// The box took a tunnel token.
+    pub token_stored: bool,
+}
+
+/// Why an install did not finish. A box that wants an approval of the token change is told apart, because what to do next is
+/// different: the owner's approval is never made here unless the owner asked for it.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Failure {
+    NeedsApproval(String),
+    Other(CliError),
+}
+
+impl From<CliError> for Failure {
+    fn from(e: CliError) -> Self {
+        Failure::Other(e)
+    }
+}
+
+impl Failure {
+    pub(crate) fn into_cli(self) -> CliError {
+        match self {
+            Failure::NeedsApproval(m) => CliError::Msg(m),
+            Failure::Other(e) => e,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn run_with_release(
+pub(crate) fn run_with_release(
     cmd: &DashboardCommand,
     yes: bool,
     dry_run: bool,
@@ -701,7 +790,58 @@ pub fn run_with_release(
     assets: &dyn AssetSource,
     input: &mut dyn BufRead,
     tty: bool,
+    stores: &Stores<'_>,
 ) -> Result<(), CliError> {
+    let opts = Opts {
+        yes,
+        dry_run,
+        json_out,
+        quiet: false,
+    };
+    install(cmd, opts, runner, verifier, assets, input, tty, stores)
+        .map(|_| ())
+        .map_err(Failure::into_cli)
+}
+
+/// The owner's approval of a tunnel-token change, made now, on their asking (`--approve-with-laptop-key`), with the key pinned
+/// when the box was made: the very steps of `ozbox secrets approve --scope tunnel-token --token-stdin`, for exactly this token.
+/// Never made for a box whose root helper does not tie a code to the token (an unbound code works for any token until it is
+/// used), and never made when nobody asked.
+fn mint_for_token(
+    runner: &dyn CommandRunner,
+    keys: &dyn crate::secrets::SecretStore,
+    install: &Install,
+    token: &str,
+) -> Result<String, String> {
+    if helper_binds_approval(runner, &install.name) != Some(true) {
+        return Err(t("dashboard.laptop_key_unbound", &[]));
+    }
+    let provider = install.kind.map(|k| k.id()).unwrap_or("cloudflare");
+    let binding = crate::secrets_approval::tunnel_token_binding(token);
+    let (code, _) = crate::approval_key_cli::obtain(
+        runner,
+        keys,
+        &install.name,
+        crate::approval_key::PIN_ID,
+        "tunnel-token",
+        provider,
+        &binding,
+    )
+    .map_err(|e| e.to_string())?;
+    crate::secrets_approval::canonical_code(&code).ok_or_else(|| t("dashboard.laptop_key_bad", &[]))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn install(
+    cmd: &DashboardCommand,
+    o: Opts,
+    runner: &dyn CommandRunner,
+    verifier: &ReleaseVerifier,
+    assets: &dyn AssetSource,
+    input: &mut dyn BufRead,
+    tty: bool,
+    stores: &Stores<'_>,
+) -> Result<Installed, Failure> {
     let DashboardCommand::Install {
         name,
         public_url,
@@ -720,11 +860,25 @@ pub fn run_with_release(
         remote_port,
         approval,
         approval_stdin,
-    } = cmd;
+        token_from_keychain,
+        approve_with_laptop_key,
+    } = cmd
+    else {
+        return Err(CliError::Msg(t("dashboard.not_install", &[])).into());
+    };
+    let (yes, dry_run, json_out) = (o.yes, o.dry_run, o.json_out);
+    let say = |text: &str| {
+        if !o.quiet {
+            println!("{text}");
+        }
+    };
     if let Some(code) = approval {
         if !crate::secrets_approval::is_code_shape(code) {
-            return Err(CliError::Msg(t("tunnel.bad_approval", &[])));
+            return Err(CliError::Msg(t("tunnel.bad_approval", &[])).into());
         }
+    }
+    if *approve_with_laptop_key && !*token_stdin && !*token_from_keychain {
+        return Err(CliError::Msg(t("dashboard.approve_needs_token", &[])).into());
     }
     // Either the box downloads the program from an address given here, or (the default) it is the signed release of
     // this version: downloaded and checked on this computer, then sent to the box.
@@ -735,7 +889,7 @@ pub fn run_with_release(
                 .map_err(CliError::Msg)?;
             (String::new(), c.sha256.clone(), Some(c))
         }
-        _ => return Err(CliError::Msg(t("dashboard.binary_both", &[]))),
+        _ => return Err(CliError::Msg(t("dashboard.binary_both", &[])).into()),
     };
     let users = people
         .iter()
@@ -788,34 +942,40 @@ pub fn run_with_release(
     };
     let plan = install.plan();
     if json_out {
-        println!(
-            "{}",
-            json!({
-                "box": name.as_str(),
-                "public_url": install.public_url,
-                "tunnel": install.kind.map(Kind::id),
-                "program_source": chosen.as_ref().map(|c| c.source.id()).unwrap_or("binary_url"),
-                "program_release": chosen.as_ref().map(|c| c.version.clone()),
-                "program_sha256": install.binary_sha256,
-                "steps": plan[1..plan.len() - 1],
-                "warning": plan[plan.len() - 1],
-                "dry_run": dry_run,
-            })
-        );
+        if !o.quiet {
+            println!(
+                "{}",
+                json!({
+                    "box": name.as_str(),
+                    "public_url": install.public_url,
+                    "tunnel": install.kind.map(Kind::id),
+                    "program_source": chosen.as_ref().map(|c| c.source.id()).unwrap_or("binary_url"),
+                    "program_release": chosen.as_ref().map(|c| c.version.clone()),
+                    "program_sha256": install.binary_sha256,
+                    "steps": plan[1..plan.len() - 1],
+                    "warning": plan[plan.len() - 1],
+                    "dry_run": dry_run,
+                })
+            );
+        }
     } else {
         for l in &plan {
-            println!("{l}");
+            say(l);
         }
     }
     if dry_run {
         if !json_out {
-            println!("{}", t("dashboard.dry_run", &[]));
+            say(&t("dashboard.dry_run", &[]));
         }
-        return Ok(());
+        return Ok(Installed {
+            token_stored: false,
+        });
     }
     // The token comes from standard input only after the plan has been shown, and before any confirmation prompt
-    // reads a line, so a person who passes --token-stdin also passes --yes.
+    // reads a line, so a person who passes --token-stdin also passes --yes. With --token-from-keychain it comes from this
+    // computer's own secret store, where an earlier install with --token-stdin kept it.
     let mut token = None;
+    let mut token_was_kept = false;
     if *token_stdin {
         let mut line = String::new();
         input
@@ -830,24 +990,40 @@ pub fn run_with_release(
                 .map_err(|_| CliError::Msg(t("tunnel.token_unreadable", &[])))?;
             match crate::secrets_approval::canonical_code(&code) {
                 Some(c) => install.approval = Some(c),
-                None => return Err(CliError::Msg(t("tunnel.bad_approval", &[]))),
+                None => return Err(CliError::Msg(t("tunnel.bad_approval", &[])).into()),
+            }
+        }
+    } else if *token_from_keychain {
+        match crate::dashboard_keep::token(stores.secrets, name.as_str()) {
+            Some(tk) => {
+                token = Some(tk);
+                token_was_kept = true;
+            }
+            None => {
+                return Err(
+                    CliError::Msg(t("dashboard.no_kept_token", &[("box", name.as_str())])).into(),
+                )
             }
         }
     }
     if !yes {
-        if !tty || token.is_some() {
-            return Err(CliError::Msg(t(
-                "dashboard.refuse_no_tty",
-                &[("box", name.as_str())],
-            )));
+        // standard input carries the token only with --token-stdin; a token from the keychain leaves it free for the answer
+        if !tty || *token_stdin {
+            return Err(
+                CliError::Msg(t("dashboard.refuse_no_tty", &[("box", name.as_str())])).into(),
+            );
         }
-        print!("{}", t("dashboard.prompt", &[]));
-        let _ = std::io::stdout().flush();
+        if !o.quiet {
+            print!("{}", t("dashboard.prompt", &[]));
+            let _ = std::io::stdout().flush();
+        }
         let mut line = String::new();
         let _ = input.read_line(&mut line);
         if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("{}", t("dashboard.aborted", &[]));
-            return Ok(());
+            say(&t("dashboard.aborted", &[]));
+            return Ok(Installed {
+                token_stored: false,
+            });
         }
     }
     if let Some(c) = chosen.as_ref().filter(|c| c.source != Source::BoxImage) {
@@ -862,24 +1038,184 @@ pub fn run_with_release(
             .map_err(|why| CliError::Msg(t("dashboard.download_failed", &[("why", &why)])))?;
         // What was downloaded must be what the signed manifest lists, before one byte leaves this computer.
         if sha256_hex(&program) != *sha {
-            return Err(CliError::Msg(t("dashboard.hash_mismatch", &[])));
+            return Err(CliError::Msg(t("dashboard.hash_mismatch", &[])).into());
         }
         match runner.run(&install.upload_command(program)) {
             Ok(o) if o.status == Some(0) => {}
             _ => {
-                return Err(CliError::Msg(t(
-                    "dashboard.upload_failed",
-                    &[("box", name.as_str())],
-                )))
+                return Err(
+                    CliError::Msg(t("dashboard.upload_failed", &[("box", name.as_str())])).into(),
+                )
             }
         }
     }
-    let script = install.script(token.as_deref()).map_err(CliError::Msg)?;
+    let mut sent = send(runner, &install, token.as_deref());
+    // The box wants the owner's approval of the token change. It is made here only when the owner asked for it with this
+    // command (`--approve-with-laptop-key`): with the key pinned when the box was made, for this very token, once.
+    let asked = match &sent {
+        Err(Failure::NeedsApproval(why))
+            if *approve_with_laptop_key && install.approval.is_none() =>
+        {
+            Some(why.clone())
+        }
+        _ => None,
+    };
+    if let (Some(why), Some(tk)) = (asked, token.as_deref()) {
+        match mint_for_token(runner, stores.keys, &install, tk) {
+            Ok(code) => {
+                install.approval = Some(code);
+                sent = send(runner, &install, token.as_deref());
+            }
+            Err(more) => sent = Err(Failure::NeedsApproval(format!("{why}\n{more}"))),
+        }
+    }
+    if let Err(Failure::NeedsApproval(m)) = &mut sent {
+        if token_was_kept && !*approve_with_laptop_key {
+            m.push('\n');
+            m.push_str(&t(
+                "dashboard.need_approval_kept",
+                &[("box", name.as_str())],
+            ));
+        }
+    }
+    let done = sent?;
+    // Kept here only now that the box took it: a token the box refused is not one to put back later.
+    let kept_here = match crate::dashboard_keep::Kept::from_command(cmd) {
+        Some(kept) => {
+            let taken = done.token_stored && !token_was_kept;
+            let tk = taken.then_some(token.as_deref()).flatten();
+            match crate::dashboard_keep::remember(stores.secrets, name.as_str(), &kept, tk) {
+                Ok(()) => true,
+                Err(why) => {
+                    say(&t(
+                        "dashboard.keep_failed",
+                        &[("box", name.as_str()), ("why", &why)],
+                    ));
+                    false
+                }
+            }
+        }
+        None => false,
+    };
+    if !json_out {
+        say(&done.said);
+        say(&t(
+            if done.kept_settings {
+                "dashboard.already_supervisor"
+            } else {
+                "dashboard.installed"
+            },
+            &[("box", name.as_str()), ("address", &install.public_url)],
+        ));
+        if done.already && done.token_stored {
+            say(&t("dashboard.token_stored", &[("box", name.as_str())]));
+        }
+        if kept_here {
+            say(&t(
+                if crate::dashboard_keep::has_token(stores.secrets, name.as_str()) {
+                    "dashboard.kept_with_token"
+                } else {
+                    "dashboard.kept_no_token"
+                },
+                &[("box", name.as_str())],
+            ));
+        }
+    } else if !o.quiet {
+        println!(
+            "{}",
+            json!({ "installed": !done.kept_settings, "box": name.as_str(), "runs_as": "ozbox-supervisor",
+                "settings_changed": !done.kept_settings, "tunnel_token_stored": done.token_stored,
+                "kept_on_this_computer": kept_here })
+        );
+    }
+    Ok(Installed {
+        token_stored: done.token_stored,
+    })
+}
+
+/// What putting a kept dashboard back came to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Restored {
+    /// Nothing is kept for this box on this computer.
+    NoneKept,
+    /// Something is kept, but the box has no dashboard files (a name used again): nothing was installed.
+    Absent,
+    /// The dashboard's service already runs: nothing was sent.
+    Running,
+    Done {
+        address: String,
+        token: bool,
+    },
+    /// The box asked for an approval of the token change. None was made.
+    NeedsApproval,
+    Failed(String),
+}
+
+/// After an upgrade replaced the box's machine: put the dashboard back from what this computer kept, quietly, as the owner's own
+/// `ozbox dashboard install` would: same checks, the program verified again, the token from the keychain. It never asks for
+/// the owner's approval to be made (`approve_with_laptop_key` is off): a box that wants one is reported as such.
+pub(crate) fn restore_kept(
+    runner: &dyn CommandRunner,
+    verifier: &ReleaseVerifier,
+    assets: &dyn AssetSource,
+    stores: &Stores<'_>,
+    name: &BoxName,
+) -> Restored {
+    let Some(kept) = crate::dashboard_keep::recall(stores.secrets, name.as_str()) else {
+        return Restored::NoneKept;
+    };
+    // What survives on /work says whether there is a dashboard to bring back, and whether it already runs: a record kept for a
+    // box that has none is never installed from here.
+    match probe_dashboard(runner, name) {
+        Some(p) if !p.present => return Restored::Absent,
+        Some(p) if p.active => return Restored::Running,
+        _ => {}
+    }
+    let with_token = crate::dashboard_keep::has_token(stores.secrets, name.as_str());
+    let cmd = kept.to_command(name.clone(), None, false, with_token);
+    let opts = Opts {
+        yes: true,
+        dry_run: false,
+        json_out: false,
+        quiet: true,
+    };
+    match install(
+        &cmd,
+        opts,
+        runner,
+        verifier,
+        assets,
+        &mut std::io::empty(),
+        false,
+        stores,
+    ) {
+        Ok(done) => Restored::Done {
+            address: kept.public_url,
+            token: done.token_stored,
+        },
+        Err(Failure::NeedsApproval(_)) => Restored::NeedsApproval,
+        Err(Failure::Other(e)) => Restored::Failed(e.to_string()),
+    }
+}
+
+/// What one run of the installer and the root helper left, before this computer keeps anything.
+struct Sent {
+    said: String,
+    kept_settings: bool,
+    already: bool,
+    token_stored: bool,
+}
+
+/// Send the installer to the box and have the root helper start the dashboard as its own user. Prints nothing.
+fn send(
+    runner: &dyn CommandRunner,
+    install: &Install,
+    token: Option<&str>,
+) -> Result<Sent, Failure> {
+    let name = &install.name;
+    let script = install.script(token).map_err(CliError::Msg)?;
     match runner.run(&install.command(script)) {
         Ok(o) if o.status == Some(0) => {
-            if !json_out {
-                print!("{}", o.stdout);
-            }
             // The box user's side only staged it. The root helper starts it as its own user (ADR 0023), checking first
             // that the staged sign-in settings are the ones sent from here, then destroys the copies the box user could
             // read. Success is reported only once the dashboard runs that way; it never runs as the box user.
@@ -887,38 +1223,19 @@ pub fn run_with_release(
             let token_stored = o.stdout.contains("dashboard-setup: tunnel-token-stored");
             // On a box that already has a supervisor the settings are staged too, and the helper decides: it installs them
             // when the dashboard has none to read (after an upgrade), and keeps the ones it has otherwise.
-            let moved = start_as_supervisor(runner, &install)?;
+            let moved = start_as_supervisor(runner, install)?;
             let kept = matches!(moved, Moved::Kept(_));
-            if !json_out {
-                let (Moved::Started(m) | Moved::Kept(m)) = &moved;
-                println!("{m}");
-                println!(
-                    "{}",
-                    t(
-                        if kept {
-                            "dashboard.already_supervisor"
-                        } else {
-                            "dashboard.installed"
-                        },
-                        &[("box", name.as_str()), ("address", &install.public_url)]
-                    )
-                );
-                if already && token_stored {
-                    println!("{}", t("dashboard.token_stored", &[("box", name.as_str())]));
-                }
-            } else {
-                println!(
-                    "{}",
-                    json!({ "installed": !kept, "box": name.as_str(), "runs_as": "ozbox-supervisor",
-                        "settings_changed": !kept, "tunnel_token_stored": token_stored || (!kept && token.is_some()) })
-                );
-            }
-            Ok(())
+            let (Moved::Started(m) | Moved::Kept(m)) = moved;
+            Ok(Sent {
+                said: format!("{}{m}", o.stdout),
+                kept_settings: kept,
+                already,
+                token_stored: token_stored || (!kept && token.is_some()),
+            })
         }
-        Ok(o) if o.status == Some(255) => Err(CliError::Msg(t(
-            "dashboard.reach_failed",
-            &[("box", name.as_str())],
-        ))),
+        Ok(o) if o.status == Some(255) => {
+            Err(CliError::Msg(t("dashboard.reach_failed", &[("box", name.as_str())])).into())
+        }
         Ok(o) => {
             // The installer's own words (it prints no secret); the SSH line for a refused connection is `255`.
             let said = o.stderr.trim().lines().last().unwrap_or("").to_string();
@@ -947,13 +1264,11 @@ pub fn run_with_release(
                 }
                 m.push(' ');
                 m.push_str(&t("dashboard.need_approval_ingress", &args));
+                return Err(Failure::NeedsApproval(m));
             }
-            Err(CliError::Msg(m))
+            Err(CliError::Msg(m).into())
         }
-        Err(_) => Err(CliError::Msg(t(
-            "dashboard.reach_failed",
-            &[("box", name.as_str())],
-        ))),
+        Err(_) => Err(CliError::Msg(t("dashboard.reach_failed", &[("box", name.as_str())])).into()),
     }
 }
 
@@ -1022,6 +1337,54 @@ enum Moved {
     Kept(String),
 }
 
+/// What the box says about the dashboard it may have: are its files on `/work` (they survive an upgrade) and does its service run.
+pub(crate) struct DashboardProbe {
+    pub present: bool,
+    pub active: bool,
+}
+
+const PROBE_SCRIPT: &str = "if [ -d /work/home/ozbox/ozbox-dashboard ]; then echo \"dashboard-probe: present $(systemctl is-active ozbox-dashboard.service 2>/dev/null || true)\"; else echo 'dashboard-probe: absent'; fi
+";
+
+/// One question over the box's own route: `None` when it could not be asked.
+pub(crate) fn probe_dashboard(
+    runner: &dyn CommandRunner,
+    name: &BoxName,
+) -> Option<DashboardProbe> {
+    let out = runner
+        .run(
+            &CommandSpec::new("ssh")
+                .args([
+                    "-o".to_string(),
+                    "BatchMode=yes".to_string(),
+                    crate::sshconfig::host_alias(name.as_str()),
+                    "sh".to_string(),
+                    "-s".to_string(),
+                ])
+                .stdin(PROBE_SCRIPT.as_bytes().to_vec()),
+        )
+        .ok()?;
+    if out.status != Some(0) {
+        return None;
+    }
+    let line = out
+        .stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("dashboard-probe: "))?;
+    let mut words = line.split_whitespace();
+    match words.next()? {
+        "absent" => Some(DashboardProbe {
+            present: false,
+            active: false,
+        }),
+        "present" => Some(DashboardProbe {
+            present: true,
+            active: words.next() == Some("active"),
+        }),
+        _ => None,
+    }
+}
+
 /// Run on the box, after the helper: is the dashboard still up once its restart delay (5 s) has passed, and has it not been
 /// restarted by systemd on its own?
 const HEALTH_SCRIPT: &str = "sleep 8
@@ -1034,6 +1397,7 @@ if [ \"$s\" = active ] && [ \"${n:-0}\" = 0 ]; then echo 'dashboard-health: ok';
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::secrets::{MemorySecrets, SecretStore};
     use crate::serve::auth::config::UserEntry;
     use ozbox_core::RecordingRunner;
 
@@ -1209,8 +1573,15 @@ mod tests {
             remote_port: 7878,
             approval: None,
             approval_stdin: false,
+            token_from_keychain: false,
+            approve_with_laptop_key: false,
         };
         let r = RecordingRunner::new();
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = Stores {
+            secrets: &secrets,
+            keys: &keys,
+        };
         run_with(
             &cmd(false),
             true,
@@ -1219,6 +1590,7 @@ mod tests {
             &r,
             &mut std::io::empty(),
             false,
+            &st,
         )
         .unwrap();
         assert!(r.calls().is_empty());
@@ -1230,13 +1602,14 @@ mod tests {
             false,
             &r,
             &mut std::io::empty(),
-            false
+            false,
+            &st
         )
         .is_err());
         assert!(r.calls().is_empty());
         let mut stdin = std::io::Cursor::new(b"SENTINEL-TOKEN\n".to_vec());
         queue_installed(&r);
-        run_with(&cmd(true), true, false, false, &r, &mut stdin, false).unwrap();
+        run_with(&cmd(true), true, false, false, &r, &mut stdin, false, &st).unwrap();
         let calls = r.calls();
         // the installer, then the root helper starting it as its own user, the box asked whether it stayed up, and the finish
         assert_eq!(calls.len(), 4);
@@ -1286,6 +1659,8 @@ mod tests {
             remote_port: 7878,
             approval: None,
             approval_stdin: false,
+            token_from_keychain: false,
+            approve_with_laptop_key: false,
         }
     }
 
@@ -1430,6 +1805,10 @@ mod tests {
             assets,
             &mut std::io::empty(),
             false,
+            &Stores {
+                secrets: &MemorySecrets::default(),
+                keys: &MemorySecrets::default(),
+            },
         )
     }
 
@@ -1798,9 +2177,26 @@ mod tests {
     fn a_release_repository_must_look_like_owner_and_name() {
         let r = RecordingRunner::new();
         let mut cmd = release_cmd(None, None);
-        let DashboardCommand::Install { release_repo, .. } = &mut cmd;
+        let DashboardCommand::Install { release_repo, .. } = &mut cmd else {
+            unreachable!()
+        };
         *release_repo = Some("not a repo".into());
-        let e = run_with(&cmd, true, true, false, &r, &mut std::io::empty(), false).unwrap_err();
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = Stores {
+            secrets: &secrets,
+            keys: &keys,
+        };
+        let e = run_with(
+            &cmd,
+            true,
+            true,
+            false,
+            &r,
+            &mut std::io::empty(),
+            false,
+            &st,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("owner/name"), "{e}");
         assert!(r.calls().is_empty());
     }
@@ -2015,7 +2411,9 @@ mod tests {
     fn a_code_that_is_not_shaped_like_one_is_refused_before_anything_is_sent() {
         let r = Arc::new(RecordingRunner::new());
         let mut cmd = by_hand();
-        let DashboardCommand::Install { approval, .. } = &mut cmd;
+        let DashboardCommand::Install { approval, .. } = &mut cmd else {
+            unreachable!()
+        };
         *approval = Some("not-a-code".into());
         assert!(install_with(&r, &cmd, &FakeAssets::ok()).is_err());
         assert!(r.calls().is_empty());
@@ -2037,7 +2435,11 @@ mod tests {
                 &verifier(&r),
                 &FakeAssets::ok(),
                 &mut std::io::empty(),
-                false
+                false,
+                &Stores {
+                    secrets: &MemorySecrets::default(),
+                    keys: &MemorySecrets::default(),
+                }
             )
             .is_err());
         }
@@ -2088,5 +2490,410 @@ mod tests {
         for c in crate::tunnel::KNOWN_CODES {
             assert!(keys.contains(&format!("tunnel.code_{c}").as_str()), "{c}");
         }
+    }
+
+    // ---- what this computer keeps, and what an upgrade puts back -------------------------------------------------------
+
+    const TOKEN: &str = "eyJhIjoiU0VOVElORUwtVE9LRU4tMDEyMzQ1Njc4OSJ9";
+
+    fn token_cmd(from_stdin: bool, from_keychain: bool, approve: bool) -> DashboardCommand {
+        let mut c = by_hand();
+        let DashboardCommand::Install {
+            tunnel,
+            token_stdin,
+            token_from_keychain,
+            approve_with_laptop_key,
+            ..
+        } = &mut c
+        else {
+            unreachable!()
+        };
+        *tunnel = Some("cloudflare".into());
+        *token_stdin = from_stdin;
+        *token_from_keychain = from_keychain;
+        *approve_with_laptop_key = approve;
+        c
+    }
+
+    fn stores_of<'a>(a: &'a MemorySecrets, b: &'a MemorySecrets) -> Stores<'a> {
+        Stores {
+            secrets: a,
+            keys: b,
+        }
+    }
+
+    fn run_cmd(
+        r: &Arc<RecordingRunner>,
+        cmd: &DashboardCommand,
+        stdin: &str,
+        st: &Stores<'_>,
+    ) -> Result<(), CliError> {
+        run_with_release(
+            cmd,
+            true,
+            false,
+            false,
+            r.as_ref(),
+            &verifier(r),
+            &FakeAssets::ok(),
+            &mut std::io::Cursor::new(stdin.as_bytes().to_vec()),
+            false,
+            st,
+        )
+    }
+
+    fn refuse_for_approval(r: &RecordingRunner) {
+        r.reply(ozbox_core::Output {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: "dashboard-setup: the box's admin helper did not take the tunnel token: this change needs a fresh approval"
+                .into(),
+        });
+    }
+
+    /// The owner's report: after an upgrade started a new store the token was gone and this computer held no copy. Installing
+    /// with a token now keeps it in this computer's secret store (the keychain on a laptop), beside the install settings, under
+    /// the same kind of name the web IDE's token has, and only once the box took it.
+    #[test]
+    fn installing_with_a_token_keeps_it_and_the_settings_in_the_secret_store() {
+        let r = Arc::new(RecordingRunner::new());
+        queue_installed(&r);
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = stores_of(&secrets, &keys);
+        run_cmd(
+            &r,
+            &token_cmd(true, false, false),
+            &format!("{TOKEN}\n"),
+            &st,
+        )
+        .unwrap();
+        assert_eq!(
+            secrets
+                .get(&crate::dashboard_keep::token_name("dash"))
+                .unwrap()
+                .as_deref(),
+            Some(TOKEN)
+        );
+        assert_eq!(
+            crate::dashboard_keep::token_name("dash"),
+            "dashboard-tunnel-token-dash"
+        );
+        let kept = crate::dashboard_keep::recall(&secrets, "dash").unwrap();
+        assert_eq!(kept.public_url, "https://ozbox.example.com");
+        assert_eq!(kept.tunnel.as_deref(), Some("cloudflare"));
+        assert_eq!(kept.people, ["owner"]);
+        // the token is in the installer's body and nowhere else: not in any argument, not in another call, not in what the
+        // record serializes or prints
+        let calls = r.calls();
+        let body = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+        assert!(body.contains(TOKEN));
+        for (i, c) in calls.iter().enumerate() {
+            assert!(!c.args.join(" ").contains(TOKEN), "argv of call {i}");
+            if i > 0 {
+                assert!(
+                    !serde_json::to_string(c).unwrap().contains(TOKEN),
+                    "call {i}"
+                );
+            }
+        }
+        assert!(!serde_json::to_string(&kept).unwrap().contains(TOKEN));
+        assert!(!format!("{kept:?}").contains(TOKEN));
+        // the settings are held as plain visible text, so every secret store can carry them
+        let raw = secrets
+            .get(&crate::dashboard_keep::settings_name("dash"))
+            .unwrap()
+            .unwrap();
+        assert!(raw.bytes().all(|b| b.is_ascii_hexdigit()), "{raw}");
+    }
+
+    /// A token the box did not take is not one to put back later, and a refusal says nothing of the token.
+    #[test]
+    fn a_token_the_box_refused_is_not_kept_and_the_refusal_does_not_say_it() {
+        let r = Arc::new(RecordingRunner::new());
+        refuse_for_approval(&r);
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = stores_of(&secrets, &keys);
+        let e = run_cmd(
+            &r,
+            &token_cmd(true, false, false),
+            &format!("{TOKEN}\n"),
+            &st,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("ozbox secrets approve"), "{e}");
+        assert!(!e.contains(TOKEN));
+        assert!(!secrets
+            .exists(&crate::dashboard_keep::token_name("dash"))
+            .unwrap());
+        assert!(crate::dashboard_keep::recall(&secrets, "dash").is_none());
+    }
+
+    /// `--token-from-keychain` hands the kept token over without anyone typing it; without the flag a tokenless install leaves the
+    /// box's token alone (an enrolled box would refuse a replacement). With nothing kept it stops before sending anything.
+    #[test]
+    fn a_kept_token_is_reused_only_when_asked_for() {
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = stores_of(&secrets, &keys);
+        let r = Arc::new(RecordingRunner::new());
+        let e = run_cmd(&r, &token_cmd(false, true, false), "", &st)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("holds no tunnel token") && e.contains("--token-stdin"),
+            "{e}"
+        );
+        assert!(r.calls().is_empty());
+        secrets
+            .set(&crate::dashboard_keep::token_name("dash"), TOKEN)
+            .unwrap();
+        let r = Arc::new(RecordingRunner::new());
+        queue_installed(&r);
+        run_cmd(&r, &token_cmd(false, false, false), "", &st).unwrap();
+        let plain = script_of(&r);
+        assert!(plain.contains("TUNNEL_TOKEN=''") && !plain.contains(TOKEN));
+        let r = Arc::new(RecordingRunner::new());
+        queue_installed(&r);
+        run_cmd(&r, &token_cmd(false, true, false), "", &st).unwrap();
+        let kept = script_of(&r);
+        assert!(kept.contains(&format!("TUNNEL_TOKEN='{TOKEN}'")), "{kept}");
+        assert!(kept.contains("'--token-stdin'"));
+        assert!(r.calls().iter().all(|c| !c.args.join(" ").contains(TOKEN)));
+    }
+
+    #[test]
+    fn approving_with_the_laptop_key_needs_a_token_to_approve() {
+        let r = Arc::new(RecordingRunner::new());
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let e = run_cmd(
+            &r,
+            &token_cmd(false, false, true),
+            "",
+            &stores_of(&secrets, &keys),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("approves one token"), "{e}");
+        assert!(r.calls().is_empty());
+    }
+
+    /// The one command: when the box asks for an approval and the owner passed `--approve-with-laptop-key`, the pinned key signs
+    /// an approval for exactly this token (the same `tunnel-token` scope `ozbox secrets approve` uses) and the install is sent
+    /// again with the code. Nothing else makes one.
+    #[test]
+    fn the_laptop_key_approves_exactly_the_kept_token_when_the_owner_asks() {
+        crate::ingress_client::testing::install("dash");
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let (seed, _) = crate::approval_key::generate().unwrap();
+        keys.set("approval-key-laptop", &seed).unwrap();
+        secrets
+            .set(&crate::dashboard_keep::token_name("dash"), TOKEN)
+            .unwrap();
+        let st = stores_of(&secrets, &keys);
+        let r = Arc::new(RecordingRunner::new());
+        refuse_for_approval(&r); // the first install
+        r.reply(ok_out("1")); // the refusal message asks whether the helper ties a code to the token
+        r.reply(ok_out("1")); // and so does the mint
+        r.reply(ok_out(
+            &json!({"ok": true, "result": {"nonce": "n0nce", "expires_ms": 4102444800000u64}})
+                .to_string(),
+        ));
+        r.reply(ok_out(
+            &json!({"ok": true, "result": {"code": "ABCD-EFGH-JKMN-PQRS", "expires_in_seconds": 300}}).to_string(),
+        ));
+        queue_installed(&r);
+        run_cmd(&r, &token_cmd(false, true, true), "", &st).unwrap();
+        let calls = r.calls();
+        // what the key was asked to sign: the tunnel-token scope for this provider, bound to this token's digest only
+        let challenge =
+            crate::ingress_client::testing::open_sent("dash", calls[3].stdin.as_ref().unwrap());
+        assert_eq!(challenge["op"], "approval_challenge");
+        assert_eq!(challenge["scope"], "tunnel-token");
+        assert_eq!(challenge["project"], "cloudflare");
+        assert_eq!(
+            challenge["env"],
+            crate::secrets_approval::tunnel_token_binding(TOKEN)
+        );
+        assert!(!challenge.to_string().contains(TOKEN));
+        // the second install carries the code, in the body
+        let second = installer_call(&r);
+        let body = String::from_utf8(second.stdin.clone().unwrap()).unwrap();
+        assert!(
+            body.contains("TUNNEL_APPROVAL='ABCD-EFGH-JKMN-PQRS'"),
+            "{body}"
+        );
+        assert!(calls.iter().all(|c| !c.args.join(" ").contains(TOKEN)));
+    }
+
+    /// An unbound code works for any token until it is used, so it is never made on the owner's behalf for a box whose helper
+    /// does not tie it to the token.
+    #[test]
+    fn the_laptop_key_never_makes_an_unbound_code() {
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let (seed, _) = crate::approval_key::generate().unwrap();
+        keys.set("approval-key-laptop", &seed).unwrap();
+        let r = Arc::new(RecordingRunner::new());
+        refuse_for_approval(&r);
+        r.reply(ok_out("0")); // the message's own probe: an older helper
+        r.reply(ok_out("0")); // the mint's probe
+        let e = run_cmd(
+            &r,
+            &token_cmd(true, false, true),
+            &format!("{TOKEN}\n"),
+            &stores_of(&secrets, &keys),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("does not tie an approval to one token"), "{e}");
+        assert!(!r.calls().iter().any(|c| c
+            .stdin
+            .as_ref()
+            .is_some_and(|b| String::from_utf8_lossy(b).contains("approval_challenge"))));
+        assert!(!e.contains(TOKEN));
+    }
+
+    /// `ozbox dashboard restore <box>` is the one command: the kept settings and token, with the program checked again.
+    #[test]
+    fn restore_reinstalls_from_what_was_kept_and_forget_removes_it() {
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = stores_of(&secrets, &keys);
+        let name = BoxName::new("dash").unwrap();
+        let r = RecordingRunner::new();
+        let restore = DashboardCommand::Restore {
+            name: name.clone(),
+            release: None,
+            approve_with_laptop_key: false,
+        };
+        let e = run_with(
+            &restore,
+            true,
+            false,
+            false,
+            &r,
+            &mut std::io::empty(),
+            false,
+            &st,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("kept nothing"), "{e}");
+        assert!(r.calls().is_empty());
+        let kept =
+            crate::dashboard_keep::Kept::from_command(&token_cmd(true, false, false)).unwrap();
+        crate::dashboard_keep::remember(&secrets, "dash", &kept, Some(TOKEN)).unwrap();
+        let cmd = kept.to_command(name.clone(), None, false, true);
+        let r = Arc::new(RecordingRunner::new());
+        r.reply(ok_out(&probe(Some(RELEASE), "x86_64", Some(PROGRAM))));
+        queue_manifest(&r, &image_manifest(RELEASE), 0);
+        queue_installed(&r);
+        run_cmd(&r, &cmd, "", &st).unwrap();
+        let body = script_of(&r);
+        assert!(body.contains(&format!("TUNNEL_TOKEN='{TOKEN}'")));
+        assert!(body.contains("PUBLIC_URL='https://ozbox.example.com'"));
+        let forget = DashboardCommand::Forget { name };
+        run_with(
+            &forget,
+            true,
+            false,
+            true,
+            r.as_ref(),
+            &mut std::io::empty(),
+            false,
+            &st,
+        )
+        .unwrap();
+        assert!(!crate::dashboard_keep::has_token(&secrets, "dash"));
+        assert!(crate::dashboard_keep::recall(&secrets, "dash").is_none());
+    }
+
+    fn restore_kept_with(r: &Arc<RecordingRunner>, st: &Stores<'_>) -> Restored {
+        restore_kept(
+            r.as_ref(),
+            &verifier(r),
+            &FakeAssets::ok(),
+            st,
+            &BoxName::new("dash").unwrap(),
+        )
+    }
+
+    fn kept_for_dash(secrets: &MemorySecrets, token: Option<&str>) {
+        let kept =
+            crate::dashboard_keep::Kept::from_command(&token_cmd(true, false, false)).unwrap();
+        crate::dashboard_keep::remember(secrets, "dash", &kept, token).unwrap();
+    }
+
+    fn probe_reply(r: &RecordingRunner, line: &str) {
+        r.reply(ok_out(&format!("dashboard-probe: {line}")));
+    }
+
+    /// The upgrade's put-back, on a new store: the token comes out of the keychain into the box, the settings come back, and
+    /// the outcome is `Done`. A dashboard already running is left alone; a record for a box with no dashboard is never installed.
+    #[test]
+    fn after_an_upgrade_the_dashboard_is_put_back_from_the_keychain() {
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let st = stores_of(&secrets, &keys);
+        let r = Arc::new(RecordingRunner::new());
+        assert_eq!(restore_kept_with(&r, &st), Restored::NoneKept);
+        assert!(
+            r.calls().is_empty(),
+            "nothing kept: the box is not even asked"
+        );
+        kept_for_dash(&secrets, Some(TOKEN));
+        let r = Arc::new(RecordingRunner::new());
+        probe_reply(&r, "absent");
+        assert_eq!(restore_kept_with(&r, &st), Restored::Absent);
+        assert_eq!(r.calls().len(), 1);
+        let r = Arc::new(RecordingRunner::new());
+        probe_reply(&r, "present active");
+        assert_eq!(restore_kept_with(&r, &st), Restored::Running);
+        assert_eq!(
+            r.calls().len(),
+            1,
+            "a running dashboard is not sent anything"
+        );
+        // present but down (the new system disk has no unit): installed again, with the token from the keychain
+        let r = Arc::new(RecordingRunner::new());
+        probe_reply(&r, "present inactive");
+        r.reply(ok_out(&probe(Some(RELEASE), "x86_64", Some(PROGRAM))));
+        queue_manifest(&r, &image_manifest(RELEASE), 0);
+        queue_installed(&r);
+        assert_eq!(
+            restore_kept_with(&r, &st),
+            Restored::Done {
+                address: "https://ozbox.example.com".into(),
+                token: true
+            }
+        );
+        let body = script_of(&r);
+        assert!(body.contains(&format!("TUNNEL_TOKEN='{TOKEN}'")), "{body}");
+        assert!(body.contains("PUBLIC_URL='https://ozbox.example.com'"));
+        assert!(r.calls().iter().all(|c| !c.args.join(" ").contains(TOKEN)
+            && (c.stdin.is_none() || !serde_json::to_string(c).unwrap().contains(TOKEN))));
+    }
+
+    /// The box wants the owner's approval for the token (an enrolled second factor): the put-back makes none, says so, and the
+    /// owner's pinned key is not touched.
+    #[test]
+    fn a_box_that_wants_an_approval_is_reported_and_nothing_is_approved_for_you() {
+        let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
+        let (seed, _) = crate::approval_key::generate().unwrap();
+        keys.set("approval-key-laptop", &seed).unwrap();
+        kept_for_dash(&secrets, Some(TOKEN));
+        let st = stores_of(&secrets, &keys);
+        let r = Arc::new(RecordingRunner::new());
+        probe_reply(&r, "present inactive");
+        r.reply(ok_out(&probe(Some(RELEASE), "x86_64", Some(PROGRAM))));
+        queue_manifest(&r, &image_manifest(RELEASE), 0);
+        refuse_for_approval(&r);
+        assert_eq!(restore_kept_with(&r, &st), Restored::NeedsApproval);
+        assert!(
+            !r.calls().iter().any(|c| c
+                .stdin
+                .as_ref()
+                .is_some_and(|b| String::from_utf8_lossy(b).contains("approval_challenge"))),
+            "no approval was asked of the key"
+        );
+        // and the token is still kept, for the one command that follows
+        assert!(crate::dashboard_keep::has_token(&secrets, "dash"));
     }
 }

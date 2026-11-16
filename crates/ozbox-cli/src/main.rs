@@ -34,6 +34,7 @@ mod config;
 mod cost_cli;
 mod cost_demo;
 mod dashboard_cli;
+mod dashboard_keep;
 mod egress;
 mod egress_guard;
 mod guard;

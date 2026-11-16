@@ -8,6 +8,20 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Hosted dashboard">
+  ## An upgrade puts your hosted dashboard back, with its tunnel token
+
+  Installing the dashboard on a box with a tunnel token used to leave that token only on the box. An upgrade that started a new secrets store lost it, and the dashboard stayed down until you had the token again.
+
+  - **This computer keeps the token.** `ozbox dashboard install ... --token-stdin` now keeps the token in this computer's keychain (never in a file, never shown), together with the address, people and tunnel you gave it.
+  - **`ozbox upgrade` puts the dashboard back** after it replaces the box's machine, and its report has a **Dashboard** line: put back, not put back (with the one command to run), or not installed.
+  - **When the box asks for your approval of the token,** the upgrade does not make it for you. Run `ozbox dashboard restore <box> --approve-with-laptop-key`: it uses the token this computer kept and approves that one token with the key this computer pinned when the box was made.
+  - **`ozbox dashboard restore <box>`** brings the dashboard back by hand; **`ozbox dashboard install --token-from-keychain`** reuses the kept token; **`ozbox dashboard forget <box>`** removes what this computer kept.
+  - **A dashboard installed before this release** is kept the next time you install it with `--token-stdin`. **Not yet run on a real box.**
+
+  See [run the dashboard on a box](/use-cases/coding-from-anywhere) and [keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
   ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
 
