@@ -108,7 +108,7 @@ jobs:
     needs: dashboard
     # Both on the arm64 runner: the x86_64 program is cross-compiled by Apple's linker (native cargo, no emulation).
     # macOS runners are charged at a higher rate, which is why this is two jobs and not more.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: true
