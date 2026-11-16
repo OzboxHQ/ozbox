@@ -325,13 +325,19 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # The release program carries the native KMS client. The behaviour (a signed round trip against fakes, run with an
-          # empty PATH) is the unit test secrets_enc::tests::kms_works_with_no_aws_command_anywhere in this same run's test job;
-          # this checks that the program that is shipped is one that has it. A real KMS call is not made in CI (no cloud here).
-          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'x-amz-json-1.1'; do
+          # The behaviour (a signed round trip against loopback fakes of the key service and the metadata service, whose
+          # signatures a separate verifier recomputes from the raw request) is tested in this same run's unit tests
+          # (aws_native / secrets_enc). It cannot be run from the SHIPPED program here without putting a test hook into it:
+          # the program's client only calls https://kms.<region>.amazonaws.com and the metadata address, and the release
+          # build refuses debug hooks (see "The release programs carry none of the debug-only test sockets"). So this checks
+          # that the program that is shipped is the one that has the native client and no longer builds the aws command line.
+          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'x-amz-json-1.1' 'AWS4-HMAC-SHA256'; do
             LC_ALL=C grep -aqF "$needle" "out/ozbox-linux-$ARCH" \
               || { echo "::error title=No native KMS client::the $ARCH ozbox program does not carry $needle, so a box set up for KMS could not open its secrets store"; exit 1; }
           done
+          # the old way piped the key to `aws kms` as fileb:///dev/stdin: a program still carrying that argument is not the fix
+          ! LC_ALL=C grep -aqF 'fileb:///dev/stdin' "out/ozbox-linux-$ARCH" \
+            || { echo "::error title=aws command still used::the $ARCH ozbox program still builds an aws kms command line, which the image cannot run (no aws command)"; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ozboxd-${{ matrix.arch }}

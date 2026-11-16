@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use ring::digest::{digest, SHA256};
 use ring::hmac;
 use serde_json::Value;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::netguard::{Guard, HttpRequest};
 use crate::settings::ModelKind;
@@ -443,8 +444,9 @@ fn split_url(url: &str) -> Result<(String, String, String), String> {
     Ok((host.to_string(), format!("/{path}"), query.to_string()))
 }
 
-/// The headers (`x-amz-date`, `x-amz-security-token`, `authorization`) that sign `req` for `service` in `region`. The
-/// request's own headers are not signed except `host`, so nothing the run sent can be smuggled under the signature.
+/// The headers (`x-amz-date`, `x-amz-security-token`, `authorization`) that sign `req` for `service` in `region`. Every header
+/// already on `req` (bar the transport's own) is signed along with `host`, so the caller sets `Content-Type`, `X-Amz-Target`
+/// and the rest BEFORE calling this, and sends exactly what it signed.
 pub fn sign_v4(
     req: &HttpRequest,
     keys: &AwsKeys<'_>,
@@ -477,41 +479,72 @@ pub fn sign_v4(
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&");
-    let mut hdrs: Vec<(String, String)> =
-        vec![("host".into(), host), ("x-amz-date".into(), stamp.clone())];
-    if let Some(t) = keys.session_token {
+    let mut hdrs: Vec<(String, String)> = Vec::new();
+    // Every header the request carries is signed (AWS refuses a request whose `Content-Type` or `x-amz-*` headers are not in
+    // SignedHeaders), so a header added after signing breaks the signature instead of riding along. Only the ones the signer
+    // owns, and the ones a transport sets for itself, are left out.
+    for (k, v) in &req.headers {
+        let k = k.to_ascii_lowercase();
+        if matches!(
+            k.as_str(),
+            "host"
+                | "x-amz-date"
+                | "x-amz-security-token"
+                | "authorization"
+                | "user-agent"
+                | "connection"
+                | "content-length"
+                | "expect"
+                | "transfer-encoding"
+                | "x-amzn-trace-id"
+        ) {
+            continue;
+        }
+        let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+        match hdrs.iter_mut().find(|(n, _)| *n == k) {
+            // the transport (`ureq`'s `set`) sends one header per name, the last one given, so that is the one signed
+            Some((_, old)) => *old = v,
+            None => hdrs.push((k, v)),
+        }
+    }
+    hdrs.push(("host".into(), host));
+    hdrs.push(("x-amz-date".into(), stamp.clone()));
+    let token = keys.session_token.map(|t| Zeroizing::new(t.to_string()));
+    if let Some(t) = &token {
         hdrs.push(("x-amz-security-token".into(), t.to_string()));
     }
     hdrs.sort();
-    let canonical_headers: String = hdrs
-        .iter()
-        .map(|(k, v)| format!("{k}:{}\n", v.trim()))
-        .collect();
+    let canonical_headers: Zeroizing<String> =
+        Zeroizing::new(hdrs.iter().map(|(k, v)| format!("{k}:{v}\n")).collect());
     let signed = hdrs
         .iter()
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(";");
+    for (k, v) in hdrs.iter_mut() {
+        if k == "x-amz-security-token" {
+            v.zeroize();
+        }
+    }
     let payload = hex(digest(&SHA256, req.body.as_deref().unwrap_or(&[])).as_ref());
-    let canonical = format!(
-        "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed}\n{payload}",
-        req.method
-    );
+    let canonical = Zeroizing::new(format!(
+        "{}\n{canonical_uri}\n{canonical_query}\n{}\n{signed}\n{payload}",
+        req.method,
+        canonical_headers.as_str()
+    ));
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let to_sign = format!(
         "AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}",
         hex(digest(&SHA256, canonical.as_bytes()).as_ref())
     );
-    let k = hmac(
-        format!("AWS4{}", keys.secret_access_key).as_bytes(),
-        date.as_bytes(),
-    );
-    let k = hmac(&k, region.as_bytes());
-    let k = hmac(&k, service.as_bytes());
-    let k = hmac(&k, b"aws4_request");
+    let seed = Zeroizing::new(format!("AWS4{}", keys.secret_access_key));
+    let k = Zeroizing::new(hmac(seed.as_bytes(), date.as_bytes()));
+    let k = Zeroizing::new(hmac(&k, region.as_bytes()));
+    let k = Zeroizing::new(hmac(&k, service.as_bytes()));
+    let k = Zeroizing::new(hmac(&k, b"aws4_request"));
     let sig = hex(&hmac(&k, to_sign.as_bytes()));
     let mut out = vec![("x-amz-date".to_string(), stamp)];
-    if let Some(t) = keys.session_token {
+    if let Some(t) = &token {
         out.push(("x-amz-security-token".into(), t.to_string()));
     }
     out.push((
@@ -589,6 +622,127 @@ mod tests {
         assert_eq!(
             h[0],
             ("x-amz-date".to_string(), "20150830T123600Z".to_string())
+        );
+    }
+
+    /// The vector's expected `Authorization` for a `POST /` with `headers` and `body`, signed the way the suite signs.
+    fn suite_auth(headers: &[(&str, &str)], body: &str) -> String {
+        let mut req = HttpRequest::new("POST", "https://example.amazonaws.com/", Guard::Public);
+        for (k, v) in headers {
+            req = req.header(k, *v);
+        }
+        req.body = Some(body.as_bytes().to_vec());
+        let h = sign_v4(&req, &aws(None), "us-east-1", "service", 1_440_938_160).unwrap();
+        h.iter()
+            .find(|(k, _)| k == "Authorization")
+            .unwrap()
+            .1
+            .clone()
+    }
+
+    #[test]
+    fn sigv4_matches_the_published_post_x_www_form_urlencoded_vector() {
+        // AWS's Signature Version 4 test suite, "post-x-www-form-urlencoded": a Content-Type header that must be signed.
+        // (This failed before the signer covered the request's own headers: it signed host and x-amz-date only.)
+        let auth = suite_auth(
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+            "Param1=value1",
+        );
+        assert_eq!(
+            auth,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a"
+        );
+    }
+
+    #[test]
+    fn the_headers_a_request_carries_are_all_signed_and_its_own_authorization_never_is() {
+        let a = suite_auth(
+            &[
+                ("X-Amz-Target", "TrentService.Encrypt"),
+                ("Content-Type", "application/x-amz-json-1.1"),
+                ("Authorization", "run-supplied"),
+                ("User-Agent", "x"),
+                ("Content-Length", "3"),
+            ],
+            "{}",
+        );
+        assert!(
+            a.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-target,"),
+            "{a}"
+        );
+        // names are lowercased, values trimmed and inner runs of spaces collapsed, as AWS canonicalises them
+        let loose = suite_auth(
+            &[
+                ("x-amz-target", "  TrentService.Encrypt "),
+                ("CONTENT-TYPE", "application/x-amz-json-1.1"),
+            ],
+            "{}",
+        );
+        let tidy = suite_auth(
+            &[
+                ("X-Amz-Target", "TrentService.Encrypt"),
+                ("Content-Type", "application/x-amz-json-1.1"),
+            ],
+            "{}",
+        );
+        assert_eq!(loose, tidy);
+    }
+
+    #[test]
+    fn a_bedrock_request_is_signed_over_the_headers_it_is_sent_with() {
+        // the broker copies the run's headers onto the upstream request, then authorises it: whatever is on the request when it
+        // goes out must be what was signed (an independent verifier recomputes the signature from the request as sent)
+        let mut req = HttpRequest::new(
+            "POST",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/m1/converse",
+            Guard::Public,
+        )
+        .header("Content-Type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        // a repeated name: only the last is sent, so only the last is signed
+        .header("Accept", "text/plain")
+        .header("accept", "application/json");
+        req.body = Some(br#"{"messages":[]}"#.to_vec());
+        let cred = Cred::Aws {
+            access_key_id: crate::aws_native::fakes::ACCESS_KEY.into(),
+            secret_access_key: crate::aws_native::fakes::SECRET_KEY.into(),
+            session_token: Some(crate::aws_native::fakes::SESSION_TOKEN.into()),
+        };
+        let ctx = Ctx {
+            kind: ModelKind::Bedrock,
+            provider_id: "br",
+            region: Some("us-east-1"),
+            now_ms: 1_440_938_160_000,
+        };
+        authorize(&mut req, &ctx, &cred, &TokenCache::default(), &|_| {
+            Err("no".into())
+        })
+        .unwrap();
+        let mut sent = req.headers.clone();
+        // ureq sends one header per name, the last
+        sent.retain(|(k, v)| !(k == "Accept" && v == "text/plain"));
+        sent.push((
+            "Host".into(),
+            "bedrock-runtime.us-east-1.amazonaws.com".into(),
+        ));
+        let seen = crate::aws_native::fakes::Seen {
+            method: "POST".into(),
+            url: "/model/m1/converse".into(),
+            headers: sent,
+            body: String::from_utf8(req.body.clone().unwrap()).unwrap(),
+        };
+        let auth = seen.header("authorization").unwrap();
+        assert!(
+            auth.contains("SignedHeaders=accept;anthropic-version;content-type;host;x-amz-date;x-amz-security-token,"),
+            "{auth}"
+        );
+        assert_eq!(
+            crate::aws_native::fakes::verify_sigv4_with(
+                &seen,
+                "/model/m1/converse",
+                &["content-type", "anthropic-version"]
+            ),
+            Ok(())
         );
     }
 

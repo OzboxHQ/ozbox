@@ -258,7 +258,10 @@ impl KmsProvider {
             .base
             .clone()
             .unwrap_or_else(|| service_base("kms", &region));
-        let bytes = Zeroizing::new(serde_json::to_vec(body).map_err(|_| KEK_UNAVAILABLE)?);
+        // sized up front, so writing the request (which holds the data key's text) never grows the buffer and leaves an
+        // unwiped copy of it behind
+        let mut bytes = Zeroizing::new(Vec::with_capacity(4096));
+        serde_json::to_writer(&mut *bytes, body).map_err(|_| KEK_UNAVAILABLE)?;
         self.client
             .call(&base, &region, "kms", target, bytes)
             .map_err(|f| match f {
@@ -2068,44 +2071,17 @@ mod tests {
         .unwrap()
     }
 
-    fn unix_of_amz_date(d: &str) -> u64 {
-        let dt = jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", d).unwrap();
-        u64::try_from(
-            dt.to_zoned(jiff::tz::TimeZone::UTC)
-                .unwrap()
-                .timestamp()
-                .as_second(),
-        )
-        .unwrap()
-    }
-
-    /// The signature on a request the fake saw, recomputed with the signer that is checked against AWS's test vector.
+    /// What the fake KMS verified for every request it saw: it recomputes each signature from the raw request, by its own
+    /// canonicalisation, and refuses a request whose SignedHeaders leave out `content-type` or `x-amz-target`.
     fn assert_signed_by_the_role(s: &fakes::Seen, f: &Fake, region: &str) {
-        let host = f.kms.trim_start_matches("http://");
-        let mut req = crate::netguard::HttpRequest::new(
-            "POST",
-            format!("https://{host}/"),
-            crate::netguard::Guard::Public,
-        );
-        req.body = Some(s.body.clone().into_bytes());
-        let stamp = s.header("x-amz-date").unwrap();
-        let want = crate::broker_cloud::sign_v4(
-            &req,
-            &crate::broker_cloud::AwsKeys {
-                access_key_id: fakes::ACCESS_KEY,
-                secret_access_key: fakes::SECRET_KEY,
-                session_token: Some(fakes::SESSION_TOKEN),
-            },
-            region,
-            "kms",
-            unix_of_amz_date(stamp),
-        )
-        .unwrap();
-        let auth = &want.iter().find(|(k, _)| k == "Authorization").unwrap().1;
-        assert_eq!(s.header("authorization"), Some(auth.as_str()));
+        assert_eq!(fakes::verify_sigv4(s), Ok(()));
+        assert!(f.sig_errors.lock().unwrap().is_empty());
+        let auth = s.header("authorization").unwrap();
         assert!(auth.contains(&format!("Credential={}/", fakes::ACCESS_KEY)));
         assert!(auth.contains(&format!("/{region}/kms/aws4_request")));
-        assert!(auth.contains("SignedHeaders=host;x-amz-date;x-amz-security-token"));
+        assert!(auth.contains(
+            "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target,"
+        ));
         // the session token travels as the role's temporary credential, and the secret key never
         assert_eq!(s.header("x-amz-security-token"), Some(fakes::SESSION_TOKEN));
         assert!(!s.body.contains(fakes::SECRET_KEY));

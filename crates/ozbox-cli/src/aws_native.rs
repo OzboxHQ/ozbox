@@ -28,6 +28,8 @@ use crate::netguard::{Guard, HttpRequest};
 pub const IMDS_BASE: &str = "http://169.254.169.254";
 /// Credentials are renewed this long before they expire.
 const RENEW_BEFORE: u64 = 60;
+/// How long role credentials are kept when their `Expiration` cannot be read.
+const UNPARSEABLE_EXPIRY: u64 = 5 * 60;
 const IMDS_TIMEOUT: Duration = Duration::from_secs(3);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// No answer from AWS is read past this many bytes.
@@ -183,16 +185,18 @@ impl AwsJson {
         {
             return Err(Failure::Unavailable);
         }
+        // an `Expiration` that does not parse is never "valid forever": it is kept a few minutes and then fetched again
         let expires = c
             .expiration
             .parse::<jiff::Timestamp>()
             .ok()
-            .and_then(|t| u64::try_from(t.as_second()).ok());
+            .and_then(|t| u64::try_from(t.as_second()).ok())
+            .unwrap_or_else(|| now() + UNPARSEABLE_EXPIRY);
         Ok(Creds {
             access_key_id: c.access_key_id,
             secret_access_key: secret,
             session_token: (!token.is_empty()).then_some(token),
-            expires,
+            expires: Some(expires),
         })
     }
 
@@ -233,12 +237,17 @@ impl AwsJson {
         target: &str,
         body: Zeroizing<Vec<u8>>,
     ) -> Result<Zeroizing<Vec<u8>>, Failure> {
-        let host = base
+        // plain http is for the loopback fakes in this module's tests only: a real call is always https
+        #[cfg(test)]
+        let rest = base
             .strip_prefix("https://")
-            .or_else(|| base.strip_prefix("http://"))
-            .ok_or(Failure::Unavailable)?
-            .trim_end_matches('/');
-        let mut req = HttpRequest::new("POST", format!("https://{host}/"), Guard::Public);
+            .or_else(|| base.strip_prefix("http://"));
+        #[cfg(not(test))]
+        let rest = base.strip_prefix("https://");
+        let host = rest.ok_or(Failure::Unavailable)?.trim_end_matches('/');
+        let mut req = HttpRequest::new("POST", format!("https://{host}/"), Guard::Public)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header("X-Amz-Target", target);
         req.body = Some(body.to_vec());
         let signed = self.with_creds(|keys| {
             sign_v4(&req, keys, region, service, now()).map_err(|_| Failure::Unavailable)
@@ -246,17 +255,19 @@ impl AwsJson {
         if let Some(b) = req.body.as_mut() {
             b.zeroize();
         }
-        let signed = signed?;
+        let mut signed = signed?;
         let agent = ureq::AgentBuilder::new()
             .timeout(CALL_TIMEOUT)
             .redirects(0)
             .build();
-        let mut r = agent
-            .post(&format!("{}/", base.trim_end_matches('/')))
-            .set("Content-Type", "application/x-amz-json-1.1")
-            .set("X-Amz-Target", target);
-        for (k, v) in &signed {
+        let mut r = agent.post(&format!("{}/", base.trim_end_matches('/')));
+        // exactly the headers that were signed, plus the signature's own
+        for (k, v) in req.headers.iter().chain(signed.iter()) {
             r = r.set(k, v);
+        }
+        // the session token's copy here is wiped; the transport keeps its own for the length of the call
+        for (_, v) in signed.iter_mut() {
+            v.zeroize();
         }
         match r.send_bytes(&body) {
             Ok(resp) => {
@@ -374,6 +385,82 @@ pub(crate) mod fakes {
         pub expiration: Arc<Mutex<String>>,
         /// Whether the metadata service answers at all.
         pub imds_up: Arc<Mutex<bool>>,
+        /// Why a request's signature was refused, one line per refusal. Empty when every request verified.
+        pub sig_errors: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
+        let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+        ring::hmac::sign(&k, msg).as_ref().to_vec()
+    }
+
+    /// What AWS does with a request: rebuild the canonical request from the bytes that ARRIVED (the headers named in
+    /// `SignedHeaders`, the body as received), derive the key from the secret and compare. Deliberately shares no code with
+    /// the signer, so a signer that signs the wrong headers cannot agree with itself here. Like AWS, it refuses a request
+    /// whose `SignedHeaders` leave out `content-type`, `x-amz-target`, `host`, `x-amz-date` or the session token.
+    pub fn verify_sigv4(s: &Seen) -> Result<(), String> {
+        verify_sigv4_with(s, "/", &["content-type", "x-amz-target"])
+    }
+
+    /// [`verify_sigv4`] for a request to `path` that must have signed `required` as well as host, date and the session token.
+    pub fn verify_sigv4_with(s: &Seen, path: &str, required: &[&str]) -> Result<(), String> {
+        let auth = s.header("authorization").ok_or("no Authorization")?;
+        let rest = auth.strip_prefix("AWS4-HMAC-SHA256 ").ok_or("not SigV4")?;
+        let field = |name: &str| {
+            rest.split(", ")
+                .find_map(|p| p.strip_prefix(name))
+                .map(str::to_string)
+        };
+        let cred = field("Credential=").ok_or("no Credential")?;
+        let signed = field("SignedHeaders=").ok_or("no SignedHeaders")?;
+        let sig = field("Signature=").ok_or("no Signature")?;
+        let mut scope = cred.splitn(2, '/');
+        let (akid, scope) = (scope.next().unwrap_or(""), scope.next().unwrap_or(""));
+        if akid != ACCESS_KEY {
+            return Err("wrong access key".into());
+        }
+        let names: Vec<&str> = signed.split(';').collect();
+        for need in required
+            .iter()
+            .copied()
+            .chain(["host", "x-amz-date", "x-amz-security-token"])
+        {
+            if !names.contains(&need) {
+                return Err(format!("{need} is not in SignedHeaders"));
+            }
+        }
+        let mut canonical_headers = String::new();
+        for n in &names {
+            let v = s.header(n).ok_or(format!("signed header {n} not sent"))?;
+            canonical_headers.push_str(&format!("{n}:{}\n", v.trim()));
+        }
+        let payload = hex(ring::digest::digest(&ring::digest::SHA256, s.body.as_bytes()).as_ref());
+        let canonical = format!(
+            "{}\n{path}\n\n{canonical_headers}\n{signed}\n{payload}",
+            s.method
+        );
+        let stamp = s.header("x-amz-date").ok_or("no x-amz-date")?;
+        let to_sign = format!(
+            "AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}",
+            hex(ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes()).as_ref())
+        );
+        let mut parts = scope.split('/');
+        let mut key = hmac(
+            format!("AWS4{SECRET_KEY}").as_bytes(),
+            parts.next().unwrap_or("").as_bytes(),
+        );
+        for p in parts {
+            key = hmac(&key, p.as_bytes());
+        }
+        if hex(&hmac(&key, to_sign.as_bytes())) == sig {
+            Ok(())
+        } else {
+            Err("signature does not match".into())
+        }
     }
 
     fn seen_of(r: &mut tiny_http::Request) -> Seen {
@@ -411,6 +498,7 @@ pub(crate) mod fakes {
                 mode: Arc::new(Mutex::new(Kms::Works)),
                 expiration: Arc::new(Mutex::new("2099-01-01T00:00:00Z".into())),
                 imds_up: Arc::new(Mutex::new(true)),
+                sig_errors: Arc::default(),
             };
             let imds_srv = Server::http("127.0.0.1:0").unwrap();
             let kms_srv = Server::http("127.0.0.1:0").unwrap();
@@ -444,11 +532,17 @@ pub(crate) mod fakes {
                     let _ = r.respond(resp);
                 }
             });
-            let (seen, mode) = (f.kms_seen.clone(), f.mode.clone());
+            let (seen, mode, sig_errors) =
+                (f.kms_seen.clone(), f.mode.clone(), f.sig_errors.clone());
             std::thread::spawn(move || {
                 for mut r in kms_srv.incoming_requests() {
                     let s = seen_of(&mut r);
                     seen.lock().unwrap().push(s.clone());
+                    if let Err(why) = verify_sigv4(&s) {
+                        sig_errors.lock().unwrap().push(why);
+                        let _ = r.respond(json(403, r#"{"__type":"InvalidSignatureException"}"#));
+                        continue;
+                    }
                     let m = *mode.lock().unwrap();
                     let resp = match m {
                         Kms::Denied => json(
@@ -528,5 +622,64 @@ mod tests {
         );
         assert!(valid_region("eu-west-2") && !valid_region("") && !valid_region("US-EAST-1"));
         assert!(!valid_region("a.b") && !valid_region("a/b"));
+    }
+
+    /// A request as the fake would see it, from `sign_v4` over `req` and then the extra headers a careless client adds.
+    fn seen_signed(req: &HttpRequest, late: &[(&str, &str)]) -> fakes::Seen {
+        let keys = AwsKeys {
+            access_key_id: fakes::ACCESS_KEY,
+            secret_access_key: fakes::SECRET_KEY,
+            session_token: Some(fakes::SESSION_TOKEN),
+        };
+        let signed = sign_v4(req, &keys, "us-east-1", "kms", 1_440_938_160).unwrap();
+        let mut headers: Vec<(String, String)> = req.headers.clone();
+        headers.push(("Host".into(), "kms.example.com".into()));
+        headers.extend(signed);
+        headers.extend(late.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        fakes::Seen {
+            method: "POST".into(),
+            url: "/".into(),
+            headers,
+            body: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn the_fake_kms_refuses_a_request_signed_without_its_content_type_and_target() {
+        // the shape of the bug: signed over host and x-amz-date, then Content-Type and X-Amz-Target added. AWS answers 403.
+        let mut bare = HttpRequest::new("POST", "https://kms.example.com/", Guard::Public);
+        bare.body = Some(b"{}".to_vec());
+        let late = [
+            ("Content-Type", "application/x-amz-json-1.1"),
+            ("X-Amz-Target", "TrentService.Encrypt"),
+        ];
+        let e = fakes::verify_sigv4(&seen_signed(&bare, &late)).unwrap_err();
+        assert!(e.contains("not in SignedHeaders"), "{e}");
+        // and accepts the same request when they are part of what was signed
+        let mut whole = HttpRequest::new("POST", "https://kms.example.com/", Guard::Public)
+            .header("Content-Type", "application/x-amz-json-1.1")
+            .header("X-Amz-Target", "TrentService.Encrypt");
+        whole.body = Some(b"{}".to_vec());
+        assert_eq!(fakes::verify_sigv4(&seen_signed(&whole, &[])), Ok(()));
+        // a tampered value after signing is refused too
+        let mut s = seen_signed(&whole, &[]);
+        for (k, v) in s.headers.iter_mut() {
+            if k == "X-Amz-Target" {
+                *v = "TrentService.ScheduleKeyDeletion".into();
+            }
+        }
+        assert_eq!(
+            fakes::verify_sigv4(&s),
+            Err("signature does not match".into())
+        );
+    }
+
+    #[test]
+    fn an_expiration_that_does_not_parse_is_kept_minutes_not_forever() {
+        let f = fakes::Fake::start();
+        *f.expiration.lock().unwrap() = "not a time".into();
+        let c = AwsJson::with_imds(&f.imds).fetch_creds().unwrap();
+        let e = c.expires.unwrap();
+        assert!(e > now() && e <= now() + UNPARSEABLE_EXPIRY);
     }
 }

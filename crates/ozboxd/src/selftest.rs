@@ -120,36 +120,82 @@ pub const APPROVAL_FLAG_FILES: &[&str] = &[
 /// Where the secrets service writes its state.
 pub const SECRETS_STATE_FILE: &str = "/run/ozbox-secrets/state";
 
+/// What the service writes at the end of its state's first line when it has used up its tries in this round and exits to be
+/// started again (`ozbox-cli`'s `secrets_cli`), against `(trying again in N s)` while it is still retrying.
+const SERVICE_GAVE_UP: &str = "(starting again)";
+
 /// Whether the secrets service can use the key that protects its store, from the state file it writes (the first line is for a
-/// person, `kek=` names the key's kind). Ready passes. Not ready on a KMS key fails, in words a person can act on; not ready
-/// on another kind is `unknown` (the service may only be starting). `None` when there is no state file.
+/// person, `kek=` names the key's kind, `code=` says why not).
+///
+/// * Ready passes.
+/// * Not ready for good (`code=` config, no-escrow or kind-mismatch) fails, and says what to do about THAT: a lost or
+///   mismatched store is mended with `recover-secrets` or `adopt-fleet-key`, never by looking at IAM or the network.
+/// * Not ready on a KMS key because the key service did not answer fails only once the service has used up its tries
+///   (`(starting again)`); while it is still retrying (`(trying again in N s)`) it is `unknown`, as is any other kind of key
+///   that is not ready.
+/// * No state file: `None` on a box with no secrets service (its folder is absent); `unknown` when the folder is there but the
+///   file is not (the service has not written one yet, or could not be read), never skipped.
 fn secrets_key_check(host: &dyn HostSource, path: &Path) -> Option<Check> {
     const NAME: &str = "secrets_key_usable";
-    let text = host.read(&path.to_string_lossy()).ok()?;
+    let text = match host.read(&path.to_string_lossy()) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if !path.parent().is_some_and(Path::exists) {
+                return None;
+            }
+            return Some(unknown(
+                NAME,
+                "the secrets service has not written its state yet (it may still be starting), so whether it can use its key is not known. If this stays, restart ozbox-secrets.service; `ozbox admin <box> -- collect-logs` shows more",
+            ));
+        }
+        Err(_) => {
+            return Some(unknown(
+                NAME,
+                "the secrets service's state could not be read, so whether it can use its key is not known",
+            ))
+        }
+    };
     let first = text.lines().next().unwrap_or("").trim();
-    let kek = text
-        .lines()
-        .find_map(|l| l.strip_prefix("kek="))
-        .map(str::trim)
-        .filter(|k| matches!(*k, "kms" | "tpm2" | "keychain" | "passphrase" | "file"));
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(str::trim)
+    };
+    let kek =
+        field("kek=").filter(|k| matches!(*k, "kms" | "tpm2" | "keychain" | "passphrase" | "file"));
+    let code = field("code=");
     if first == "ready" || first.starts_with("ready:") {
         return Some(pass(NAME));
     }
     // the first line is the service's own fixed sentence; keep it short and on one line
     let why: String = first.chars().take(300).collect();
-    Some(match kek {
-        Some("kms") => fail(
+    Some(match (code, kek) {
+        (Some("no-escrow" | "kind-mismatch"), _) => fail(
+            NAME,
+            "the secrets service's state",
+            format!(
+                "the secrets service cannot open its store, and nothing on this box can: it was sealed by a key that is gone. The service says: {why}. This is not a role or network problem. Put the key back if you still have a copy, then run `ozbox admin <box> -- adopt-fleet-key`; if there is no copy, `ozbox admin <box> -- recover-secrets` sets the store aside for a new one (the old secrets are lost)"
+            ),
+        ),
+        (Some("config"), _) => fail(
+            NAME,
+            "the secrets service's state",
+            format!(
+                "the secrets service is not configured, so no secret can be read or saved. The service says: {why}. Check `/etc/ozbox/secrets.env` names the key, then restart ozbox-secrets.service"
+            ),
+        ),
+        (_, Some("kms")) if first.ends_with(SERVICE_GAVE_UP) => fail(
             NAME,
             "the secrets service's state",
             format!(
                 "this box is set up for the fleet's KMS key and the secrets service cannot use it, so no secret can be read or saved. The service says: {why}. Check that the box's role may use the key (the key service refuses a role whose tag or policy does not match), that the key service is reachable from the box, and the box's `/etc/ozbox/secrets.env` names the right key; then restart ozbox-secrets.service. `ozbox admin <box> -- collect-logs` shows more"
             ),
         ),
-        other => Check {
+        (_, other) => Check {
             name: NAME.into(),
             outcome: Outcome::Unknown {
                 reason: format!(
-                    "the secrets service is not ready (key kind: {}): {why}",
+                    "the secrets service is not ready yet and is still trying (key kind: {}): {why}. If this stays, check the box's role and the key service, and `ozbox admin <box> -- collect-logs`",
                     other.unwrap_or("not said")
                 ),
             },
@@ -1004,6 +1050,22 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_state_file_is_unknown_where_the_service_has_a_folder_and_skipped_where_it_has_none(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let (_, h) = setup(d.path());
+        // the service's runtime folder is there, its state file is not: not verified, never skipped
+        match secrets_key_check(&h, &d.path().join("state")).map(|c| c.outcome) {
+            Some(Outcome::Unknown { reason }) => {
+                assert!(reason.contains("not written"), "{reason}")
+            }
+            o => panic!("{o:?}"),
+        }
+        // no folder: a box without the service
+        assert!(secrets_key_check(&h, &d.path().join("absent/state")).is_none());
+    }
+
+    #[test]
     fn a_kms_box_whose_key_cannot_be_used_fails_the_self_test_in_words_to_act_on() {
         let d = tempfile::tempdir().unwrap();
         let (mut cfg, h) = setup(d.path());
@@ -1019,9 +1081,18 @@ mod tests {
         assert_eq!(by(&h), None);
         h.set(SECRETS_STATE_FILE, "ready\nkek=kms\n");
         assert_eq!(by(&h), Some(Outcome::Pass));
+        // still retrying (the service's own "(trying again in N s)"): unknown, never a fail and never a pass
         h.set(
             SECRETS_STATE_FILE,
-            "not-ready: the key that protects this machine's secrets is not available, so nothing was read or changed (check the key service or the keychain, then try again)\nkek=kms\ncode=transient\n",
+            "not-ready: the key service could not be reached (trying again in 2 s)\nkek=kms\ncode=transient\n",
+        );
+        assert!(
+            matches!(by(&h), Some(Outcome::Unknown { reason }) if reason.contains("still trying"))
+        );
+        // the service has used up its tries: now it fails, in words to act on
+        h.set(
+            SECRETS_STATE_FILE,
+            "not-ready: the key that protects this machine's secrets is not available, so nothing was read or changed (check the key service or the keychain, then try again) (starting again)\nkek=kms\ncode=transient\n",
         );
         match by(&h) {
             Some(Outcome::Fail { reason, .. }) => {
@@ -1036,6 +1107,35 @@ mod tests {
             }
             o => panic!("{o:?}"),
         }
+        // a store that cannot be opened for good points at the repair, not at IAM or the network
+        for code in ["kind-mismatch", "no-escrow"] {
+            h.set(
+                SECRETS_STATE_FILE,
+                &format!(
+                    "not-ready: sealed by a key that is gone\nkek=kms\ncode={code}\nstore=file\n"
+                ),
+            );
+            match by(&h) {
+                Some(Outcome::Fail { reason, .. }) => {
+                    assert!(
+                        reason.contains("recover-secrets") && reason.contains("adopt-fleet-key"),
+                        "{reason}"
+                    );
+                    assert!(
+                        !reason.contains("role may use") && !reason.contains("reachable"),
+                        "{reason}"
+                    );
+                }
+                o => panic!("{o:?}"),
+            }
+        }
+        h.set(
+            SECRETS_STATE_FILE,
+            "not-ready: no key\nkek=kms\ncode=config\n",
+        );
+        assert!(
+            matches!(by(&h), Some(Outcome::Fail { reason, .. }) if reason.contains("secrets.env"))
+        );
         // another kind of key that is not ready may only be starting: unknown, never a pass
         h.set(
             SECRETS_STATE_FILE,

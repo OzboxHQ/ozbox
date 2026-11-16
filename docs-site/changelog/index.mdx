@@ -14,7 +14,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   A box set up for the fleet's KMS key could not start its secrets service. Every start said the key that protects the box's secrets was not available, and no secret could be read or saved. The box image does not carry the AWS command the service used to reach the key.
 
   - **The secrets service reaches the key itself**, with the box's own role. Nothing needs installing on the box, and the key's access rules (the role may use the key only for its own box) are unchanged.
-  - **The box's self-test now says it.** When a box set up for KMS cannot use its key, the self-test fails with `secrets_key_usable`, names the KMS key and lists what to check, instead of the box looking well.
+  - **The box's self-test now says it.** When a box set up for KMS cannot use its key, the self-test fails with `secrets_key_usable` once the service has given up, names the KMS key and lists what to check; while the service is still retrying, or has not written its state yet, it says it could not verify, never a pass. A store that cannot be opened for good is pointed at `recover-secrets` or `adopt-fleet-key`, not at the network.
   - **Nothing is lost on the way.** A store waiting on its key is kept as it was and opens again once the key works. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 
   **How to get it.** `ozbox upgrade <box>` to the release that carries this.
