@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Declarations of a real application">
+  ## A real application's command declaration now saves, and a refused one no longer uses up your approval code
+
+  `ozbox env policy set` refused a realistic declaration (a service, a folder pin for each package a Next.js build traced, a few file pins and a tool, about 7 KB) with "the value is too long", because it was stored like a short key. And when the box refused a save, your single-use approval code was already spent, so you had to make another by hand each time.
+
+  - **Declarations up to 256 KB are kept as they are**, with the same protection as before. A declaration saved by an earlier version still loads, and is replaced by the new form the next time you save. Keys and tokens keep their own, shorter limit.
+  - **A declaration that is too big says so**: it names its size and the limit. The [guide](/use-cases/secure-agent-workspace) lists every limit of a declaration.
+  - **Your computer checks first.** The declaration's rules (including names a command cannot set, such as `NODE_OPTIONS`) and its size are checked before anything is sent, and the box checks them again before it looks at your approval code.
+  - **An approval code is used up only by a save that happened.** If the box cannot save, the same code works for your next try; a save that went through spends it, and it cannot be used twice.
+  - A box running this version stores declarations in the new form, so a declaration saved by it cannot be read by an earlier version of Oz Box.
+</Update>
+
 <Update label="[Release date]" tags={["CLI"]} description="Fleet-key move and self-test">
   ## `adopt-fleet-key` no longer refuses a box only because its tags change, and the self-test stops reporting a one-time service that had nothing to do
 

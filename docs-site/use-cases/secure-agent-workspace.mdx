@@ -186,6 +186,12 @@ What each part does:
   folder once, checks its SHA-256 against the digest you computed, and keeps a read-only, root-owned copy named by that digest. The
   command runs that copy. A file that differs from your digest stops the run and says which (a link on the way counts too); five
   of these in a minute pause the project for five minutes.
+- **How big a declaration may be.** A declaration is kept as a record, not as a secret, so a real application's (one service, a
+  folder pin for each package its build traced, a few file pins and a tool, about 7 KB) saves as it is. The limit is 256 KB of the
+  compact JSON; over it, `env policy set` says the size and the limit and sends nothing. Each part also has a count: 64 commands per
+  declaration, 16 pinned files and 64 pinned folders per command, 32 plain variables per command (`vars`, `pass` and `public`
+  together), 16 tools, 3 browsers, and a plain variable's value of at most 512 characters. Everything the box would refuse is
+  checked on your computer first, so a declaration it would refuse never uses up your approval code.
 - **A command that receives a secret runs in a private view of `/work`.** Inside the command's own mount namespace `/work` is an
   empty, read-only tmpfs, and only what you approved is put back in it, at its own path: the pinned files and folders (root-owned
   copies) and your `writable` folders. So the command sees **no folder above the project and no other project**: a `package.json`

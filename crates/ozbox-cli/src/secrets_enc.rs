@@ -1134,6 +1134,14 @@ impl SecretStore for EncryptedSecrets {
             .map(|_| ())
     }
 
+    /// A record is sealed and integrity-protected exactly like a secret (the same entry, the same key, the same file); only its
+    /// size rule differs ([`crate::secrets::MAX_RECORD_VALUE`]). Text that is not a plain value is kept as base64, as for
+    /// [`Self::set_exact`], and read back as it was.
+    fn set_record(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        crate::secrets::check_record(value)?;
+        self.put(name, value, check_value(value).is_err(), Meta::default())
+    }
+
     fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let Some(f) = self.read()? else {

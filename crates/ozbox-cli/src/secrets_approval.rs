@@ -272,6 +272,43 @@ impl ApprovalGate {
         }
         Ok(st.live.remove(&tag).map(|a| a.via).unwrap_or_default())
     }
+
+    /// [`ApprovalGate::consume`], spent only if `effect` succeeds. The approval is checked, `effect` runs while the state stays locked
+    /// (so nothing else can use the same code in between), and the approval is removed only when `effect` returned `Ok`: a write
+    /// that is refused for any reason leaves the person's code usable, and a write that happened can never be repeated with the same
+    /// code. The effect must be short (one write to the store) and must not take this lock.
+    pub fn consume_then<T>(
+        &self,
+        code: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        now_ms: u64,
+        effect: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, ConsumeThen> {
+        let wrong = "that approval is not valid, has been used, or has expired: ask for a new one in the dashboard";
+        if normalise(code).is_empty() {
+            return Err(ConsumeThen::Approval(wrong.into()));
+        }
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.live.retain(|_, a| a.expires_ms > now_ms);
+        let tag = self.tag(code);
+        let via = match st.live.get(&tag) {
+            Some(a) if a.scope == scope && a.project == project && a.env == env => a.via.clone(),
+            _ => return Err(ConsumeThen::Approval(wrong.into())),
+        };
+        let out = effect(&via).map_err(ConsumeThen::Effect)?;
+        st.live.remove(&tag);
+        Ok(out)
+    }
+}
+
+/// Why [`ApprovalGate::consume_then`] did not finish: the approval was not valid (nothing ran), or it was and the effect failed (the
+/// approval is still unused).
+#[derive(Debug)]
+pub enum ConsumeThen {
+    Approval(String),
+    Effect(String),
 }
 
 /// What a change is allowed by, in words for the audit line.
@@ -425,5 +462,42 @@ mod tests {
         ] {
             assert!(!is_code_shape(bad), "{bad}");
         }
+    }
+
+    /// A code is spent by a write that happened and by nothing else: a refused write leaves it usable, and a write that happened
+    /// cannot be repeated with it.
+    #[test]
+    fn a_code_is_spent_only_when_the_write_it_was_for_succeeded() {
+        let a = ApprovalGate::new();
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .unwrap();
+        // the wrong scope never runs the effect
+        let mut ran = false;
+        assert!(matches!(
+            a.consume_then(&code, "import", "app", "", 1001, |_| {
+                ran = true;
+                Ok(())
+            }),
+            Err(ConsumeThen::Approval(_))
+        ));
+        assert!(!ran);
+        // a write that fails leaves the code usable, any number of times
+        for _ in 0..3 {
+            assert!(matches!(
+                a.consume_then(&code, "policy", "app", "", 1002, |_| Err::<(), _>("full".into())),
+                Err(ConsumeThen::Effect(e)) if e == "full"
+            ));
+        }
+        // a write that happens spends it, and says how it was approved
+        assert_eq!(
+            a.consume_then(&code, "policy", "app", "", 1003, |via| Ok(via.to_string()))
+                .unwrap(),
+            "dashboard-stepup"
+        );
+        assert!(a
+            .consume_then(&code, "policy", "app", "", 1004, |_| Ok(()))
+            .is_err());
+        assert!(a.consume(&code, "policy", "app", "", 1004).is_err());
     }
 }

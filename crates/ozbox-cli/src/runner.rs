@@ -1965,7 +1965,7 @@ impl Backend for SystemBackend {
             .call(json!({"op": "get", "name": name}))
             .map_err(|e| e.0)?;
         match v["value"].as_str() {
-            Some(h) => Policy::from_hex(h).map(Some).map_err(|e| e.0),
+            Some(h) => Policy::from_stored(h).map(Some).map_err(|e| e.0),
             None => Ok(None),
         }
     }

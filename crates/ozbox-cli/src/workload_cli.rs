@@ -544,8 +544,12 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
         } => {
             let text = std::fs::read_to_string(file)
                 .map_err(|_| CliError::Msg(t("secrets.import_unreadable", &[])))?;
+            // Every check that needs no answer from the box runs HERE, before anything is sent: the declaration's shape and its
+            // variable rules (a reserved name such as NODE_ENV), the rules of a command that receives a secret, and the size the
+            // box keeps. The box repeats them, but a request the box would refuse should never reach it: a person's approval code is
+            // made by hand, for one use.
             let p = Policy::parse(&text).map_err(fail)?;
-            let compact = serde_json::to_string(&p).unwrap_or_default();
+            let compact = p.check_before_write().map_err(fail)?;
             match on_box {
                 Some(b) => {
                     // A box from before this format would read the declaration, drop what it does not know and store the
@@ -1673,6 +1677,44 @@ mod tests {
             vec![("A".to_string(), "b=c".to_string())]
         );
         assert!(parse_pass(&["A".into()]).is_err() && parse_pass(&["=x".into()]).is_err());
+    }
+
+    /// A declaration the box would refuse is refused on this computer, before anything is sent: the box's approval code is made by
+    /// hand for one use, so a doomed request must never reach it.
+    #[test]
+    fn a_declaration_the_box_would_refuse_is_refused_here_and_nothing_is_sent() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let set = |text: &str| {
+            let f = d.path().join("p.json");
+            std::fs::write(&f, text).unwrap();
+            let r = RecordingRunner::new();
+            let out = policy(
+                &PolicyCommand::Set {
+                    file: f,
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                &r,
+                true,
+            );
+            (out, r.calls().len())
+        };
+        let too_big = crate::workload_policy::realistic_declaration(64, 64, 16);
+        let reserved_secret = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":["K"],"env":["NODE_OPTIONS"],"envs":["staging"],"argv":["node","t.mjs"],"pin":[{"file":"t.mjs","sha256":"%"}]}}}"#
+            .replace('%', &"a".repeat(64));
+        let reserved_var = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":[],"vars":{"NODE_ENV":"production"}}}}"#;
+        for (what, text) in [
+            ("too large", too_big.as_str()),
+            ("a reserved variable", reserved_var),
+            ("a reserved name for a secret", reserved_secret.as_str()),
+            ("not a declaration", "{"),
+        ] {
+            let (out, sent) = set(text);
+            assert!(out.is_err(), "{what} was accepted");
+            assert_eq!(sent, 0, "{what} reached the box");
+        }
     }
 
     #[test]

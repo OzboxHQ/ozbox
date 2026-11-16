@@ -441,6 +441,98 @@ impl Gates {
         true
     }
 
+    /// The audit record of one gate decision: `allowed`, `refused`, or `kept` (the approval was good, the write it was for was
+    /// refused, and the approval is still usable).
+    #[allow(clippy::too_many_arguments)]
+    fn gate_line(
+        &self,
+        store: &EncryptedSecrets,
+        what: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        via: &str,
+        now_ms: u64,
+    ) {
+        crate::workload::audit(
+            store.path(),
+            &format!("approval {what} scope={scope} project={project} env={env} via={via}"),
+        );
+        let action = match (what, via) {
+            ("refused", _) => "secrets.approval.refused",
+            ("kept", _) => "secrets.approval.kept",
+            (_, crate::secrets_approval::VIA_BOOTSTRAP) => "secrets.approval.bootstrap",
+            _ => "secrets.approval.spent",
+        };
+        let detail = format!("project={project} env={env} via={via}");
+        if what == "refused" {
+            // a wrong code can be sent as often as a process likes: bounded, never a lockout
+            self.audit_event_bounded(store, action, scope, &detail, now_ms);
+        } else {
+            self.audit_event(store, action, scope, &detail);
+        }
+    }
+
+    /// [`Gates::require`] for a write: `effect` runs once the approval is known good and the approval is spent only if it
+    /// succeeds. A write the box refuses (storage, a limit) leaves the person's single-use code usable; a write that happened
+    /// can never be repeated with the same code, because the check, the write and the spend happen under one lock
+    /// ([`crate::secrets_approval::ApprovalGate::consume_then`]). Check everything that does not depend on the approval BEFORE
+    /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
+    /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn require_then<T>(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        now_ms: u64,
+        effect: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        use crate::secrets_approval::ConsumeThen;
+        let line =
+            |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
+        if !store
+            .exists(crate::secrets_approval::ENROLLED_MARKER)
+            .map_err(|e| e.0)?
+        {
+            use crate::secrets_approval::{in_bootstrap, InBootstrap};
+            if in_bootstrap(scope) == InBootstrap::Refused {
+                line("refused", "none why=no-approver");
+                return Err(crate::secrets_approval::bootstrap_refusal(scope));
+            }
+            let out = effect(crate::secrets_approval::VIA_BOOTSTRAP)?;
+            line("allowed", crate::secrets_approval::VIA_BOOTSTRAP);
+            return Ok(out);
+        }
+        if !self.codes_allowed() {
+            line("refused", "none why=codes-off");
+            return Err(CODES_REFUSED.to_string());
+        }
+        match self
+            .approvals
+            .consume_then(approval, scope, project, env, now_ms, |via| {
+                let out = effect(via)?;
+                line("allowed", via);
+                Ok(out)
+            }) {
+            Ok(out) => Ok(out),
+            Err(ConsumeThen::Effect(e)) => {
+                line("kept", "none");
+                Err(e)
+            }
+            Err(ConsumeThen::Approval(e)) => {
+                line("refused", "none");
+                Err(if approval.is_empty() {
+                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                } else {
+                    e
+                })
+            }
+        }
+    }
+
     /// Whether a change to the box's secrets is allowed by a fresh second factor. Returns how it was allowed, for the
     /// audit line. Never a value in what it records.
     pub fn require(
@@ -469,24 +561,8 @@ impl Gates {
         approval: &str,
         now_ms: u64,
     ) -> Result<String, Refusal> {
-        let line = |what: &str, via: &str| {
-            crate::workload::audit(
-                store.path(),
-                &format!("approval {what} scope={scope} project={project} env={env} via={via}"),
-            );
-            let action = match (what, via) {
-                ("refused", _) => "secrets.approval.refused",
-                (_, crate::secrets_approval::VIA_BOOTSTRAP) => "secrets.approval.bootstrap",
-                _ => "secrets.approval.spent",
-            };
-            let detail = format!("project={project} env={env} via={via}");
-            if what == "refused" {
-                // a wrong code can be sent as often as a process likes: bounded, never a lockout
-                self.audit_event_bounded(store, action, scope, &detail, now_ms);
-            } else {
-                self.audit_event(store, action, scope, &detail);
-            }
-        };
+        let line =
+            |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
         if !store
             .exists(crate::secrets_approval::ENROLLED_MARKER)
             .map_err(|e| Refusal::Approval(e.0))?
@@ -960,32 +1036,41 @@ pub fn handle_from(
             }
         }
         (Policy::Unsealed, "policy") => {
-            let parsed = crate::workload_policy::Policy::parse(&r.text);
-            match parsed {
-                Err(e) => Resp::fail(&e.0),
-                Ok(p) => match p
-                    .secret_rules(None)
-                    .map_err(|e| e.0)
-                    .and_then(|()| policy_bootstrap_gate(store, &r.project, &p))
-                    .and_then(|()| gates.require(store, "policy", &r.project, "", &r.approval, now))
-                {
-                    Err(e) => Resp::fail(&e),
-                    Ok(via) => match crate::workload_policy::save(store, &r.project, &p) {
-                        Ok(()) => {
-                            crate::workload::audit(
-                                store.path(),
-                                &format!("policy project={} via={via}", r.project),
-                            );
-                            gates.audit_event(
-                                store,
-                                "secrets.policy.write",
-                                &r.project,
-                                &format!("via={via}"),
-                            );
-                            Resp::ok()
-                        }
-                        Err(e) => Resp::fail(&e.0),
+            // Everything that can be decided without the approval is decided first, so a declaration the box would refuse (its
+            // shape, its secret rules, its size once written out) never touches the person's single-use code. The approval is then
+            // spent together with the write ([`Gates::require_then`]): a write that fails leaves the code usable.
+            match crate::workload_policy::Policy::parse(&r.text)
+                .and_then(|p| p.check_before_write().map(|_| p))
+                .map_err(|e| e.0)
+                .and_then(|p| policy_bootstrap_gate(store, &r.project, &p).map(|()| p))
+            {
+                Err(e) => Resp::fail(&e),
+                Ok(p) => match gates.require_then(
+                    store,
+                    "policy",
+                    &r.project,
+                    "",
+                    &r.approval,
+                    now,
+                    |via| {
+                        crate::workload_policy::save(store, &r.project, &p).map_err(|e| e.0)?;
+                        Ok(via.to_string())
                     },
+                ) {
+                    Err(e) => Resp::fail(&e),
+                    Ok(via) => {
+                        crate::workload::audit(
+                            store.path(),
+                            &format!("policy project={} via={via}", r.project),
+                        );
+                        gates.audit_event(
+                            store,
+                            "secrets.policy.write",
+                            &r.project,
+                            &format!("via={via}"),
+                        );
+                        Resp::ok()
+                    }
                 },
             }
         }
@@ -3010,6 +3095,67 @@ mod tests {
             !ok(&declare(&text("t"), &code)),
             "an approval is spent by use"
         );
+    }
+
+    /// A person's approval code is made by hand for one use. A declaration the box refuses (its shape, its size) never touches it, so
+    /// the same code then saves a valid one; a save that happened spends it.
+    #[test]
+    fn a_declaration_the_box_refuses_leaves_the_approval_unused_and_a_saved_one_spends_it() {
+        use crate::workload_policy::realistic_declaration;
+        let d = tempfile::tempdir().unwrap();
+        let (s, m) = svc_enrolled(d.path());
+        let g = Gates::default();
+        let mint = || {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Supervisor,
+                json!({"op":"approve_mint","scope":"policy","project":"app"}),
+            )["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let declare = |t: &str, approval: &str| {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Unsealed,
+                json!({"op":"policy","project":"app","text":t,"approval":approval}),
+            )
+        };
+        let code = mint();
+        // too big once written out: refused with the size and the limit
+        let big = realistic_declaration(64, 64, 16);
+        let r = declare(&big, &code);
+        assert!(
+            !ok(&r) && r["error"].as_str().unwrap().contains("256 KB"),
+            "{r}"
+        );
+        // a declaration that breaks a rule of its shape, and one that breaks a rule of a secret command
+        let no_pin = secret_decl("x").replace("\"pin\"", "\"pins\"");
+        let bad_var = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":[],"vars":{"NODE_OPTIONS":"--x"}}}}"#;
+        let renamed =
+            r#"{"dir":"/work/projects/app","commands":{"a":{"allow":["K"],"env":["K"]}}}"#;
+        for bad in [no_pin.as_str(), bad_var, "not json", renamed] {
+            assert!(!ok(&declare(bad, &code)), "{bad}");
+        }
+        assert!(crate::workload_policy::load(&*s, "app").unwrap().is_none());
+        // the same code still works for a declaration the box keeps: a realistic one, about 7 KB
+        let good = realistic_declaration(1, 45, 11);
+        assert!(good.len() > 6000);
+        let r = declare(&good, &code);
+        assert!(ok(&r), "{r}");
+        let want = crate::workload_policy::Policy::parse(&good).unwrap();
+        assert_eq!(
+            crate::workload_policy::load(&*s, "app").unwrap().unwrap(),
+            want
+        );
+        // that save spent it
+        let again = declare(&good, &code);
+        assert!(!ok(&again), "{again}");
     }
 
     /// G5 second review, N-C1: on a box with no second factor the agent could declare first (or squat before the owner), then receive
