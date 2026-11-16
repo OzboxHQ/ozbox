@@ -25,9 +25,11 @@ open it depends on where the store's key is. A key in a cloud key service (AWS: 
 `[aws]`, and make the box with them, or move an existing box with `ozbox adopt-fleet-key main`: see 1b) or a TPM is kept, and so is a key escrowed in the box's own vault (box secrets on OpenBao
 with a token). A key kept only in a file on the system disk is lost with that disk: the upgrade is then refused and the plan
 lists what you would have to enter again. Escrow the key first, or run it again with `--accept-new-secrets-store`; the old
-store is then set aside (never deleted) with the key this computer pinned when it made the box, and the web IDE's tunnel token
-is put back from this computer, as are the backup credentials when this computer holds them (if it does not, backups on that
-box stop, and the upgrade says so: see 4b). A box that is not running cannot be asked, so start it first
+store is then set aside (never deleted) with the key this computer pinned when it made the box, and the backup credentials,
+the web IDE's tunnel token and a hosted dashboard (its settings and tunnel token, kept on this computer when you installed it) are put
+back from this computer (if it does not hold the backup credentials, backups on that box stop, and the upgrade says so: see 4b). The report has a line for each. The dashboard's token can need your approval first, because the box's new
+store asks for one: the report then says so and names the one command, `ozbox dashboard restore <box> --approve-with-laptop-key`;
+an upgrade never makes that approval for you (see [run the dashboard on a box](coding-from-anywhere.md)). A box that is not running cannot be asked, so start it first
 (`ozbox resume main`) or accept a new store.
 
 **On AWS, an upgrade that may lose the store's key keeps a copy of the old system disk first.** When the key is a file on the

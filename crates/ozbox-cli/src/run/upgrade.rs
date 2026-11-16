@@ -61,6 +61,10 @@ pub struct Report {
     /// `/work` and come back by themselves, but a service that is not running after the upgrade is set up again from the
     /// passwords and the tunnel token kept in this computer's secret store. Additive.
     pub services: Step,
+    /// The hosted dashboard (`ozbox dashboard install`): its tunnel token and install settings are kept on this computer, and an
+    /// upgrade puts it back from them. `done` when it runs again, `failed` when it needs you (the step says the one command),
+    /// `skipped` when no dashboard is kept for this box. Additive.
+    pub dashboard: Step,
     /// The box memory guard (ADR 0045): swap in compressed RAM, protected scores for the box's own services and soft limits for
     /// terminals, put on the box live, with nothing restarted. Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,7 +136,7 @@ pub struct StoreCheck {
 }
 
 /// What a person must enter again when a box starts a new secrets store.
-const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials and the web IDE's tunnel token when this computer holds them. If it does not hold the backup credentials, backups on the box STOP: the self-test fails and the report gives the command that sends them (`ozbox backup credentials <box>`)";
+const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials, the web IDE's tunnel token and the hosted dashboard (its install settings and tunnel token) when this computer holds them. If it does not hold the backup credentials, backups on the box STOP: the self-test fails and the report gives the command that sends them (`ozbox backup credentials <box>`). The dashboard's token can need your approval first, and the report then says the one command";
 
 /// What the box's ROOT says about its store, read through the cloud's root channel (AWS Systems Manager). `Err` is why it
 /// could not be read. Only an AWS box has one.
@@ -1337,6 +1341,28 @@ pub(super) fn command(
             recover: &|ag, rec| Some(recover_store_step(ag, rec, keys.as_ref(), waits)),
             restore_backups: &restore_backup_credentials,
             restore_services: &restore_managed_services,
+            restore_dashboard: &|_, rec| {
+                if simulated {
+                    return None;
+                }
+                let secrets = crate::serve::secret_store();
+                let verifier = ozbox_core::ReleaseVerifier::new(
+                    std::sync::Arc::new(ozbox_core::SystemRunner),
+                    ozbox_core::DEFAULT_RELEASE_REPO,
+                );
+                restore_dashboard_with(
+                    rec,
+                    &crate::dashboard_cli::Stores {
+                        secrets: secrets.as_ref(),
+                        keys: keys.as_ref(),
+                    },
+                    &ozbox_core::SystemRunner,
+                    &verifier,
+                    &crate::dashboard_cli::VerifierAssets {
+                        verifier: &verifier,
+                    },
+                )
+            },
             memory_guard: &memory_guard_step,
             refresh_ssh: &|previous, after| refresh_ssh_entry(&for_ssh, previous, after),
             review_signers: &|rec| {
@@ -1375,6 +1401,8 @@ pub(super) struct Around<'a> {
     pub recover: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub restore_backups: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub restore_services: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
+    /// After the machine was replaced: put the hosted dashboard back from what this computer kept (`None`: none is kept).
+    pub restore_dashboard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     /// Put the memory guard on the running box, live (`None`: nothing to say, as on a box that cannot be asked).
     pub memory_guard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub refresh_ssh: &'a dyn Fn(Option<&str>, &BoxRecord) -> Step,
@@ -1681,6 +1709,68 @@ pub(crate) fn restore_services_with(
                 &[("box", name), ("what", &failed.join("; "))],
             ),
         )
+    })
+}
+
+/// After the machine was replaced: the hosted dashboard, from what this computer kept when it was installed (the token in the
+/// keychain, the install settings beside it). `None` when none is kept for this box.
+///
+/// It goes through the very install the owner runs by hand, with the same checks, so the box's own gate decides: the web IDE's
+/// token is put back the same way (the box's root helper takes it, and asks for an approval once a second factor is enrolled).
+/// **Nothing here makes an approval.** A box that asks for one gets the outcome `failed` and the one command that makes it with
+/// the owner's pinned key at the owner's asking (`ozbox dashboard restore <box> --approve-with-laptop-key`).
+pub(crate) fn restore_dashboard_with(
+    rec: &BoxRecord,
+    stores: &crate::dashboard_cli::Stores<'_>,
+    runner: &dyn ozbox_core::CommandRunner,
+    verifier: &ozbox_core::ReleaseVerifier,
+    assets: &dyn crate::dashboard_cli::AssetSource,
+) -> Option<Step> {
+    use crate::dashboard_cli::restore_kept;
+    step_for_dashboard(
+        rec.spec.name.as_str(),
+        restore_kept(runner, verifier, assets, stores, &rec.spec.name),
+    )
+}
+
+/// The words for what putting the dashboard back came to; `None` when nothing is kept (there is nothing to say).
+pub(crate) fn step_for_dashboard(
+    me: &str,
+    outcome: crate::dashboard_cli::Restored,
+) -> Option<Step> {
+    use crate::dashboard_cli::Restored;
+    Some(match outcome {
+        Restored::NoneKept => return None,
+        Restored::Absent => Step::new(
+            StepOutcome::Skipped,
+            t("upgrade.dashboard_absent", &[("box", me)]),
+        ),
+        Restored::Running => Step::new(
+            StepOutcome::Done,
+            t("upgrade.dashboard_running", &[("box", me)]),
+        ),
+        Restored::Done { address, token } => {
+            let token = if token {
+                t("upgrade.dashboard_token_part", &[])
+            } else {
+                String::new()
+            };
+            Step::new(
+                StepOutcome::Done,
+                t(
+                    "upgrade.dashboard_restored",
+                    &[("box", me), ("address", &address), ("token", &token)],
+                ),
+            )
+        }
+        Restored::NeedsApproval => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.dashboard_needs_approval", &[("box", me)]),
+        ),
+        Restored::Failed(why) => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.dashboard_failed", &[("box", me), ("why", &why)]),
+        ),
     })
 }
 
@@ -2425,6 +2515,17 @@ pub(super) fn execute(
                 t("upgrade.services_none", &[("box", name.as_str())]),
             )
         });
+    // After the services, so the box's new secrets store and its SSH entry are in place before the dashboard's token goes in.
+    let dashboard = (ready.outcome != StepOutcome::Failed)
+        .then(|| p.get(&name).ok().flatten())
+        .flatten()
+        .and_then(|after| (around.restore_dashboard)(agent, &after))
+        .unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.dashboard_none", &[("box", name.as_str())]),
+            )
+        });
     let memory_guard = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(&name).ok().flatten())
         .flatten()
@@ -2448,6 +2549,7 @@ pub(super) fn execute(
         ssh_entry,
         backup_credentials,
         services,
+        dashboard,
         memory_guard,
         secrets_store: store,
         secrets_recovery,
@@ -2468,6 +2570,7 @@ pub(super) fn execute(
         }
         println!("{}", report.backup_credentials.detail);
         println!("{}", report.services.detail);
+        println!("{}", report.dashboard.detail);
         if let Some(m) = &report.memory_guard {
             println!("{}", m.detail);
         }
@@ -2640,6 +2743,7 @@ mod tests {
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
                 restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
                 review_signers: &|_| None,
@@ -2739,6 +2843,7 @@ mod tests {
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
                 restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
                 review_signers: &|_| None,
@@ -4250,6 +4355,7 @@ mod tests {
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,
                     restore_services: &|_, _| None,
+                    restore_dashboard: &|_, _| None,
                     memory_guard: &|_, _| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         Some(Step::new(StepOutcome::Done, "in place"))
@@ -4288,6 +4394,55 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let (_p, rec) = running_box(dir.path(), "dev")?;
         Ok((dir, rec))
+    }
+
+    /// The report states the dashboard's outcome in one of three ways, and the step that needs the owner names the one command
+    /// and says nothing is approved for them.
+    #[test]
+    fn the_dashboard_line_says_put_back_needs_your_approval_or_not_installed() {
+        use crate::dashboard_cli::Restored;
+        assert!(step_for_dashboard("dev", Restored::NoneKept).is_none());
+        let done = step_for_dashboard(
+            "dev",
+            Restored::Done {
+                address: "https://ozbox.example.com".into(),
+                token: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(done.outcome, StepOutcome::Done);
+        assert!(
+            done.detail
+                .contains("put back on dev at https://ozbox.example.com")
+                && done.detail.contains("keychain"),
+            "{}",
+            done.detail
+        );
+        let needs = step_for_dashboard("dev", Restored::NeedsApproval).unwrap();
+        assert_eq!(needs.outcome, StepOutcome::Failed);
+        assert!(
+            needs
+                .detail
+                .contains("ozbox dashboard restore dev --approve-with-laptop-key")
+                && needs.detail.contains("nothing here makes that approval"),
+            "{}",
+            needs.detail
+        );
+        let absent = step_for_dashboard("dev", Restored::Absent).unwrap();
+        assert_eq!(absent.outcome, StepOutcome::Skipped);
+        assert!(absent.detail.contains("ozbox dashboard forget dev"));
+        assert_eq!(
+            step_for_dashboard("dev", Restored::Running)
+                .unwrap()
+                .outcome,
+            StepOutcome::Done
+        );
+        let failed =
+            step_for_dashboard("dev", Restored::Failed("it did not start".into())).unwrap();
+        assert!(
+            failed.detail.contains("ozbox dashboard restore dev")
+                && failed.detail.contains("it did not start")
+        );
     }
 
     #[test]

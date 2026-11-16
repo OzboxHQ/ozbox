@@ -1363,6 +1363,7 @@ pub enum TunnelCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum DashboardCommand {
     /// Install the dashboard as a service on a box, with its tunnel, running as a user of its own (never the box user). Shows
     /// the plan first.
@@ -1426,6 +1427,33 @@ pub enum DashboardCommand {
         /// this computer's command line or shell history.
         #[arg(long, requires = "token_stdin")]
         approval_stdin: bool,
+        /// Use the tunnel token this computer kept in its keychain when the dashboard was installed with --token-stdin, instead
+        /// of reading one. It is never shown. Without this flag a tokenless install leaves the box's token as it is.
+        #[arg(long, conflicts_with = "token_stdin")]
+        token_from_keychain: bool,
+        /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
+        /// token, as `ozbox secrets approve --scope tunnel-token --token-stdin` would, and send it. Needs a token
+        /// (--token-stdin or --token-from-keychain).
+        #[arg(long, conflicts_with_all = ["approval", "approval_stdin"])]
+        approve_with_laptop_key: bool,
+    },
+    /// Put a dashboard back on a box from what this computer kept when it was installed: the address, the people, the tunnel
+    /// and its token (in the keychain, never in a file). One command after an upgrade that started a new secrets store.
+    Restore {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
+        /// The release to take the program from (as for install). Default: the image release the box is from.
+        #[arg(long)]
+        release: Option<String>,
+        /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
+        /// token (the same step as `ozbox secrets approve --scope tunnel-token --token-stdin`), and send it.
+        #[arg(long)]
+        approve_with_laptop_key: bool,
+    },
+    /// Forget what this computer kept for a box's dashboard (its token and install settings). Nothing on the box changes.
+    Forget {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
     },
 }
 

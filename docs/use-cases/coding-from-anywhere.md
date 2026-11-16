@@ -178,7 +178,7 @@ signed program) is kept only as a fallback. Read the first-time setup code on yo
 (it is handed to the box's secrets service and sent back through the sealed route, so it is not in a log the box user can read; on a
 box made before the ingress account, `ozbox upgrade` it first) and sign in at once. A box made before this release does not know the helper's new check
 and the install stops there, with the dashboard staged but not running: upgrade the box first (an upgrade on Hetzner now replaces the
-server, so it brings the current helper too). Upgrading or pausing that box takes the dashboard down, so do that from another computer.
+server, so it brings the current helper too). Upgrading or pausing that box takes the dashboard down, so do that from another computer; an upgrade then puts it back from what this computer kept (below).
 **Status:** Preview.
 
 **What the dashboard on a box shows.** The box it runs on, read from the box's own agent: its health, sessions, runs,
@@ -207,6 +207,24 @@ answered; the demo says **Demo**, and a box's own dashboard says **This box** be
 replacing a tunnel token, loosening the approval policy (asking about fewer actions, fewer branches or commands, a wider
 list of people who can decide) and raising or removing a spend limit (the fleet's, a person's or a model provider's monthly limit) each need a passkey shown a moment ago; asking for
 more does not. On a box with no sign-in those changes are refused and say why.
+
+**This computer keeps the dashboard for you.** When the install is done, this computer keeps the tunnel token in its keychain
+(the same place it keeps the web IDE's token; never in a file, never shown) and the settings you gave it (address, people,
+tunnel). A box that is upgraded can start a new secrets store, which would lose the token; `ozbox upgrade` now puts the dashboard
+back from those, after the web IDE, and its report has a **Dashboard** line that says one of three things:
+
+- **put back:** the dashboard runs again at its address;
+- **not put back, and the one command to run:** the box's new store asks for your approval of the token first, and an upgrade
+  never makes that approval for you. Run `ozbox dashboard restore <box> --approve-with-laptop-key`: it takes the token this
+  computer kept, approves that one token with the key this computer pinned when the box was made (the same step as `ozbox
+  secrets approve --scope tunnel-token`, tied to that token), and puts the dashboard back. It makes no code for a box whose helper
+  does not tie a code to the token: upgrade that box first;
+- **not installed:** nothing is kept for this box on this computer, or the box has no dashboard to bring back. A dashboard
+  installed before this release is kept the next time you install it with `--token-stdin`.
+
+`ozbox dashboard restore <box>` is also the way to bring the dashboard back by hand. To reuse the kept token in an install
+(different people, say) add `--token-from-keychain` instead of `--token-stdin`; without either flag an install leaves the box's token
+as it is. `ozbox dashboard forget <box>` removes what this computer kept; nothing on the box changes.
 
 **A new tunnel token later.** Run the same command again with the new token. The dashboard's program and sign-in settings
 stay as they are, and so does its public address; only the token changes. What happens next depends on the box:
