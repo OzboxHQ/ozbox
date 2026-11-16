@@ -71,3 +71,34 @@ hand. The operator role may tag a resource only when it is created (`TagOnCreate
 
 **What it costs.** A custom or older module that tags an existing disk needs one administrator command per such box. The
 refusal says which and why.
+
+## Amendment 2 (2026-11-16): one operator policy, with the adopt statements, written on every run and never applied by init
+
+**What happened.** The permissions `ozbox adopt-fleet-key` needs (send the fleet's adopt document to boxes Oz Box manages, read the
+command's result) were in a second policy, the adopt module's `operator_adopt_policy_json`, which init wrote to its own file only
+when it applied the document step. On an account that already had the document, or one made by an earlier release, init wrote
+nothing, said nothing, and the daily operator's policy (`infra/aws/operator-policy.json`) never had the statements. The command
+then failed with "Systems Manager refused", and an administrator pasted the statements in by hand.
+
+**Decision.**
+
+1. **One source.** The adopt statements are part of `infra/aws/operator-policy.json`, scoped as the module scoped them: the fleet's
+   own document, boxes tagged `ozbox-managed=true`, in one account and region. The file is a template with three placeholders
+   (`${account_id}`, `${region}`, `${fleet}`); `ozbox_provider_aws::operator_policy::render` is the only thing that fills them in.
+   The module still outputs its three statements for anyone who wants only that part, and a test holds the two equal.
+2. **Init writes the whole policy on every run**, rendered for the account, region and fleet, to `operator-policy.json` in its working
+   folder, and prints the path whether or not the document step changed anything. It lists the statements older operator policies lack.
+3. **Init never applies it.** The setup identity has no right over the operator's permissions and must not get one: an identity that can
+   rewrite the operator's policy can widen it, and the daily role is normally an Identity Center permission set that only an account
+   administrator edits. So init tells the administrator exactly what to do (replace the daily role's inline policy with the file). The
+   policy is longer than a managed policy may be (6,144 characters), so it is an inline policy; there are no policy versions to rotate.
+4. **Init checks the daily sign-in, read only.** When the config records a daily `profile`, init asks Systems Manager, as that profile, to
+   read a command that does not exist. "Not found" means the sign-in may ask; a refusal means its policy predates the adopt statements,
+   and init prints the three statements and the one step. The check never stops setup and sends nothing. Without a recorded profile it
+   says it could not check.
+5. **A test derives the calls from the source.** Every AWS command named in the program's non-test code must be allowed by the operator
+   policy, or be listed with a reason as the setup identity's. A new call that nobody allowed fails the build.
+
+**What is not covered.** Init does not know what the operator's policy contains; it only learns whether one read works. A policy edited
+by hand to allow that read but not the sends passes the check and fails at the command, which then says what it needs. Nothing widens:
+no `kms:` action and no first tag on an existing disk (amendment 1) reach the operator.

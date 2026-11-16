@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ozbox_core::{Change, CommandRunner, CommandSpec, Output, Risk, Size};
+use ozbox_provider_aws::operator_policy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -269,6 +270,50 @@ pub fn classify_probe(dry: bool, out: &Output) -> (ProbeState, Option<String>) {
             Some(detail)
         },
     )
+}
+
+/// Whether the daily operator sign-in already holds the statements the adopt commands need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorCheck {
+    /// Systems Manager answered "not found" to a read of a command that does not exist: the sign-in may ask.
+    Allowed,
+    /// The sign-in was refused: it was set up before the adopt statements existed.
+    Denied,
+    /// The answer was neither (not signed in, a network error).
+    Unknown,
+    /// No daily profile is recorded in the config, so there is no sign-in to ask.
+    NotChecked,
+}
+
+/// What `ozbox init` leaves for the administrator who applies the operator policy.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OperatorPolicyReport {
+    /// The complete policy, ready to apply (one file; replaces the daily permission set's policy).
+    pub file: String,
+    pub region: String,
+    pub fleet: String,
+    /// The statements an operator policy from before 0.2.0 does not have.
+    pub added_statements: Vec<String>,
+    /// Those statements as rendered for this account, region and fleet.
+    pub adopt_statements: Vec<Value>,
+    pub operator_check: OperatorCheck,
+}
+
+/// The meaning of the one read the operator check makes.
+pub fn classify_operator_check(out: &Output) -> OperatorCheck {
+    let err = out.stderr.as_str();
+    if err.contains("AccessDenied") || err.contains("not authorized") {
+        return OperatorCheck::Denied;
+    }
+    if out.status == Some(0)
+        || err.contains("InvocationDoesNotExist")
+        || err.contains("InvalidCommandId")
+        || err.contains("InvalidInstanceId")
+    {
+        return OperatorCheck::Allowed;
+    }
+    OperatorCheck::Unknown
 }
 
 /// Who grants a probe's permission. The operator policy (`infra/aws/operator-policy.json`) is the daily role; the state
@@ -1781,6 +1826,64 @@ impl Init<'_> {
             context: Vec::new(),
         };
         self.permission_for(target, identity, &[request])
+    }
+
+    /// The complete operator policy for this account, region and fleet, written next to the other plans for an administrator to
+    /// apply, and a read-only check of whether the daily sign-in already has the statements the adopt commands need.
+    ///
+    /// Setup never applies it: the setup identity has no right over the operator's permissions (it could otherwise widen
+    /// them), and the daily role is usually a permission set that only an administrator edits. So the file is written on EVERY
+    /// run, not only when the adopt step changed something, and a daily sign-in that lacks the statements is named.
+    pub fn operator_policy(&self, target: &Target, account: &str) -> Res<OperatorPolicyReport> {
+        let region = target.region_or_err()?.to_string();
+        let fleet = self.fleet_name();
+        let policy = operator_policy::render(account, &region, &fleet)
+            .map_err(|e| Finding::new("operator_policy", e))?;
+        let dir = self.paths.work.join("operator-policy").join(&region);
+        std::fs::create_dir_all(&dir).map_err(|e| Finding::new("command_failed", e.to_string()))?;
+        let file = dir.join("operator-policy.json");
+        let text = serde_json::to_string_pretty(&policy)
+            .map_err(|e| Finding::new("operator_policy", e.to_string()))?;
+        std::fs::write(&file, format!("{text}\n"))
+            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
+        let adopt = operator_policy::statements_named(&policy, &operator_policy::ADOPT_STATEMENTS);
+        let operator_check = match self.recorded("aws").get("profile") {
+            None => OperatorCheck::NotChecked,
+            Some(profile) => {
+                let as_operator = Target {
+                    provider: target.provider.clone(),
+                    profile: Some(profile.clone()),
+                    region: target.region.clone(),
+                };
+                // A read of a command that does not exist: the answer is "not found" when the sign-in may ask and a refusal
+                // when it may not, and nothing is sent or changed either way.
+                match self.exec(&self.aws(
+                    &as_operator,
+                    &[
+                        "ssm",
+                        "get-command-invocation",
+                        "--command-id",
+                        "00000000-0000-0000-0000-000000000000",
+                        "--instance-id",
+                        "i-00000000000000000",
+                    ],
+                )) {
+                    Ok(out) => classify_operator_check(&out),
+                    Err(_) => OperatorCheck::Unknown,
+                }
+            }
+        };
+        Ok(OperatorPolicyReport {
+            file: file.display().to_string(),
+            region,
+            fleet,
+            added_statements: operator_policy::ADOPT_STATEMENTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            adopt_statements: adopt,
+            operator_check,
+        })
     }
 
     /// The fleet's name as recorded in the config (`ozbox` until one is chosen), the same way the plans read it.
@@ -4385,6 +4488,86 @@ mod tests {
         assert!(std::fs::read_to_string(f)
             .unwrap()
             .contains("SendOnlyTheAdoptDocument"));
+    }
+
+    const NO_COMMAND: &str = "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation:";
+    const COMMAND_DENIED: &str = "An error occurred (AccessDeniedException) when calling the GetCommandInvocation operation: User is not authorized to perform: ssm:GetCommandInvocation";
+
+    #[test]
+    fn the_operator_policy_is_written_whole_on_every_run_and_names_the_adopt_statements() {
+        let e = Env::new();
+        let init = e.init();
+        // no daily profile recorded: nothing is asked of AWS, and the file is still written
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert_eq!(r.operator_check, OperatorCheck::NotChecked);
+        assert!(e.runner.calls().is_empty());
+        let text = std::fs::read_to_string(&r.file).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        for sid in operator_policy::ADOPT_STATEMENTS {
+            assert!(text.contains(sid), "{sid} is in the written policy");
+        }
+        // every older statement is still there, so applying the file drops nothing the operator had
+        assert!(text.contains("TagOnCreateOnly") && text.contains("AttachTheFleetKeyPolicy"));
+        assert!(text.contains("document/ozbox-adopt-ozbox"));
+        for left in ["${account_id}", "${region}", "${fleet}"] {
+            assert!(!text.contains(left), "{left} left unfilled");
+        }
+        assert_eq!(r.adopt_statements.len(), 3);
+        // a second run writes the same file: nothing is appended or duplicated
+        let again = init.operator_policy(&target(), "123456789012").unwrap();
+        let doc2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&again.file).unwrap()).unwrap();
+        assert_eq!(doc, doc2);
+        let sids: Vec<&str> = doc["Statement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["Sid"].as_str().unwrap())
+            .collect();
+        let unique: std::collections::BTreeSet<_> = sids.iter().collect();
+        assert_eq!(sids.len(), unique.len());
+        // a fleet in the config is the fleet in the policy
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nfleet = \"acme\"\n",
+        )
+        .unwrap();
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert!(std::fs::read_to_string(&r.file)
+            .unwrap()
+            .contains("document/ozbox-adopt-acme"));
+    }
+
+    #[test]
+    fn the_daily_sign_in_is_asked_with_a_read_of_a_command_that_does_not_exist() {
+        for (reply, want) in [
+            (out(254, "", NO_COMMAND), OperatorCheck::Allowed),
+            (out(254, "", COMMAND_DENIED), OperatorCheck::Denied),
+            (
+                out(255, "", "Error loading SSO Token"),
+                OperatorCheck::Unknown,
+            ),
+        ] {
+            let e = Env::new();
+            std::fs::write(
+                e.dir.path().join("config.toml"),
+                "[aws]\nprofile = \"ozbox-operator\"\n",
+            )
+            .unwrap();
+            e.runner.reply(reply);
+            let r = e.init().operator_policy(&target(), "123456789012").unwrap();
+            assert_eq!(r.operator_check, want);
+            let calls = e.runner.calls();
+            assert_eq!(calls.len(), 1);
+            let args = calls[0].args.join(" ");
+            // the operator's own profile, a read, and nothing sent
+            assert!(
+                args.contains("ssm get-command-invocation")
+                    && args.contains("--profile ozbox-operator"),
+                "{args}"
+            );
+            assert!(!args.contains("send-command"));
+        }
     }
 
     #[test]

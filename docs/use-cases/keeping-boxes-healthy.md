@@ -79,8 +79,7 @@ back through KMS before anything is replaced), then stops the service, swaps the
 down for that swap and its start-up: a few seconds, plus a little for every secret it unlocks when it starts (a store with 100
 secrets can take a minute or two to be ready; `ozbox env run` and the dashboard's secret reads wait or retry meanwhile). The box
 keeps its key file until you commit: this command reads `main`'s state **as root through AWS Systems Manager**, with a document
-of your fleet's own that runs only fixed `ozbox` programs (the `aws-adopt-command` module makes it, a step of `ozbox init`; attach the policy it outputs as
-`operator_adopt_policy_json` to whoever runs this command, and to nobody else; the box user's SSH answer is never trusted for this),
+of your fleet's own that runs only fixed `ozbox` programs (the `aws-adopt-command` module makes it, a step of `ozbox init`; the statements it needs are in the operator policy `ozbox init` writes to `operator-policy.json` on every run: an administrator applies that file to whoever runs this command, and to nobody else; the box user's SSH answer is never trusted for this),
 and only when the service, the store and the copy on `/work` are all on KMS does it write the label that makes `ozbox upgrade`
 keep the store. Then `main` destroys its key file and the copy beside the store, and the command waits for `main` to say so.
 What the store holds is kept.

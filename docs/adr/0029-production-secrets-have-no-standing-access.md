@@ -1610,14 +1610,14 @@ names the permission.
 **Systems Manager is a root path, and who holds it.** Oz Box otherwise holds that the box has no root
 shell, and root actions go through gated, signed admin commands. Permission to send `AWS-RunShellScript` is exactly a root
 shell on every box, logged only in SSM history, so it is never asked for. The operator permission is the module's output
-`operator_adopt_policy_json` (`ozbox init` writes it to a file and prints the path; an administrator attaches it): `ssm:SendCommand` on **that one document** (resource ARN
+`operator_adopt_policy_json` (the same statements are part of the daily operator policy, which `ozbox init` writes whole on every run and prints the path of; an administrator applies it, ADR 0053 amendment 2): `ssm:SendCommand` on **that one document** (resource ARN
 `arn:aws:ssm:<region>:<account>:document/ozbox-adopt-<fleet>`) and on instances tagged `ozbox-managed=true`, plus
 `ssm:GetCommandInvocation` (it takes no resource restriction in IAM, so it reads the result of **any** Run Command in the
 account, a deploy by another team included; attach the policy only to a principal used for nothing else until Oz Box has an account
 of its own). `ssm:CancelCommand` is not in it: the delivery timeout already stops a command that would
 start late, and a running move or cancel must never be killed part way. Whoever holds it can read a box's secrets-store facts and record or take away a cancel
 on it, and can have it put its pre-move copy back (`cancel-from-copy`, which loses what was saved since); they cannot run
-anything else. Attach it to the role or user that runs `ozbox adopt-fleet-key`, and to nobody else. The box's role already
+anything else. Apply it to the role or user that runs `ozbox adopt-fleet-key`, and to nobody else. The box's role already
 carries the account's `ozbox-box-session-manager` policy (it covers the Run Command agent as well as Session Manager). A computer with no fleet configured has no document to send and says so.
 
 The SSH answer is kept for courtesy checks only (is this a box that can do its part?), never to decide. **`ozbox upgrade`'s
