@@ -47,6 +47,17 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
   `0.2.0`) and is told "a newer release is available". The beta is retired only after the final release has shipped and 14 days
   have passed. A partial publish (some images public, then a failure) is recovered by running the workflow with `republish`,
   which publishes the existing release's manifest again after verifying it.
+- **Amendment: the public-image quota (owner's decision, 2026-11-16).** AWS allows only 5 public images per region by default.
+  The `0.2.0-beta.2` run made its amd64 image public (the fifth) and was refused for arm64, leaving the release half public,
+  because retirement ran after publishing and keeps three versions (six images), so it could never fit. Now, before publishing,
+  `scripts/image/make-room.sh` makes the **oldest** public Oz Box versions **private** (launch permission removed; the image and
+  snapshots stay) until the release fits, whole versions with every architecture together, never the version being published
+  or an image that is not ours, and the quota is read from Service Quotas (5 if it cannot be read). The preflight fails a release
+  that can never fit before anything is built, and `publish.sh` is all or nothing: it skips images that are already public, and
+  rolls back the ones it made public in its own run if any other is refused. **Private (for the quota) and retired (deleted) are
+  different:** old versions are made private by this process and never deleted by it; retirement stays a separate, explicit
+  step (`retire_old`). A client only ever picks a public image, so a version made private is no longer offered, and a box that
+  already runs it keeps running (as with retirement).
 - **Which release.** Among the verified candidates, the newest one **this program can use** (same major and minor version,
   ADR 0036) comes first, then the newest. The day after a minor release the newest image is the wrong one for the older program,
   and the three retained versions are what let it keep working until it is upgraded. At most six candidates are checked.

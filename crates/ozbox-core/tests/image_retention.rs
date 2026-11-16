@@ -491,8 +491,8 @@ fn publish(dir: &Path, manifest: &Value, extra: &[&str]) -> (bool, String, Strin
     std::fs::write(
         &aws,
         format!(
-            "#!/bin/sh\necho \"$@\" >>'{}'\ncase \"$2\" in\n  describe-images) case \"$*\" in *Public*) echo True ;; *) echo snap-0000000a ;; esac ;;\nesac\n",
-            log.display()
+            "#!/bin/sh\necho \"$@\" >>'{log}'\ncase \"$2\" in\n  describe-images) case \"$*\" in *Public*) i=$(echo \"$*\" | sed 's/.*--image-ids \\([^ ]*\\).*/\\1/'); if grep -q -- \"--image-id $i --launch-permission Add\" '{log}'; then echo True; else echo False; fi ;; *) echo snap-0000000a ;; esac ;;\nesac\n",
+            log = log.display()
         ),
     )
     .unwrap();
@@ -538,7 +538,10 @@ fn publishing_lists_by_default_and_with_apply_tags_then_makes_each_manifest_imag
         ok && out.contains("dry run") && out.contains("eu-west-1 ami-0000000d"),
         "{out}"
     );
-    assert!(calls.is_empty(), "a dry run calls nothing: {calls}");
+    assert!(
+        !calls.contains("create-tags") && !calls.contains("modify-image-attribute"),
+        "a dry run changes nothing: {calls}"
+    );
 
     let d = tempfile::tempdir().unwrap();
     let (ok, _, err, calls) = publish(d.path(), &manifest(), &["--apply"]);

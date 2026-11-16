@@ -107,6 +107,37 @@ happen. Windows is not supported natively: use WSL.
 A release that went wrong is not edited: delete the draft or pre-release if it is not yet public, otherwise publish a fixed
 `vX.Y.(Z+1)`.
 
+## Machine images: the public-image quota, "private" and "retired"
+
+AWS lets an account share only a few images **publicly** per region (5 by default; the real limit is read from Service
+Quotas, "Public AMIs"). A release has one image per architecture, so every release uses two of them in each region and the
+older versions must stop being public before a new one can be. The image workflow does this by itself, in this order:
+
+1. **Before anything is built**, the preflight checks that public sharing is allowed in every region and that the quota can
+   hold this release at all (the public images this process can never change, plus the release's images, must fit).
+2. **Make room** (`scripts/image/make-room.sh`, a dry run unless `--apply`). Per region it counts the account's public images
+   and makes the **oldest** public Oz Box versions **private** (the launch permission is removed), whole versions with every
+   architecture together, only as many as the release needs. It never touches the version being published, a newer one, or an
+   image that is not ours (owner, tags and name are all checked). Every region is planned first: if one cannot fit, nothing is
+   changed anywhere and the step fails naming the quota and what to do (make other public images private, or ask AWS Support to
+   raise "Public AMIs" in that region).
+3. **Publish** (`scripts/image/publish.sh`). All or nothing: an image that is already public is skipped, and if any other image
+   cannot be made public, the ones this run made public are made private again and the step fails.
+4. **Retire** (optional, see below).
+
+**Private is not retired.** A private version is still in the account: its image and snapshots are kept, nothing is deleted,
+and the version can be made public again by hand. *Retired* means deleted: `scripts/image/retention.sh` deregisters the image and
+deletes its snapshots. It is a separate step with its own switch (`retire_old`, true on a tag push; a manual run can ask for the
+list only) and keeps the last three versions and the newest of each of the last three minors, whatever their visibility. The two
+cannot conflict: making room runs first, retirement runs after a release that already fits, and retirement does not look at
+visibility.
+
+**Publishing a half-public release again** (a run that failed part way before this was fixed, or by hand) is a manual run with
+`republish`: the quota step runs first, counts only the images still to be made public, and the already-public ones are skipped.
+
+The build role needs `servicequotas:ListServiceQuotas` to read the real limit; without it the scripts say so and assume 5.
+It also needs `ec2:ModifyImageAttribute`, which it already has, to remove a launch permission.
+
 ## The benchmark gate (a release step, not CI)
 
 Each image release is measured on the benchmark shape, 4 vCPU / 8 GiB / 40 GB (size XS), on a fresh box in our own account.
