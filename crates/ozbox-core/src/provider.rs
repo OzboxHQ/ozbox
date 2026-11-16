@@ -42,6 +42,11 @@ pub struct ImageInfo {
     /// manifest could not be verified or the provider has none. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<crate::UpgradeRecord>,
+    /// Newer candidates that `latest` looked at and passed over, one line each (the image, its release and why: its
+    /// signed release could not be found, did not list the image, or is a pre-release this program does not use). Empty
+    /// when the newest candidate was the one chosen. Additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 fn signature_applies() -> bool {
@@ -138,7 +143,9 @@ pub trait Provider: Send + Sync {
 
     fn get(&self, name: &BoxName) -> Result<Option<BoxRecord>>;
 
-    /// The newest Oz image this account can see (read-only). `Unsupported` where the provider cannot tell.
+    /// The newest Oz image this account can see **whose signed release verifies** (read-only): newer candidates whose release
+    /// cannot be found or does not list them are passed over, and named in [`ImageInfo::skipped`]. When none verifies, the
+    /// newest is returned unverified, with every candidate's reason in `skipped`, for the caller to refuse. `Unsupported` where the provider cannot tell.
     fn latest_image(&self, _region: Option<&str>) -> Result<ImageInfo> {
         Err(Error::Unsupported {
             provider: self.id().to_string(),

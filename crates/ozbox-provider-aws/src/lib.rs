@@ -561,6 +561,21 @@ struct Snapshots {
     snapshots: Vec<Snapshot>,
 }
 
+/// One line saying why `latest` passed over a candidate: `<image> (release <r>): <why>`.
+fn skip_line(info: &ImageInfo, why: &str) -> String {
+    format!(
+        "{} (release {}): {why}",
+        info.id,
+        info.release.as_deref().unwrap_or("unknown")
+    )
+}
+
+/// The skip lines other than the one about `id` itself: an image that is returned is not also "passed over".
+fn without_own_line(lines: Vec<String>, id: &str) -> Vec<String> {
+    let own = format!("{id} ");
+    lines.into_iter().filter(|l| !l.starts_with(&own)).collect()
+}
+
 fn tag<'a>(tags: &'a [Tag], key: &str) -> Option<&'a str> {
     tags.iter().find(|t| t.key == key).map(|t| t.value.as_str())
 }
@@ -1168,6 +1183,7 @@ impl AwsBackend {
                 signature_applicable: true,
                 first_boot_sha256: facts.first_boot.filter(|_| verdict.verified),
                 upgrade: facts.upgrade.filter(|_| verdict.verified),
+                skipped: Vec::new(),
             },
             definitive,
         )
@@ -1243,6 +1259,7 @@ impl AwsBackend {
             .public_lookup_deadline
             .unwrap_or(public_images::LOOKUP_DEADLINE);
         let mut first = None;
+        let mut skipped: Vec<String> = Vec::new();
         for img in order {
             if first.is_some() && started.elapsed() >= deadline {
                 break;
@@ -1250,6 +1267,10 @@ impl AwsBackend {
             let (info, definitive) = self.inspect_full(img, region);
             if info.signature_verified {
                 if self.is_prerelease_for_stable_program(&program, img, region) {
+                    skipped.push(skip_line(
+                        &info,
+                        "a pre-release, which a stable program does not use",
+                    ));
                     // kept only as an UNVERIFIED answer: a stable program is never handed a pre-release as a verified image
                     first.get_or_insert(ImageInfo {
                         signature_verified: false,
@@ -1262,15 +1283,26 @@ impl AwsBackend {
                     });
                     continue;
                 }
-                return info;
+                return ImageInfo { skipped, ..info };
             }
             if !definitive {
-                return first.unwrap_or(info);
+                // The check itself failed: no older image is tried in its place.
+                let mut answer = first.unwrap_or(info);
+                answer.skipped = without_own_line(skipped, &answer.id);
+                return answer;
             }
+            skipped.push(skip_line(
+                &info,
+                info.signature_detail
+                    .as_deref()
+                    .unwrap_or("its signed release could not be verified"),
+            ));
             first.get_or_insert(info);
         }
         // `images` is not empty, so there is a first (every verified pre-release in it was stored unverified)
-        first.unwrap_or_else(|| self.inspect(&images[0], region))
+        let mut answer = first.unwrap_or_else(|| self.inspect(&images[0], region));
+        answer.skipped = without_own_line(skipped, &answer.id);
+        answer
     }
 
     /// A stable program never boots a pre-release by default. Decided from the verified manifest's own field.
@@ -1336,6 +1368,7 @@ impl AwsBackend {
             .cfg
             .public_lookup_deadline
             .unwrap_or(public_images::LOOKUP_DEADLINE);
+        let mut skipped: Vec<String> = Vec::new();
         for r in &ranked {
             if started.elapsed() >= deadline {
                 return Err(Error::Config(format!(
@@ -1353,8 +1386,8 @@ impl AwsBackend {
                 .verify_image(&r.release, region, &img.image_id);
             if verdict.verified && facts.prerelease == Some(true) && !self.program().contains('-') {
                 // A stable program is not handed a pre-release: the signed manifest says it is one (the name is not asked).
-                refused.push(format!(
-                    "{} (release {}) is a pre-release, which a stable program does not use",
+                skipped.push(format!(
+                    "{} (release {}): a pre-release, which a stable program does not use",
                     img.image_id, r.release
                 ));
                 continue;
@@ -1369,6 +1402,7 @@ impl AwsBackend {
                     signature_applicable: true,
                     first_boot_sha256: facts.first_boot,
                     upgrade: facts.upgrade,
+                    skipped,
                 });
             }
             if !verdict.definitive {
@@ -1379,13 +1413,14 @@ impl AwsBackend {
                     img.image_id, r.release, verdict.detail
                 )));
             }
-            refused.push(format!(
-                "{} (release {}) is not vouched for by the signed manifest: {}",
+            skipped.push(format!(
+                "{} (release {}): {}",
                 img.image_id, r.release, verdict.detail
             ));
         }
+        refused.extend(skipped);
         Err(Error::Config(format!(
-            "no public Oz image in {where_} could be verified, so none was used. {} Nothing was created. Pass --image with an image id you trust, or fix the signature check (it needs curl and cosign).",
+            "no public Oz image in {where_} could be verified, so none was used. {} Nothing was created. Pass --image with the id of an image you trust (an upgrade also needs --allow-unverified-image for one that is not a signed release), or fix the signature check (it needs curl and cosign).",
             refused
                 .iter()
                 .map(|r| format!("Refused: {r}."))
@@ -4714,7 +4749,7 @@ Usage: ozbox secrets <COMMAND>",
                 .ok_or("must refuse")?
                 .to_string();
             assert!(
-                err.contains("ami-0pub") && err.contains("nothing was created"),
+                err.contains("ami-0pub") && err.to_lowercase().contains("nothing was created"),
                 "{err}"
             );
             assert!(err.contains("--image"), "{err}");
@@ -4772,7 +4807,8 @@ Usage: ozbox secrets <COMMAND>",
     ) -> TestResult {
         let aws = Arc::new(FakeAws::new());
         public_only(&aws);
-        // two releases this program can use: the newer has no manifest to fetch (a failed download says nothing about it)
+        // two releases this program can use, both published; but the network is down, so no download can be made. That says
+        // nothing about the newer image, so the older one is not tried in its place (unlike a release that is not published).
         let newer = "ozbox-0.2.0-beta.1-20261201000000".to_string();
         aws.add_public_image(
             "ami-0new",
@@ -4787,12 +4823,20 @@ Usage: ozbox secrets <COMMAND>",
             "2026-11-01T00:00:00.000Z",
         );
         aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-0new"],
+            None,
+        );
+        aws.publish_release_with(
             "0.2.0-beta.0",
             "0.2.0-beta.0",
             "us-east-1",
             &["ami-0old"],
             None,
         );
+        aws.make_releases_unreachable();
         let err = provider_program(&aws, "0.2.0-beta.0")
             .latest_image(None)
             .err()
@@ -4832,6 +4876,257 @@ Usage: ozbox secrets <COMMAND>",
         assert!(
             err.contains("for release 0.1.9, not 0.2.0")
                 && err.contains("no older image was tried"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    // `latest` is the newest image whose SIGNED release verifies: an image of a release that was never published (its
+    // publish step failed), or that was made private after a newer release, is passed over for the previous signed one.
+
+    #[test]
+    fn latest_passes_over_a_newest_image_whose_release_was_never_published_and_names_it(
+    ) -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        public_only(&aws);
+        let publisher = public_images::PUBLISHER_ACCOUNT_ID;
+        aws.add_public_image(
+            "ami-beta2",
+            publisher,
+            "ozbox-0.2.0-beta.2-20261116000000",
+            "2026-11-16T00:00:00.000Z",
+        );
+        aws.add_public_image(
+            "ami-beta1",
+            publisher,
+            "ozbox-0.2.0-beta.1-20261110000000",
+            "2026-11-10T00:00:00.000Z",
+        );
+        // beta.2's release was never published (no manifest: a 404); beta.1's is, and lists its image
+        aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-beta1"],
+            Some(true),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").latest_image(None)?;
+        assert_eq!(got.id, "ami-beta1");
+        assert!(got.signature_verified);
+        assert_eq!(got.skipped.len(), 1, "{:?}", got.skipped);
+        assert!(
+            got.skipped[0].contains("ami-beta2") && got.skipped[0].contains("0.2.0-beta.2"),
+            "{:?}",
+            got.skipped
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn latest_picks_the_newest_when_it_verifies_and_skips_nothing() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        public_only(&aws);
+        let publisher = public_images::PUBLISHER_ACCOUNT_ID;
+        aws.add_public_image(
+            "ami-beta2",
+            publisher,
+            "ozbox-0.2.0-beta.2-20261116000000",
+            "2026-11-16T00:00:00.000Z",
+        );
+        aws.add_public_image(
+            "ami-beta1",
+            publisher,
+            "ozbox-0.2.0-beta.1-20261110000000",
+            "2026-11-10T00:00:00.000Z",
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.2",
+            "0.2.0-beta.2",
+            "us-east-1",
+            &["ami-beta2"],
+            Some(true),
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-beta1"],
+            Some(true),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").latest_image(None)?;
+        assert_eq!(got.id, "ami-beta2");
+        assert!(got.skipped.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn latest_passes_over_a_signed_release_that_does_not_list_the_image_for_this_region(
+    ) -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        public_only(&aws);
+        let publisher = public_images::PUBLISHER_ACCOUNT_ID;
+        aws.add_public_image(
+            "ami-new",
+            publisher,
+            "ozbox-0.2.0-beta.2-20261116000000",
+            "2026-11-16T00:00:00.000Z",
+        );
+        aws.add_public_image(
+            "ami-old",
+            publisher,
+            "ozbox-0.2.0-beta.1-20261110000000",
+            "2026-11-10T00:00:00.000Z",
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.2",
+            "0.2.0-beta.2",
+            "us-east-1",
+            &["ami-other"],
+            Some(true),
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-old"],
+            Some(true),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").latest_image(None)?;
+        assert_eq!(got.id, "ami-old");
+        assert!(
+            got.skipped[0].contains("ami-new")
+                && got.skipped[0].contains("not in the signed manifest")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn latest_in_the_callers_own_account_walks_back_to_the_newest_signed_release() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        aws.remove_images();
+        aws.add_image(
+            "ami-0new",
+            "x86_64",
+            "available",
+            "2026-11-16T00:00:00.000Z",
+            Some("0.2.0-beta.2"),
+        );
+        aws.add_image(
+            "ami-0old",
+            "x86_64",
+            "available",
+            "2026-11-10T00:00:00.000Z",
+            Some("0.2.0-beta.1"),
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-0old"],
+            Some(true),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").latest_image(None)?;
+        assert_eq!(got.id, "ami-0old");
+        assert!(got.signature_verified);
+        assert!(
+            got.skipped.len() == 1 && got.skipped[0].contains("ami-0new"),
+            "{:?}",
+            got.skipped
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn latest_with_no_verifiable_release_returns_the_newest_unverified_with_every_reason(
+    ) -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        aws.remove_images();
+        aws.add_image(
+            "ami-0new",
+            "x86_64",
+            "available",
+            "2026-11-16T00:00:00.000Z",
+            Some("0.2.0-beta.2"),
+        );
+        aws.add_image(
+            "ami-0old",
+            "x86_64",
+            "available",
+            "2026-11-10T00:00:00.000Z",
+            Some("0.2.0-beta.1"),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").latest_image(None)?;
+        assert_eq!(got.id, "ami-0new");
+        assert!(!got.signature_verified);
+        // the newest is the one returned (unverified); the other candidate is the one named as passed over
+        assert!(
+            got.skipped.len() == 1 && got.skipped[0].contains("ami-0old"),
+            "{:?}",
+            got.skipped
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_image_named_explicitly_is_inspected_as_before_and_never_walked_back() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        aws.remove_images();
+        aws.add_image(
+            "ami-0new",
+            "x86_64",
+            "available",
+            "2026-11-16T00:00:00.000Z",
+            Some("0.2.0-beta.2"),
+        );
+        aws.add_image(
+            "ami-0old",
+            "x86_64",
+            "available",
+            "2026-11-10T00:00:00.000Z",
+            Some("0.2.0-beta.1"),
+        );
+        aws.publish_release_with(
+            "0.2.0-beta.1",
+            "0.2.0-beta.1",
+            "us-east-1",
+            &["ami-0old"],
+            Some(true),
+        );
+        let got = provider_program(&aws, "0.2.0-beta.2").image_info("ami-0new", None)?;
+        assert_eq!(got.id, "ami-0new");
+        assert!(!got.signature_verified && got.skipped.is_empty(), "{got:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn latest_in_the_public_path_with_no_verifiable_release_refuses_naming_the_ways_forward(
+    ) -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        public_only(&aws);
+        let publisher = public_images::PUBLISHER_ACCOUNT_ID;
+        aws.add_public_image(
+            "ami-beta2",
+            publisher,
+            "ozbox-0.2.0-beta.2-20261116000000",
+            "2026-11-16T00:00:00.000Z",
+        );
+        aws.add_public_image(
+            "ami-beta1",
+            publisher,
+            "ozbox-0.2.0-beta.1-20261110000000",
+            "2026-11-10T00:00:00.000Z",
+        );
+        let err = provider_program(&aws, "0.2.0-beta.2")
+            .latest_image(None)
+            .err()
+            .ok_or("must refuse")?
+            .to_string();
+        assert!(
+            err.contains("ami-beta2") && err.contains("ami-beta1"),
+            "{err}"
+        );
+        assert!(
+            err.contains("--image") && err.contains("--allow-unverified-image"),
             "{err}"
         );
         Ok(())

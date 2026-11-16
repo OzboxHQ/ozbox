@@ -1325,6 +1325,9 @@ fn default_create_image(
                 &[("id", &info.id), ("release", release)]
             )
         );
+        for note in upgrade::latest_skipped_notes(Some(&info)) {
+            eprintln!("{note}");
+        }
         if let Some(note) = info
             .release
             .as_deref()
@@ -2163,6 +2166,7 @@ mod create_image_tests {
             signature_applicable: applicable,
             first_boot_sha256: None,
             upgrade: None,
+            skipped: Vec::new(),
         }
     }
 

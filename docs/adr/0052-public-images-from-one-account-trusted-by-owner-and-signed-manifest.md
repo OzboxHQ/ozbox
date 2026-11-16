@@ -65,7 +65,14 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
   and signs the manifest (which records every image id per region and architecture, and refuses to be written if any region is
   missing), and only then makes the images public and retires the old ones. A failure before signing leaves nothing public that a
   client could mistake for a release. The client also walks the publisher's images newest first and takes the first the manifest
-  vouches for, so a build that was made public and then failed to sign cannot take `latest` down.
+  vouches for, so a build that was made public and then failed to sign cannot take `latest` down. The same walk applies to an
+  image in the caller's own account. An image is **passed over** when its release has no published, signed manifest (a 404:
+  the publish step never ran), when the signed manifest does not list the image for the region, or when the manifest says it is
+  a pre-release and this program is stable (a pre-release program may take one). Each one passed over is named in the upgrade
+  plan (and on `create`), one line each. A check that could not be made (a download or signature failure, a manifest for another
+  release) is **not** a reason to pass over: it says nothing about the image, so the lookup stops rather than fall back to an
+  older one on a bad day. At most six candidates are checked, within the lookup deadline. When none verifies, `ozbox upgrade`
+  refuses and names `--image` and `--allow-unverified-image`; `ozbox create` refuses and names `--image`.
 - **Unencrypted images, encrypted boxes.** An encrypted snapshot can never be public, so the public release is built with
   `aws_encrypt_boot = false`. Every box made from it has an encrypted root volume (the box module encrypts it at launch), and a
   fork that does not publish gets encrypted private images (the default).

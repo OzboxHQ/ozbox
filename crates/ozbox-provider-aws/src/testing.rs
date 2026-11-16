@@ -89,6 +89,8 @@ struct Account {
     releases: BTreeMap<String, String>,
     /// Make `cosign verify-blob` refuse the signature.
     cosign_refuses: bool,
+    /// Release downloads fail as a network error (curl exits non-zero), whatever is published.
+    releases_unreachable: bool,
     /// Report system disks (and so their snapshots) as not encrypted.
     plain_system_disks: bool,
     /// Calls that fail, by what they are: `create-snapshot`, or `describe-snapshots` read by id (the look at a snapshot just made).
@@ -538,6 +540,11 @@ impl FakeAws {
             a.releases
                 .insert(serve_as.to_string(), manifest.to_string());
         });
+    }
+
+    /// Every release download fails like a dropped connection (curl exits non-zero).
+    pub fn make_releases_unreachable(&self) {
+        self.with(|a| a.releases_unreachable = true);
     }
 
     /// `cosign verify-blob` refuses what it is given.
@@ -1122,6 +1129,9 @@ impl FakeAws {
         let Some((_, rest)) = url.split_once("/releases/download/image-v") else {
             return fail("unsimulated url");
         };
+        if a.releases_unreachable {
+            return fail("could not connect");
+        }
         let Some((version, file)) = rest.split_once('/') else {
             return fail("unsimulated url");
         };
