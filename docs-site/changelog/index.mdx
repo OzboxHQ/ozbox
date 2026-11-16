@@ -21,6 +21,13 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Not yet.** The network and the off-box issuer are not adopted: on an account whose network was made another way, decline that step and use the one you have. **Not yet run against a real AWS account.**
 </Update>
 
+<Update label="[Release date]" tags={["CLI"]} description="Fleet-key move and self-test">
+  ## `adopt-fleet-key` no longer refuses a box only because its tags change, and the self-test stops reporting a one-time service that had nothing to do
+
+  - **`ozbox adopt-fleet-key`** moves a box to your fleet's key by adding tags to its resources. It refused when the only difference on the box's system disk was those tags. Tags on the system disk may now change; a change to its size, type, encryption, key, speed or delete-on-termination is still refused, and nothing is changed when it refuses.
+  - **The self-test** no longer reports "enabled but not running" for a one-time service that finished, or that did not start because its start condition was not met (for example, resuming a session after an upgrade that left nothing to resume). A service that should keep running and does not, a service whose last run failed, and a user manager that never started its services are still reported.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 

@@ -380,12 +380,82 @@ fn in_place_attribute_changes(
                 for key in changed_tag_keys(c, k, addr, fleet) {
                     out.push(format!("{addr}.{k}[{key}]"));
                 }
+            } else if IN_PLACE_TAGGED_BLOCKS.contains(&k) {
+                // a disk block of the machine: its labels may change, nothing else about it
+                if nested_block_changed_beyond_tags(c, k) {
+                    out.push(format!("{addr}.{k}"));
+                }
             } else if !allowed(k) {
                 out.push(format!("{addr}.{k}"));
             }
         }
     }
     out
+}
+
+/// The machine's disk blocks. Each carries its own `tags` (labels on the volume AWS creates), which ride on the module's tag
+/// change like every other taggable resource's. A volume is not a principal and no policy here reads its tags, so unlike the
+/// machine's and the role's own tags they are not compared key by key; every OTHER attribute of the block (size, type, key,
+/// encryption, iops, throughput, delete-on-termination) must be identical, or the change is refused as before.
+const IN_PLACE_TAGGED_BLOCKS: &[&str] = &["root_block_device", "ebs_block_device"];
+
+/// Whether an update to a nested disk block (`attr`, a list of one object per disk) changes anything but its tag maps: a different
+/// number of disks, a disk whose other attributes differ, or one whose other attributes are only known after apply. Anything
+/// that is not the expected shape counts as changed. Pure.
+fn nested_block_changed_beyond_tags(change: &serde_json::Value, attr: &str) -> bool {
+    use serde_json::Value;
+    let strip = |v: &Value| -> Option<Vec<serde_json::Map<String, Value>>> {
+        match v {
+            Value::Null => Some(Vec::new()),
+            Value::Array(items) => items
+                .iter()
+                .map(|i| {
+                    i.as_object().map(|o| {
+                        let mut o = o.clone();
+                        for t in IN_PLACE_TAGS {
+                            o.remove(*t);
+                        }
+                        o
+                    })
+                })
+                .collect(),
+            _ => None,
+        }
+    };
+    let side = |which: &str| {
+        strip(
+            change
+                .pointer(&format!("/change/{which}/{attr}"))
+                .unwrap_or(&Value::Null),
+        )
+    };
+    let (Some(before), Some(after)) = (side("before"), side("after")) else {
+        return true;
+    };
+    if before != after {
+        return true;
+    }
+    match change.pointer(&format!("/change/after_unknown/{attr}")) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Array(items)) => items.iter().any(|i| match i {
+            Value::Object(o) => o
+                .iter()
+                .any(|(k, u)| !IN_PLACE_TAGS.contains(&k.as_str()) && unknown_is_set(u)),
+            other => unknown_is_set(other),
+        }),
+        Some(_) => true,
+    }
+}
+
+/// Whether an `after_unknown` entry says "known after apply" for anything inside it.
+fn unknown_is_set(u: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match u {
+        Value::Bool(b) => *b,
+        Value::Object(o) => o.values().any(unknown_is_set),
+        Value::Array(a) => a.iter().any(unknown_is_set),
+        _ => false,
+    }
 }
 
 /// Whether the plan's new value for the fleet tag (`None`: taken away) is one the change may make, on this resource. Only a role
@@ -2333,6 +2403,82 @@ mod tests {
         // a plan whose change cannot be read is never "nothing changed"
         let unreadable = r#"{"resource_changes":[{"address":"aws_instance.box","change":{"actions":["update"]}}]}"#;
         assert!(check_inplace_plan(unreadable, &create, &[], &[]).is_err());
+    }
+
+    /// A tag-only change to the machine's system disk is what an adoption does to every taggable resource. Any other change to
+    /// the disk is still refused.
+    #[test]
+    fn a_system_disk_update_is_allowed_only_when_nothing_but_its_tags_change() {
+        let disk = |before: &str, after: &str, unknown: &str| {
+            format!(
+                r#"{{"resource_changes":[{{"address":"aws_instance.box","change":{{"actions":["update"],
+                "before":{{"instance_type":"m7i.xlarge","root_block_device":[{before}]}},
+                "after":{{"instance_type":"m7i.xlarge","root_block_device":[{after}]}},
+                "after_unknown":{{"root_block_device":[{unknown}]}}}}}}]}}"#
+            )
+        };
+        let base = |extra: &str, tags: &str| {
+            format!(
+                r#"{{"delete_on_termination":true,"encrypted":true,"iops":3000,"kms_key_id":"key-1","throughput":125,"volume_size":100,"volume_type":"gp3"{extra},"tags":{tags},"tags_all":{tags}}}"#
+            )
+        };
+        let labels =
+            r#"{"ozbox-managed":"true","ozbox-box":"dev","ozbox-role":"root","ozbox-fleet":"f"}"#;
+        // the real shape: tags {} to the box's tags, everything else identical, tags_all computed
+        let ok = disk(&base("", "{}"), &base("", labels), r#"{"tags_all":{}}"#);
+        assert!(check_inplace_plan(&ok, &[], &[], &[]).is_ok(), "{ok}");
+        let ok = disk(&base("", "{}"), &base("", labels), r#"{"tags_all":true}"#);
+        assert!(check_inplace_plan(&ok, &[], &[], &[]).is_ok(), "{ok}");
+        // any other attribute of the disk
+        for (key, was, now) in [
+            ("volume_size", "100", "200"),
+            ("kms_key_id", r#""key-1""#, r#""key-2""#),
+            ("encrypted", "true", "false"),
+            ("iops", "3000", "16000"),
+            ("throughput", "125", "250"),
+            ("delete_on_termination", "true", "false"),
+            ("volume_type", r#""gp3""#, r#""io2""#),
+        ] {
+            let swap = |tags: &str, v: &str| {
+                base("", tags).replace(&format!(r#""{key}":{}"#, was), &format!(r#""{key}":{v}"#))
+            };
+            let plan = disk(&swap("{}", was), &swap(labels, now), "{}");
+            match check_inplace_plan(&plan, &[], &[], &[]) {
+                Err(Error::Provider(m)) => {
+                    assert!(
+                        m.contains("aws_instance.box.root_block_device"),
+                        "{key}: {m}"
+                    )
+                }
+                other => panic!("{key}: expected a refusal, got {other:?}"),
+            }
+        }
+        // tags together with a size change are still refused, so are an attribute only known after apply and a second disk
+        let mixed = disk(
+            &base("", "{}"),
+            &base("", labels).replace(r#""volume_size":100"#, r#""volume_size":200"#),
+            "{}",
+        );
+        assert!(check_inplace_plan(&mixed, &[], &[], &[]).is_err());
+        let unknown = disk(&base("", "{}"), &base("", labels), r#"{"volume_id":true}"#);
+        assert!(check_inplace_plan(&unknown, &[], &[], &[]).is_err());
+        let two = disk(
+            &base("", "{}"),
+            &format!("{},{}", base("", labels), base("", labels)),
+            "{}",
+        );
+        assert!(check_inplace_plan(&two, &[], &[], &[]).is_err());
+        // the same holds for extra data disks declared on the machine
+        let ebs = |before: &str, after: &str| {
+            format!(
+                r#"{{"resource_changes":[{{"address":"aws_instance.box","change":{{"actions":["update"],
+                "before":{{"ebs_block_device":[{before}]}},"after":{{"ebs_block_device":[{after}]}}}}}}]}}"#
+            )
+        };
+        let (a, b) = (base("", "{}"), base("", labels));
+        assert!(check_inplace_plan(&ebs(&a, &b), &[], &[], &[]).is_ok());
+        let bigger = b.replace(r#""volume_size":100"#, r#""volume_size":200"#);
+        assert!(check_inplace_plan(&ebs(&a, &bigger), &[], &[], &[]).is_err());
     }
 
     #[test]
