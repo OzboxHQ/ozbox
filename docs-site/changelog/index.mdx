@@ -8,7 +8,7 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
+<Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 
   - **Boxes on AWS reach their secrets without the `aws` command.** The secrets service and a box's own secrets load straight from AWS with the box's role, and the self-test says when they cannot.
@@ -20,7 +20,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** Install with `sh install.sh --version 0.2.0-beta.3`, then `ozbox upgrade <box>`.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes with secrets of their own">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="AWS boxes with secrets of their own">
   ## A box's own secrets now load from Parameter Store
 
   A box set up with secrets of its own in AWS Parameter Store could not load them: the loader used the AWS command, which the box image does not carry, and the only sign was a failed unit. The secrets never appeared.
@@ -32,7 +32,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes set up for the fleet's KMS key">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="AWS boxes set up for the fleet's KMS key">
   ## A box set up for the fleet's KMS key now starts its secrets service
 
   A box set up for the fleet's KMS key could not start its secrets service. Every start said the key that protects the box's secrets was not available, and no secret could be read or saved. The box image does not carry the AWS command the service used to reach the key.
@@ -44,7 +44,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** `ozbox upgrade <box>` to the release that carries this.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Secrets service outages">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="Secrets service outages">
   ## An upgrade plan no longer says "kept" about a store it has not checked, and you can still commit while the secrets service is down
 
   **The upgrade plan tells the truth about the secrets store.** For a box on your fleet's KMS key, `ozbox upgrade` used to say the store was kept because the box's record named the key, even when the box's secrets service could not open its store. The plan now asks the box itself and says one of four things: kept, will be lost, already cannot be opened (and how to start a new store, as part of the upgrade with `--accept-new-secrets-store` or beforehand with `ozbox admin <box> -- recover-secrets`), or unknown because the box could not be asked. It only says a store cannot be opened when no copy of its key is held anywhere: if your computer's keychain or the box's vault holds one, it says the store is not lost, and that `--accept-new-secrets-store` sets the old store aside (never deleted) and starts a new one, so the old one can be reopened later from the held key. Unknown is never "kept". See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
@@ -52,7 +52,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **Commits are not blocked while the secrets service is down.** Before, every commit on the box was stopped until the service came back, so work could not be saved. Now a commit is still checked for private keys, provider keys, signed tokens, passwords in addresses and `.env` files. A clean commit goes through, with a note that stored secrets were not compared; nothing is lost. A commit that looks like it holds a key is stopped, and the message says so. A push is held until the service is back, because that is what leaves the box, and the message says how to bring the service back. See the [CLI reference](/cli-reference).
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Backups through an upgrade">
+<Update label="November 16, 2026" tags={["CLI", "Dashboard"]} description="Backups through an upgrade">
   ## An upgrade no longer leaves a box quietly un-backed-up
 
   An upgrade replaces a box's system disk. If the box backed up `/work` to a repository, nothing told you afterwards whether those backups still worked, and settings you had made on the box itself could be gone.
@@ -68,7 +68,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Real-world exclude settings are kept.** Patterns such as `*.tmp` and `node_modules` in the `[backup]` section no longer stop the box from remembering that backups were set up.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Hosted dashboard">
+<Update label="November 16, 2026" tags={["CLI", "Dashboard"]} description="Hosted dashboard">
   ## An upgrade puts your hosted dashboard back, with its tunnel token
 
   Installing the dashboard on a box with a tunnel token used to leave that token only on the box. An upgrade that started a new secrets store lost it, and the dashboard stayed down until you had the token again.
@@ -82,7 +82,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   See [run the dashboard on a box](/use-cases/coding-from-anywhere) and [keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 </Update>
 
-<Update label="[Release date]" tags={["Dashboard"]} description="Dashboard stays responsive">
+<Update label="November 16, 2026" tags={["Dashboard"]} description="Dashboard stays responsive">
   ## The dashboard no longer freezes while your cloud or a box is slow
 
   With a real fleet, the Fleet and Boxes pages could stop with "This page could not ask the server what it is". Listing your boxes in the cloud and asking each one how it is doing can take a long time, and while it did, every other request waited behind it.
@@ -94,7 +94,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A page that could not reach the server brings itself back** as soon as the server answers, without pressing Try again.
 </Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS operator permissions">
+<Update label="November 16, 2026" tags={["CLI", "Security"]} description="AWS operator permissions">
   ## `ozbox init` now gives you the complete operator policy, including what `ozbox adopt-fleet-key` needs
 
   Setting up again on an account made by an earlier release did not add the permissions `ozbox adopt-fleet-key` needs, so the command failed with "Systems Manager refused" until an administrator pasted them in by hand.
@@ -104,7 +104,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **`ozbox init` still does not change the operator role itself.** The setup sign-in has no right over the operator's permissions, so a person who could rewrite them could not widen them. Nothing is widened: still no `kms:` action, and still no first tag on an existing disk. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 </Update>
 
-<Update label="[Release date]" tags={["CLI"]} description="ozbox upgrade and create">
+<Update label="November 16, 2026" tags={["CLI"]} description="ozbox upgrade and create">
   ## `latest` now means the newest image whose signed release verifies
 
   `ozbox upgrade <box>` (and `ozbox create` with no image) used to take the newest Oz image it could see. When that image's release had not been published or signed yet, the upgrade was then refused, even though the release before it was fine.
