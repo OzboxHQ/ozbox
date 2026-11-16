@@ -37,7 +37,7 @@ tempfile = "3"
 ring = "0.17"
 zeroize = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [target.'cfg(unix)'.dependencies]
