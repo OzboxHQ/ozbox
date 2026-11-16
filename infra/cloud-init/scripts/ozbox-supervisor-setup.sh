@@ -6,7 +6,12 @@
 #   (no argument)   make the user and its private home, move the dashboard to a system unit that runs as it
 #   --expect-auth SHA256
 #                   the same, refusing unless the staged sign-in settings are exactly the ones the person's computer sent
-#                   (`ozbox dashboard install` passes their sha256): the box user could have changed the file in between
+#                   (`ozbox dashboard install` passes their sha256): the box user could have changed the file in between.
+#                   Those settings are installed when this is the first move, or when the dashboard's own folder has no
+#                   sign-in settings (a box whose system disk was replaced by an upgrade keeps that folder on /work). A
+#                   dashboard that already HAS settings keeps them: the sha proves the file is what the person's computer
+#                   sent, not that the person asked, and this request comes from the box user, so replacing settings that
+#                   decide who may approve needs an approval this step cannot take.
 #   --socket-only   make the supervisor user and the dashboard's socket to the box daemon (below) and stop: nothing about the
 #                   dashboard itself is touched (a box that upgraded its program or daemon runs this)
 #   --finish        after the dashboard has been seen working as the supervisor, destroy the old copies the box user could read
@@ -17,7 +22,8 @@
 # user can open. The old user unit is disabled and left (renamed) so a rollback is `--rollback`.
 #
 # Environment (for tests): OZBOX_ETC, OZBOX_WORK, OZBOX_SYSTEMD_DIR, OZBOX_SYSTEMCTL, OZBOX_USERADD, OZBOX_USERMOD,
-# OZBOX_PASSWD, OZBOX_ID, OZBOX_CHOWN, OZBOX_RUNUSER, OZBOX_SHRED, OZBOX_BIN, OZBOX_GPASSWD, OZBOX_DAEMON_BIN.
+# OZBOX_PASSWD, OZBOX_ID, OZBOX_CHOWN, OZBOX_RUNUSER, OZBOX_SHRED, OZBOX_BIN, OZBOX_GPASSWD, OZBOX_DAEMON_BIN, OZBOX_JOURNALCTL,
+# OZBOX_DASHBOARD_PROBE (a program that is given the port and succeeds when the dashboard answers), OZBOX_DASHBOARD_PROBE_S.
 set -euo pipefail
 
 etc="${OZBOX_ETC:-/etc}"
@@ -38,6 +44,9 @@ shred_bin="${OZBOX_SHRED:-shred}"
 gpasswd_bin="${OZBOX_GPASSWD:-gpasswd}"
 ozbox_bin="${OZBOX_BIN:-/usr/local/bin/ozbox}"
 daemon_bin="${OZBOX_DAEMON_BIN:-/usr/local/bin/ozboxd}"
+journalctl_bin="${OZBOX_JOURNALCTL:-journalctl}"
+# After a start the dashboard must answer on its port within this many seconds (the tests make it short)
+probe_s="${OZBOX_DASHBOARD_PROBE_S:-20}"
 
 sup=ozbox-supervisor
 home="$work/ozbox-supervisor"
@@ -78,6 +87,12 @@ ensure_user() {
   mkdir -p "$home/state" "$home/home"
   "$chown_bin" "$sup:$sup" "$home" "$home/state" "$home/home"
   chmod 0700 "$home" "$home/state" "$home/home"
+  # A kept folder whose owner id differs from this user's (a user made again after an upgrade) would leave the dashboard unable
+  # to read its own settings: the files are put back under it every time, not only at the first move.
+  local kf
+  for kf in config.toml auth.toml dashboard.env; do
+    [ ! -f "$home/$kf" ] || [ -L "$home/$kf" ] || "$chown_bin" "$sup:$sup" "$home/$kf"
+  done
   drop_box_user_ssh_config
   ensure_scoped_socket
 }
@@ -203,7 +218,12 @@ install_agent_settings() {
     printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
   else
     printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
-    say "the Oz Box tools were not added to every coding agent's settings (see above; run as the box user: ozbox agent-mcp install)"
+    if printf '%s' "$out" | grep -q 'cannot set user id'; then
+      # the root helper's service is not allowed to switch to the box user: it says nothing about the dashboard or its settings
+      say "the root helper could not switch to the box user, so the Oz Box tools were not added to the coding agents' settings; the dashboard is not affected. Run as the box user: ozbox agent-mcp install"
+    else
+      say "the Oz Box tools were not added to every coding agent's settings (see above; run as the box user: ozbox agent-mcp install)"
+    fi
   fi
 }
 
@@ -397,6 +417,62 @@ copy_state() {
   : >"$home/.migrated"
 }
 
+# Is there a sign-in settings file in the dashboard's own folder that the dashboard could read? Without one it exits at once
+# ("the sign-in settings file could not be read") and systemd restarts it for ever.
+settings_usable() {
+  [ -f "$home/auth.toml" ] && [ ! -L "$home/auth.toml" ] && [ -s "$home/auth.toml" ]
+}
+
+sha_of() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# The staged sign-in settings, proven to be the ones the person's computer sent. The bytes that are hashed are the bytes that
+# are kept: the file is copied FIRST (into the dashboard's folder, which only root and the supervisor can open) and the COPY
+# is hashed, so the box user swapping the staged file after the check changes nothing. Prints nothing; on success the verified
+# copy is $home/auth.toml.verified.
+stage_verified_auth() {
+  rm -f "$home/auth.toml.verified"
+  if [ -L "$old_home/auth.toml" ] || [ ! -f "$old_home/auth.toml" ] \
+    || ! install -m 0600 "$old_home/auth.toml" "$home/auth.toml.verified" 2>/dev/null \
+    || [ "$(sha_of "$home/auth.toml.verified")" != "$expect_auth" ]; then
+    rm -f "$home/auth.toml.verified"
+    say "the staged sign-in settings are not the ones your computer sent (a process on the box changed them, or none were staged); nothing was moved or started"
+    exit 1
+  fi
+}
+
+# The last error the dashboard printed, for a person to read: printable characters only, anything shaped like a credential
+# blanked, and short.
+last_dashboard_error() {
+  "$journalctl_bin" -u ozbox-dashboard.service -n 30 --no-pager -o cat 2>/dev/null \
+    | grep -i 'error' | tail -n 1 | tr -cd '[:print:]' \
+    | sed -E -e 's#([Bb]earer[[:space:]]+)[A-Za-z0-9_.~+/=-]+#\1[redacted]#g' \
+      -e 's#(([Tt]oken|[Ss]ecret|[Pp]assword|[Kk]ey)[=: ]+)[A-Za-z0-9_.+/=-]+#\1[redacted]#g' \
+    | cut -c1-200 || true
+}
+
+port_answers() {
+  if [ -n "${OZBOX_DASHBOARD_PROBE:-}" ]; then "$OZBOX_DASHBOARD_PROBE" "$1"; else (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; fi
+}
+
+# Started AND staying up AND answering: a simple unit is "active" the instant it forks, so a dashboard that exits straight
+# away (its settings missing) looked started. Returns non-zero with the reason in $why.
+why=""
+dashboard_up() {
+  local n=0 t=0
+  until "$systemctl_bin" is-active --quiet ozbox-dashboard.service; do
+    n=$((n + 1))
+    if [ "$n" -ge 15 ]; then why="it did not start"; return 1; fi
+    sleep 1
+  done
+  if ! dashboard_steady; then why="it started and stopped again"; return 1; fi
+  until port_answers "$1"; do
+    t=$((t + 1))
+    if [ "$t" -gt "$probe_s" ]; then why="it is running but nothing answers on port $1"; return 1; fi
+    sleep 1
+  done
+  return 0
+}
+
 case "${1:-}" in
   --finish)
     [ -e "$home/.migrated" ] || { say "nothing was moved yet; run without --finish first"; exit 1; }
@@ -437,7 +513,9 @@ ensure_user
 [ ! -x "$ozbox_bin" ] || "$ozbox_bin" browser-setup >/dev/null 2>&1 || true
 
 args=""
-if [ -f "$old_unit" ] && [ ! -L "$old_unit" ]; then
+# A unit the box user staged is read only for a first move (nothing has been moved yet) or on the person's own install (the
+# request carries their sha256). After that a staged unit with no sha is not obeyed: it would repoint the dashboard.
+if [ -f "$old_unit" ] && [ ! -L "$old_unit" ] && { [ ! -e "$home/.migrated" ] || [ -n "${expect_auth:-}" ]; }; then
   args="$(parse_old "$old_unit")" || { say "the old dashboard unit has arguments this step does not carry over; nothing was moved"; exit 1; }
 elif [ -f "$new_unit" ]; then
   args="$(parse_new)"
@@ -449,16 +527,39 @@ fi
 read -r port host kind <<<"$args"
 
 # The sign-in settings decide who may approve on this box, and the box user could have rewritten the staged file after the
-# person's computer wrote it: compare it with what that computer sent before anything is copied.
-if [ -n "${expect_auth:-}" ] && [ ! -e "$home/.migrated" ]; then
-  have="$(sha256sum "$old_home/auth.toml" 2>/dev/null | cut -d' ' -f1 || true)"
-  if [ -L "$old_home/auth.toml" ] || [ "$have" != "$expect_auth" ]; then
-    say "the staged sign-in settings are not the ones your computer sent (a process on the box changed them); nothing was moved or started"
-    exit 1
+# person's computer wrote it: it is proven to be what that computer sent before anything is installed.
+if [ -n "${expect_auth:-}" ]; then stage_verified_auth; fi
+
+if [ ! -e "$home/.migrated" ]; then
+  # the one-time move of the box user's old dashboard (its settings, state and own configuration)
+  copy_state
+  if [ -n "${expect_auth:-}" ]; then
+    # what was proven is what is kept, even if the staged file changed while the rest was copied
+    install -m 0600 "$home/auth.toml.verified" "$home/auth.toml"
+    "$chown_bin" "$sup:$sup" "$home/auth.toml"
+  fi
+elif [ -n "${expect_auth:-}" ]; then
+  # Moved long ago (an upgrade replaces the system disk and keeps /work, so this folder, and its marker, outlive the unit).
+  # The move is over; this is the person's own install. Their verified settings go in when the dashboard has none to read; a
+  # dashboard that already has some keeps them (see the head of this file).
+  if ! settings_usable; then
+    install -m 0600 "$home/auth.toml.verified" "$home/auth.toml"
+    "$chown_bin" "$sup:$sup" "$home/auth.toml"
+    say "the sign-in settings you sent were installed"
+  elif [ "$(sha_of "$home/auth.toml")" != "$expect_auth" ]; then
+    rm -f "$home/auth.toml.verified"
+    say "the dashboard on this box already has sign-in settings of its own, so the ones sent from your computer were not applied (replacing them needs your approval, which this step cannot take yet); nothing was changed"
+    exit 0
+  elif [ -f "$new_unit" ] && [ -n "$(parse_new)" ]; then
+    # the same settings again: the address stays the one the dashboard has, never one a staged unit names
+    read -r port host kind <<<"$(parse_new)"
   fi
 fi
-
-copy_state
+rm -f "$home/auth.toml.verified"
+if ! settings_usable; then
+  say "the dashboard's sign-in settings are missing ($home/auth.toml), so it was not started (it would fail and restart for ever). Run 'ozbox dashboard install' again from your computer"
+  exit 1
+fi
 want="$(write_unit "$port" "$host" "$kind")"
 if [ ! -f "$new_unit" ] || [ "$(cat "$new_unit")" != "$want" ]; then
   printf '%s\n' "$want" >"$new_unit"
@@ -478,22 +579,19 @@ if [ -f "$old_unit" ]; then
 fi
 "$systemctl_bin" enable ozbox-dashboard.service >/dev/null 2>&1 || true
 "$systemctl_bin" restart ozbox-dashboard.service || true
-n=0
-until "$systemctl_bin" is-active --quiet ozbox-dashboard.service; do
-  n=$((n + 1))
-  if [ "$n" -ge 15 ]; then
-    "$systemctl_bin" disable --now ozbox-dashboard.service 2>/dev/null || true
-    [ -e "$old_unit.migrated" ] && mv -f "$old_unit.migrated" "$old_unit"
-    user_systemctl daemon-reload || true
-    if [ "$was_running" = yes ]; then
-      say "the dashboard did not start as the supervisor; putting the old one back"
-      user_systemctl enable --now ozbox-dashboard.service || true
-    else
-      say "the dashboard did not start as the supervisor; it was not started as the box user either (nothing runs)"
-    fi
-    exit 1
+if ! dashboard_up "$port"; then
+  reason="$(last_dashboard_error)"
+  "$systemctl_bin" disable --now ozbox-dashboard.service 2>/dev/null || true
+  [ ! -e "$old_unit.migrated" ] || mv -f "$old_unit.migrated" "$old_unit"
+  user_systemctl daemon-reload || true
+  say "the dashboard did not run as the supervisor: $why${reason:+ ($reason)}"
+  if [ "$was_running" = yes ]; then
+    say "putting the old one back"
+    user_systemctl enable --now ozbox-dashboard.service || true
+  else
+    say "it was not started as the box user either (nothing runs)"
   fi
-  sleep 1
-done
+  exit 1
+fi
 install_agent_settings
 say "the dashboard runs as $sup (port $port); run with --finish once you have signed in to it"
