@@ -101,6 +101,19 @@ pub fn backups_check(h: BackupHealth, box_name: &str) -> Option<Check> {
             NAME,
             "a backup operation is using the repository right now, so it was not asked; run the self-test again when it finishes",
         )),
+        // the last check, while a new one runs: said as what it found and how long ago, never as "not checked"
+        BackupHealth::Stale {
+            working: true,
+            age_secs: _,
+        } => Some(pass(NAME)),
+        BackupHealth::Stale {
+            working: false,
+            age_secs,
+        } => Some(fail(
+            NAME,
+            "repository",
+            format!("backups were set up on this box, but its repository did not answer when it was last asked ({} minutes ago; a new check is running), so backups are not working. Check the repository and its credentials in Settings -> Backups, then run `ozbox backup now {box_name} --to restic`", age_secs / 60),
+        )),
         BackupHealth::Pending => Some(unknown(
             NAME,
             "the repository has not been checked yet (the check runs in the background and can take a minute on a slow network); run the self-test again shortly",

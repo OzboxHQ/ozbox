@@ -29,6 +29,21 @@ pub const INGRESS_LABEL: &str = "ozbox-ingress";
 /// Hetzner and the fake the machine. Providers round-trip it through [`BoxRecord`]'s `spec.labels`.
 pub const UPGRADE_TO_LABEL: &str = "ozbox-upgrade-to";
 
+/// What a snapshot Oz Box took is for, as the provider labels it. A snapshot with no such label is a backup of `/work`.
+pub const PURPOSE_LABEL: &str = "ozbox-purpose";
+/// The purpose of the copy an upgrade keeps of the OLD system disk. It holds a disk (and, on a box whose store key is a file, that
+/// key), not `/work`: never a restore or clone source, and removed with the box unless the person keeps it.
+pub const PRE_UPGRADE_ROOT_PURPOSE: &str = "pre-upgrade-root";
+
+/// The longest an `apply` waits for the copy of an old system disk. The box holds new runs back for ten minutes from the start of
+/// the checkpoint that comes before a stop; a copy taken inside the apply must be complete well inside that, or the stop would come
+/// after the hold lapsed. `ozbox upgrade` takes the copy BEFORE the checkpoint instead and waits as long as the provider allows.
+pub const HOLD_SAFE_COPY_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// A label ONLY on the record an upgrade's `apply` returns (never written to the provider): the id of the copy of the old system
+/// disk that this very apply took, so the report names the exact snapshot rather than guessing one from a listing.
+pub const PRE_UPGRADE_COPY_LABEL: &str = "ozbox-pre-upgrade-copy";
+
 /// The first-boot hash a box's machine was made with, as the PROVIDER records it (on AWS an instance tag the module sets
 /// when it creates the machine, never changed in place and not writable from the box). It is the authority on whether a
 /// box's first boot is this program's; what the box says about itself (`/etc/ozbox/first-boot`) is only a cross-check.
@@ -157,6 +172,29 @@ pub trait Backend: Send + Sync {
             what: "replace a machine from the image it already runs".into(),
             why: "this provider's upgrade keeps the first-boot configuration the machine was made with; to give a box this program's first boot, create a new box (or `ozbox clone` this one) and move to it".into(),
         })
+    }
+
+    /// What a copy of the old system disk would be, for the plan of an upgrade that asked to keep one: `Ok(Some(text))` is the
+    /// change's description (the plan names the disk; the snapshot's id exists only once it is taken, and is in the report),
+    /// `Ok(None)` says this provider cannot keep one (the plan then says so plainly), and `Err` refuses the plan with the
+    /// reason (and the opt-out). Read-only. Called only for a machine that exists.
+    fn check_system_disk_snapshot(&self, _rec: &BoxRecord) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Snapshot the (running or stopped) machine's SYSTEM disk, tagged so it is never taken for a `/work` backup, wait until
+    /// it is complete and return its id. Called by an upgrade BEFORE anything is marked or stopped, so a failure leaves
+    /// the box exactly as it was. Never reached when [`Backend::check_system_disk_snapshot`] said `None`. `max_wait` is the most
+    /// the caller will wait for the copy to complete (`None`: the provider's own, long, limit): an apply that may be running
+    /// while the box holds new runs back for a stop passes [`HOLD_SAFE_COPY_WAIT`]. A copy not complete in time is an error
+    /// that names it, and it finishes by itself.
+    fn snapshot_system_disk(
+        &self,
+        _rec: &BoxRecord,
+        _image: &str,
+        _max_wait: Option<std::time::Duration>,
+    ) -> Result<String> {
+        Err(self.upgrade_unsupported("keep a copy of the old system disk"))
     }
 
     /// Set (`Some(image)`) or clear (`None`) [`UPGRADE_TO_LABEL`], durably, on something the replacement keeps.
@@ -303,6 +341,16 @@ impl<B: Backend> Engine<B> {
             state: rec.state,
             action,
         }
+    }
+
+    /// The copies of old system disks an upgrade kept for this box (never a `/work` backup).
+    fn old_system_copies(&self, rec: &BoxRecord) -> Result<Vec<SnapshotInfo>> {
+        Ok(self
+            .backend
+            .list_snapshots(rec)?
+            .into_iter()
+            .filter(SnapshotInfo::is_old_system_disk_copy)
+            .collect())
     }
 
     /// The snapshot `id` of `rec`, provided it is finished and holds `/work`: the only kind a restore or a clone can use.
@@ -638,7 +686,10 @@ impl<B: Backend> Engine<B> {
                     ),
                     Risk::High,
                 ));
-                if all.len() == 1 {
+                // Only a backup of /work counts: a copy of an old system disk is not one, so neither is it the "other" snapshot
+                // that makes deleting this one safe.
+                if found.is_work_backup() && all.iter().filter(|x| x.is_work_backup()).count() == 1
+                {
                     notes.push(format!(
                         "This is the only snapshot of {name}: after it is deleted there is no backup of /work from this provider."
                     ));
@@ -723,6 +774,7 @@ impl<B: Backend> Engine<B> {
                 name,
                 image,
                 reprovision,
+                keep_old_system_disk,
             } => {
                 let rec = Self::require(records, name)?;
                 // A box whose machine is gone is exactly what an interrupted upgrade leaves behind: it is the one
@@ -842,6 +894,21 @@ impl<B: Backend> Engine<B> {
                     notes.extend(capacity(&self.backend)?);
                     notes.extend(self.backend.check_upgrade(&rec, image)?);
                     let current = rec.spec.image.as_deref().unwrap_or("unknown");
+                    // The copy of the old system disk is taken first, before anything is marked or stopped: a refusal
+                    // there leaves the box as it was.
+                    if *keep_old_system_disk {
+                        match self.backend.check_system_disk_snapshot(&rec)? {
+                            Some(what) => changes.push(Change::new(
+                                "snapshot.old_system_disk",
+                                what,
+                                Risk::Low,
+                            )),
+                            None => notes.push(format!(
+                                "A copy of the old system disk of {name} was asked for, but {} cannot keep one: nothing of the old system disk survives this upgrade.",
+                                self.backend.id()
+                            )),
+                        }
+                    }
                     if running {
                         notes.push(format!(
                             "{name} is running: its agent is asked to checkpoint work in progress first when it can be reached (the plan cannot promise it), then the box is stopped, so anything running in it is interrupted."
@@ -890,6 +957,7 @@ impl<B: Backend> Engine<B> {
             Operation::Destroy {
                 name,
                 final_snapshot,
+                keep_old_system_disks,
             } => {
                 if let Some(rec) = Self::find(records, name) {
                     let missing = rec.state == BoxState::InstanceMissing;
@@ -920,6 +988,31 @@ impl<B: Backend> Engine<B> {
                             }
                             .into(),
                         );
+                    }
+                    // A copy of an old system disk holds the box's old secrets-store key. It is not a backup of /work and is only
+                    // reachable through this box, so it goes with the box unless the person keeps it.
+                    let copies = self.old_system_copies(&rec)?;
+                    if !copies.is_empty() {
+                        let ids = copies
+                            .iter()
+                            .map(|c| c.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if *keep_old_system_disks {
+                            notes.push(format!(
+                                "{} copy(ies) of an old system disk of {name} are KEPT ({ids}), as asked. Each holds the old secrets-store key and costs storage until deleted. Once the box is gone ozbox cannot list them: delete them from the AWS console or with `aws ec2 delete-snapshot --snapshot-id <id>` when you no longer need them.",
+                                copies.len()
+                            ));
+                        } else {
+                            changes.push(Change::new(
+                                "snapshot.delete_old_system_disks",
+                                format!(
+                                    "Delete {} copy(ies) of an old system disk of {name} ({ids}): they hold the box's old secrets-store key and cannot be reached once the box is gone. Add --keep-old-system-disks to keep them",
+                                    copies.len()
+                                ),
+                                Risk::High,
+                            ));
+                        }
                     }
                     changes.push(Change::new(
                         "box.delete",
@@ -952,7 +1045,9 @@ impl<B: Backend> Engine<B> {
         })
     }
 
-    fn run(&self, op: &Operation, records: &[BoxRecord]) -> Result<()> {
+    /// Do the operation. The answer is the id of the copy of the old system disk this run took, when it took one.
+    fn run(&self, op: &Operation, records: &[BoxRecord]) -> Result<Option<String>> {
+        let mut kept_copy: Option<String> = None;
         match op {
             Operation::Create { spec } => {
                 let choice = self.backend.machine_choice(spec.size)?;
@@ -1069,6 +1164,7 @@ impl<B: Backend> Engine<B> {
                 name,
                 image,
                 reprovision,
+                keep_old_system_disk,
             } => {
                 let rec = Self::require(records, name)?;
                 if rec.state == BoxState::InstanceMissing {
@@ -1081,6 +1177,17 @@ impl<B: Backend> Engine<B> {
                     }
                     self.backend.replace_image(&rec, image)?;
                 } else if rec.spec.image.as_deref() != Some(image.as_str()) || *reprovision {
+                    // The way back to the old system disk is made first of all: nothing is marked or stopped until it is
+                    // complete, so a failure here changes nothing.
+                    if *keep_old_system_disk
+                        && self.backend.check_system_disk_snapshot(&rec)?.is_some()
+                    {
+                        kept_copy = Some(self.backend.snapshot_system_disk(
+                            &rec,
+                            image,
+                            Some(HOLD_SAFE_COPY_WAIT),
+                        )?);
+                    }
                     // Everything that must survive an interruption is durable BEFORE the stop; a repeat of this
                     // operation finds the mark and finishes the job. (`apply` has just re-planned, which ran the
                     // provider's `check_upgrade` against the state it is about to change.)
@@ -1102,15 +1209,23 @@ impl<B: Backend> Engine<B> {
             Operation::Destroy {
                 name,
                 final_snapshot,
+                keep_old_system_disks,
             } => {
                 let rec = Self::require(records, name)?;
                 if *final_snapshot {
                     self.backend.snapshot(&rec)?;
                 }
+                // The copies of old system disks are removed BEFORE the box: they can only be named through it, and a failure here
+                // stops the destroy with the box still whole, never leaves a key-holding copy behind with nothing to list it.
+                if !*keep_old_system_disks {
+                    for copy in self.old_system_copies(&rec)? {
+                        self.backend.delete_snapshot(&rec, &copy.id)?;
+                    }
+                }
                 self.backend.destroy(&rec)?;
             }
         }
-        Ok(())
+        Ok(kept_copy)
     }
 }
 
@@ -1143,6 +1258,18 @@ impl<B: Backend> Provider for Engine<B> {
     fn old_work_disks(&self, name: &BoxName) -> Result<Vec<OldWorkDisk>> {
         let rec = Self::require(&self.backend.list()?, name)?;
         self.backend.list_old_work(&rec)
+    }
+
+    fn keep_old_system_disk(&self, name: &BoxName, image: &str) -> Result<String> {
+        let rec = Self::require(&self.backend.list()?, name)?;
+        if rec.state == BoxState::InstanceMissing
+            || self.backend.check_system_disk_snapshot(&rec)?.is_none()
+        {
+            return Err(self
+                .backend
+                .upgrade_unsupported("keep a copy of the old system disk"));
+        }
+        self.backend.snapshot_system_disk(&rec, image, None)
     }
 
     fn latest_image(&self, region: Option<&str>) -> Result<ImageInfo> {
@@ -1184,10 +1311,19 @@ impl<B: Backend> Provider for Engine<B> {
                 "the plan no longer matches what would be done".into(),
             ));
         }
-        if !fresh.is_noop() {
-            self.run(&plan.operation, &records)?;
+        let kept_copy = if fresh.is_noop() {
+            None
+        } else {
+            self.run(&plan.operation, &records)?
+        };
+        let mut after = self.get(&name)?;
+        // The copy this apply took, said by the apply itself (the record is the answer; the label is never written to the provider).
+        if let (Some(id), Some(rec)) = (kept_copy, after.as_mut()) {
+            rec.spec
+                .labels
+                .insert(PRE_UPGRADE_COPY_LABEL.to_string(), id);
         }
-        self.get(&name)
+        Ok(after)
     }
 }
 

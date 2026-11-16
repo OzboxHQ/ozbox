@@ -58,26 +58,54 @@ fn under_work(p: &str) -> bool {
             .any(|b| b.is_ascii_control() || b == b'"' || b == b'\\')
 }
 
+/// One exclude, as restic reads it: an absolute path must be under `/work` (it can only ever name something there), and a
+/// relative pattern (`*.tmp`, `node_modules`, `cache/*`) matches at any depth, so it can name nothing outside `/work`
+/// either. Both are common in a real `/etc/ozbox/ozboxd.toml`. What is refused is a `..` step, a control character and an
+/// absolute path elsewhere.
+fn exclude_ok(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 512
+        && !p.split('/').any(|c| c == "..")
+        && !p.bytes().any(|b| b.is_ascii_control())
+        && (!p.starts_with('/') || p == "/work" || p.starts_with("/work/"))
+}
+
+fn paths_valid(p: &[String]) -> Result<(), String> {
+    if p.is_empty() || p.len() > 32 || !p.iter().all(|x| under_work(x)) {
+        return Err("paths must be 1 to 32 folders under /work".into());
+    }
+    Ok(())
+}
+
+fn excludes_valid(e: &[String]) -> Result<(), String> {
+    if e.len() > 256 || !e.iter().all(|x| exclude_ok(x)) {
+        return Err(
+            "excludes must be at most 256 patterns: paths under /work, or relative patterns".into(),
+        );
+    }
+    Ok(())
+}
+
+fn interval_valid(h: u64) -> Result<(), String> {
+    if !(1..=8760).contains(&h) {
+        return Err("interval_hours must be 1 to 8760".into());
+    }
+    Ok(())
+}
+
 impl Carried {
     pub fn validate(&self) -> Result<(), String> {
         if !self.configured {
             return Err("the record does not say backups were set up".into());
         }
         if let Some(p) = &self.paths {
-            if p.is_empty() || p.len() > 32 || !p.iter().all(|x| under_work(x)) {
-                return Err("paths must be 1 to 32 folders under /work".into());
-            }
+            paths_valid(p)?;
         }
         if let Some(e) = &self.excludes {
-            if e.len() > 256 || !e.iter().all(|x| under_work(x)) {
-                return Err("excludes must be at most 256 paths under /work".into());
-            }
+            excludes_valid(e)?;
         }
-        if self
-            .interval_hours
-            .is_some_and(|h| !(1..=8760).contains(&h))
-        {
-            return Err("interval_hours must be 1 to 8760".into());
+        if let Some(h) = self.interval_hours {
+            interval_valid(h)?;
         }
         Ok(())
     }
@@ -170,32 +198,51 @@ pub fn effective(etc: BackupSection, carried: Option<&Carried>) -> BackupSection
 /// What to keep after credentials were set: the record, and every setting root's `/etc` holds that differs from the default,
 /// over what was already carried (a new system disk's defaults must not overwrite a carried choice).
 pub fn merge(existing: Option<&Carried>, etc: &BackupSection) -> Carried {
+    merge_checked(existing, etc).0
+}
+
+/// As [`merge`], and what was left out. A setting the record cannot hold (too many folders, a path outside `/work`, an
+/// interval that is not 1 to 8760 hours) is skipped on its own, keeping what was carried before, and named in the second
+/// answer: one odd setting must never stop the record that backups were set up from being written, because without that
+/// record an upgrade cannot tell a box whose backups stopped from one that never had any. The names hold no value.
+pub fn merge_checked(existing: Option<&Carried>, etc: &BackupSection) -> (Carried, Vec<String>) {
     let default = BackupSection::default();
-    let pick = |changed: bool, now: Option<Vec<String>>, before: Option<&Vec<String>>| {
-        if changed {
-            now
-        } else {
-            before.cloned()
+    let mut skipped = Vec::new();
+    let mut keep = |name: &str, verdict: Result<(), String>| -> bool {
+        if verdict.is_err() {
+            skipped.push(format!(
+                "the [backup] setting `{name}` in /etc/ozbox/ozboxd.toml cannot be kept across an upgrade and was left out"
+            ));
         }
+        verdict.is_ok()
     };
-    Carried {
-        configured: true,
-        paths: pick(
-            etc.paths != default.paths,
-            Some(etc.paths.clone()),
-            existing.and_then(|c| c.paths.as_ref()),
-        ),
-        excludes: pick(
-            etc.excludes != default.excludes,
-            Some(etc.excludes.clone()),
-            existing.and_then(|c| c.excludes.as_ref()),
-        ),
-        interval_hours: if etc.interval_hours != default.interval_hours {
-            Some(etc.interval_hours)
+    let paths = if etc.paths != default.paths && keep("paths", paths_valid(&etc.paths)) {
+        Some(etc.paths.clone())
+    } else {
+        existing.and_then(|c| c.paths.clone())
+    };
+    let excludes =
+        if etc.excludes != default.excludes && keep("excludes", excludes_valid(&etc.excludes)) {
+            Some(etc.excludes.clone())
         } else {
-            existing.and_then(|c| c.interval_hours)
+            existing.and_then(|c| c.excludes.clone())
+        };
+    let interval_hours = if etc.interval_hours != default.interval_hours
+        && keep("interval_hours", interval_valid(etc.interval_hours))
+    {
+        Some(etc.interval_hours)
+    } else {
+        existing.and_then(|c| c.interval_hours)
+    };
+    (
+        Carried {
+            configured: true,
+            paths,
+            excludes,
+            interval_hours,
         },
-    }
+        skipped,
+    )
 }
 
 /// Write the record where only root can change it, whole or not at all. Root's helper only. A folder that is already there
@@ -342,7 +389,8 @@ mod tests {
         for bad in [
             "configured = true\npaths = [\"/etc\"]\n",
             "configured = true\npaths = [\"/work/../etc\"]\n",
-            "configured = true\nexcludes = [\"relative\"]\n",
+            "configured = true\nexcludes = [\"../relative\"]\n",
+            "configured = true\nexcludes = [\"/etc/passwd\"]\n",
             "configured = true\ninterval_hours = 0\n",
             "configured = true\nenv_file = \"/work/x.env\"\n",
             "configured = true\nservice_socket = \"/work/s.sock\"\n",
@@ -354,6 +402,50 @@ mod tests {
             std::fs::write(&f, bad).unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(read(&dir, me()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn real_world_excludes_are_kept_and_an_odd_setting_never_stops_the_record() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join(DIR_NAME);
+        // relative patterns are what people write: restic matches them at any depth
+        let real = BackupSection {
+            excludes: vec![
+                "*.tmp".into(),
+                "node_modules".into(),
+                "target/debug".into(),
+                "/work/.ozbox/metrics".into(),
+            ],
+            ..BackupSection::default()
+        };
+        let (kept, skipped) = merge_checked(None, &real);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        write(&dir, &kept, me()).unwrap();
+        assert_eq!(
+            read(&dir, me()).unwrap().unwrap().excludes,
+            Some(real.excludes.clone())
+        );
+        // a setting the record cannot hold is left out by itself: the record is still written, and the rest is kept
+        let odd = BackupSection {
+            paths: vec!["/sentinel-path".into()],
+            excludes: vec!["../sentinel-exclude".into()],
+            interval_hours: 6,
+            ..BackupSection::default()
+        };
+        let (kept, skipped) = merge_checked(None, &odd);
+        assert!(kept.configured && kept.paths.is_none() && kept.excludes.is_none());
+        assert_eq!(kept.interval_hours, Some(6));
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert!(skipped.iter().all(|w| !w.contains("sentinel")));
+        kept.validate().unwrap();
+        write(&dir, &kept, me()).unwrap();
+        // an earlier good choice survives a later odd one
+        let before = merge(None, &real);
+        assert_eq!(merge(Some(&before), &odd).excludes, before.excludes);
+        // what stays refused: a parent step, a control character, an absolute path elsewhere
+        for bad in ["a/../b", "/etc/passwd", "x\ny", ""] {
+            assert!(!exclude_ok(bad), "{bad:?}");
         }
     }
 

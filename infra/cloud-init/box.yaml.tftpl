@@ -465,9 +465,11 @@ write_files:
 
       # Takes no command or path from a request; hands checked settings to the secrets service (no credentials file).
       # It also keeps the record in /work/ozbox-backup, the one place on /work its sandbox may write (made before the
-      # sandbox starts; `-` so a box without /work still takes credentials, the record then being a warning).
+      # sandbox starts; the `-` only covers that folder not being there yet). RequiresMountsFor=/work holds it back until
+      # /work is mounted, where the record lives. At boot it waits up to 90 s for the secrets service: hence the limit.
       [Service]
       Type=oneshot
+      TimeoutStartSec=300
       ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup
       ExecStart=/usr/local/bin/ozboxd backup-root
       User=root

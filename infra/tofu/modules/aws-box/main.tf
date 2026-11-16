@@ -3,7 +3,7 @@
 # Invariants (asserted in tests/invariants.tftest.hcl):
 #   - the security group has ZERO ingress rules; the box is reached only through outbound tunnels
 #   - no public IP, IMDSv2 required with hop limit 1
-#   - root and /work volumes are encrypted gp3
+#   - root and /work volumes are encrypted gp3, and the root volume is tagged ozbox-managed from the moment it exists
 #   - /work is a standalone volume, so replacing the instance (a new image) keeps the data
 
 locals {
@@ -289,7 +289,8 @@ resource "aws_instance" "box" {
     encrypted             = true
     kms_key_id            = var.kms_key_arn
     delete_on_termination = true
-    tags                  = merge(local.tags, { "ozbox-role" = "root" })
+    # Tagged at the moment the disk exists (the operator's role may tag only on create, or a resource that is already ozbox-managed).
+    tags = merge(local.tags, { "ozbox-role" = "root" })
   }
 
   tags = merge(local.tags, local.box_secrets, local.patch_tag, local.first_boot_tag)
@@ -309,7 +310,12 @@ resource "aws_instance" "box" {
     # the new machine from the current configuration, with fresh user data.
     # The first-boot tag follows the user data: an in-place change (a resize) must not relabel a machine that booted with
     # older user data, so it is written only when the machine is created.
-    ignore_changes = [user_data_base64, tags["ozbox-first-boot"]]
+    ignore_changes = [user_data_base64, tags["ozbox-first-boot"], root_block_device[0].tags]
+    # The system disk is tagged when it is created (see root_block_device above), and never again in place. A box made by an
+    # earlier version has a system disk with no tags at all, and the operator's AWS role may put a first tag on a disk only at
+    # the moment it is created (it may change tags only on a resource that already carries ozbox-managed), so a plan that tagged
+    # the old disk in place would be refused part way through an apply. Nothing reads a volume's tags: the machine is the
+    # principal, and an upgrade makes a new, tagged disk.
   }
 }
 

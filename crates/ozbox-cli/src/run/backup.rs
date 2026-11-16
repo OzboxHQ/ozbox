@@ -35,6 +35,7 @@ pub(super) fn command(
             in_place,
         } => restore(p, a, &settings, &name, &id, new_box, in_place, f),
         C::Credentials { name } => credentials(p, a, &settings, &name, f),
+        C::Off { name } => off(p, a, settings, &name, f),
         C::Delete { name, id } => delete(p, a, &settings, &name, &id, f),
         C::Schedule {
             r#box,
@@ -133,29 +134,52 @@ fn provider_items(p: &dyn Provider, name: &BoxName) -> (Vec<SnapshotInfo>, Optio
     }
 }
 
-/// The repository backups of a running box: `(items, why not)`.
+/// The repository backups of a running box: `(items, why not, busy)`. `busy` is a box whose repository is held by a prune
+/// right now: the list is not empty, it was not read, which is neither "no backups" nor a failure.
 fn restic_items(
     a: &dyn crate::serve::BoxAgent,
     settings: &Settings,
     rec: &ozbox_core::BoxRecord,
-) -> (Vec<Value>, Option<String>) {
+) -> (Vec<Value>, Option<String>, bool) {
     if settings.backups.restic.is_none() {
-        return (Vec::new(), Some(t("backup.restic_off", &[])));
+        return (Vec::new(), Some(t("backup.restic_off", &[])), false);
     }
     if rec.state != ozbox_core::BoxState::Running {
-        return (Vec::new(), Some(format!("the box is {}", rec.state)));
+        return (Vec::new(), Some(format!("the box is {}", rec.state)), false);
     }
-    match call(a, rec, "GET", "/snapshots", &Value::Null) {
-        Ok((200, v)) => (v["items"].as_array().cloned().unwrap_or_default(), None),
-        Ok((409, _)) => (Vec::new(), None),
+    items_from_answer(
+        call(a, rec, "GET", "/snapshots", &Value::Null),
+        rec.spec.name.as_str(),
+    )
+}
+
+/// What a box's answer to listing its repository means.
+fn items_from_answer(
+    answer: std::result::Result<(u16, Value), String>,
+    box_name: &str,
+) -> (Vec<Value>, Option<String>, bool) {
+    match answer {
+        Ok((200, v)) => (
+            v["items"].as_array().cloned().unwrap_or_default(),
+            None,
+            false,
+        ),
+        Ok((409, v)) if v.get("code").and_then(Value::as_str) == Some("busy") => (
+            Vec::new(),
+            Some(t("backup.restic_busy", &[("box", box_name)])),
+            true,
+        ),
+        // no repository on this box: nothing to list
+        Ok((409, _)) => (Vec::new(), None, false),
         Ok((_, v)) => (
             Vec::new(),
             Some(crate::backup_ops::reason(
                 &v,
                 "the box could not list its backups",
             )),
+            false,
         ),
-        Err(e) => (Vec::new(), Some(e)),
+        Err(e) => (Vec::new(), Some(e), false),
     }
 }
 
@@ -175,7 +199,7 @@ fn list(
 ) -> Result<()> {
     let rec = require(p, name)?;
     let (snaps, provider_note) = provider_items(p, name);
-    let (repo, repo_note) = restic_items(a, settings, &rec);
+    let (repo, repo_note, repo_busy) = restic_items(a, settings, &rec);
     let old_disks = p.old_work_disks(name).unwrap_or_default();
     if f.json {
         let mut items: Vec<Value> = snaps
@@ -184,6 +208,7 @@ fn list(
                 json!({
                     "id": s.id, "kind": "snapshot", "created_at": s.created_at, "size_bytes": s.size_bytes,
                     "status": s.status, "includes_work": s.includes_work,
+                    "purpose": s.labels.get(ozbox_core::PURPOSE_LABEL),
                 })
             })
             .collect();
@@ -198,7 +223,7 @@ fn list(
             "box": name,
             "items": items,
             "provider": { "supported": provider_note.is_none(), "error": provider_note },
-            "restic": { "target_set": settings.backups.restic.is_some(), "error": repo_note },
+            "restic": { "target_set": settings.backups.restic.is_some(), "error": if repo_busy { None } else { repo_note }, "busy": repo_busy },
             "old_disks": old_disks,
         }));
     }
@@ -277,9 +302,103 @@ fn list(
         println!("{}", t("backup.provider_unsupported", &[("why", &why)]));
     }
     if let Some(why) = repo_note {
-        println!("{}", t("backup.restic_unreachable", &[("why", &why)]));
+        // busy is said as what it is: not a failure, and not "no backups"; the list is not empty, it was not read
+        let key = if repo_busy {
+            "backup.restic_busy_line"
+        } else {
+            "backup.restic_unreachable"
+        };
+        println!("{}", t(key, &[("why", &why)]));
     }
     Ok(())
+}
+
+/// `ozbox backup off <box>`: retire a box's backups. Its repository credentials are removed from the box (and with them
+/// the record that backups were set up, so its self-test and an upgrade stop expecting them) and its schedule is switched
+/// off on this computer, so the next slot does not send them again. What was already backed up stays where it is.
+fn off(
+    p: &dyn Provider,
+    a: &dyn crate::serve::BoxAgent,
+    settings: Settings,
+    name: &BoxName,
+    f: &Flags,
+) -> Result<()> {
+    off_with(p, a, settings, name, f, &|s| {
+        let path = Settings::path()
+            .ok_or_else(|| "there is nowhere to save settings on this computer".to_string())?;
+        s.save_to(&path).map_err(|e| e.to_string())
+    })
+}
+
+pub(super) fn off_with(
+    p: &dyn Provider,
+    a: &dyn crate::serve::BoxAgent,
+    mut settings: Settings,
+    name: &BoxName,
+    f: &Flags,
+    save: &dyn Fn(&Settings) -> std::result::Result<(), String>,
+) -> Result<()> {
+    let rec = require(p, name)?;
+    if rec.state != ozbox_core::BoxState::Running {
+        return Err(CliError::Msg(t(
+            "backup.off_not_running",
+            &[("box", name.as_str()), ("state", &rec.state.to_string())],
+        )));
+    }
+    if f.dry_run {
+        if f.json {
+            return print_json(&json!({ "box": name, "off": false, "dry_run": true }));
+        }
+        println!("{}", t("backup.off_dry", &[("box", name.as_str())]));
+        return Ok(());
+    }
+    confirm_off(name, f)?;
+    crate::backup_ops::remove_credentials(a, &rec).map_err(|why| {
+        CliError::Msg(t(
+            "backup.off_failed",
+            &[("box", name.as_str()), ("why", &why)],
+        ))
+    })?;
+    settings.backups.turn_off_box(name.as_str());
+    if let Err(why) = save(&settings) {
+        return Err(CliError::Msg(t(
+            "backup.off_not_saved",
+            &[("box", name.as_str()), ("why", &why)],
+        )));
+    }
+    if f.json {
+        return print_json(&json!({ "box": name, "off": true }));
+    }
+    println!("{}", t("backup.off_done", &[("box", name.as_str())]));
+    Ok(())
+}
+
+/// Say what stops, and ask (`--yes` goes on; anything but a terminal refuses, and nothing is changed).
+fn confirm_off(name: &BoxName, f: &Flags) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    if f.yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::Msg(t(
+            "backup.off_not_terminal",
+            &[("box", name.as_str())],
+        )));
+    }
+    let mut err = std::io::stderr();
+    let _ = write!(
+        err,
+        "{} [y/N] ",
+        t("backup.off_question", &[("box", name.as_str())])
+    );
+    let _ = err.flush();
+    let mut line = String::new();
+    super::read_line(&mut line)?;
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError::Msg(t("backup.off_aborted", &[])))
+    }
 }
 
 /// Plan, show, confirm and start a repository operation. The provider is not involved.
@@ -395,7 +514,7 @@ fn restore(
             (None, false) => Err(CliError::Msg(t("backup.in_place_or_new", &[]))),
         };
     }
-    let (repo, _) = restic_items(a, settings, &rec);
+    let (repo, _, _) = restic_items(a, settings, &rec);
     if repo.iter().any(|i| i["id"].as_str() == Some(id)) {
         if let Some(to) = new_box {
             return restore_to_new_box(p, a, settings, name, &to, id, f);
@@ -588,7 +707,7 @@ fn delete(
             f,
         );
     }
-    let (repo, _) = restic_items(a, settings, &rec);
+    let (repo, _, _) = restic_items(a, settings, &rec);
     if repo.iter().any(|i| i["id"].as_str() == Some(id)) {
         return restic_mutate(
             p,
@@ -888,5 +1007,147 @@ mod tests {
             &f
         )
         .is_err());
+    }
+
+    fn running_box(dir: &std::path::Path, name: &str) -> (impl Provider, BoxName) {
+        let p = ozbox_provider_fake::open(dir);
+        let n = BoxName::new(name).unwrap();
+        p.apply(
+            &p.plan(&Operation::Create {
+                spec: BoxSpec::new(n.clone(), Size::S),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        (p, n)
+    }
+
+    fn with_repo(
+        agent: &SimulatedAgent,
+        p: &dyn Provider,
+        n: &BoxName,
+    ) -> (Settings, MemorySecrets) {
+        let mut settings = Settings::default();
+        settings.backups.restic = Some(ResticTarget {
+            kind: ResticKind::S3,
+            location: "https://objects.example.com/bucket".into(),
+        });
+        let secrets = MemorySecrets::default();
+        secrets.set(SECRET_PASSWORD, "correct-horse").unwrap();
+        secrets.set(SECRET_ACCESS_KEY, "AKIAEXAMPLE").unwrap();
+        secrets.set(SECRET_SECRET_KEY, "sekrit-value").unwrap();
+        let rec = p.get(n).unwrap().unwrap();
+        crate::backup_ops::ensure_credentials(
+            agent,
+            &rec,
+            settings.backups.restic.as_ref().unwrap(),
+            &secrets,
+            true,
+        )
+        .unwrap();
+        (settings, secrets)
+    }
+
+    #[test]
+    fn off_removes_the_credentials_from_the_box_and_switches_its_schedule_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, n) = running_box(dir.path(), "dev");
+        let agent = SimulatedAgent::default();
+        let (settings, _secrets) = with_repo(&agent, &p, &n);
+        let rec = p.get(&n).unwrap().unwrap();
+        let status = |a: &SimulatedAgent| call(a, &rec, "GET", "/status", &Value::Null).unwrap().1;
+        assert_eq!(status(&agent)["configured"], json!(true));
+        let saved = std::sync::Mutex::new(None::<Settings>);
+        let yes = Flags {
+            yes: true,
+            dry_run: false,
+            json: true,
+        };
+        off_with(&p, &agent, settings.clone(), &n, &yes, &|s| {
+            *saved.lock().unwrap() = Some(s.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            status(&agent)["configured"],
+            json!(false),
+            "the box holds no credentials"
+        );
+        let kept = saved.lock().unwrap().clone().unwrap();
+        assert!(kept.backups.is_off_for("dev"));
+        assert_eq!(
+            kept.backups.restic, settings.backups.restic,
+            "the repository itself stays"
+        );
+        // a dry run changes nothing and saves nothing
+        let (settings, _s) = with_repo(&agent, &p, &n);
+        let saved2 = std::sync::Mutex::new(false);
+        let dry = Flags {
+            yes: true,
+            dry_run: true,
+            json: true,
+        };
+        off_with(&p, &agent, settings, &n, &dry, &|_| {
+            *saved2.lock().unwrap() = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!*saved2.lock().unwrap());
+        assert_eq!(status(&agent)["configured"], json!(true));
+    }
+
+    #[test]
+    fn off_without_a_yes_on_a_pipe_refuses_and_changes_nothing_and_a_failed_save_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, n) = running_box(dir.path(), "dev");
+        let agent = SimulatedAgent::default();
+        let (settings, _secrets) = with_repo(&agent, &p, &n);
+        let rec = p.get(&n).unwrap().unwrap();
+        let ask = Flags {
+            yes: false,
+            dry_run: false,
+            json: true,
+        };
+        // the test's standard input is not a terminal: refused, nothing removed
+        let e = off_with(&p, &agent, settings.clone(), &n, &ask, &|_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("--yes"), "{e}");
+        assert_eq!(
+            call(&agent, &rec, "GET", "/status", &Value::Null)
+                .unwrap()
+                .1["configured"],
+            json!(true)
+        );
+        // the credentials are gone but the setting could not be saved: the person is told what to run
+        let yes = Flags { yes: true, ..ask };
+        let e = off_with(&p, &agent, settings, &n, &yes, &|_| Err("disk full".into())).unwrap_err();
+        let said = e.to_string();
+        assert!(
+            said.contains("disk full") && said.contains("backup schedule --box dev --every off"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_busy_repository_is_said_as_busy_and_is_neither_an_empty_list_nor_a_failure() {
+        let (items, note, busy) = items_from_answer(
+            Ok((
+                409,
+                json!({"code": "busy", "error": "a backup operation is using the repository right now"}),
+            )),
+            "dev",
+        );
+        assert!(items.is_empty() && busy);
+        assert!(note.unwrap().contains("using the repository"));
+        // no repository on the box: nothing to list, and nothing to say
+        assert_eq!(
+            items_from_answer(Ok((409, json!({"code": "not_configured"}))), "dev"),
+            (Vec::new(), None, false)
+        );
+        // a real failure is a failure
+        let (_, note, busy) = items_from_answer(Ok((502, json!({"error": "x"}))), "dev");
+        assert!(note.is_some() && !busy);
+        let (items, note, busy) =
+            items_from_answer(Ok((200, json!({"items": [{"id": "a"}]}))), "dev");
+        assert_eq!((items.len(), note, busy), (1, None, false));
     }
 }

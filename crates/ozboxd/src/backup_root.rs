@@ -126,6 +126,11 @@ pub struct Target {
     pub state_dir: PathBuf,
     /// Whose folder and file the record must be (root's, 0, on a box).
     pub trusted_uid: u32,
+    /// How long [`refresh_record`] waits for the secrets service to answer at a boot, with the first pause between asks
+    /// (it doubles, to a few seconds). The service binds its sockets last, so a helper ordered after it can still start
+    /// before the socket is there.
+    pub ready_wait: Duration,
+    pub ready_pause: Duration,
 }
 
 impl Default for Target {
@@ -137,6 +142,8 @@ impl Default for Target {
             etc_config: PathBuf::from(crate::config::DEFAULT_CONFIG_PATH),
             state_dir: crate::backup_state::dir_for(Path::new("/work")),
             trusted_uid: 0,
+            ready_wait: Duration::from_secs(90),
+            ready_pause: Duration::from_millis(500),
         }
     }
 }
@@ -201,7 +208,8 @@ pub fn apply(req: &Request, t: &Target) -> Result<Option<String>, String> {
                 return Err(e);
             }
             remove_legacy(t);
-            Ok(remember(t).err())
+            // a slip keeping the record is a warning, never a failure of the credentials just stored
+            Ok(remember(t).unwrap_or_else(Some))
         }
     }
 }
@@ -223,59 +231,116 @@ fn etc_backup(t: &Target) -> crate::config::BackupSection {
 /// the non-secret settings root's `/etc/ozbox/ozboxd.toml` holds (see `backup_state`). It reads only root's own file, so the
 /// box user, who asked for the credentials, chooses none of it. The credentials are already stored when this fails, so the
 /// error says what is not kept rather than that the credentials failed.
-fn remember(t: &Target) -> Result<(), String> {
+fn remember(t: &Target) -> Result<Option<String>, String> {
     let etc = etc_backup(t);
     // an untrusted or unreadable earlier record is replaced by the record of what root's own config says now
     let before = crate::backup_state::read(&t.state_dir, t.trusted_uid)
         .ok()
         .flatten();
-    crate::backup_state::write(
-        &t.state_dir,
-        &crate::backup_state::merge(before.as_ref(), &etc),
-        t.trusted_uid,
-    )
-    .map_err(|_| RECORD_NOT_WRITTEN.to_string())
+    let (merged, skipped) = crate::backup_state::merge_checked(before.as_ref(), &etc);
+    crate::backup_state::write(&t.state_dir, &merged, t.trusted_uid)
+        .map_err(|_| RECORD_NOT_WRITTEN.to_string())?;
+    Ok(skipped_warning(&skipped))
 }
 
-/// Whether the secrets store holds a repository's credentials, asked over root's admin socket. `false` when it cannot be
-/// asked (the service is not up yet): a record is never invented from a guess.
-fn store_holds_credentials(t: &Target) -> bool {
-    [
+/// The settings the record could not hold, as the one warning an answer or a log line carries.
+fn skipped_warning(skipped: &[String]) -> Option<String> {
+    (!skipped.is_empty()).then(|| skipped.join("; "))
+}
+
+/// Whether the secrets store holds a repository's credentials, asked over root's admin socket. `Err` when it cannot be
+/// asked (the service is not up yet): a record is never invented from a guess, and "no credentials" is a different answer
+/// from "no answer".
+fn store_state(t: &Target) -> Result<bool, String> {
+    for name in [
         crate::secrets_link::RESTIC_ENV,
         crate::secrets_link::RESTIC_PASSWORD,
-    ]
-    .iter()
-    .all(|name| {
-        crate::secrets_link::call(
+    ] {
+        let v = crate::secrets_link::call(
             &t.admin_socket,
             &serde_json::json!({"op": "exists", "name": name}),
             Some(Duration::from_secs(10)),
-        )
-        .map(|v| v["flag"].as_bool() == Some(true))
-        .unwrap_or(false)
-    })
+        )?;
+        if v["flag"].as_bool() != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Ask the store until it answers, for at most `ready_wait`, pausing longer each time. Never waits forever.
+fn store_state_waiting(t: &Target) -> Result<bool, String> {
+    let deadline = Instant::now() + t.ready_wait;
+    let mut pause = t.ready_pause;
+    loop {
+        match store_state(t) {
+            Ok(held) => return Ok(held),
+            Err(e) => {
+                if Instant::now() + pause > deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_secs(8));
+            }
+        }
+    }
+}
+
+/// How a start of the helper left the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// No record and no credentials: this box has no backups, so nothing was written.
+    NoBackups,
+    /// No record, and the secrets service did not answer in time: nothing was written, and the next start tries again.
+    ServiceNotReady,
+    /// The record was already what root's config says.
+    Current,
+    /// The record was written (new, or a setting changed).
+    Written,
+}
+
+impl std::fmt::Display for Refreshed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoBackups => "this box has no backups, so no record was written",
+            Self::ServiceNotReady => {
+                "the secrets service did not answer in time, so whether this box has backups is not known; no record was written, and the next start tries again"
+            }
+            Self::Current => "the record of backups is up to date",
+            Self::Written => "the record of backups was written",
+        })
+    }
 }
 
 /// Bring the record up to date on every start of the helper, not only when credentials are sent: a box that already held
 /// credentials before the record existed gets one, and a `[backup]` setting root edited by hand since is kept. It writes
 /// only for a box that has backups (a record already, or credentials in the store), and only when something changed.
 ///
+/// The secrets service starts at the same boot and binds its sockets last, so with no record yet the helper waits for it
+/// to answer (a bounded time, with growing pauses) before it decides this box has no backups. With a record it needs no
+/// answer: the record is the proof, and what is left is root's own file.
+///
 /// A carried setting never goes back to its default by setting `/etc` to the default (the default is what a new system
 /// disk starts with, and must not undo a choice). To go back to a default, delete `/work/ozbox-backup/backup.toml` as root:
-/// the next start of the helper writes it again from `/etc`.
-pub fn refresh_record(t: &Target) -> Result<(), String> {
+/// the next start of the helper writes it again from `/etc`. The settings it could not hold are in the second answer.
+pub fn refresh_record(t: &Target) -> Result<(Refreshed, Vec<String>), String> {
     let before = crate::backup_state::read(&t.state_dir, t.trusted_uid)
         .ok()
         .flatten();
-    if before.is_none() && !store_holds_credentials(t) {
-        return Ok(());
+    if before.is_none() {
+        match store_state_waiting(t) {
+            Ok(true) => {}
+            Ok(false) => return Ok((Refreshed::NoBackups, Vec::new())),
+            Err(_) => return Ok((Refreshed::ServiceNotReady, Vec::new())),
+        }
     }
-    let merged = crate::backup_state::merge(before.as_ref(), &etc_backup(t));
+    let (merged, skipped) = crate::backup_state::merge_checked(before.as_ref(), &etc_backup(t));
     if before.as_ref() == Some(&merged) {
-        return Ok(());
+        return Ok((Refreshed::Current, skipped));
     }
     crate::backup_state::write(&t.state_dir, &merged, t.trusted_uid)
-        .map_err(|_| RECORD_NOT_WRITTEN.to_string())
+        .map_err(|_| RECORD_NOT_WRITTEN.to_string())?;
+    Ok((Refreshed::Written, skipped))
 }
 
 /// Move a credentials file written by an older version into the store, then remove it. `Ok(false)` when there is none.
@@ -526,6 +591,9 @@ mod tests {
                 etc_config: dir.join("etc-ozboxd.toml"),
                 state_dir: dir.join("state").join("ozbox-backup"),
                 trusted_uid: me(),
+                // a stand-in answers at once; a test that wants the wait sets it
+                ready_wait: Duration::ZERO,
+                ready_pause: Duration::from_millis(5),
             },
             store,
         )
@@ -599,6 +667,8 @@ mod tests {
             etc_config: dir.path().join("etc-ozboxd.toml"),
             state_dir: dir.path().join("state").join("ozbox-backup"),
             trusted_uid: me(),
+            ready_wait: Duration::ZERO,
+            ready_pause: Duration::from_millis(5),
         };
         let e = apply(&req("n1"), &t).unwrap_err();
         assert!(e.contains("secrets service") && !e.contains("sekrit"));
@@ -917,6 +987,78 @@ mod tests {
         etc_with(&t, "");
         refresh_record(&t).unwrap();
         assert_eq!(read(&t.state_dir, me()).unwrap().unwrap(), again);
+    }
+
+    #[test]
+    fn credentials_with_real_world_excludes_still_write_the_record() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let (t, _store) = fake_service(dir.path());
+        etc_with(
+            &t,
+            "excludes = [\"*.tmp\", \"node_modules\", \"/work/.ozbox/metrics\"]\ninterval_hours = 6\n",
+        );
+        assert_eq!(apply(&req("x1"), &t).unwrap(), None);
+        let kept = read(&t.state_dir, me()).unwrap().unwrap();
+        assert!(kept.configured);
+        assert_eq!(kept.excludes.unwrap().len(), 3);
+        // a setting that cannot be held is a warning for that setting alone: the record is still written
+        let dir2 = tempfile::tempdir().unwrap();
+        let (t2, _s2) = fake_service(dir2.path());
+        etc_with(&t2, "paths = [\"/sentinel-path\"]\ninterval_hours = 6\n");
+        let w = apply(&req("x2"), &t2).unwrap().unwrap();
+        assert!(w.contains("paths") && !w.contains("sentinel"), "{w}");
+        let kept = read(&t2.state_dir, me()).unwrap().unwrap();
+        assert!(kept.configured && kept.paths.is_none());
+        assert_eq!(kept.interval_hours, Some(6));
+    }
+
+    #[test]
+    fn a_boot_waits_for_a_secrets_service_that_binds_its_socket_late_and_never_forever() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("admin.sock");
+        let t = Target {
+            admin_socket: sock.clone(),
+            legacy_env_file: dir.path().join("restic.env"),
+            legacy_pass_file: dir.path().join("restic.pass"),
+            etc_config: dir.path().join("etc-ozboxd.toml"),
+            state_dir: dir.path().join("state").join("ozbox-backup"),
+            trusted_uid: me(),
+            ready_wait: Duration::from_secs(20),
+            ready_pause: Duration::from_millis(20),
+        };
+        // the service comes up late (as the real one does: it binds its sockets last) and holds credentials
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+            for c in l.incoming().take(2).flatten() {
+                use std::io::{BufRead, BufReader};
+                let mut line = String::new();
+                BufReader::new(&c).read_line(&mut line).unwrap();
+                let mut w = &c;
+                w.write_all(b"{\"ok\":true,\"flag\":true}\n").unwrap();
+            }
+        });
+        let (outcome, _) = refresh_record(&t).unwrap();
+        late.join().unwrap();
+        assert_eq!(
+            outcome,
+            Refreshed::Written,
+            "the late service was waited for"
+        );
+        assert!(read(&t.state_dir, me()).unwrap().unwrap().configured);
+        // a service that never comes up: bounded, and said (no record is invented)
+        let dir2 = tempfile::tempdir().unwrap();
+        let (mut t2, _s) = fake_service(dir2.path());
+        t2.admin_socket = dir2.path().join("never.sock");
+        t2.ready_wait = Duration::from_millis(120);
+        let began = Instant::now();
+        let (outcome, _) = refresh_record(&t2).unwrap();
+        assert_eq!(outcome, Refreshed::ServiceNotReady);
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(read(&t2.state_dir, me()), Ok(None));
+        assert!(outcome.to_string().contains("did not answer"));
     }
 
     #[test]

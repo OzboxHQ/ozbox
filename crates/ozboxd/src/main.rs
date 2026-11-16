@@ -210,8 +210,14 @@ mod daemon {
             "backup credentials helper: {n} request(s) handled"
         ));
         // every start: a box that held credentials before the record existed gets one, and a [backup] edit is kept
-        if let Err(e) = br::refresh_record(&t) {
-            log(&format!("backup record: {e}"));
+        match br::refresh_record(&t) {
+            Ok((outcome, skipped)) => {
+                log(&format!("backup record: {outcome}"));
+                for why in skipped {
+                    log(&format!("backup record: {why}"));
+                }
+            }
+            Err(e) => log(&format!("backup record: {e}")),
         }
         Ok(())
     }

@@ -97,12 +97,16 @@ pub struct ServiceRunner {
 
 impl CommandRunner for ServiceRunner {
     fn run(&self, cmd: &CommandSpec) -> Result<Output> {
-        let v = call(
-            &self.socket,
-            &json!({"op": "restic", "args": cmd.args}),
-            None,
-        )
-        .map_err(Error::Provider)?;
+        // With a deadline the service kills restic at it; this side waits a little longer than that for the answer, so a
+        // service that is gone cannot hold the caller for ever either.
+        let (req, wait) = match cmd.timeout_secs {
+            Some(s) => (
+                json!({"op": "restic", "args": cmd.args, "timeout_secs": s}),
+                Some(Duration::from_secs(s + 15)),
+            ),
+            None => (json!({"op": "restic", "args": cmd.args}), None),
+        };
+        let v = call(&self.socket, &req, wait).map_err(Error::Provider)?;
         Ok(Output {
             status: v["status"].as_i64().and_then(|c| i32::try_from(c).ok()),
             stdout: v["stdout"].as_str().unwrap_or("").to_string(),

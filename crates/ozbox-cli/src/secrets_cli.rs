@@ -110,6 +110,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
             project,
             env,
             allow_live,
+            allow_live_all,
             public,
             on_box,
             approval,
@@ -119,6 +120,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
                 project,
                 env,
                 allow_live,
+                allow_live_all: *allow_live_all,
                 public,
                 on_box: on_box.as_ref().map(|b| b.as_str()),
                 approval: approval.as_deref(),
@@ -380,7 +382,7 @@ fn runner_setup(project: &str, socket: Option<&std::path::Path>) -> Result<(), C
         .call(serde_json::json!({"op": "get", "name": name}))
         .map_err(fail)?;
     let policy = match v["value"].as_str() {
-        Some(h) => Some(crate::workload_policy::Policy::from_hex(h).map_err(fail)?),
+        Some(h) => Some(crate::workload_policy::Policy::from_stored(h).map_err(fail)?),
         None => None,
     };
     let home = std::env::var("OZBOX_BOX_HOME")
@@ -999,6 +1001,16 @@ fn serve(
                 eprintln!("the secrets service is not ready: {m}");
                 std::process::exit(NOT_READY_EXIT);
             }
+            // The store was sealed by a key kept in a file, this service is configured for another kind, and the file key is
+            // gone with no copy: nothing on the box can open it. Also for good, and recorded as such (never as a restart), so the
+            // store can be set aside for a new one.
+            StartFailure::KindMismatch { message, stored } => {
+                let st = not_ready(&message, crate::secrets_state::KIND_MISMATCH_CODE)
+                    .with_store_kek(&stored);
+                write_state(&state, &st);
+                eprintln!("the secrets service is not ready: {message}");
+                std::process::exit(NOT_READY_EXIT);
+            }
             // The key service, the TPM, the vault or the disk did not answer: that passes. Try again here with a growing
             // wait, then exit with an ordinary failure so the unit starts it again (and reads its settings files again: a
             // vault token placed in the meantime is seen).
@@ -1035,6 +1047,9 @@ enum StartFailure {
     /// The store is there, its file-kept key is not, and no escrow holds a copy. Also for good, and the only state in which
     /// the store may be set aside for a new one.
     NoEscrow(String),
+    /// The store is sealed by a key kept in a file (`stored`), the service is configured for another kind, and the file key is
+    /// gone with no copy. For good, like `NoEscrow`: the other state in which the store may be set aside.
+    KindMismatch { message: String, stored: String },
     /// The key service, a TPM, the vault, the network or a disk failed: worth trying again.
     Transient(String),
 }
@@ -1062,6 +1077,57 @@ fn classify_key_source(e: &crate::secrets::SecretError) -> StartFailure {
     } else {
         StartFailure::Transient(m)
     }
+}
+
+/// What a store sealed by a key of another kind than the one configured means. Only a store sealed by a file-kept key whose
+/// key is gone (`key_file_present` false) with no copy anywhere (`escrow`) can never be opened; any other mismatch is left to
+/// be retried as it always was (a key file that is there can still be moved with `ozbox adopt-fleet-key`).
+fn classify_kind_mismatch(
+    stored: &str,
+    configured: &str,
+    key_file_present: bool,
+    escrow: Option<crate::secrets_escrow::Missing>,
+) -> StartFailure {
+    use crate::secrets_escrow::Missing;
+    let plain = || StartFailure::Transient(crate::secrets_enc::KEK_KIND_MISMATCH.to_string());
+    if stored != "file" || stored == configured || key_file_present {
+        return plain();
+    }
+    match escrow {
+        Some(Missing::NoEscrow(_)) => StartFailure::KindMismatch {
+            message: format!(
+                "the store was sealed by a key kept in a file, but this box is configured for {configured}, and that file key is not on this disk and no copy of it is held anywhere: the store cannot be opened"
+            ),
+            stored: stored.to_string(),
+        },
+        _ => plain(),
+    }
+}
+
+/// A store sealed by another kind of key than the one configured never opens, however often it is tried. Say so, in a state of
+/// its own, when the key it was sealed with is also gone (see `classify_kind_mismatch`); a store of the configured kind passes.
+fn store_kind_gate(
+    path: &std::path::Path,
+    configured: &str,
+    key_file: &std::path::Path,
+    escrow: Option<&crate::secrets_escrow::Escrow>,
+) -> Result<(), StartFailure> {
+    let Some(stored) = crate::secrets_enc::EncryptedSecrets::stored_kek(path) else {
+        return Ok(());
+    };
+    if stored == configured {
+        return Ok(());
+    }
+    let copy = (stored == "file" && !key_file.exists()).then(|| {
+        let declared = crate::secrets_escrow::Escrow::declared(&|k| std::env::var(k).ok());
+        crate::secrets_escrow::recover_key(escrow, declared, &ozbox_core::SystemRunner, key_file)
+    });
+    Err(classify_kind_mismatch(
+        &stored,
+        configured,
+        key_file.exists(),
+        copy,
+    ))
 }
 
 #[cfg(unix)]
@@ -1163,6 +1229,7 @@ fn serve_inner(
     } else {
         crate::secrets_file::provider_from_env(&path).map_err(|e| classify_key_source(&e))?
     };
+    store_kind_gate(&path, &provider.label(), &key_file, escrow.as_ref())?;
     // The box's own secrets: a second store on tmpfs, sealed under the same key and gone when the machine stops.
     let memory = match memory_store {
         Some(p) => Some(Arc::new(
@@ -1565,5 +1632,44 @@ mod dry_run_tests {
             };
             assert!(e.to_string().contains("no dry run"), "{args:?}: {e}");
         }
+    }
+
+    /// A store sealed by a file-kept key, found by a service configured for the fleet's KMS key, with the file key gone and no
+    /// copy anywhere: recorded as `kind-mismatch` (for good, exit 78), never as a restart.
+    #[test]
+    fn a_file_sealed_store_under_a_kms_configuration_with_no_key_is_recorded_as_unopenable() {
+        use crate::secrets::SecretStore;
+        use crate::secrets_enc::{EncryptedSecrets, KeyProvider, LocalKekProvider};
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("secrets.json");
+        let key_file = d.path().join(crate::secrets_persist::KEY_FILE);
+        // no store yet: nothing to say
+        assert!(store_kind_gate(&store, "kms", &key_file, None).is_ok());
+        let kek = LocalKekProvider::random("file").unwrap();
+        let s = EncryptedSecrets::new(
+            store.clone(),
+            "dev",
+            std::sync::Arc::new(kek) as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap();
+        s.set("projects/app/X", "v").unwrap();
+        // the kinds match: the gate says nothing
+        assert!(store_kind_gate(&store, "file", &key_file, None).is_ok());
+        // kms configured, a file-sealed store, no key file, no escrow: unopenable, and what sealed it is named
+        match store_kind_gate(&store, "kms", &key_file, None) {
+            Err(StartFailure::KindMismatch { stored, .. }) => assert_eq!(stored, "file"),
+            other => panic!("{other:?}"),
+        }
+        // the key file is there: the store can still be moved (`ozbox adopt-fleet-key`), so it is the old retry, not a loss
+        std::fs::write(&key_file, "k").unwrap();
+        assert!(matches!(
+            store_kind_gate(&store, "kms", &key_file, None),
+            Err(StartFailure::Transient(m)) if m == crate::secrets_enc::KEK_KIND_MISMATCH
+        ));
+        // a store sealed by something else than a file key is never called lost on this evidence
+        assert!(matches!(
+            classify_kind_mismatch("tpm2", "kms", false, None),
+            StartFailure::Transient(_)
+        ));
     }
 }

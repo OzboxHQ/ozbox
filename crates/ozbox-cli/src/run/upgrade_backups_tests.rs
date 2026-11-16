@@ -25,6 +25,8 @@ struct BackupBox {
     configured_after_replace: bool,
     /// `METHOD /sub` of every call, in order.
     calls: Mutex<Vec<String>>,
+    /// The box has just started: its secrets service is not up, so it cannot say whether it holds credentials.
+    secrets_not_ready: bool,
 }
 
 impl BackupBox {
@@ -35,7 +37,13 @@ impl BackupBox {
             reachable,
             configured_after_replace: after_replace,
             calls: Mutex::new(Vec::new()),
+            secrets_not_ready: false,
         }
+    }
+
+    fn not_ready(mut self) -> Self {
+        self.secrets_not_ready = true;
+        self
     }
 
     fn said(&self, call: &str) -> usize {
@@ -94,7 +102,7 @@ impl BoxAgent for BackupBox {
         Ok(match (method, sub) {
             ("GET", "/status") => (
                 200,
-                json!({ "configured": configured, "expected": self.expected, "running": null, "last": null }),
+                json!({ "configured": configured && !self.secrets_not_ready, "secrets_ready": !self.secrets_not_ready, "expected": self.expected, "running": null, "last": null }),
             ),
             ("GET", "/snapshots") if !configured => (
                 409,
@@ -176,6 +184,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
                 detail: "test".into(),
             },
             accept_new_store: accept,
+            old_disk: OldDisk::NotOffered,
             recover: &|_, _| None,
             restore_backups: &|ag, rec| restore_with(&settings, ag, rec, &secrets),
             restore_services: &|_, _| None,
@@ -260,6 +269,39 @@ fn a_box_that_never_had_backups_is_not_failed_for_it() {
     let agent = BackupBox::new(false, false, false, false);
     upgrade(&agent, false, false).unwrap();
     assert_eq!(agent.said("GET /snapshots"), 0);
+}
+
+#[test]
+fn a_box_whose_secrets_service_is_not_up_is_neither_failed_as_stopped_nor_sent_credentials() {
+    // the new machine's secrets service is still starting: "no credentials" is "not known". This computer holds the
+    // repository, and an upgrade that sent it on a guess could overwrite what the box holds.
+    let agent = BackupBox::new(true, true, true, false).not_ready();
+    upgrade(&agent, true, true).expect("not verified is not a failure");
+    assert_eq!(
+        agent.said("PUT /credentials"),
+        0,
+        "nothing is sent on a guess"
+    );
+    assert_eq!(
+        agent.said("GET /snapshots"),
+        0,
+        "and the repository is not asked"
+    );
+    let d = tempfile::tempdir().unwrap();
+    let (_p, rec) = running(d.path()).unwrap();
+    let said = verify_backups(
+        &BackupBox::new(false, true, true, false).not_ready(),
+        &rec,
+        true,
+        None,
+    );
+    assert_eq!(said.outcome, StepOutcome::Skipped);
+    assert!(
+        said.detail.contains("not ready") && said.detail.contains("nothing was sent"),
+        "{}",
+        said.detail
+    );
+    assert!(!said.detail.contains("HAVE STOPPED"));
 }
 
 fn running(dir: &std::path::Path) -> std::result::Result<(impl Provider, BoxRecord), String> {

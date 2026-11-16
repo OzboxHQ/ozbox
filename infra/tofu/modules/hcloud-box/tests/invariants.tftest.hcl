@@ -314,6 +314,13 @@ run "user_data_installs_the_backup_credentials_helper_with_a_narrow_hand_off" {
     condition     = strcontains(hcloud_server.box.user_data, "RequiresMountsFor=/work") && strcontains(hcloud_server.box.user_data, "systemctl, enable, ozbox-backup.service")
     error_message = "the helper runs at every boot, after /work is mounted, so the record is brought up to date without new credentials"
   }
+
+  # The helper waits (a bounded time) for the secrets service at a boot, so its start has a limit above that wait, and its
+  # unit says what really happens without /work: it is held back until /work is mounted (it does not "still take credentials").
+  assert {
+    condition     = strcontains(hcloud_server.box.user_data, "TimeoutStartSec=300") && strcontains(hcloud_server.box.user_data, "RequiresMountsFor=/work") && !strcontains(hcloud_server.box.user_data, "still takes credentials")
+    error_message = "the credentials helper needs a start limit above its wait for the secrets service, and its unit must not claim to run without /work"
+  }
 }
 
 run "user_data_gets_ozboxd_only_from_the_signed_release_and_never_on_the_oz_image" {

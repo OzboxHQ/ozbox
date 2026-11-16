@@ -5,6 +5,7 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::secrets::SecretStore;
 
@@ -142,12 +143,14 @@ pub fn configured(store: &dyn SecretStore) -> bool {
 }
 
 /// Run `bin` with the box's restic credentials for one validated command. The output has every credential value removed
-/// before it is returned, and standard error is dropped (restic echoes the repository there).
+/// before it is returned, and standard error is dropped (restic echoes the repository there). With `timeout`, a restic that
+/// has not finished by then is killed (so a repository that never answers does not keep a process, or its lock, for ever).
 pub fn run(
     store: &dyn SecretStore,
     bin: &str,
     cache_dir: &str,
     args: &[String],
+    timeout: Option<Duration>,
 ) -> Result<ResticOut, String> {
     args_ok(args).map_err(str::to_string)?;
     let env_text = store
@@ -191,14 +194,34 @@ pub fn run(
     let mut child = c
         .spawn()
         .map_err(|_| "restic could not be started".to_string())?;
-    let mut out = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        let _ = (&mut so).take(MAX_OUTPUT).read_to_end(&mut out);
-    }
-    let status = child
-        .wait()
-        .map_err(|_| "restic did not finish".to_string())?
-        .code();
+    // Read on a thread so the wait below can be bounded: a restic that hangs is killed, which closes its output.
+    let reader = child.stdout.take().map(|so| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = so.take(MAX_OUTPUT).read_to_end(&mut out);
+            out
+        })
+    });
+    let deadline = timeout.map(|t| Instant::now() + t);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.code(),
+            Ok(None) => {}
+            Err(_) => return Err("restic did not finish".to_string()),
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(r) = reader {
+                let _ = r.join();
+            }
+            return Err("restic did not answer in time and was stopped".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let out = reader
+        .map(|r| r.join().unwrap_or_default())
+        .unwrap_or_default();
     let mut text = String::from_utf8_lossy(&out).into_owned();
     for secret in env
         .iter()
@@ -426,6 +449,7 @@ mod tests {
             &bin.to_string_lossy(),
             &d.path().to_string_lossy(),
             &v(&["snapshots", "--json", "--tag", "ozbox"]),
+            None,
         )
         .unwrap();
         assert_eq!(out.status, Some(0));
@@ -436,7 +460,7 @@ mod tests {
         assert!(!out.stdout.contains("SENTINEL"));
         assert!(out.stdout.contains("other= "), "{}", out.stdout);
         // a command outside the list never starts
-        assert!(run(&s, &bin.to_string_lossy(), "/tmp", &v(&["dump", "x"])).is_err());
+        assert!(run(&s, &bin.to_string_lossy(), "/tmp", &v(&["dump", "x"]), None).is_err());
         // no credentials, no run, and the message names no value
         let empty = MemorySecrets::default();
         let e = run(
@@ -444,10 +468,58 @@ mod tests {
             &bin.to_string_lossy(),
             "/tmp",
             &v(&["snapshots", "--json", "--tag", "ozbox"]),
+            None,
         )
         .err()
         .unwrap();
         assert!(e.contains("no backup credentials"));
         assert!(!configured(&empty) && configured(&s));
+    }
+
+    #[test]
+    fn a_restic_that_never_answers_is_killed_at_its_deadline_and_a_quick_one_is_untouched() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("restic");
+        // a stand-in that hangs for a minute when asked to, as a repository that never answers does
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ -e \"$HOME/hang\" ] && exec sleep 60\necho fine\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let s = MemorySecrets::default();
+        s.set(PASSWORD_SECRET, "SENTINEL-restic-password").unwrap();
+        let env = "RESTIC_REPOSITORY=s3:https://objects.example.com/b\n"
+            .bytes()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let args = v(&["snapshots", "--json", "--tag", "ozbox"]);
+        s.set(ENV_SECRET, &env).unwrap();
+        // the stand-in hangs while this marker is in its home (the cache folder)
+        std::fs::write(d.path().join("hang"), "").unwrap();
+        let began = Instant::now();
+        let hung = run(
+            &s,
+            &bin.to_string_lossy(),
+            &d.path().to_string_lossy(),
+            &args,
+            Some(Duration::from_millis(300)),
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(hung.err().unwrap().contains("did not answer in time"));
+        std::fs::remove_file(d.path().join("hang")).unwrap();
+        let ok = run(
+            &s,
+            &bin.to_string_lossy(),
+            &d.path().to_string_lossy(),
+            &args,
+            Some(Duration::from_secs(30)),
+        )
+        .unwrap();
+        assert_eq!((ok.status, ok.stdout.trim()), (Some(0), "fine"));
     }
 }

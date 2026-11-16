@@ -207,7 +207,18 @@ impl Restic {
 
     /// The snapshots this box made (tagged for it), oldest first.
     pub fn snapshots(&self) -> Result<Vec<ResticSnapshot>, BackupError> {
-        let out = match self.runner.run(&self.snapshots_cmd()) {
+        self.snapshots_within(None)
+    }
+
+    /// As [`Self::snapshots`], with a limit on how long restic may take (a runner that can stops it at the limit, and the
+    /// answer is then a failure, like a repository that does not answer).
+    pub fn snapshots_within(
+        &self,
+        limit: Option<std::time::Duration>,
+    ) -> Result<Vec<ResticSnapshot>, BackupError> {
+        let mut cmd = self.snapshots_cmd();
+        cmd.timeout_secs = limit.map(|d| d.as_secs().max(1));
+        let out = match self.runner.run(&cmd) {
             Ok(o) if o.status == Some(0) => o,
             Ok(o) => return Err(BackupError::Failed("snapshots", o.status)),
             Err(_) => return Err(BackupError::Failed("snapshots", None)),
