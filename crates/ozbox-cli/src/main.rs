@@ -140,6 +140,8 @@ mod telegram_store;
 mod telegram_transcript;
 mod telemetry;
 mod telemetry_cli;
+#[cfg(test)]
+mod test_support;
 mod this_box;
 mod timezone;
 mod tokenmac;

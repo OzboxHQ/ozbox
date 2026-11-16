@@ -4282,7 +4282,12 @@ mod tests {
             .unwrap()
             .is_some());
         drop(first);
-        assert!(lock_service_in(&root, WEB_UNIT, false).unwrap().is_some());
+        // let go: free again (a look the instant after can still see a child's copy of the descriptor, see `test_support::until`)
+        assert!(
+            crate::test_support::until(|| lock_service_in(&root, WEB_UNIT, false).unwrap())
+                .is_some(),
+            "the lock was still held after its holder let go"
+        );
         for bad in [
             "ozbox-egress-app_web",
             "ozbox-svc-",
