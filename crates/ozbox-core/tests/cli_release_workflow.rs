@@ -114,8 +114,8 @@ fn the_workflow_never_publishes_on_its_own_and_holds_no_more_power_than_it_needs
 #[test]
 fn the_dashboard_check_runs_the_program_and_never_searches_it_for_the_hash() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
-    let script =
-        std::fs::read_to_string(root.join("scripts/release/check-embedded-dashboard.sh")).unwrap();
+    let script = std::fs::read_to_string(root.join("scripts/release/check-embedded-dashboard.sh"))
+        .unwrap_or_default();
     for needle in [
         "build-info --json",
         ".dashboard.sha256",
@@ -123,7 +123,8 @@ fn the_dashboard_check_runs_the_program_and_never_searches_it_for_the_hash() {
     ] {
         assert!(script.contains(needle), "the check script lost {needle:?}");
     }
-    let image = std::fs::read_to_string(root.join(".github/workflows/image.yml")).unwrap();
+    let image =
+        std::fs::read_to_string(root.join(".github/workflows/image.yml")).unwrap_or_default();
     let release = build_workflow();
     for (name, w) in [("image.yml", &image), ("release-build.yml", &release)] {
         assert!(
