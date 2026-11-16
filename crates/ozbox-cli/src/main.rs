@@ -44,6 +44,7 @@ mod guard_scan;
 mod helper_refresh;
 mod host_guard_cli;
 mod host_tools;
+mod import_report;
 mod infra_cli;
 mod ingress_cli;
 mod ingress_client;
