@@ -490,6 +490,10 @@ fn unknown_production() -> SecretError {
     )
 }
 
+/// What a store sealed by one kind of key says when the service is configured for another.
+pub const KEK_KIND_MISMATCH: &str =
+    "the secrets file is protected by a different kind of key than the one configured";
+
 impl EncryptedSecrets {
     /// `scope` names the box or fleet the store belongs to (it is part of every seal).
     pub fn new(
@@ -537,7 +541,7 @@ impl EncryptedSecrets {
                     return Err(err("the secrets file belongs to a different box"));
                 }
                 if f.kek != self.provider.label() {
-                    return Err(err("the secrets file is protected by a different kind of key than the one configured"));
+                    return Err(err(KEK_KIND_MISMATCH));
                 }
                 Ok(Some(f))
             }
@@ -827,11 +831,17 @@ impl EncryptedSecrets {
             .unwrap_or(false))
     }
 
-    /// How many secrets are stored encoded.
+    /// How many secrets are stored encoded. A project's declaration is a record, not a secret, and is kept encoded when it
+    /// holds characters a plain value may not: it is not counted here.
     pub fn encoded_count(&self) -> Result<usize, SecretError> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         Ok(self.read()?.map_or(0, |f| {
-            f.secrets.values().filter(|e| !e.enc.is_empty()).count()
+            f.secrets
+                .iter()
+                .filter(|(n, e)| {
+                    !e.enc.is_empty() && !n.starts_with(crate::workload_policy::POLICY_NAME_PREFIX)
+                })
+                .count()
         }))
     }
 
@@ -1032,6 +1042,13 @@ impl EncryptedSecrets {
     }
 
     /// The salt stored for a passphrase-derived KEK, if the file exists and has one.
+    /// The kind of key that sealed the store at `path` (its label: `file`, `kms`, ...), when it can be read. Only the label is
+    /// read; nothing is opened.
+    pub fn stored_kek(path: &Path) -> Option<String> {
+        let f: File = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        Some(f.kek).filter(|k| !k.is_empty())
+    }
+
     pub fn stored_salt(path: &Path) -> Option<Vec<u8>> {
         let f: File = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
         decode_std(&f.salt).filter(|s| !s.is_empty())
@@ -1132,6 +1149,14 @@ impl SecretStore for EncryptedSecrets {
     fn set_exact(&self, name: &str, value: &str) -> Result<(), SecretError> {
         self.set_exact_with_meta(name, value, Meta::default())
             .map(|_| ())
+    }
+
+    /// A record is sealed and integrity-protected exactly like a secret (the same entry, the same key, the same file); only its
+    /// size rule differs ([`crate::secrets::MAX_RECORD_VALUE`]). Text that is not a plain value is kept as base64, as for
+    /// [`Self::set_exact`], and read back as it was.
+    fn set_record(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        crate::secrets::check_record(value)?;
+        self.put(name, value, check_value(value).is_err(), Meta::default())
     }
 
     fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
@@ -1403,6 +1428,11 @@ mod tests {
                 && !text.contains("plain-0123456789")
                 && !text.contains("🔑 emoji")
         );
+        assert_eq!(s.encoded_count().unwrap(), all.len() - 1);
+        // a declaration kept as an encoded record is not a secret and is not counted as one
+        s.set_record("workload-policy.app", "{\n\"commands\": {}\n}")
+            .unwrap();
+        assert!(s.is_encoded("workload-policy.app").unwrap());
         assert_eq!(s.encoded_count().unwrap(), all.len() - 1);
         // a data-key rotation keeps every value, and the marker
         s.rotate_all_data_keys().unwrap();

@@ -36,6 +36,14 @@ pub trait SecretStore: Send + Sync {
     fn set_exact(&self, name: &str, value: &str) -> Result<(), SecretError> {
         self.set(name, value)
     }
+    /// Store a STRUCTURED RECORD the program keeps for itself (a project's declaration of its commands): any text up to
+    /// [`MAX_RECORD_VALUE`], read back by [`Self::get`] as it was. It is a record, not a credential: it is never an environment
+    /// variable, a command-line word or a script's input, so the short single-line rule of [`Self::set`] ([`MAX_VALUE`]) does not
+    /// apply, and that rule is not relaxed for anything that IS a secret. A store with no encoded form keeps its own limit.
+    fn set_record(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        check_record(value)?;
+        self.set_exact(name, value)
+    }
     /// Where secrets are kept, in words for a person.
     fn label(&self) -> &'static str;
     /// Whether this store's own service decides if a change to a gated secret (a tunnel token) goes ahead, by asking for the
@@ -63,6 +71,11 @@ pub trait SecretStore: Send + Sync {
 }
 
 pub const MAX_VALUE: usize = 4096;
+/// The most a structured record ([`SecretStore::set_record`]) may hold, in bytes. A project's declaration is JSON a person writes
+/// and a build's trace adds to (one folder per package a service needs): a real application is several KB, so it cannot share the
+/// limit of a short credential. 256 KB is far above any declaration the rules in `workload_policy` allow, and far below what the
+/// store's file or the box's socket line carry.
+pub const MAX_RECORD_VALUE: usize = 256 * 1024;
 
 /// The names this server will store, which keeps the keychain namespace small and the command arguments plain.
 pub fn valid_name(name: &str) -> bool {
@@ -175,6 +188,23 @@ pub fn check_value(value: &str) -> Result<(), SecretError> {
     Ok(())
 }
 
+/// What [`SecretStore::set_record`] refuses: nothing, an unreadable NUL byte, or more than [`MAX_RECORD_VALUE`].
+pub fn check_record(value: &str) -> Result<(), SecretError> {
+    if value.is_empty() {
+        return Err(SecretError("the record is empty".into()));
+    }
+    if value.contains('\0') {
+        return Err(SecretError("the record contains a NUL byte".into()));
+    }
+    if value.len() > MAX_RECORD_VALUE {
+        return Err(SecretError(format!(
+            "the record is {} bytes, over the {MAX_RECORD_VALUE} byte limit",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct MemorySecrets {
     map: Mutex<BTreeMap<String, String>>,
@@ -183,6 +213,13 @@ pub struct MemorySecrets {
 impl SecretStore for MemorySecrets {
     fn set(&self, name: &str, value: &str) -> Result<(), SecretError> {
         check_value(value)?;
+        if let Ok(mut m) = self.map.lock() {
+            m.insert(name.to_string(), value.to_string());
+        }
+        Ok(())
+    }
+    fn set_record(&self, name: &str, value: &str) -> Result<(), SecretError> {
+        check_record(value)?;
         if let Ok(mut m) = self.map.lock() {
             m.insert(name.to_string(), value.to_string());
         }

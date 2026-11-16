@@ -12,7 +12,7 @@ body:
     attributes:
       label: Oz Box version
       description: The output of `ozbox --version`, and the image version if a box is involved.
-      placeholder: ozbox 0.2.0-beta.1
+      placeholder: ozbox 0.2.0-beta.2
     validations:
       required: true
   - type: dropdown

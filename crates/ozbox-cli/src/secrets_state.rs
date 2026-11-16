@@ -13,9 +13,11 @@
 //!
 //! * `kek`: what protects the store's key (`kms`, `tpm2`, `keychain`, `passphrase` or `file`).
 //! * `escrow`: for a file-kept key, whether a copy is escrowed off the box (`vault`) or not (`none`).
-//! * `code`: why the service is not ready: `no-escrow` (the store is there, its key is not, and nothing holds a copy: the only
-//!   state in which `recover-store` may set the store aside), `config` (anything else a person must change) or `transient`
-//!   (the service is trying again).
+//! * `store`: with `code=kind-mismatch`, what sealed the store the service found (`file`): not the kind in `kek`.
+//! * `code`: why the service is not ready: `no-escrow` (the store is there, its key is not, and nothing holds a copy) or
+//!   `kind-mismatch` (the store is sealed by a key kept in a file, the service is configured for another kind, and the file
+//!   key is gone with no copy): the only two states in which `recover-store` may set the store aside, both meaning the store
+//!   can never be opened. `config` (anything else a person must change) or `transient` (the service is trying again).
 //!
 //! `ozbox upgrade` reads it before it replaces a system disk, to say what happens to the store; the root helper's
 //! `recover-secrets` reads it, as root, to refuse every state but `no-escrow`.
@@ -30,6 +32,8 @@ pub struct State {
     /// `Some(true)`: a copy of a file-kept key is escrowed; `Some(false)`: it is not.
     pub escrow: Option<bool>,
     pub code: Option<String>,
+    /// With `code=kind-mismatch`: what sealed the store (`kek` is what the service is configured for).
+    pub store_kek: Option<String>,
     /// The service that wrote this can move a store sealed by a file key to the fleet's KMS key in place (`ozbox
     /// adopt-fleet-key`); a file from an older service has no such line. `ozbox adopt-fleet-key` asks for it before it
     /// changes anything about the box, so a box whose program is older is never left half-moved.
@@ -41,8 +45,11 @@ pub struct State {
 
 /// The one not-ready code under which a store may be set aside.
 pub const NO_ESCROW_CODE: &str = "no-escrow";
+/// The other not-ready code under which a store may be set aside: sealed by a file-kept key that is gone, while the service
+/// is configured for another kind of key (a box moved to the fleet's KMS key over a store the disk's key sealed).
+pub const KIND_MISMATCH_CODE: &str = "kind-mismatch";
 const KEKS: [&str; 5] = ["kms", "tpm2", "keychain", "passphrase", "file"];
-const CODES: [&str; 3] = [NO_ESCROW_CODE, "config", "transient"];
+const CODES: [&str; 4] = [NO_ESCROW_CODE, KIND_MISMATCH_CODE, "config", "transient"];
 
 impl State {
     pub fn ready(note: &str, kek: &str, escrow: Option<bool>) -> Self {
@@ -52,6 +59,7 @@ impl State {
             kek: Some(kek.to_string()),
             escrow,
             code: None,
+            store_kek: None,
             adopt: true,
             names: None,
         }
@@ -64,9 +72,16 @@ impl State {
             kek: kek.map(str::to_string),
             escrow,
             code: Some(code.to_string()),
+            store_kek: None,
             adopt: true,
             names: None,
         }
+    }
+
+    /// What sealed the store the service found (said with `kind-mismatch`).
+    pub fn with_store_kek(mut self, kind: &str) -> Self {
+        self.store_kek = Some(kind.to_string());
+        self
     }
 
     pub fn with_names(mut self, n: u32) -> Self {
@@ -91,6 +106,9 @@ impl State {
         }
         if let Some(c) = &self.code {
             out.push_str(&format!("code={c}\n"));
+        }
+        if let Some(k) = &self.store_kek {
+            out.push_str(&format!("store={k}\n"));
         }
         if self.adopt {
             out.push_str("adopt=kms\n");
@@ -130,6 +148,7 @@ impl State {
                 Some(("escrow", "vault")) => s.escrow = Some(true),
                 Some(("escrow", "none")) => s.escrow = Some(false),
                 Some(("code", v)) if CODES.contains(&v) => s.code = Some(v.to_string()),
+                Some(("store", v)) if KEKS.contains(&v) => s.store_kek = Some(v.to_string()),
                 Some(("adopt", "kms")) => s.adopt = true,
                 Some(("names", v)) => s.names = v.parse().ok(),
                 _ => {}
@@ -146,6 +165,21 @@ impl State {
     /// The service stopped because its store's key is gone and nothing holds a copy (and only that).
     pub fn is_no_escrow(&self) -> bool {
         !self.ready && self.code.as_deref() == Some(NO_ESCROW_CODE)
+    }
+
+    /// The service stopped because the store is sealed by a file-kept key (`store`) that is gone with no copy, and the
+    /// service is configured for another kind (`kek`): the store cannot be opened by anything on this box.
+    pub fn is_kind_mismatch(&self) -> bool {
+        !self.ready
+            && self.code.as_deref() == Some(KIND_MISMATCH_CODE)
+            && self.store_kek.as_deref() == Some("file")
+            && self.kek.is_some()
+            && self.kek.as_deref() != Some("file")
+    }
+
+    /// The store can never be opened (a lost key, or a key kind it was not sealed with): the states a store may be set aside in.
+    pub fn is_unopenable(&self) -> bool {
+        self.is_no_escrow() || self.is_kind_mismatch()
     }
 }
 
@@ -249,6 +283,25 @@ mod tests {
         let prose = State::parse("not-ready: the store's key ... has no escrow for it\n").unwrap();
         assert!(!prose.is_no_escrow());
         assert!(!State::ready("", "kms", None).file_kek_without_escrow());
+    }
+
+    #[test]
+    fn a_kind_mismatch_is_recorded_apart_from_a_restart_and_from_a_lost_key() {
+        let m = State::not_ready("x", KIND_MISMATCH_CODE, Some("kms"), None).with_store_kek("file");
+        assert_eq!(State::parse(&m.render()).unwrap(), m);
+        assert!(m.is_kind_mismatch() && m.is_unopenable() && !m.is_no_escrow());
+        // a restart, a configuration state and a store whose kinds match are not it
+        for other in [
+            State::not_ready("x", "transient", Some("kms"), None).with_store_kek("file"),
+            State::not_ready("x", "config", Some("kms"), None).with_store_kek("file"),
+            State::not_ready("x", KIND_MISMATCH_CODE, Some("file"), None).with_store_kek("file"),
+            State::not_ready("x", KIND_MISMATCH_CODE, Some("kms"), None),
+            State::ready("", "kms", None).with_store_kek("file"),
+        ] {
+            assert!(!other.is_unopenable(), "{other:?}");
+        }
+        // a lost key is unopenable too
+        assert!(State::not_ready("x", NO_ESCROW_CODE, Some("file"), Some(false)).is_unopenable());
     }
 
     #[test]

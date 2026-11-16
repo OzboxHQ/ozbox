@@ -1436,46 +1436,34 @@ impl Machine for SystemMachine<'_> {
 mod tests {
     use super::*;
 
-    /// True once nobody holds the lock. A `flock` belongs to the open file, and a child another test's thread is
-    /// starting (`git`, a command) holds a copy of every descriptor open at that moment until it has exec'd. So the
-    /// instant after a holder let go, a look can still see the lock held on a loaded machine. Assertions that the lock
-    /// is FREE wait for that to pass (bounded); assertions that it is HELD need no wait.
+    /// True once nobody holds the lock. A look at the instant after a holder let go can still see it held (see
+    /// [`crate::test_support::until`]), so assertions that the lock is FREE wait for that to pass; assertions that it is HELD
+    /// need no wait.
     fn lock_freed(p: &Paths) -> bool {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while lock_busy(p) {
-            if std::time::Instant::now() >= end {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        true
+        crate::test_support::until(|| (!lock_busy(p)).then_some(())).is_some()
     }
 
     /// Takes the lock once it is free (same reason as [`lock_freed`]) and says whether `f` ran.
     fn ran_when_free(p: &Paths) -> bool {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if with_lock(p, || ()).unwrap().is_some() {
-                return true;
-            }
-            if std::time::Instant::now() >= end {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        crate::test_support::until(|| with_lock(p, || ()).unwrap()).is_some()
     }
-    /// Runs a locked call again while it answers `Busy`, for up to 10 s. The lock is a kernel `flock` on an open file, and a
-    /// child another test's thread is starting holds a copy of that descriptor until it has exec'd, so a call made right after
-    /// a holder let go can see `Busy` on a loaded machine. Only tests whose point is NOT the lock use this.
+
+    /// The facts about the box once nobody holds its lock. `busy` is one of them, and it reads the lock, so a look right after a
+    /// locked step can say "busy" for a lock that was let go (see [`crate::test_support::until`]).
+    fn facts_at_rest(p: &Paths, m: &dyn Machine, tags: &dyn Tags) -> Facts {
+        assert!(lock_freed(p), "the lock was still held");
+        facts(p, m, tags)
+    }
+
+    /// Runs a locked call again while it answers `Busy`. Only tests whose point is NOT the lock use this (same reason as
+    /// [`lock_freed`]).
     fn unbusy(f: impl Fn() -> Result<Outcome, String>) -> Result<Outcome, String> {
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        // still busy at the deadline: the caller sees `Busy` and its own assertion says what was expected
+        crate::test_support::until(|| {
             let r = f();
-            if !matches!(r, Ok(Outcome::Busy)) || std::time::Instant::now() >= end {
-                return r;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+            (!matches!(r, Ok(Outcome::Busy))).then_some(r)
+        })
+        .unwrap_or(Ok(Outcome::Busy))
     }
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -2392,7 +2380,7 @@ mod tests {
         assert!(
             key_file(&r.p).exists() && !backup_file(&r.p).exists() && marker_file(&r.p).exists()
         );
-        let facts = facts(&r.p, &m, &tagged(ARN));
+        let facts = facts_at_rest(&r.p, &m, &tagged(ARN));
         assert!(facts.cancel_confirmed(), "{facts:?}");
         // the pending tag is still on the box (the laptop has not applied it yet), and a run does NOTHING: not even a probe
         let later = machine(&r.p);
@@ -2431,7 +2419,7 @@ mod tests {
         );
         assert!(did(&m).is_empty(), "{:?}", did(&m));
         assert!(marker_file(&r.p).exists() && key_file(&r.p).exists());
-        assert!(facts(&r.p, &m, &tagged(ARN)).cancel_confirmed());
+        assert!(facts_at_rest(&r.p, &m, &tagged(ARN)).cancel_confirmed());
         // a cancel whose store cannot be taken back (its key file gone) refuses, and the grant must stay
         let r = rig(FILE_SETTINGS);
         moved(&r);

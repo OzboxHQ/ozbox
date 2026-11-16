@@ -19,6 +19,19 @@ async function getJson(request: APIRequestContext, path: string): Promise<{ stat
   return { status: r.status(), body: (await r.json().catch(() => ({}))) as Record<string, unknown> };
 }
 
+/**
+ * Answer a page's reads of `path` with the real server's own body plus `change`. The real body is read once, up front, by the
+ * test's own request; the route then answers at once and never waits on anything. (The page cancels a read it no longer wants:
+ * a refresh that starts while another is in flight, a navigation. A handler that was in the middle of fetching the real answer
+ * for that read lost its response with "Response has been disposed", and the test failed for a read nobody was waiting on.)
+ */
+async function overlay(page: Page, request: APIRequestContext, path: string, change: (real: Record<string, unknown>) => Record<string, unknown>): Promise<void> {
+  const real = await getJson(request, path);
+  expect(real.status, `the real server answers ${path}`).toBe(200);
+  const json = change(real.body);
+  await page.route((u) => u.pathname === path, (route) => route.fulfill({ status: 200, json }));
+}
+
 const RULES = '---\nengine: fake\nmerge_approval: person\ntest_command: make test\n---\nSmall commits.';
 
 test('raising an orchestration cap says it was raised, not that it failed', async ({ page, request }) => {
@@ -153,12 +166,7 @@ for (const width of WIDTHS) {
   });
 
   test(`Browser names a running box whose sessions could not be read, at ${width}px`, async ({ page, request }) => {
-    expect((await getJson(request, '/v1/browser/sessions')).status).toBe(200);
-    await page.route((u) => u.pathname === '/v1/browser/sessions', async (route) => {
-      const real = await route.fetch();
-      const body = (await real.json()) as Record<string, unknown>;
-      await route.fulfill({ response: real, json: { ...body, unreachable: [{ name: 'alpha', reason: 'the box did not answer' }] } });
-    });
+    await overlay(page, request, '/v1/browser/sessions', (real) => ({ ...real, unreachable: [{ name: 'alpha', reason: 'the box did not answer' }] }));
     await page.setViewportSize({ width, height: 900 });
     await open(page, '/browser');
     const note = page.getByTestId('unreachable-note');
@@ -204,11 +212,7 @@ for (const width of WIDTHS) {
   test(`Memory says when its notes are forgotten on restart, at ${width}px`, async ({ page, request }) => {
     // a server with no settings file keeps notes for its own run only; the harness always has one, so that answer is injected
     expect(((await getJson(request, '/v1/memory')).body['store'] as { persisted: boolean }).persisted).toBe(true);
-    await page.route((u) => u.pathname === '/v1/memory', async (route) => {
-      const real = await route.fetch();
-      const body = (await real.json()) as Record<string, unknown>;
-      await route.fulfill({ response: real, json: { ...body, store: { persisted: false, on_a_box: false, host: null } } });
-    });
+    await overlay(page, request, '/v1/memory', (real) => ({ ...real, store: { persisted: false, on_a_box: false, host: null } }));
     await page.setViewportSize({ width, height: 900 });
     await open(page, '/memory');
     await expect(page.getByTestId('memory-forgotten')).toContainText('forgotten when it stops', { timeout: 15_000 });

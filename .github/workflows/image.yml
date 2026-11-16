@@ -219,19 +219,39 @@ jobs:
           # makes crates/ozbox-cli/build.rs refuse to build without the dashboard (passed into cross by Cross.toml)
           OZBOX_RELEASE: "1"
         run: cross build --release --locked --target "$TARGET" -p ozboxd -p ozbox-cli
-      - name: The program serves the real dashboard, not the placeholder page
+      - name: The program serves the real dashboard, not the placeholder page (asked of the program itself, every architecture)
         env:
+          ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
           DASH: ${{ needs.dashboard.outputs.sha256 }}
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
-          if grep -aq "The dashboard is not built" "$f"; then
+          # the placeholder page is a literal that exists only in a build without a dashboard, so a search for it is sound
+          if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          # it records the hash of the dashboard it embedded, and it is the one that was built
-          grep -aq "$DASH" "$f"
+          # the program says which dashboard it embedded, and it is the one that was built. (A hash the compiler may split
+          # into pieces cannot be found by searching the file.)
+          case "$ARCH" in
+            amd64) sh scripts/release/check-embedded-dashboard.sh "$DASH" "./$f" ;;
+            arm64)
+              sudo apt-get update -qq
+              # Ubuntu 26.04 replaced qemu-user-static; install whichever this runner offers, then use the binary it ships.
+              sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                echo "::error title=No dashboard check::no qemu-aarch64 is available, so the arm64 program cannot be asked what it embedded"
+                exit 1
+              fi
+              sh scripts/release/check-embedded-dashboard.sh "$DASH" "$q" "./$f"
+              ;;
+            *)
+              echo "::error title=No dashboard check::there is no way to run the $ARCH program here"
+              exit 1
+              ;;
+          esac
       - name: The box daemon carries the marker the setup script looks for
         env:
           TARGET: ${{ matrix.target }}
@@ -239,7 +259,7 @@ jobs:
           set -euo pipefail
           # ozbox-supervisor-setup.sh decides whether to make the dashboard's socket by finding this text in the installed
           # daemon (a daemon that does not take its socket from systemd must never be handed one). Never reword it (G1 F8).
-          grep -aq 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
+          LC_ALL=C grep -aqF 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
             || { echo "::error title=Missing marker::the release ozboxd does not carry ozbox-listenfd-protocol-1, so no box would make its dashboard socket"; exit 1; }
       - name: The release programs carry none of the debug-only test sockets
         env:
@@ -248,9 +268,9 @@ jobs:
           set -euo pipefail
           # Both hooks exist for the browser tests of a DEBUG build (a dashboard socket the daemon binds itself and admits any
           # peer on, and the dashboard's switch to it). Neither may ever be in a program a box runs.
-          ! grep -aq 'OZBOXD_TEST_DASHBOARD_SOCKET' "target/$TARGET/release/ozboxd" \
+          ! LC_ALL=C grep -aqF 'OZBOXD_TEST_DASHBOARD_SOCKET' "target/$TARGET/release/ozboxd" \
             || { echo "::error title=Debug hook in a release::the release ozboxd carries OZBOXD_TEST_DASHBOARD_SOCKET"; exit 1; }
-          ! grep -aq 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+          ! LC_ALL=C grep -aqF 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
             || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: One self-contained file, and a start check where this runner can
         env:

@@ -51,7 +51,8 @@ pub mod upgrade_kind;
 
 pub use engine::{
     Backend, CapacityRequest, Engine, MachineChoice, APPROVER_LABEL, FIRST_BOOT_LABEL,
-    INGRESS_LABEL, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
+    HOLD_SAFE_COPY_WAIT, INGRESS_LABEL, PRE_UPGRADE_COPY_LABEL, PRE_UPGRADE_ROOT_PURPOSE,
+    PURPOSE_LABEL, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
 };
 pub use error::{Error, Result};
 pub use exec::{CommandRunner, CommandSpec, Output, RecordingRunner, SystemRunner};

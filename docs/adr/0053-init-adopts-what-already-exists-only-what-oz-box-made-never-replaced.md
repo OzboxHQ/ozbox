@@ -37,3 +37,33 @@ that predates it. Adoption keeps a re-run safe and cheap without asking anyone t
 **What it costs.** Up to a handful of read calls per step, each already in `OzBoxSetup` (a test lists every lookup and checks
 the permission sets allow it). An adopted resource whose settings differ is changed in place on apply, which is what the module
 says it should be, and the plan shows it first.
+
+## Amendment 1 (2026-11-16): the first ownership tag on an existing disk is an administrator's, never the program's
+
+**What happened.** `ozbox adopt-fleet-key` on a box made by `0.1.x` planned to tag the box's system disk (the module tags every
+resource it makes), the system disk had never been tagged, and the apply failed part way: `UnauthorizedOperation: ec2:CreateTags`.
+The grant and the "moving" mark were already applied, so the box was left half moved until an administrator tagged the disk by
+hand. The operator role may tag a resource only when it is created (`TagOnCreateOnly`) or when it already carries
+`ozbox-managed=true` (`ChangeOnlyTaggedResources`), and a disk made before the module tagged it carries nothing.
+
+**Decision.**
+
+1. **The ownership tag is conferred on an existing resource only by an account administrator.** No statement is added to the
+   operator policy or to `OzBoxSetup` that lets either put `ozbox-managed` on a volume that exists. IAM cannot say "a disk attached
+   to one of our machines" (a condition can read the volume's own tags and the request's, not what it is attached to), so such a
+   statement would let the identity mark any volume in the account as Oz Box's and then change, detach or delete it. That undoes
+   this ADR's rule 3 (only what Oz Box made). Rejected: a `CreateTags` statement for `volume/*` limited by `aws:RequestTag` and
+   `aws:TagKeys`; and an `ozbox init` step that tags the disks of tagged machines (it needs the same statement on the setup identity).
+   `nothing_but_an_administrator_can_give_an_existing_volume_its_first_tag` pins both policies.
+2. **The change stops needing it.** The module still tags the system disk when it creates it (new boxes, and every upgrade, which
+   makes a new disk), and now ignores the tags of an existing system disk (`ignore_changes`), so a plan for an old box never asks for
+   the call. Nothing reads a volume's tags.
+3. **A plan that would still ask for it is refused before anything is applied.** Every plan of an existing box passes one gate
+   (`check_disk_tags_applicable`, in the shared plan step): an update that gives a disk with no `ozbox-managed=true` tag new tags is
+   refused, naming the disk and the two commands an administrator runs once (check the disk is the box's machine's, then
+   `aws ec2 create-tags`). It applies to every step of a move (begin, finish, cancel), so a box an older program half moved is
+   stopped on the way out too. Values copied into the printed commands are plain identifiers or a placeholder.
+
+**What it costs.** A custom or older module that tags an existing disk needs one administrator command per such box. The
+refusal says which and why.
+

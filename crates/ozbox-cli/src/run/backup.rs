@@ -119,6 +119,7 @@ fn list(
                 json!({
                     "id": s.id, "kind": "snapshot", "created_at": s.created_at, "size_bytes": s.size_bytes,
                     "status": s.status, "includes_work": s.includes_work,
+                    "purpose": s.labels.get(ozbox_core::PURPOSE_LABEL),
                 })
             })
             .collect();
