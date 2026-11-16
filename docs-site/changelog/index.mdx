@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes with secrets of their own">
+  ## A box's own secrets now load from Parameter Store
+
+  A box set up with secrets of its own in AWS Parameter Store could not load them: the loader used the AWS command, which the box image does not carry, and the only sign was a failed unit. The secrets never appeared.
+
+  - **The loader reads Parameter Store itself**, with the box's own role. Nothing needs installing on the box, and which parameters it reads (its own path, non-production only) is unchanged.
+  - **The box's self-test now says it.** When a box that declares secrets could not load them, the self-test fails with `box_secrets_loaded` and says where to look, instead of the box looking well.
+  - **Known limit.** A box whose secrets are in OpenBao still needs the `bao` program on it.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes set up for the fleet's KMS key">
   ## A box set up for the fleet's KMS key now starts its secrets service
 

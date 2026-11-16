@@ -1,4 +1,4 @@
-//! A small, native AWS client for the calls a box makes about its own secrets: no `aws` command, no SDK (ADR 0008).
+//! A small, native AWS client for the calls a box makes about its own secrets (the key service and the parameter store): no `aws` command, no SDK (ADR 0008).
 //!
 //! The box image does not carry the AWS CLI (its installer's signature cannot be verified, so `ozbox tools` refuses it), so
 //! anything the secrets service needs from AWS must work without it. This module is the one place that does:
@@ -147,6 +147,17 @@ impl AwsJson {
             .ok()?;
         let r = r.trim();
         valid_region(r).then(|| r.to_string())
+    }
+
+    /// The region to call when none is set: the environment's (`AWS_REGION`, `AWS_DEFAULT_REGION`), else this machine's own.
+    pub fn region_or_default(&self, setting: Option<&str>) -> Option<String> {
+        if let Some(r) = setting.filter(|r| !r.is_empty()) {
+            return valid_region(r).then(|| r.to_string());
+        }
+        ["AWS_REGION", "AWS_DEFAULT_REGION"]
+            .iter()
+            .find_map(|n| env(n).filter(|v| valid_region(v)))
+            .or_else(|| self.imds_region())
     }
 
     fn fetch_creds(&self) -> Result<Creds, Failure> {
@@ -463,7 +474,7 @@ pub(crate) mod fakes {
         }
     }
 
-    fn seen_of(r: &mut tiny_http::Request) -> Seen {
+    pub(crate) fn seen_of(r: &mut tiny_http::Request) -> Seen {
         let mut body = String::new();
         let _ = std::io::Read::read_to_string(r.as_reader(), &mut body);
         Seen {
@@ -482,7 +493,7 @@ pub(crate) mod fakes {
         Response::from_string(s)
     }
 
-    fn json(code: u16, s: &str) -> Response<Cursor<Vec<u8>>> {
+    pub(crate) fn json(code: u16, s: &str) -> Response<Cursor<Vec<u8>>> {
         Response::from_string(s)
             .with_status_code(code)
             .with_header(Header::from_bytes("Content-Type", "application/x-amz-json-1.1").unwrap())

@@ -46,6 +46,10 @@ pub struct SelfTestConfig {
     /// self-test fails and names the key that protects the store, so a box whose key cannot be used is never reported well.
     /// `None` off a box; a missing file is a box without the service, and is skipped.
     pub secrets_state_file: Option<PathBuf>,
+    /// The box's own-secrets declaration (`/etc/ozbox/box-secrets.env`). A box that declares secrets and whose loader
+    /// (`ozbox-box-secrets.service`) is in the `failed` state fails the test, so a box that could not load them is never
+    /// reported well. `None` off a box; no file is a box that declares none, and is skipped.
+    pub box_secrets_declaration: Option<PathBuf>,
     /// Root's approval setting files (`approvals-legacy-codes-off`, `approvals-presence-keys`). A file that is there but not
     /// root's, or that others can write, is ignored by the secrets service, so root's setting does not hold: that fails the
     /// test (phase 2 re-check NL9). Empty off a box; absent files are fine (the setting is its default).
@@ -220,6 +224,47 @@ fn secrets_key_check(host: &dyn HostSource, path: &Path, now_ms: u64) -> Option<
     })
 }
 
+/// Where a box's own-secrets declaration is, and the loader's unit.
+pub const BOX_SECRETS_DECLARATION: &str = "/etc/ozbox/box-secrets.env";
+const BOX_SECRETS_UNIT: &str = "ozbox-box-secrets.service";
+
+/// A box that declares secrets of its own must have been able to load them: the loader unit is not `failed`. `None` when
+/// the box declares none. The loader's own message (never a value or a path) is in `journalctl -u ozbox-box-secrets`.
+fn box_secrets_check(
+    host: &dyn HostSource,
+    declaration: &Path,
+    runner: &dyn CommandRunner,
+) -> Option<Check> {
+    const NAME: &str = "box_secrets_loaded";
+    let text = host.read(&declaration.to_string_lossy()).ok()?;
+    let backend = text
+        .lines()
+        .find_map(|l| l.strip_prefix("OZBOX_BOX_SECRETS_BACKEND="))
+        .map(str::trim)
+        .filter(|b| !b.is_empty())?;
+    let state = runner
+        .run(&CommandSpec::new("systemctl").args(["is-failed", BOX_SECRETS_UNIT]))
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_default();
+    Some(match state.as_str() {
+        "failed" => fail(
+            NAME,
+            "systemctl is-failed ozbox-box-secrets.service",
+            format!(
+                "this box declares secrets of its own (kept in {}) and the loader could not load them, so commands that need them will not find them. See why with `ozbox admin <box> -- collect-logs` (the loader says what failed, never a value), check the box's role may read its path, then run `systemctl start ozbox-box-secrets.service` or wait for its next refresh",
+                if backend == "aws-ssm" { "AWS Parameter Store" } else { "the vault" }
+            ),
+        ),
+        "" => Check {
+            name: NAME.into(),
+            outcome: Outcome::Unknown {
+                reason: "the loader's state could not be read".into(),
+            },
+        },
+        _ => pass(NAME),
+    })
+}
+
 /// Where the box user's secrets-service sockets are on a box.
 pub const BOX_USER_SECRETS_SOCKETS: &[&str] = &[
     "/run/ozbox-secrets/box/box.sock",
@@ -240,6 +285,7 @@ impl SelfTestConfig {
             tunnel_units: Vec::new(),
             secrets_sockets: Vec::new(),
             secrets_state_file: None,
+            box_secrets_declaration: None,
             approval_flag_files: Vec::new(),
             dashboard_socket: None,
             user_cgroup_root: None,
@@ -842,6 +888,15 @@ pub fn run(
         checks.push(c);
     }
 
+    // a box that declares secrets of its own loaded them
+    if let Some(c) = cfg
+        .box_secrets_declaration
+        .as_deref()
+        .and_then(|p| box_secrets_check(host, p, runner))
+    {
+        checks.push(c);
+    }
+
     // root's approval setting files, when there are any, are ones the service trusts
     if let Some(c) = approval_flags_check(&cfg.approval_flag_files) {
         checks.push(c);
@@ -1244,6 +1299,45 @@ mod tests {
                 assert!(reason.contains("`ozbox adopt-fleet-key <box>`"), "{reason}");
                 assert!(
                     !reason.contains("admin <box> -- adopt-fleet-key"),
+                    "{reason}"
+                );
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn a_box_that_declares_secrets_and_could_not_load_them_fails_the_self_test() {
+        let d = tempfile::tempdir().unwrap();
+        let (_, h) = setup(d.path());
+        let by = |h: &FakeHost, state: &str| {
+            let r = RecordingRunner::new();
+            r.reply(Output {
+                status: Some(if state == "failed" { 0 } else { 1 }),
+                stdout: format!("{state}\n"),
+                stderr: String::new(),
+            });
+            box_secrets_check(h, Path::new(BOX_SECRETS_DECLARATION), &r).map(|c| c.outcome)
+        };
+        // no declaration file, or one that declares nothing: no check
+        assert_eq!(by(&h, "failed"), None);
+        h.set(BOX_SECRETS_DECLARATION, "OZBOX_BOX_SECRETS_BACKEND=\n");
+        assert_eq!(by(&h, "failed"), None);
+        h.set(
+            BOX_SECRETS_DECLARATION,
+            "OZBOX_BOX_SECRETS_BACKEND=aws-ssm\nOZBOX_BOX_SECRETS_PATH=/ozbox/dev\nOZBOX_BOX_ROLE=main\n",
+        );
+        assert_eq!(by(&h, "inactive"), Some(Outcome::Pass));
+        assert_eq!(by(&h, "active"), Some(Outcome::Pass));
+        match by(&h, "failed") {
+            Some(Outcome::Fail { reason, .. }) => {
+                assert!(
+                    reason.contains("Parameter Store") && reason.contains("collect-logs"),
+                    "{reason}"
+                );
+                // names neither the path nor the role
+                assert!(
+                    !reason.contains("/ozbox/dev") && !reason.contains("main"),
                     "{reason}"
                 );
             }
