@@ -140,6 +140,10 @@ come from a real run.
 - **The dashboard.** `ozbox-cli`'s `build.rs` embeds `packages/dashboard/dist`, and a release build refuses to compile
   without it. A crate on crates.io contains only files under its own directory, so a `cargo install ozbox-cli` build would
   find no dashboard and either fail or serve the placeholder page. The dry run reports this every time.
+  Every built program is then **run** and asked what it embedded (`ozbox build-info --json`, a hidden command;
+  `scripts/release/check-embedded-dashboard.sh`): the build fails unless it reports this build's dashboard hash and no
+  placeholder page. The programs are run natively, under qemu (arm64 Linux) or under Rosetta (x86_64 macOS). The file is not
+  searched for the hash, because the compiler may store that constant in pieces.
 - crates.io Trusted Publishing needs the crate to exist first (publish version one by hand), a trusted publisher
   configured per crate, and a human-reviewed pin for `rust-lang/crates-io-auth-action` (the workflow references it by tag
   with a comment; every other action here is pinned to a commit).

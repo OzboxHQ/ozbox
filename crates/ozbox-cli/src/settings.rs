@@ -842,7 +842,8 @@ mod tests {
             &fleet,
             &Operation::Destroy {
                 name: BoxName::new("a")?,
-                final_snapshot: true
+                final_snapshot: true,
+                keep_old_system_disks: false
             }
         )
         .is_ok());

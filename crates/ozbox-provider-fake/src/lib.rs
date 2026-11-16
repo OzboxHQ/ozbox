@@ -85,6 +85,19 @@ struct State {
     /// When each snapshot was taken and how large its disk was, by snapshot id.
     #[serde(default)]
     snapshot_meta: BTreeMap<String, SnapMeta>,
+    /// Copies of old system disks that upgrades kept; never `/work` backups.
+    #[serde(default)]
+    system_copies: Vec<SystemCopy>,
+}
+
+/// A copy of a machine's system disk an upgrade kept (the sandbox's stand-in for a provider snapshot of it).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SystemCopy {
+    id: String,
+    box_name: String,
+    /// The image the upgrade that took it was going to.
+    image: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,27 +434,69 @@ impl Backend for FakeBackend {
         })
     }
 
+    fn check_system_disk_snapshot(&self, rec: &BoxRecord) -> Result<Option<String>> {
+        Ok(Some(format!(
+            "Keep a copy of the OLD system disk of {} (the sandbox keeps a simulated one)",
+            rec.spec.name
+        )))
+    }
+
+    fn snapshot_system_disk(
+        &self,
+        rec: &BoxRecord,
+        image: &str,
+        _max_wait: Option<std::time::Duration>,
+    ) -> Result<String> {
+        self.mutate(|s| {
+            s.next_id += 1;
+            let id = format!("fake-root-snap-{}", s.next_id);
+            let box_name = entry(s, rec)?.spec.name.to_string();
+            s.system_copies.push(SystemCopy {
+                id: id.clone(),
+                box_name,
+                image: image.to_string(),
+                created_at: now_rfc3339(),
+            });
+            Ok(id)
+        })
+    }
+
     fn list_snapshots(&self, rec: &BoxRecord) -> Result<Vec<SnapshotInfo>> {
         let state = self.load()?;
         let e = state
             .boxes
             .get(rec.spec.name.as_str())
             .ok_or_else(|| Error::NotFound(rec.spec.name.to_string()))?;
-        Ok(e.snapshots
+        let work = e.snapshots.iter().map(|id| {
+            let meta = state.snapshot_meta.get(id);
+            SnapshotInfo {
+                id: id.clone(),
+                kind: SnapshotKind::Provider,
+                created_at: meta.map(|m| m.created_at.clone()),
+                size_bytes: meta.map(|m| m.size_bytes),
+                status: "completed".into(),
+                includes_work: true,
+                labels: BTreeMap::from([("ozbox-box".to_string(), e.spec.name.to_string())]),
+            }
+        });
+        let copies = state
+            .system_copies
             .iter()
-            .map(|id| {
-                let meta = state.snapshot_meta.get(id);
-                SnapshotInfo {
-                    id: id.clone(),
-                    kind: SnapshotKind::Provider,
-                    created_at: meta.map(|m| m.created_at.clone()),
-                    size_bytes: meta.map(|m| m.size_bytes),
-                    status: "completed".into(),
-                    includes_work: true,
-                    labels: BTreeMap::from([("ozbox-box".to_string(), e.spec.name.to_string())]),
-                }
-            })
-            .collect())
+            .filter(|c| c.box_name == rec.spec.name.as_str())
+            .map(|c| SnapshotInfo {
+                id: c.id.clone(),
+                kind: SnapshotKind::Provider,
+                created_at: Some(c.created_at.clone()),
+                size_bytes: None,
+                status: "completed".into(),
+                includes_work: false,
+                labels: BTreeMap::from([
+                    ("ozbox-box".to_string(), c.box_name.clone()),
+                    ("ozbox-purpose".to_string(), "pre-upgrade-root".to_string()),
+                    (UPGRADE_TO_LABEL.to_string(), c.image.clone()),
+                ]),
+            });
+        Ok(work.chain(copies).collect())
     }
 
     fn delete_snapshot(&self, rec: &BoxRecord, id: &str) -> Result<()> {
@@ -450,7 +505,14 @@ impl Backend for FakeBackend {
             let before = e.snapshots.len();
             e.snapshots.retain(|x| x != id);
             if e.snapshots.len() == before {
-                return Err(Error::NotFound(format!("snapshot {id}")));
+                // a copy of an old system disk is deleted the same way
+                let copies = s.system_copies.len();
+                s.system_copies
+                    .retain(|c| !(c.id == id && c.box_name == rec.spec.name.as_str()));
+                if s.system_copies.len() == copies {
+                    return Err(Error::NotFound(format!("snapshot {id}")));
+                }
+                return Ok(());
             }
             s.snapshot_meta.remove(id);
             Ok(())
@@ -836,6 +898,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         };
         let plan = p.plan(&op)?;
         let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
@@ -900,6 +963,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         };
         let plan = p.plan(&op)?;
         let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
@@ -943,6 +1007,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?;
         assert!(plan.notes.iter().any(|t| t.contains("leaves it running")));
         assert!(plan.changes.iter().all(|c| c.kind != "instance.stop"));
@@ -963,6 +1028,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision,
+            keep_old_system_disk: false,
         };
         p.apply(&p.plan(&to(false))?)?;
         assert!(p.plan(&to(false))?.is_noop(), "already on the image");
@@ -1177,6 +1243,93 @@ mod tests {
                 upgrade: None,
             });
             assert!(res.is_err(), "the suite passed a provider that {label}");
+        }
+        Ok(())
+    }
+
+    /// The box, its name, the id of its backup of /work and the id of the copy of its old system disk.
+    type Kept = (Engine<FakeBackend>, BoxName, String, String);
+
+    fn made_box_with_a_backup_and_a_copy(
+        dir: &std::path::Path,
+    ) -> std::result::Result<Kept, Box<dyn std::error::Error>> {
+        let p = Engine::new(FakeBackend::new(dir));
+        let n = BoxName::new("kept")?;
+        p.apply(&p.plan(&Operation::Create {
+            spec: BoxSpec::new(n.clone(), Size::S),
+        })?)?;
+        p.apply(&p.plan(&Operation::Snapshot { name: n.clone() })?)?;
+        p.apply(&p.plan(&Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision: false,
+            keep_old_system_disk: true,
+        })?)?;
+        let all = p.snapshots(&n)?;
+        let work = all
+            .iter()
+            .find(|s| s.is_work_backup())
+            .ok_or("no backup")?
+            .id
+            .clone();
+        let copy = all
+            .iter()
+            .find(|s| s.is_old_system_disk_copy())
+            .ok_or("no copy")?
+            .id
+            .clone();
+        Ok((p, n, work, copy))
+    }
+
+    /// A copy of an old system disk is not a backup of /work: it does not stop the one real backup being "the only snapshot", and
+    /// deleting the copy is never said to leave no backup.
+    #[test]
+    fn the_only_snapshot_note_counts_backups_and_not_copies_of_old_system_disks() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, work, copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        let only = |plan: &Plan| plan.notes.iter().any(|t| t.contains("only snapshot"));
+        let del = |id: &str| Operation::DeleteSnapshot {
+            name: n.clone(),
+            snapshot: id.to_string(),
+        };
+        assert!(
+            only(&p.plan(&del(&work))?),
+            "the one backup is the only one"
+        );
+        assert!(!only(&p.plan(&del(&copy))?), "a copy is not a backup");
+        Ok(())
+    }
+
+    /// The copy holds the old store's key and cannot be reached once the box is gone: destroying the box removes it (the plan
+    /// says so) unless the person keeps it, and a backup of /work is kept as before.
+    #[test]
+    fn destroying_a_box_removes_its_copies_of_old_system_disks_by_default() -> TestResult {
+        for keep in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let (p, n, _work, copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+            let plan = p.plan(&Operation::Destroy {
+                name: n.clone(),
+                final_snapshot: false,
+                keep_old_system_disks: keep,
+            })?;
+            let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
+            if keep {
+                assert_eq!(kinds, ["box.delete"]);
+                assert!(plan
+                    .notes
+                    .iter()
+                    .any(|t| t.contains(&copy) && t.contains("KEPT")));
+            } else {
+                assert_eq!(kinds, ["snapshot.delete_old_system_disks", "box.delete"]);
+                assert!(plan.changes[0].description.contains(&copy));
+            }
+            p.apply(&plan)?;
+            let left = p.backend().load()?;
+            assert_eq!(
+                left.system_copies.iter().filter(|c| c.id == copy).count(),
+                usize::from(keep),
+                "keep={keep}"
+            );
         }
         Ok(())
     }

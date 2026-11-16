@@ -64,6 +64,11 @@ fn use_plugin_cache() {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    // Answers about the program itself, so it reads no configuration and touches no provider: it must work on a build
+    // machine with nothing set up.
+    if let Command::BuildInfo = &cli.command {
+        return build_info(cli.json);
+    }
     use_plugin_cache();
     crate::infra_cli::set_dev_flag(cli.dev_modules);
     let (config, source) = Config::load_found()?;
@@ -434,6 +439,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Sizes
+        | Command::BuildInfo
         | Command::Infra
         | Command::Providers
         | Command::Serve { .. }
@@ -786,6 +792,7 @@ pub fn run(cli: Cli) -> Result<()> {
             image,
             allow_unverified_image,
             accept_new_secrets_store,
+            no_pre_upgrade_snapshot,
             reprovision,
             allow_first_boot_mismatch,
             use_fleet_key,
@@ -804,6 +811,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 image,
                 allow_unverified_image,
                 accept_new_secrets_store,
+                no_pre_upgrade_snapshot,
                 upgrade::FirstBootOpts {
                     ours: crate::infra_cli::effective_first_boot(),
                     reprovision,
@@ -1014,11 +1022,13 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Destroy {
             name,
             no_final_snapshot,
+            keep_old_system_disks,
         } => mutate(
             p,
             Operation::Destroy {
                 name,
                 final_snapshot: !no_final_snapshot,
+                keep_old_system_disks,
             },
             &flags(cli.yes, cli.dry_run, json),
         ),
@@ -1327,6 +1337,14 @@ fn default_create_image(
 }
 
 /// The AWS adapter's settings from the config file (and the default state directory for the boxes' OpenTofu state).
+/// How many looks, one `interval` apart, make `minutes` of waiting for the copy of an old system disk (at least one).
+fn snapshot_wait_polls(minutes: u32, interval: std::time::Duration) -> u32 {
+    let every = interval.as_secs().max(1);
+    u32::try_from(u64::from(minutes) * 60 / every)
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
 fn aws_config(config: &Config, force_s3: bool) -> Result<ozbox_provider_aws::AwsConfig> {
     let mut cfg = ozbox_provider_aws::AwsConfig::default();
     if let Some(s) = config.aws.as_ref() {
@@ -1338,6 +1356,9 @@ fn aws_config(config: &Config, force_s3: bool) -> Result<ozbox_provider_aws::Aws
         cfg.secrets_key_arn = s.secrets_key_arn.clone().filter(|k| !k.is_empty());
         cfg.fleet = s.fleet.clone().filter(|f| !f.is_empty());
         cfg.root_disk_gb = s.root_disk_gb;
+        if let Some(m) = s.snapshot_wait_minutes.filter(|m| *m > 0) {
+            cfg.snapshot_wait_polls = snapshot_wait_polls(m, cfg.poll_interval);
+        }
         cfg.session_log_bucket = s.session_log_bucket.clone();
         cfg.patch_group = s.patch_group.clone();
         if let Some(r) = &s.release_repo {
@@ -2105,6 +2126,28 @@ fn providers(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `ozbox build-info`: the version and the dashboard this program embeds, as the program itself reports them.
+fn build_info(json: bool) -> Result<()> {
+    let (embedded, sha256, placeholder) = crate::serve::dashboard_build();
+    let version = env!("CARGO_PKG_VERSION");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": version,
+                "dashboard": { "embedded": embedded, "sha256": sha256 },
+                "placeholder_page": placeholder,
+            })
+        );
+    } else {
+        println!("ozbox {version}");
+        println!("dashboard embedded: {embedded}");
+        println!("dashboard sha256: {sha256}");
+        println!("placeholder page compiled in: {placeholder}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod create_image_tests {
     use super::{check_default_image, newer_release_note};
@@ -2154,5 +2197,24 @@ mod create_image_tests {
             newer_release_note("0.2.0-beta.1", "0.2.0-beta.2").is_none(),
             "not a stable release"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_wait_tests {
+    use super::snapshot_wait_polls;
+    use std::time::Duration;
+
+    /// `snapshot_wait_minutes` under `[aws]` is minutes of waiting for the copy of an old system disk: the number of looks that
+    /// make it, never none.
+    #[test]
+    fn minutes_of_waiting_become_the_looks_that_make_them() {
+        let five = Duration::from_secs(5);
+        assert_eq!(snapshot_wait_polls(30, five), 360);
+        assert_eq!(snapshot_wait_polls(1, five), 12);
+        assert_eq!(snapshot_wait_polls(10, Duration::from_secs(30)), 20);
+        // a zero interval is looked at every second, and a wait is at least one look
+        assert_eq!(snapshot_wait_polls(1, Duration::ZERO), 60);
+        assert_eq!(snapshot_wait_polls(1, Duration::from_secs(600)), 1);
     }
 }

@@ -120,7 +120,31 @@ fn store_digest(p: &Paths) -> Result<String, String> {
     Ok(ozbox_core::audit::hex(&d.as_ref()[..8]))
 }
 
+/// What the service's state says, in words, for a refusal: the person is told which state the box was in.
+fn saw(state: &State) -> String {
+    let code = state.code.as_deref().unwrap_or("none");
+    if state.ready {
+        return "ready (its store opens)".to_string();
+    }
+    match code {
+        "transient" => "restarting (it is trying again; that is not a lost store)".to_string(),
+        "config" => "waiting for a change to the box's configuration (that is not a lost store)".to_string(),
+        "kind-mismatch" => format!(
+            "a store sealed by a different kind of key than the one configured (configured: {}, store: {})",
+            state.kek.as_deref().unwrap_or("?"),
+            state.store_kek.as_deref().unwrap_or("?")
+        ),
+        "no-escrow" => format!("a lost file key (kek={}, escrow={:?})", state.kek.as_deref().unwrap_or("?"), state.escrow),
+        other => format!("not ready with code {other}"),
+    }
+}
+
 /// Everything that must hold before a store is set aside, said as the first thing that does not. `Ok` is the store's digest.
+///
+/// Two recorded states qualify, and nothing else does: the file key is lost with no copy (`no-escrow`, a file-key box), or the
+/// store is sealed by a file-kept key that is gone while the box is configured for another kind (`kind-mismatch`, as after a
+/// box moved to the fleet's KMS key over a store its old disk's key sealed). In both the key file is absent and the service
+/// itself, not running, said so; and for the second, root also reads the store's own label and checks it.
 pub fn preconditions(p: &Paths, f: &Facts) -> Result<String, String> {
     let refuse = |why: &str| Err(format!("refused: {why}; nothing was changed"));
     if p.store
@@ -131,24 +155,52 @@ pub fn preconditions(p: &Paths, f: &Facts) -> Result<String, String> {
     }
     let settings = crate::secrets_file::env_file(&p.settings);
     let kind = crate::secrets_file::kek_kind_with(&|k| settings.get(k).cloned(), f.tpm);
-    if kind != Some("file") {
+    // The state is read as root would trust it; whether it is the mismatch one decides which settings are expected.
+    let state: Result<State, String> = read_trusted(&p.state, f.service_uid);
+    let mismatch = state.as_ref().is_ok_and(State::is_kind_mismatch);
+    if !mismatch && kind != Some("file") {
+        let said = state
+            .as_ref()
+            .map_or_else(|_| "not recorded".to_string(), saw);
         return refuse(&format!(
-            "this box keeps its store's key with {} rather than in a file, so a missing key is the key service's to fix, not a lost store",
+            "this box keeps its store's key with {} rather than in a file, so a missing key is the key service's to fix, not a lost store (the service's state: {said})",
             kind.unwrap_or("nothing configured")
         ));
     }
     if f.unit_active {
-        return refuse("the secrets service is starting or running");
+        let saw = match &state {
+            Ok(s) => saw(s),
+            Err(_) => "not recorded".to_string(),
+        };
+        return refuse(&format!(
+            "the secrets service is starting or running (its state: {saw}), so nothing is recorded as lost"
+        ));
     }
     if f.unit_exit != Some(NOT_READY_EXIT) {
         return refuse("the secrets service did not stop because its store's key is lost (it is between restarts, or stopped for another reason); look at `ozbox admin <box> -- collect-logs`");
     }
-    let state: State = match read_trusted(&p.state, f.service_uid) {
+    let state = match state {
         Ok(s) => s,
         Err(e) => return refuse(&e),
     };
-    if !(state.is_no_escrow() && state.file_kek_without_escrow()) {
-        return refuse("the secrets service did not record that its store's key is lost with no escrow; only that state may be recovered");
+    if mismatch {
+        // the service's word is checked against what root can see: the settings choose the kind the service recorded, and the
+        // store's own label is the other kind (a store the configured key could open is never set aside)
+        let stored = crate::secrets_enc::EncryptedSecrets::stored_kek(&p.store).or_else(|| {
+            crate::secrets_enc::EncryptedSecrets::stored_kek(&p.persist.join("secrets.json"))
+        });
+        if kind.is_none() || kind != state.kek.as_deref() || stored.as_deref() != Some("file") {
+            return refuse(&format!(
+                "the secrets service recorded a store sealed by a different kind of key, but the box's settings and the store do not agree with it (configured: {}, store sealed by: {})",
+                kind.unwrap_or("nothing"),
+                stored.as_deref().unwrap_or("unreadable")
+            ));
+        }
+    } else if !(state.is_no_escrow() && state.file_kek_without_escrow()) {
+        return refuse(&format!(
+            "the secrets service did not record that its store can never be opened; it recorded: {}. Only a lost key with no escrow, or a store sealed by a different kind of key whose own key is gone, may be recovered",
+            saw(&state)
+        ));
     }
     store_digest(p)
 }
@@ -499,6 +551,95 @@ mod tests {
         assert!(kept(&r));
     }
 
+    const MISMATCH: &str = "not-ready: the store was sealed by a key kept in a file, but this box is configured for kms\nkek=kms\ncode=kind-mismatch\nstore=file\n";
+
+    /// A real store sealed by a file-kept key whose key file is not kept (as after a replaced system disk), in both places.
+    fn seal_with_a_file_key(r: &Rig) {
+        use crate::secrets::SecretStore;
+        use crate::secrets_enc::{EncryptedSecrets, KeyProvider, LocalKekProvider};
+        let kek = LocalKekProvider::random("file").unwrap();
+        std::fs::remove_file(&r.p.store).unwrap();
+        let s = EncryptedSecrets::new(
+            r.p.store.clone(),
+            "dev",
+            std::sync::Arc::new(kek) as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap();
+        s.set("projects/app/X", "v").unwrap();
+        std::fs::copy(&r.p.store, r.p.persist.join("secrets.json")).unwrap();
+    }
+
+    /// The box that moved to the fleet's KMS key over a store the old disk's file key sealed: the service records
+    /// `kind-mismatch`, and that store may be set aside, with the pinned key's signature, like a lost one.
+    #[test]
+    fn a_store_sealed_by_a_lost_file_key_under_a_kms_configuration_is_set_aside_with_approval() {
+        let r = rig(KMS_BOX, MISMATCH);
+        seal_with_a_file_key(&r);
+        let c = challenge(&r.p, &r.f, 1_000).unwrap();
+        let sig = sign(&r, &c);
+        assert_eq!(
+            redeem(&r.p, &r.f, &c.nonce, c.expires_ms, &sig, 2_000).unwrap(),
+            2
+        );
+        assert!(!kept(&r));
+        // without the signature nothing moves
+        let r = rig(KMS_BOX, MISMATCH);
+        seal_with_a_file_key(&r);
+        let c = challenge(&r.p, &r.f, 1_000).unwrap();
+        let (other, _) = crate::approval_key::generate().unwrap();
+        let forged = crate::approval_key::sign(&other, &c.message()).unwrap();
+        assert!(redeem(&r.p, &r.f, &c.nonce, c.expires_ms, &forged, 2_000).is_err());
+        assert!(kept(&r));
+    }
+
+    /// What may NOT be recovered, each said by the state it saw: a key file that is there, a restarting service, a recorded
+    /// mismatch the settings or the store do not bear out, and a store whose kind matches.
+    #[test]
+    fn a_store_that_can_be_opened_or_a_restarting_service_is_refused_and_the_refusal_names_the_state(
+    ) {
+        // the key file is here: it can be opened
+        let r = rig(KMS_BOX, MISMATCH);
+        seal_with_a_file_key(&r);
+        std::fs::write(
+            r.p.store.with_file_name(crate::secrets_persist::KEY_FILE),
+            "k",
+        )
+        .unwrap();
+        assert!(challenge(&r.p, &r.f, 1)
+            .unwrap_err()
+            .contains("can be opened"));
+        // restarting (the service still in its retry loop): refused, and it says restarting
+        let r = rig(KMS_BOX, "not-ready: the secrets file is protected by a different kind of key than the one configured (trying again in 2 s)\nkek=kms\ncode=transient\n");
+        seal_with_a_file_key(&r);
+        let e = challenge(&r.p, &r.f, 1).unwrap_err();
+        assert!(e.contains("restarting"), "{e}");
+        let mut r = rig(KMS_BOX, MISMATCH);
+        seal_with_a_file_key(&r);
+        r.f.unit_active = true;
+        let e = challenge(&r.p, &r.f, 1).unwrap_err();
+        assert!(
+            e.contains("starting or running") && e.contains("kind of key"),
+            "{e}"
+        );
+        // the state says mismatch but the settings choose another kind than it recorded
+        let r = rig(FILE_BOX, MISMATCH);
+        seal_with_a_file_key(&r);
+        assert!(challenge(&r.p, &r.f, 1)
+            .unwrap_err()
+            .contains("do not agree"));
+        // the state says mismatch but the store is not sealed by a file key (the kinds match what is configured)
+        let r = rig(KMS_BOX, MISMATCH);
+        assert!(challenge(&r.p, &r.f, 1)
+            .unwrap_err()
+            .contains("do not agree"));
+        // a ready service: nothing to recover
+        let r = rig(KMS_BOX, "ready\nkek=kms\n");
+        seal_with_a_file_key(&r);
+        let e = challenge(&r.p, &r.f, 1).unwrap_err();
+        assert!(e.contains("ready"), "{e}");
+        assert!(kept(&r));
+    }
+
     #[test]
     fn a_forged_state_file_is_never_the_services_word() {
         if cfg!(target_os = "macos") {
@@ -587,5 +728,108 @@ mod tests {
             Some(c)
         );
         assert_eq!(Challenge::from_output("challenge ; rm 1 2"), None);
+    }
+
+    /// The on-box half of "Recovering an old secrets store" (docs/use-cases/keeping-boxes-healthy.md): the old disk's `kek.key`
+    /// reopens the store the upgrade set aside (`secrets.json.lost-<time>` beside the store and on /work), and no other key does.
+    /// The cloud half (a volume from the snapshot, attached and mounted) is described in the guide and not run here.
+    #[test]
+    fn the_key_file_of_a_kept_system_disk_reopens_the_store_that_was_set_aside() {
+        use crate::secrets::SecretStore;
+        use crate::secrets_enc::{EncryptedSecrets, KeyProvider, LocalKekProvider};
+        // (on macOS a file-kept key is chosen only when the settings say so)
+        let r = rig(&format!("{FILE_BOX}OZBOX_SECRET_KEK=file\n"), LOST);
+        // the old machine: a store sealed under a key kept in a file beside it
+        let old = r._d.path().join("old-root/var/lib/ozbox-secrets");
+        std::fs::create_dir_all(&old).unwrap();
+        let kek = LocalKekProvider::random("file").unwrap();
+        std::fs::write(
+            old.join(crate::secrets_persist::KEY_FILE),
+            kek.kek_text().as_str(),
+        )
+        .unwrap();
+        let sealed = EncryptedSecrets::new(
+            old.join("secrets.json"),
+            "main",
+            std::sync::Arc::new(kek) as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap();
+        sealed
+            .set("projects/app/DATABASE_URL", "postgres://example")
+            .unwrap();
+        // the new machine got the store back from /work without the key, and the upgrade set it aside
+        std::fs::copy(old.join("secrets.json"), &r.p.store).unwrap();
+        std::fs::copy(old.join("secrets.json"), r.p.persist.join("secrets.json")).unwrap();
+        assert_eq!(console(&r.p, &r.f).unwrap(), 2);
+        let aside = std::fs::read_dir(&r.p.persist)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains(".json.lost-"))
+            .unwrap();
+        // reinstating it, as the guide says: the aside store as secrets.json, the old disk's key file beside it
+        let back = r._d.path().join("reinstated");
+        std::fs::create_dir_all(&back).unwrap();
+        std::fs::copy(&aside, back.join("secrets.json")).unwrap();
+        let key = std::fs::read_to_string(old.join(crate::secrets_persist::KEY_FILE)).unwrap();
+        assert!(crate::secrets_ingress::kek_opens_store(
+            &back.join("secrets.json"),
+            "main",
+            &key
+        ));
+        let other = LocalKekProvider::random("file")
+            .unwrap()
+            .kek_text()
+            .to_string();
+        assert!(!crate::secrets_ingress::kek_opens_store(
+            &back.join("secrets.json"),
+            "main",
+            &other
+        ));
+        let names = EncryptedSecrets::new(
+            back.join("secrets.json"),
+            "main",
+            std::sync::Arc::new(LocalKekProvider::from_text("file", &key).unwrap())
+                as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap()
+        .names("")
+        .unwrap();
+        assert_eq!(names, ["projects/app/DATABASE_URL"]);
+    }
+
+    /// The guide names the real files, the real tags and the real commands; a rename here fails until the guide is fixed.
+    #[test]
+    fn the_recovery_guide_names_the_files_tags_and_commands_the_code_uses() {
+        let guide = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/use-cases/keeping-boxes-healthy.md"),
+        )
+        .unwrap();
+        let section = guide
+            .split("## 1c. ")
+            .nth(1)
+            .unwrap()
+            .split("\n## ")
+            .next()
+            .unwrap();
+        for needle in [
+            crate::secrets_persist::KEY_FILE,
+            ".json.lost-",
+            "/var/lib/ozbox-secrets",
+            "/work/ozbox-secrets-private",
+            ozbox_provider_aws::PURPOSE_TAG,
+            ozbox_provider_aws::PRE_UPGRADE_ROOT,
+            "ozbox-secrets.service",
+            "ozbox adopt-fleet-key",
+            "ozbox backup delete",
+        ] {
+            assert!(section.contains(needle), "the guide must say {needle}");
+        }
+        // the paths in the guide are the ones the code defaults to
+        assert!(Paths::default().store.starts_with("/var/lib/ozbox-secrets"));
+        assert!(Paths::default()
+            .persist
+            .starts_with("/work/ozbox-secrets-private"));
     }
 }

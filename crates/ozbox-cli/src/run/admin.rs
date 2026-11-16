@@ -432,6 +432,9 @@ pub const HELPER_ACTIONS: &[(&str, HelperGate)] = &[
     ("enable-linger", HelperGate::Ungated),
 ];
 
+/// What a box's root helper from before the `kind-mismatch` state says to a service that is looping on one.
+const OLD_HELPER_REFUSAL: &str = "the secrets service is running, so its store can be opened";
+
 /// Why a recovery did not happen.
 #[derive(Debug)]
 pub enum RecoverError {
@@ -454,6 +457,17 @@ pub fn recover_secrets(
         .admin(rec, "recover-secrets challenge")
         .map_err(RecoverError::Unreachable)?;
     if !ok {
+        // A box whose helper predates the mismatch state refuses a service that is only looping on it as "running, so its
+        // store can be opened". Its program records nothing a person can act on, so say what to run instead.
+        if out.contains(OLD_HELPER_REFUSAL)
+            && matches!(agent.secrets_state(rec), Ok((Some(s), _))
+                if s.text.contains(crate::secrets_enc::KEK_KIND_MISMATCH))
+        {
+            return Err(RecoverError::Refused(t(
+                "admin.recover_old_helper",
+                &[("box", rec.spec.name.as_str())],
+            )));
+        }
         return Err(RecoverError::Refused(out));
     }
     let c = Challenge::from_output(&out).ok_or_else(|| {

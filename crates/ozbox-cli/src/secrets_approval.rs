@@ -272,6 +272,59 @@ impl ApprovalGate {
         }
         Ok(st.live.remove(&tag).map(|a| a.via).unwrap_or_default())
     }
+
+    /// [`ApprovalGate::consume`], spent only if `effect` succeeds. The approval is checked and TAKEN under the lock, and the lock is
+    /// released before `effect` runs: the effect may be slow (a store on a KMS key calls the key service over the network), and a
+    /// slow effect must not stall every other mint and consume on the box. Taking it first is what keeps a code single use: a second
+    /// request with the same code, arriving while the effect runs, finds nothing. If the effect fails the approval is put back with its own expiry, so a refused write leaves the person's code usable; if the effect panics the code stays spent,
+    /// which is the safe side. The effect may take this gate's lock (it can mint another code).
+    pub fn consume_then<T>(
+        &self,
+        code: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        now_ms: u64,
+        effect: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, ConsumeThen> {
+        let wrong = "that approval is not valid, has been used, or has expired: ask for a new one in the dashboard";
+        if normalise(code).is_empty() {
+            return Err(ConsumeThen::Approval(wrong.into()));
+        }
+        let tag = self.tag(code);
+        let taken = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.live.retain(|_, a| a.expires_ms > now_ms);
+            let ok = st
+                .live
+                .get(&tag)
+                .is_some_and(|a| a.scope == scope && a.project == project && a.env == env);
+            if !ok {
+                return Err(ConsumeThen::Approval(wrong.into()));
+            }
+            st.live.remove(&tag)
+        };
+        let Some(approval) = taken else {
+            return Err(ConsumeThen::Approval(wrong.into()));
+        };
+        match effect(&approval.via) {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                // put back as it was, with its own expiry: the next use or mint drops it if it has run out meanwhile
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.live.insert(tag, approval);
+                Err(ConsumeThen::Effect(e))
+            }
+        }
+    }
+}
+
+/// Why [`ApprovalGate::consume_then`] did not finish: the approval was not valid (nothing ran), or it was and the effect failed (the
+/// approval is still unused).
+#[derive(Debug)]
+pub enum ConsumeThen {
+    Approval(String),
+    Effect(String),
 }
 
 /// What a change is allowed by, in words for the audit line.
@@ -425,5 +478,147 @@ mod tests {
         ] {
             assert!(!is_code_shape(bad), "{bad}");
         }
+    }
+
+    /// A code is spent by a write that happened and by nothing else: a refused write leaves it usable, and a write that happened
+    /// cannot be repeated with it.
+    #[test]
+    fn a_code_is_spent_only_when_the_write_it_was_for_succeeded() {
+        let a = ApprovalGate::new();
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .unwrap();
+        // the wrong scope never runs the effect
+        let mut ran = false;
+        assert!(matches!(
+            a.consume_then(&code, "import", "app", "", 1001, |_| {
+                ran = true;
+                Ok(())
+            }),
+            Err(ConsumeThen::Approval(_))
+        ));
+        assert!(!ran);
+        // a write that fails leaves the code usable, any number of times
+        for _ in 0..3 {
+            assert!(matches!(
+                a.consume_then(&code, "policy", "app", "", 1002, |_| Err::<(), _>("full".into())),
+                Err(ConsumeThen::Effect(e)) if e == "full"
+            ));
+        }
+        // a write that happens spends it, and says how it was approved
+        assert_eq!(
+            a.consume_then(&code, "policy", "app", "", 1003, |via| Ok(via.to_string()))
+                .unwrap(),
+            "dashboard-stepup"
+        );
+        assert!(a
+            .consume_then(&code, "policy", "app", "", 1004, |_| Ok(()))
+            .is_err());
+        assert!(a.consume(&code, "policy", "app", "", 1004).is_err());
+    }
+
+    /// A code put back after a failed write keeps its own expiry: it is usable until then and not a moment longer.
+    #[test]
+    fn a_code_put_back_after_a_failed_write_still_expires_at_its_own_time() {
+        let a = ApprovalGate::new();
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 1000)
+            .unwrap();
+        assert!(a
+            .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
+                "full".into()
+            ))
+            .is_err());
+        // put back, but the code was only ever good until 2000
+        assert!(a.consume(&code, "policy", "app", "", 2000).is_err());
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 1000)
+            .unwrap();
+        assert!(a
+            .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
+                "full".into()
+            ))
+            .is_err());
+        assert!(a.consume(&code, "policy", "app", "", 1999).is_ok());
+    }
+
+    /// Two requests with one code at the same moment: exactly one write happens, however slow it is.
+    #[test]
+    fn two_requests_with_one_code_make_exactly_one_write() {
+        let a = std::sync::Arc::new(ApprovalGate::new());
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .unwrap();
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (a, code, writes, barrier) =
+                    (a.clone(), code.clone(), writes.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    a.consume_then(&code, "policy", "app", "", 1001, |_| {
+                        // a slow store: long enough for every other thread to arrive while this one is writing
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .is_ok()
+                })
+            })
+            .collect();
+        let ok = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|b| *b)
+            .count();
+        assert_eq!(ok, 1);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(a.consume(&code, "policy", "app", "", 1002).is_err());
+    }
+
+    /// The write may be slow (a store on a key service): while it runs the gate is free, so another code can be minted and used
+    /// (a gate held across the write would stall here, and on a real box would stall every mint and consume).
+    #[test]
+    fn the_gate_is_not_held_while_the_write_runs() {
+        let a = std::sync::Arc::new(ApprovalGate::new());
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let a2 = a.clone();
+        std::thread::spawn(move || {
+            let r = a2.consume_then(&code, "policy", "app", "", 1001, |_| {
+                let other = a2
+                    .mint("import", "app", "dev", "dashboard-stepup", 1001, 60_000)
+                    .unwrap();
+                a2.consume(&other, "import", "app", "dev", 1002).map(|_| ())
+            });
+            let _ = tx.send(r.is_ok());
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the write could not use the gate: it is held across the write"
+        );
+    }
+
+    /// A write that panics leaves the code spent (never live after a write that may have happened), and the gate still works.
+    #[test]
+    fn a_panicking_write_leaves_the_code_spent_and_the_gate_usable() {
+        let a = std::sync::Arc::new(ApprovalGate::new());
+        let code = a
+            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .unwrap();
+        let (a2, c2) = (a.clone(), code.clone());
+        let r = std::thread::spawn(move || {
+            let _ = a2.consume_then(&c2, "policy", "app", "", 1001, |_| -> Result<(), String> {
+                panic!("store write panicked")
+            });
+        })
+        .join();
+        assert!(r.is_err());
+        assert!(a.consume(&code, "policy", "app", "", 1002).is_err());
+        assert!(a.mint("policy", "app", "", "x", 1003, 60_000).is_ok());
     }
 }

@@ -66,6 +66,20 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    ```
    ozbox secrets import .env.staging --project shop --env staging --box main
    ```
+   **What the result tells you.** Every entry of the file ends in exactly one place, and the last line adds them up, for example
+   `73 entries: 72 stored, 1 duplicate (line 40 kept, line 12 ignored)`: *stored* (or *ready to store* in a preview), *held back*
+   (production-looking and not allowed), *skipped* (with the reason beside the name: a blank value, a name that is not a variable
+   name and why, a line that is not `NAME=value`, a value the store cannot hold), *duplicate* (a name that appears again: the
+   **last** line is kept, as a shell and Docker Compose do, and the lines ignored are named) and *unchanged* (already stored with
+   the same value, flag and mark; reported for an import to this computer's store, not for `--box`, which does not say). `--json`
+   carries the same account in `summary`, `duplicates` and `rejected_lines`, and an `outcome` on every key. Values are never
+   printed; a line that is not a valid name is shown only as its line number.
+
+   **A production file.** In an environment named `production` every key is production-looking, and none is stored unless you
+   allow it. Name keys one at a time with `--allow-live NAME` (repeatable), or allow every production-looking key in the file
+   with `--allow-live-all` (the two cannot be used together). Either way the keys are listed first, a person at a terminal
+   types the project's name to confirm, and a script is refused with the exact command to run yourself. The keys stay flagged and
+   no agent's command is ever given them.
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used
@@ -181,6 +195,12 @@ What each part does:
   folder once, checks its SHA-256 against the digest you computed, and keeps a read-only, root-owned copy named by that digest. The
   command runs that copy. A file that differs from your digest stops the run and says which (a link on the way counts too); five
   of these in a minute pause the project for five minutes.
+- **How big a declaration may be.** A declaration is kept as a record, not as a secret, so a real application's (one service, a
+  folder pin for each package its build traced, a few file pins and a tool, about 7 KB) saves as it is. The limit is 256 KB of the
+  compact JSON; over it, `env policy set` says the size and the limit and sends nothing. Each part also has a count: 64 commands per
+  declaration, 16 pinned files and 64 pinned folders per command, 32 plain variables per command (`vars`, `pass` and `public`
+  together), 16 tools, 3 browsers, and a plain variable's value of at most 512 characters. Everything the box would refuse is
+  checked on your computer first, so a declaration it would refuse never uses up your approval code.
 - **A command that receives a secret runs in a private view of `/work`.** Inside the command's own mount namespace `/work` is an
   empty, read-only tmpfs, and only what you approved is put back in it, at its own path: the pinned files and folders (root-owned
   copies) and your `writable` folders. So the command sees **no folder above the project and no other project**: a `package.json`
