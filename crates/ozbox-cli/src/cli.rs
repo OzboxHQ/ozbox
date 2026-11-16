@@ -847,7 +847,7 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live.
+    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -858,6 +858,11 @@ pub enum SecretsCommand {
         /// A production-looking key to store anyway (it stays flagged, and no agent's command receives it). Repeatable.
         #[arg(long = "allow-live", value_name = "NAME")]
         allow_live: Vec<String>,
+        /// Store EVERY production-looking key in the file, as if each were named with --allow-live. The same typed confirmation
+        /// (a person at a terminal; refused from a script) comes first, after the names are listed. They stay flagged and no agent's
+        /// command receives them. Use either this or --allow-live NAME, not both.
+        #[arg(long = "allow-live-all", conflicts_with = "allow_live")]
+        allow_live_all: bool,
         /// Mark a value PUBLIC: a public URL or an anonymous key that a declared command may be given as plain environment
         /// (`"public": ["NAME"]` in its declaration). Your explicit word, never guessed from a value. Refused for a name that
         /// says it is secret, a production-looking value, a kind of key that is only ever secret, and a service-role key.

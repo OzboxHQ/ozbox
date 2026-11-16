@@ -15,6 +15,18 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The self-test** no longer reports "enabled but not running" for a one-time service that finished, or that did not start because its start condition was not met (for example, resuming a session after an upgrade that left nothing to resume). A service that should keep running and does not, a service whose last run failed, and a user manager that never started its services are still reported.
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Importing .env files">
+  ## `ozbox secrets import` allows a whole production file in one flag, reads `.env` files properly, and accounts for every line
+
+  Importing a production `.env` file meant naming every key with its own `--allow-live`, and the result could say "stored 72" for a file of 73 with no word on the missing one.
+
+  - **`--allow-live-all`** allows every production-looking key in the file. Nothing else changes: the keys are listed first, a person at a terminal types the project's name, a script is refused (and the refusal now says the exact command to run in a terminal), and the keys stay flagged so no agent's command is given them. Use it instead of `--allow-live NAME`, not with it.
+  - **Every entry ends in one place, and the total adds up**: stored, held back, skipped (with the reason), duplicate (which line was kept) or unchanged (already stored with the same value). The last line reads like `73 entries: 72 stored, 1 duplicate (line 40 kept, line 12 ignored)`. `--json` carries the same account.
+  - **A name that appears twice keeps its last line**, and the ignored lines are named instead of vanishing.
+  - **Clearer reasons**: a line that is not `NAME=value` is listed with its line number, and a name that is not a valid variable name says why (a space, a leading digit, lower-case letters) without repeating it.
+  - **A key already stored with the same value is left alone** and reported as unchanged (an import to this computer's store; a box does not say).
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 

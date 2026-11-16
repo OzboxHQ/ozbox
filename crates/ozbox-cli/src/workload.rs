@@ -45,13 +45,76 @@ impl Malformed {
     }
 }
 
+/// A name that appears more than once in a file. The LAST one is kept (as a shell, python-dotenv and Docker Compose do), so
+/// the report can say which line won and which were ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Duplicate {
+    pub name: String,
+    pub kept_line: usize,
+    /// The earlier lines that were ignored, in file order.
+    pub ignored_lines: Vec<usize>,
+}
+
+/// A line that is neither blank, a comment, nor `NAME=value`: it is never stored, and the report says where and why. The
+/// reason is a fixed sentence and never quotes the line (it may be part of a key that was not quoted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejected {
+    pub line: usize,
+    pub reason: &'static str,
+}
+
+/// What a file holds, with everything [`parse_env`] drops silently accounted for: every entry of the file ends up in
+/// `lines` (kept), `duplicates` (an earlier line of a name that appears again) or `rejected` (not `NAME=value`).
+#[derive(Default)]
+pub struct ParsedEnv {
+    pub lines: Vec<EnvLine>,
+    pub duplicates: Vec<Duplicate>,
+    pub rejected: Vec<Rejected>,
+}
+
+impl ParsedEnv {
+    /// How many entries the file has: kept ones, ignored duplicates and rejected lines. Blank lines and comments are not entries.
+    pub fn entries(&self) -> usize {
+        self.lines.len()
+            + self
+                .duplicates
+                .iter()
+                .map(|d| d.ignored_lines.len())
+                .sum::<usize>()
+            + self.rejected.len()
+    }
+}
+
+/// Why a name cannot be a variable name, in words that never repeat the name (a "name" can be a piece of a value).
+pub fn invalid_name_reason(name: &str) -> &'static str {
+    if name.is_empty() {
+        "the name before `=` is empty"
+    } else if name.len() > 64 {
+        "the name is longer than 64 characters"
+    } else if name.chars().any(char::is_whitespace) {
+        "the name contains a space (an unquoted value that runs over several lines? quote it)"
+    } else if name.as_bytes()[0].is_ascii_digit() {
+        "the name starts with a digit"
+    } else if name.bytes().any(|b| b.is_ascii_lowercase()) {
+        "the name has lower-case letters (names are capital letters, digits and _)"
+    } else {
+        "the name has a character other than capital letters, digits and _"
+    }
+}
+
 /// The most lines one quoted value may span before it is called unclosed.
 const MAX_QUOTED_LINES: usize = 4096;
+
+/// The entries of a `.env` text without the accounting of [`parse_env_report`], which holds the rules.
+#[cfg(test)]
+pub fn parse_env(text: &str) -> Vec<EnvLine> {
+    parse_env_report(text).lines
+}
 
 /// Parse `.env` text the way dotenv does (python-dotenv and Docker Compose; not Node's `dotenv`, which ends an unquoted
 /// value at any `#`).
 ///
-/// * Blank lines and `#` comment lines are skipped; a line without `=` is ignored.
+/// * Blank lines and `#` comment lines are skipped; a line without `=` is [`Rejected`] (and never stored).
 /// * An `export ` (or `export<TAB>`) prefix is dropped.
 /// * A value in matching double quotes loses the quotes, and what follows the closing quote (a ` # comment`) is ignored.
 ///   Inside double quotes `\"` is a quote, `\\` is a backslash and `\n` is a line break; any other backslash stays as
@@ -63,8 +126,13 @@ const MAX_QUOTED_LINES: usize = 4096;
 /// * An unquoted value ends at a ` #` (a space, then `#`) and is trimmed. `KEY=a#b` keeps the `#`.
 ///
 /// The value is only parsed here; whether the store can hold it is decided by [`plan`].
-pub fn parse_env(text: &str) -> Vec<EnvLine> {
+///
+/// Every entry is accounted for: a name that appears more than once keeps its LAST line (and the earlier ones are
+/// [`Duplicate`]s), and a line without `=` is [`Rejected`] with its line number.
+pub fn parse_env_report(text: &str) -> ParsedEnv {
     let mut out: Vec<EnvLine> = Vec::new();
+    let mut duplicates: Vec<Duplicate> = Vec::new();
+    let mut rejected: Vec<Rejected> = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -80,6 +148,10 @@ pub fn parse_env(text: &str) -> Vec<EnvLine> {
             _ => l,
         };
         let Some((k, v)) = l.split_once('=') else {
+            rejected.push(Rejected {
+                line: start + 1,
+                reason: "not NAME=value (there is no `=` on the line)",
+            });
             continue;
         };
         let name = k.trim().to_string();
@@ -106,7 +178,21 @@ pub fn parse_env(text: &str) -> Vec<EnvLine> {
         } else {
             (unquoted_value(v), None)
         };
-        out.retain(|e| e.name != name); // the last one wins, as a shell would
+        // the last one wins, as a shell would; the earlier lines are remembered so the report can name them
+        if let Some(pos) = out.iter().position(|e| e.name == name) {
+            let earlier = out.remove(pos);
+            match duplicates.iter_mut().find(|d| d.name == name) {
+                Some(d) => {
+                    d.ignored_lines.push(earlier.line);
+                    d.kept_line = start + 1;
+                }
+                None => duplicates.push(Duplicate {
+                    name: name.clone(),
+                    kept_line: start + 1,
+                    ignored_lines: vec![earlier.line],
+                }),
+            }
+        }
         out.push(EnvLine {
             name,
             value: Zeroizing::new(value),
@@ -114,7 +200,11 @@ pub fn parse_env(text: &str) -> Vec<EnvLine> {
             malformed,
         });
     }
-    out
+    ParsedEnv {
+        lines: out,
+        duplicates,
+        rejected,
+    }
 }
 
 enum Scan {
@@ -396,6 +486,43 @@ pub fn apply_marked(
         done.stored.push(l.name.clone());
     }
     Ok(done)
+}
+
+/// The names a local import would store exactly as they already are: same value, same production flag, same public mark. Such a
+/// name is not written again, and the report says "unchanged". `live_allowed` is the production-looking names the person
+/// allowed; a production-looking name that is held back is never unchanged (it is held back).
+pub fn unchanged_names(
+    store: &EncryptedSecrets,
+    project: &str,
+    env: &str,
+    lines: &[EnvLine],
+    rows: &[Row],
+    live_allowed: &dyn Fn(&str) -> bool,
+    public: &[String],
+) -> Result<Vec<String>, SecretError> {
+    let mut out = Vec::new();
+    for (l, r) in lines.iter().zip(rows) {
+        let live = match r.status {
+            Status::Ready => false,
+            Status::Live(_) if live_allowed(&l.name) => true,
+            _ => continue,
+        };
+        let full = workload_name(project, env, &l.name)?;
+        let Some(meta) = store.meta(&full)? else {
+            continue;
+        };
+        if meta.production != live || meta.public != public.iter().any(|p| p == &l.name) {
+            continue;
+        }
+        if store
+            .get(&full)?
+            .map(Zeroizing::new)
+            .is_some_and(|v| v.as_str() == l.value.as_str())
+        {
+            out.push(l.name.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn pct(s: &str) -> String {
@@ -1442,5 +1569,113 @@ mod tests {
         )
         .unwrap();
         assert!(a.unstorable.iter().any(|(n, _)| n == "NOT_THERE"));
+    }
+
+    #[test]
+    fn every_entry_of_a_file_is_kept_a_duplicate_or_rejected_and_the_last_duplicate_wins() {
+        let text = "A=1\n# comment\nB=2\n\nA=3\nNOT A LINE\nA=4\nexport C=\"x\"\n=novalue\n";
+        let p = parse_env_report(text);
+        let names: Vec<_> = p.lines.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["B", "A", "C", ""], "the last A is kept");
+        let a = p.lines.iter().find(|l| l.name == "A").unwrap();
+        assert_eq!((a.value.as_str(), a.line), ("4", 7));
+        assert_eq!(
+            p.duplicates,
+            [Duplicate {
+                name: "A".into(),
+                kept_line: 7,
+                ignored_lines: vec![1, 5]
+            }]
+        );
+        assert_eq!(
+            p.rejected,
+            [Rejected {
+                line: 6,
+                reason: "not NAME=value (there is no `=` on the line)"
+            }]
+        );
+        // 4 kept + 2 ignored duplicates + 1 rejected
+        assert_eq!(p.entries(), 7);
+        // `parse_env` is the same rows without the accounting
+        assert_eq!(parse_env(text).len(), 4);
+        // blanks and comments are not entries
+        assert_eq!(parse_env_report("\n# only a comment\n   \n").entries(), 0);
+    }
+
+    #[test]
+    fn an_invalid_name_says_why_without_repeating_it() {
+        for (name, why) in [
+            ("", "is empty"),
+            ("MY KEY", "contains a space"),
+            ("1KEY", "starts with a digit"),
+            ("my_key", "lower-case"),
+            ("MY-KEY", "character other than"),
+        ] {
+            let r = invalid_name_reason(name);
+            assert!(r.contains(why), "{name:?}: {r}");
+            assert!(name.is_empty() || !r.contains(name));
+        }
+    }
+
+    #[test]
+    fn dotenv_values_end_to_end_a_quoted_blank_is_blank_and_a_comment_is_not_a_value() {
+        let lines = parse_env(
+            "export A_KEY='single # kept'\nB_KEY=\"dq \\\"q\\\" \\\\ end\" # c\nC_KEY=plain # c\nD_KEY=\"\"\nE_KEY=   \nF_KEY=''\n",
+        );
+        let v: Vec<_> = lines
+            .iter()
+            .map(|l| (l.name.as_str(), l.value.as_str()))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("A_KEY", "single # kept"),
+                ("B_KEY", "dq \"q\" \\ end"),
+                ("C_KEY", "plain"),
+                ("D_KEY", ""),
+                ("E_KEY", ""),
+                ("F_KEY", ""),
+            ]
+        );
+        let rows = plan(&lines, "app", "staging");
+        let blank = rows.iter().filter(|r| r.status == Status::Blank).count();
+        assert_eq!(blank, 3);
+    }
+
+    #[test]
+    fn an_unchanged_name_is_one_already_stored_with_the_same_value_flag_and_mark() {
+        let d = tempfile::tempdir().unwrap();
+        let s = store(d.path());
+        let lines = parse_env("A_KEY=one-0123456789\nB_KEY=two-0123456789\n");
+        let none = |_: &str| false;
+        let rows = plan(&lines, "app", "staging");
+        assert!(
+            unchanged_names(&s, "app", "staging", &lines, &rows, &none, &[])
+                .unwrap()
+                .is_empty()
+        );
+        apply(&s, "app", "staging", &lines, &[], "me").unwrap();
+        assert_eq!(
+            unchanged_names(&s, "app", "staging", &lines, &rows, &none, &[]).unwrap(),
+            ["A_KEY", "B_KEY"]
+        );
+        // a changed value is not unchanged; a different public mark is not either
+        let again = parse_env("A_KEY=changed-0123456789\nB_KEY=two-0123456789\n");
+        let rows = plan(&again, "app", "staging");
+        assert_eq!(
+            unchanged_names(&s, "app", "staging", &again, &rows, &none, &[]).unwrap(),
+            ["B_KEY"]
+        );
+        assert!(unchanged_names(
+            &s,
+            "app",
+            "staging",
+            &again,
+            &rows,
+            &none,
+            &["B_KEY".into()]
+        )
+        .unwrap()
+        .is_empty());
     }
 }
