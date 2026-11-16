@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import type { BackupItem, BackupsSettings, ResticKind, Schedule, ScheduleKind } from '../api/backups';
+import type { BackupItem, BackupsSettings, BoxBackups, ResticKind, Schedule, ScheduleKind } from '../api/backups';
 import { ABSENT, fmtBytes, fmtCost } from './format';
 import { t, type MessageKey } from './i18n';
 
@@ -96,6 +96,18 @@ export function restoreTargets(i: BackupItem): RestoreTarget[] {
   if (i.kind === 'snapshot') return i.includes_work ? ['new_box', 'in_place'] : [];
   // The folder stays the default: it changes nothing that exists. A new box is one click away.
   return ['folder', 'new_box', 'in_place'];
+}
+
+/**
+ * The backups to list for a box. While a prune holds its repository the box answers "busy" and sends no repository list; the
+ * page then keeps the repository backups it had last time (a busy repository is not an empty one) and adds the provider's
+ * current snapshots. Newest first.
+ */
+export function listedBackups(prev: BoxBackups | undefined, next: BoxBackups): BackupItem[] {
+  if (!next.restic.busy) return next.items;
+  const kept = (prev?.items ?? []).filter((i) => i.kind === 'restic');
+  const have = new Set(next.items.map((i) => `${i.kind}-${i.id}`));
+  return [...next.items, ...kept.filter((i) => !have.has(`${i.kind}-${i.id}`))].sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
 }
 
 export function estimateText(e: { monthly: number | null; currency: string | null }): string {

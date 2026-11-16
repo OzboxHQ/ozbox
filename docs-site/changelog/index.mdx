@@ -40,6 +40,22 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **Commits are not blocked while the secrets service is down.** Before, every commit on the box was stopped until the service came back, so work could not be saved. Now a commit is still checked for private keys, provider keys, signed tokens, passwords in addresses and `.env` files. A clean commit goes through, with a note that stored secrets were not compared; nothing is lost. A commit that looks like it holds a key is stopped, and the message says so. A push is held until the service is back, because that is what leaves the box, and the message says how to bring the service back. See the [CLI reference](/cli-reference).
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Backups through an upgrade">
+  ## An upgrade no longer leaves a box quietly un-backed-up
+
+  An upgrade replaces a box's system disk. If the box backed up `/work` to a repository, nothing told you afterwards whether those backups still worked, and settings you had made on the box itself could be gone.
+
+  - **Your backup settings come through.** The repository's password and keys stay in the box's encrypted secrets store, which an upgrade keeps when the store can be opened on the new machine, so backups you set up on the box itself no longer depend on this computer holding anything. What is backed up and how often, if you changed it on the box, is kept by root on `/work` and applies on the new system disk.
+  - **The upgrade checks that backups work.** After the self-test it asks the box whether backups are configured and whether the repository answers, and the report says so. A box whose backups were set up and are not working now fails its self-test, and the upgrade ends with an error naming what to run. A box that never had backups is not failed for it.
+  - **If a new secrets store was started** (`--accept-new-secrets-store`), backups stop until their credentials are sent again. The upgrade puts them back from this computer when it holds them; otherwise it says **BACKUPS HAVE STOPPED** and the command: `ozbox backup credentials <box>`.
+  - **A box that already has its credentials keeps them.** The upgrade no longer sends this computer's copy over a box's own.
+  - **New command:** `ozbox backup credentials <box>` sends the repository's password and keys from this computer's secret store to a box. They are never printed.
+  - **Turn off backups on a box, on purpose.** In the box's **Backups** tab choose **Turn off backups on this box**, or run `ozbox backup off <box>`. It says what stops, removes the repository credentials from the box and switches its schedule off, so the self-test and an upgrade stop expecting backups and the next slot does not send the credentials back. Backups already made stay where they are.
+  - **A busy repository is not an empty one.** While a backup is pruning, listing a box's backups says it is busy instead of showing none, and the dashboard keeps the last list on screen.
+  - **A box that is still starting is not "stopped".** If the box's secrets service is not up yet, the report says backups were not checked and sends nothing, instead of saying they stopped. The repository check has a time limit, and the self-test shows the last answer and its age while a new check runs.
+  - **Real-world exclude settings are kept.** Patterns such as `*.tmp` and `node_modules` in the `[backup]` section no longer stop the box from remembering that backups were set up.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 

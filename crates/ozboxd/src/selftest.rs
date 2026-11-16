@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use ozbox_core::{CommandRunner, CommandSpec};
 use serde::Serialize;
 
+use crate::backup_service::BackupHealth;
 use crate::growfs;
 use crate::host::HostSource;
 use crate::metrics::parse;
@@ -65,6 +66,71 @@ pub struct SelfTestConfig {
     pub run_backend: Option<RunBackendNow>,
     /// The box user's home on /work: its owner is the box user, whose manager is looked for.
     pub user_home: PathBuf,
+    /// Set on a box that has a backup service. The check only appears for a box on which backups were set up.
+    pub backups: Option<BackupsProbe>,
+}
+
+/// How the self-test asks whether backups that were set up are working.
+#[derive(Clone)]
+pub struct BackupsProbe {
+    /// The box's name, for the command the failure names.
+    pub box_name: String,
+    pub health: std::sync::Arc<dyn Fn() -> BackupHealth + Send + Sync>,
+}
+
+impl std::fmt::Debug for BackupsProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackupsProbe")
+            .field("box_name", &self.box_name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The check for backups that were set up on this box: when they were, they must still have their credentials and the
+/// repository must answer. A box that never had backups has no such check, so a box without a repository is not a failure.
+/// The reasons name no repository, credential or restic text.
+pub fn backups_check(h: BackupHealth, box_name: &str) -> Option<Check> {
+    const NAME: &str = "backups";
+    match h {
+        BackupHealth::NotExpected => None,
+        BackupHealth::Working => Some(pass(NAME)),
+        BackupHealth::CredentialsMissing => Some(fail(
+            NAME,
+            "credentials",
+            format!("backups were set up on this box and have STOPPED: its repository credentials are not here any more (a new secrets store starts without them). Put them back with `ozbox backup credentials {box_name}` on your computer, or Send credentials in Settings -> Backups"),
+        )),
+        BackupHealth::Unreachable => Some(fail(
+            NAME,
+            "repository",
+            format!("backups were set up on this box, but its repository did not answer, so backups are not working. Check the repository and its credentials in Settings -> Backups, then run `ozbox backup now {box_name} --to restic`"),
+        )),
+        // not a failure and not a pass: the self-test never waits for a repository, so these say what was not checked
+        BackupHealth::Busy => Some(unknown(
+            NAME,
+            "a backup operation is using the repository right now, so it was not asked; run the self-test again when it finishes",
+        )),
+        // the last check, while a new one runs: said as what it found and how long ago, never as "not checked"
+        BackupHealth::Stale {
+            working: true,
+            age_secs: _,
+        } => Some(pass(NAME)),
+        BackupHealth::Stale {
+            working: false,
+            age_secs,
+        } => Some(fail(
+            NAME,
+            "repository",
+            format!("backups were set up on this box, but its repository did not answer when it was last asked ({} minutes ago; a new check is running), so backups are not working. Check the repository and its credentials in Settings -> Backups, then run `ozbox backup now {box_name} --to restic`", age_secs / 60),
+        )),
+        BackupHealth::Pending => Some(unknown(
+            NAME,
+            "the repository has not been checked yet (the check runs in the background and can take a minute on a slow network); run the self-test again shortly",
+        )),
+        BackupHealth::ServiceNotReady => Some(unknown(
+            NAME,
+            "the box's secrets service is not ready yet, so whether the backup credentials are here was not checked; run the self-test again shortly",
+        )),
+    }
 }
 
 /// What the self-test needs to say whether the dashboard's own socket is there.
@@ -291,6 +357,7 @@ impl SelfTestConfig {
             user_cgroup_root: None,
             run_backend: None,
             user_home: work_dir.join("home/ozbox"),
+            backups: None,
             work_dir,
         }
     }
@@ -907,6 +974,15 @@ pub fn run(
         checks.push(c);
     }
 
+    // backups that were set up still work (never a check for a box that has none)
+    if let Some(c) = cfg
+        .backups
+        .as_ref()
+        .and_then(|b| backups_check((b.health)(), &b.box_name))
+    {
+        checks.push(c);
+    }
+
     // a sample run starts
     checks.push(match sample_run() {
         Ok(()) => pass("sample_run"),
@@ -1376,6 +1452,70 @@ mod tests {
             .path()
             .join(format!(".ozbox-selftest-{}", std::process::id()))
             .exists());
+    }
+
+    #[test]
+    fn backups_that_were_set_up_fail_the_self_test_when_they_stopped_and_a_box_without_them_is_not_asked(
+    ) {
+        let probe = |h: BackupHealth| BackupsProbe {
+            box_name: "main".into(),
+            health: std::sync::Arc::new(move || h),
+        };
+        let run_with = |p: Option<BackupsProbe>| {
+            let d = tempfile::tempdir().unwrap();
+            let (mut cfg, h) = setup(d.path());
+            cfg.backups = p;
+            run(
+                &cfg,
+                &h,
+                &RecordingRunner::new(),
+                "/bin:/usr/bin",
+                &|| Ok(()),
+                7,
+            )
+        };
+        let named = |r: &SelfTestResult| r.checks.iter().find(|c| c.name == "backups").cloned();
+        // a box that never had backups has no backups check at all
+        assert!(named(&run_with(None)).is_none());
+        let none = run_with(Some(probe(BackupHealth::NotExpected)));
+        assert!(none.ok && named(&none).is_none());
+        // set up and working
+        let ok = run_with(Some(probe(BackupHealth::Working)));
+        assert!(ok.ok);
+        assert_eq!(named(&ok).unwrap().outcome, Outcome::Pass);
+        // set up, and the credentials are gone: a failure that names the command
+        let gone = run_with(Some(probe(BackupHealth::CredentialsMissing)));
+        assert!(!gone.ok);
+        let Outcome::Fail { step, reason } = named(&gone).unwrap().outcome else {
+            panic!("not a failure");
+        };
+        assert_eq!(step, "credentials");
+        assert!(
+            reason.contains("STOPPED") && reason.contains("ozbox backup credentials main"),
+            "{reason}"
+        );
+        // set up, credentials present, the repository does not answer
+        let down = run_with(Some(probe(BackupHealth::Unreachable)));
+        assert!(!down.ok);
+        let Outcome::Fail { step, reason } = named(&down).unwrap().outcome else {
+            panic!("not a failure");
+        };
+        assert_eq!(step, "repository");
+        assert!(reason.contains("did not answer"), "{reason}");
+        // not verified (a busy repository, a check still running, a service that has not started) is neither a pass nor a
+        // failure: the self-test stays ok and says what it did not check
+        for h in [
+            BackupHealth::Busy,
+            BackupHealth::Pending,
+            BackupHealth::ServiceNotReady,
+        ] {
+            let r = run_with(Some(probe(h)));
+            assert!(r.ok && !r.all_verified, "{h:?}");
+            assert!(
+                matches!(named(&r).unwrap().outcome, Outcome::Unknown { .. }),
+                "{h:?}"
+            );
+        }
     }
 
     #[test]

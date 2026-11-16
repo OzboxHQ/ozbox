@@ -92,6 +92,23 @@ pub fn box_last_finished(agent: &dyn BoxAgent, rec: &BoxRecord) -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a box's `/status` answer says its secrets service was not ready (a box that has just started). An older box's answer
+/// has no such field and reads as ready.
+pub fn status_not_ready(status: &Value) -> bool {
+    status.get("secrets_ready").and_then(Value::as_bool) == Some(false)
+}
+
+/// Remove the repository credentials from a box (and, on the box, the record that backups were set up, so its self-test and
+/// an upgrade stop expecting them). The one path the dashboard and the command both take.
+pub fn remove_credentials(agent: &dyn BoxAgent, rec: &BoxRecord) -> Result<(), String> {
+    let (s, v) = call(agent, rec, "DELETE", "/credentials", &Value::Null)?;
+    if s == 200 {
+        Ok(())
+    } else {
+        Err(reason(&v, "the box did not remove the credentials"))
+    }
+}
+
 /// Make sure the box holds the repository credentials, putting them there if it does not (or `force`). `Ok(true)` when
 /// they were provisioned now.
 pub fn ensure_credentials(
@@ -105,6 +122,14 @@ pub fn ensure_credentials(
         let (s, v) = call(agent, rec, "GET", "/status", &Value::Null)?;
         if s == 200 && v.get("configured").and_then(Value::as_bool) == Some(true) {
             return Ok(false);
+        }
+        // A box whose secrets service is not up cannot say whether it holds credentials: "not configured" there is "not
+        // known", and putting them again would overwrite what it holds. Never send on a guess.
+        if s == 200 && status_not_ready(&v) {
+            return Err(
+                "the box's secrets service is not ready yet, so it could not be asked whether it already holds the repository credentials; nothing was sent. Try again in a moment"
+                    .into(),
+            );
         }
     }
     let body = credentials_body(target, secrets)?;

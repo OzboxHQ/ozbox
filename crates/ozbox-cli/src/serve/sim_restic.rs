@@ -103,7 +103,7 @@ pub fn service_for(dir: PathBuf, name: &str, repo: &SimRepo) -> Arc<BackupServic
 /// service instead; a demo has no such service).
 pub fn provision(
     dir: &std::path::Path,
-) -> impl Fn(&backup_root::Request) -> Result<(), String> + '_ {
+) -> impl Fn(&backup_root::Request) -> Result<Option<String>, String> + '_ {
     move |r| {
         backup_root::validate(r)?;
         let (env, pass) = (dir.join("restic.env"), dir.join("restic.pass"));
@@ -111,7 +111,7 @@ pub fn provision(
             backup_root::Action::Clear => {
                 let _ = std::fs::remove_file(&env);
                 let _ = std::fs::remove_file(&pass);
-                Ok(())
+                Ok(None)
             }
             backup_root::Action::Set => {
                 let text = format!(
@@ -120,7 +120,9 @@ pub fn provision(
                     pass.display()
                 );
                 std::fs::write(&pass, &r.password).map_err(|e| e.kind().to_string())?;
-                std::fs::write(&env, text).map_err(|e| e.kind().to_string())
+                std::fs::write(&env, text)
+                    .map(|()| None)
+                    .map_err(|e| e.kind().to_string())
             }
         }
     }

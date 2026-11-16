@@ -1748,6 +1748,19 @@ pub enum BackupCommand {
         #[arg(long)]
         in_place: bool,
     },
+    /// Send the repository's password and keys to a box from this computer's secret store (what a box needs after its
+    /// secrets store started again without them). Nothing is printed or stored on the box's /work.
+    Credentials {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
+    },
+    /// Turn off backups on a box: its schedule stops (provider snapshots and repository), and its repository credentials
+    /// are removed from the box. Backups already made stay where they are. Turn them on again with `ozbox backup schedule
+    /// --box <box> --every daily` and `ozbox backup credentials <box>`.
+    Off {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
+    },
     /// Delete one backup. It cannot be brought back.
     Delete {
         #[arg(value_parser = parse_name)]

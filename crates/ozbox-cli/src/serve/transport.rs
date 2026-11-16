@@ -816,7 +816,19 @@ fn request_with_body(
     path: &str,
     body: &[u8],
 ) -> Result<(u16, Vec<u8>), AgentError> {
-    request_with_cap(sock, method, path, body, None)
+    request_with_cap(sock, method, path, body, None, REQUEST_TIMEOUT)
+}
+
+/// The same, for a call whose answer waits on a repository or a root helper (restic backups): it may take longer than a
+/// local read does, so it is given the transfer time rather than the short request time, which a slow network would exceed
+/// and turn into a report that the box could not be reached.
+fn request_slow(
+    sock: &Path,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(u16, Vec<u8>), AgentError> {
+    request_with_cap(sock, method, path, body, None, TRANSFER_TIMEOUT)
 }
 
 /// One request to the box daemon; with `capability`, it carries a controlled run's capability in its header.
@@ -826,12 +838,13 @@ fn request_with_cap(
     path: &str,
     body: &[u8],
     capability: Option<&str>,
+    timeout: Duration,
 ) -> Result<(u16, Vec<u8>), AgentError> {
     let unreachable = |m: &str| AgentError::Unreachable(m.to_string());
     let mut s = UnixStream::connect(sock)
         .map_err(|_| unreachable("the box's agent socket did not accept a connection"))?;
-    let _ = s.set_read_timeout(Some(REQUEST_TIMEOUT));
-    let _ = s.set_write_timeout(Some(REQUEST_TIMEOUT));
+    let _ = s.set_read_timeout(Some(timeout));
+    let _ = s.set_write_timeout(Some(timeout));
     let cap_line = match capability {
         Some(c) if !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => {
             format!("X-Ozbox-Run-Capability: {c}\r\n")
@@ -1328,6 +1341,7 @@ impl BoxAgent for SshAgent {
             &format!("/v1/runs{sub}"),
             body,
             Some(capability),
+            REQUEST_TIMEOUT,
         )?;
         let v = serde_json::from_slice(&raw).map_err(|_| {
             AgentError::Unreachable(
@@ -1489,7 +1503,8 @@ impl BoxAgent for SshAgent {
         body: &[u8],
     ) -> Result<(u16, Value), AgentError> {
         let sock = self.socket(rec)?;
-        let (status, raw) = request_with_body(&sock, method, &format!("/v1/backup{sub}"), body)?;
+        // a repository listing and a credentials hand-off wait on a repository or a root helper, so they get the long timeout
+        let (status, raw) = request_slow(&sock, method, &format!("/v1/backup{sub}"), body)?;
         let v = serde_json::from_slice(&raw).map_err(|_| {
             AgentError::Unreachable(
                 "the box's agent answered with data that is not understood".into(),
@@ -1808,6 +1823,9 @@ mod tests {
         last_dead: Mutex<Option<Arc<AtomicBool>>>,
     }
 
+    /// How long the fake daemon takes to list a repository, set by the one test that needs it.
+    static SLOW_BACKUP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn daemon_answer(path_and_query: &str) -> (u16, String) {
         let path = path_and_query.split('?').next().unwrap_or("");
         match path {
@@ -1823,6 +1841,13 @@ mod tests {
                     "mem_total_bytes": { "min": 1000.0, "max": 1000.0, "mean": 1000.0, "last": 1000.0 },
                     "mem_available_bytes": { "min": 100.0, "max": 300.0, "mean": 200.0, "last": 150.0 } } }
             ]}).to_string()),
+            // a repository that is slow to answer: the listing is the daemon's restic run, synchronously
+            "/v1/backup/snapshots" => {
+                std::thread::sleep(Duration::from_millis(
+                    SLOW_BACKUP_MS.load(std::sync::atomic::Ordering::SeqCst),
+                ));
+                (200, serde_json::json!({ "items": [ { "id": "aaaaaaaa11111111" } ] }).to_string())
+            }
             "/v1/selftest" => (200, serde_json::json!({ "result": { "ts_ms": 5, "ok": false, "all_verified": true, "checks": [
                 { "name": "tunnels up", "outcome": "fail", "step": "tunnels up", "reason": "not running" },
                 { "name": "work disk mounted", "outcome": "pass" } ] } }).to_string()),
@@ -1932,6 +1957,23 @@ mod tests {
 
     fn agent(ssh: &Arc<FakeSsh>) -> Result<SshAgent, String> {
         SshAgent::new(ssh.clone(), RouteInputs::default())
+    }
+
+    /// A repository over a slow network takes longer than the 8 seconds a local read is given: the upgrade's listing of the
+    /// box's backups must wait for it (a timeout there reads as "the box could not be reached" and fails the upgrade).
+    #[test]
+    fn a_slow_repository_listing_is_waited_for_not_given_the_short_request_time() -> TestResult {
+        let ssh = Arc::new(FakeSsh::default());
+        let a = agent(&ssh)?;
+        let rec = aws_box("dev")?;
+        SLOW_BACKUP_MS.store(9_000, std::sync::atomic::Ordering::SeqCst);
+        let t = std::time::Instant::now();
+        let (status, v) = a.restic(&rec, "GET", "/snapshots", b"")?;
+        SLOW_BACKUP_MS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(t.elapsed() >= Duration::from_secs(9));
+        assert_eq!(status, 200);
+        assert_eq!(v["items"][0]["id"], "aaaaaaaa11111111");
+        Ok(())
     }
 
     #[test]

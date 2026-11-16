@@ -1901,7 +1901,17 @@ fn handle_broker_inner(
             let bin = std::env::var("OZBOX_RESTIC_BIN").unwrap_or_else(|_| "restic".into());
             let cache = std::env::var("OZBOX_RESTIC_CACHE")
                 .unwrap_or_else(|_| "/var/lib/ozbox-secrets/restic-cache".into());
-            match crate::secrets_restic::run(broker.secrets().as_ref(), &bin, &cache, &args) {
+            // an optional bound on how long restic may run (the daemon's repository check sets one; a backup does not)
+            let timeout = v["timeout_secs"]
+                .as_u64()
+                .map(|s| std::time::Duration::from_secs(s.clamp(1, 900)));
+            match crate::secrets_restic::run(
+                broker.secrets().as_ref(),
+                &bin,
+                &cache,
+                &args,
+                timeout,
+            ) {
                 Ok(o) => json!({"ok": true, "status": o.status, "stdout": o.stdout}).to_string(),
                 Err(e) => fail(&e),
             }

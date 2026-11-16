@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PanelSheet, PanelSheetBody, PanelSheetContent, PanelSheetDescription, PanelSheetFooter, PanelSheetHeader, PanelSheetTitle } from '@/components/ui/panel-sheet';
@@ -17,7 +18,7 @@ import { useApp } from '../App';
 import { SourceNote } from './source-badge';
 import { AppLink, EmptyState } from './page';
 import { PlanSheet } from './box-action-sheets';
-import { canRestore, fmtIso, fmtWhen, itemKindText, itemLabels, itemSize, itemStatusText, restoreTargets, scheduleText, type RestoreTarget } from '../lib/backups';
+import { canRestore, fmtIso, listedBackups, fmtWhen, itemKindText, itemLabels, itemSize, itemStatusText, restoreTargets, scheduleText, type RestoreTarget } from '../lib/backups';
 import { fmtRelative } from '../lib/format';
 import { t } from '../lib/i18n';
 import { ops } from '../lib/plan-flow';
@@ -113,8 +114,23 @@ export function BackupsTab({ box }: { box: BoxRecord }) {
   const flow = usePlanFlow(client, () => q.reload());
   const [restoring, setRestoring] = useState<BackupItem | null>(null);
   const [sending, setSending] = useState(false);
+  const [confirmOff, setConfirmOff] = useState(false);
+  // the last answer that was not busy: while a prune holds the repository the page keeps its list instead of dropping it
+  const last = useRef<BoxBackups | undefined>(undefined);
 
   const data = q.data;
+  const items = data ? listedBackups(last.current, data) : [];
+  if (data && !data.restic.busy) last.current = data;
+  const turnOff = async () => {
+    try {
+      await client.backups.turnOff(name);
+      toast.success(t('backups.off_done', { name }));
+      q.reload();
+    } catch (e) {
+      toast.error(t('backups.off_failed', { why: e instanceof ApiError ? e.message : '' }));
+      throw e;
+    }
+  };
   const sendCredentials = async () => {
     setSending(true);
     try {
@@ -201,7 +217,28 @@ export function BackupsTab({ box }: { box: BoxRecord }) {
             <AlertDescription>{t('backups.repo_error', { why: data.restic.error })}</AlertDescription>
           </Alert>
         ) : null}
-        {repoSet && data.state === 'running' && data.restic.configured_on_box === false ? (
+        {repoSet && data.state === 'running' && data.restic.busy ? (
+          <p className="text-xs text-muted-foreground" data-testid="repo-busy">
+            {t('backups.repo_busy')}
+          </p>
+        ) : null}
+        {repoSet && data.state === 'running' && data.restic.secrets_ready === false ? (
+          <p className="text-xs text-muted-foreground" data-testid="repo-not-ready">
+            {t('backups.repo_not_ready')}
+          </p>
+        ) : null}
+        {data.turned_off ? (
+          <Alert data-testid="backups-turned-off">
+            <AlertDescription>{t('backups.turned_off')}</AlertDescription>
+          </Alert>
+        ) : data.state === 'running' ? (
+          <div>
+            <Button variant="outline" size="sm" className="max-lg:h-11" onClick={() => setConfirmOff(true)} data-testid="turn-off-backups">
+              {t('backups.off')}
+            </Button>
+          </div>
+        ) : null}
+        {repoSet && data.state === 'running' && data.restic.configured_on_box === false && data.restic.secrets_ready !== false ? (
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>{t('backups.repo_not_here')}</span>
             <Button variant="outline" size="sm" className="max-lg:h-11" disabled={sending} onClick={() => void sendCredentials()} data-testid="send-credentials">
@@ -217,13 +254,13 @@ export function BackupsTab({ box }: { box: BoxRecord }) {
         </Alert>
       ) : null}
 
-      {data.items.length === 0 ? (
+      {items.length === 0 ? (
         <EmptyState title={t('backups.empty')}>{t('backups.empty_body')}</EmptyState>
       ) : (
         <Card className="p-4" data-testid="backups-list">
           <h2 className="text-sm font-semibold">{t('backups.list')}</h2>
           <ul className="mt-2 divide-y text-sm" aria-label={t('backups.list')}>
-            {data.items.map((i) => (
+            {items.map((i) => (
               <li key={`${i.kind}-${i.id}`} className="grid gap-2 py-3 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_6rem_minmax(0,1.4fr)_8rem_auto] lg:items-center" data-testid={`backup-${i.id}`}>
                 <div className="min-w-0">
                   <p className="font-medium">{fmtIso(i.created_at, data.zone)}</p>
@@ -294,6 +331,7 @@ export function BackupsTab({ box }: { box: BoxRecord }) {
           q.reload();
         }}
       />
+      <ConfirmDialog open={confirmOff} onOpenChange={setConfirmOff} title={t('backups.off_title', { name })} description={t('backups.off_body')} confirmLabel={t('backups.off_confirm')} destructive onConfirm={turnOff} />
     </div>
   );
 }
