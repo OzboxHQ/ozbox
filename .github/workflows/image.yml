@@ -338,7 +338,7 @@ jobs:
           # the old way piped the key to `aws kms` as fileb:///dev/stdin: a program still carrying that argument is not the fix
           ! LC_ALL=C grep -aqF 'fileb:///dev/stdin' "out/ozbox-linux-$ARCH" \
             || { echo "::error title=aws command still used::the $ARCH ozbox program still builds an aws kms command line, which the image cannot run (no aws command)"; exit 1; }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ozboxd-${{ matrix.arch }}
           path: out/
@@ -466,7 +466,7 @@ jobs:
       - name: Build
         working-directory: infra/packer/ozbox-image
         run: packer build -only='ozbox.amazon-ebs.ozbox' -color=false .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ matrix.arch }}
           path: |
@@ -647,7 +647,7 @@ jobs:
             --bundle ozbox-image-manifest.json.sigstore.json
           # .sig and .pem stay for older clients; the bundle is what cosign 3 prefers.
           echo "sha256=$(sha256sum ozbox-image-manifest.json | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-manifest
           path: out/ozbox-image-manifest.json

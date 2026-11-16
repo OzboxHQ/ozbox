@@ -95,7 +95,7 @@ jobs:
         run: OZBOX_E2E_WITH_DEPS=1 OZBOX_BIN="$GITHUB_WORKSPACE/target/debug/ozbox" scripts/e2e-local.sh --no-build
       - name: Keep what a failed browser test saw (page snapshot, trace)
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dashboard-e2e-failures
           path: packages/dashboard/test-results
