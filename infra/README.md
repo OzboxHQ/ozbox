@@ -293,9 +293,9 @@ On an account that already has boxes (they carry AWS's `AmazonSSMManagedInstance
 1. An administrator creates the `OzBoxSetup` permission set from `infra/aws/setup-policy.json` and assigns it to the person on the
    account (the steps above), and re-applies `infra/aws/operator-policy.json` to the daily operator role (it now allows attaching
    only the new policy, reading it, and Instance Connect for the `ozbox-ingress` account).
-2. Sign in as that profile and run `ozbox init --provider aws --profile <setup-profile>`; approve the state bucket (an older account has none) and the "Session Manager policy" step. Read the **network**
-   plan before you approve it: init keeps its own state in the new bucket, so on an account whose network was made some other way it
-   plans a second one (a NAT gateway bills by the hour). Decline that step and use the network you have.
+2. Sign in as that profile and run `ozbox init --provider aws --profile <setup-profile>`; approve the state bucket (an older account has none, and it is the one step init needs) and the "Session Manager policy" step. When your configuration already names its subnet (`subnet_id` under `[aws]`),
+   init uses it: it checks the subnet is there, plans **no** network (a second one would bill a NAT gateway by the hour) and goes on. Answering no to any step other than the state bucket skips that step, says so and goes on to the next; the summary at the end lists what was applied, skipped and already in place. Init edits the config file `ozbox` reads
+   (`config.toml`, else `fleet.toml`), keeps its comments and every key, and never changes your daily `profile`: the profile you ran init with is recorded as `setup_profile`.
 3. For each box, either `ozbox upgrade <box>` (replaces the machine, swaps the attachment, pins your ingress key), or, without
    replacing the machine, swap the attachment (attach first, so Session Manager never drops):
 

@@ -148,3 +148,38 @@ pub const STATE_BUCKET_EXTRA_ACTIONS: [&str; 3] = [
 
 /// The actions on the state objects: read and write the state, and take and release the lock (`use_lockfile`, a `.tflock` object).
 pub const STATE_OBJECT_ACTIONS: [&str; 3] = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"];
+
+/// The read-only AWS CLI calls `ozbox init` makes to find what a step would create, so it can adopt it instead of making it a
+/// second time (ADR 0053): (service, subcommand, the IAM actions the call needs, a sample resource ARN, the permission set of
+/// the step that makes the call). A call the code makes that is not here fails the coverage test, so a new lookup is a
+/// deliberate edit here and, if the identity cannot make it, in `infra/aws/setup-policy.json` and the step's own set.
+pub const ADOPTION_LOOKUPS: [(&str, &str, &[&str], &str, &str); 4] = [
+    (
+        "kms",
+        "list-aliases",
+        &["kms:ListAliases"],
+        "*",
+        "key-admin-policy.json",
+    ),
+    (
+        "kms",
+        "list-resource-tags",
+        &["kms:ListResourceTags"],
+        "arn:aws:kms:us-east-1:123456789012:key/00000000",
+        "key-admin-policy.json",
+    ),
+    (
+        "ssm",
+        "describe-document",
+        &["ssm:DescribeDocument"],
+        "arn:aws:ssm:us-east-1:123456789012:document/ozbox-adopt-fleet",
+        "adopt-admin-policy.json",
+    ),
+    (
+        "iam",
+        "get-policy",
+        &["iam:GetPolicy"],
+        "arn:aws:iam::123456789012:policy/ozbox-box-session-manager",
+        "box-policy-admin-policy.json",
+    ),
+];
