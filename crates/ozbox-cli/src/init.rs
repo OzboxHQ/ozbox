@@ -557,6 +557,15 @@ pub struct Prepared {
     after: After,
 }
 
+/// What a look at the configured subnet found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubnetState {
+    Found,
+    Missing,
+    /// The answer could not be read (often a missing `ec2:DescribeSubnets` permission); the reason is short.
+    Unknown(String),
+}
+
 #[derive(Debug, Clone, Default)]
 enum After {
     #[default]
@@ -739,7 +748,8 @@ impl InitPaths {
 
     /// The directory next to the configuration file (`OZBOX_CONFIG`, else `~/.config/ozbox`).
     pub fn detect() -> Option<InitPaths> {
-        let config = crate::config::Config::path()?;
+        // the file the loader reads (`fleet.toml` on an older layout), never a second one beside it
+        let config = crate::config::Config::active_path()?;
         let base = config.parent()?.to_path_buf();
         let cache = std::env::var_os("OZBOX_PLUGIN_CACHE_DIR")
             .map(PathBuf::from)
@@ -1614,6 +1624,50 @@ impl Init<'_> {
         std::fs::write(dir.join("main.tf"), main)
             .map_err(|e| Finding::new("command_failed", e.to_string()))?;
         Ok(dir)
+    }
+
+    /// The private subnet the configuration already names (`[aws] subnet_id`), if it looks like one. When there is one, setup
+    /// uses it and plans no network: a second, empty network would cost a NAT gateway for nothing.
+    pub fn configured_subnet(&self) -> Option<String> {
+        self.recorded("aws")
+            .remove("subnet_id")
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("subnet-") && s.len() > "subnet-".len())
+    }
+
+    /// Whether the configured subnet exists and this identity can see it (a read-only `describe-subnets`).
+    pub fn check_subnet(&self, target: &Target, subnet: &str) -> Res<SubnetState> {
+        target.validate()?;
+        let out =
+            self.exec(&self.aws(target, &["ec2", "describe-subnets", "--subnet-ids", subnet]))?;
+        if out.status == Some(0) {
+            let listed = serde_json::from_str::<Value>(&out.stdout)
+                .ok()
+                .and_then(|v| {
+                    v.get("Subnets")
+                        .and_then(Value::as_array)
+                        .map(|a| !a.is_empty())
+                })
+                .unwrap_or(false);
+            return Ok(if listed {
+                SubnetState::Found
+            } else {
+                SubnetState::Missing
+            });
+        }
+        if out.stderr.contains("InvalidSubnetID.NotFound") {
+            return Ok(SubnetState::Missing);
+        }
+        let why: String = out
+            .stderr
+            .lines()
+            .find(|l| l.contains("rror"))
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        Ok(SubnetState::Unknown(why))
     }
 
     /// What it takes to have the private network boxes live in. Needs the state bucket first (the state is kept there).
@@ -2507,56 +2561,43 @@ impl Init<'_> {
 
     // ----- the configuration file -----
 
-    /// Set the provider and the given keys under its section, keeping everything else in the file (a backup is made
-    /// the first time).
+    /// Set the provider and the given keys under its section, keeping everything else in the file: comments, order and keys
+    /// this program does not know (a backup is made the first time). It edits the file the loader reads, so a layout that
+    /// keeps its settings in `fleet.toml` is updated in place and no second file shadows it. The profile init was run with is
+    /// the SETUP identity: it is recorded as `setup_profile` and never written over `profile`, which daily commands use.
     pub fn persist(&self, target: &Target, extra: &[(&str, &str)]) -> Res<()> {
+        self.persist_keys_in(target, extra, &[])
+    }
+
+    fn persist_keys_in(&self, target: &Target, set: &[(&str, &str)], remove: &[&str]) -> Res<()> {
         let path = &self.paths.config;
-        let io = |e: std::io::Error| Finding::new("command_failed", e.to_string());
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(io(e)),
-        };
-        let mut table: toml::Table = text.parse().map_err(|_| {
-            Finding::new(
-                "bad_config",
-                t("init.bad_config", &[("path", &path.display().to_string())]),
-            )
-        })?;
-        table.insert(
-            "provider".into(),
-            toml::Value::String(target.provider.clone()),
-        );
+        let mut keys: Vec<(&str, &str)> = Vec::new();
         if target.provider != "fake" {
-            let section = table
-                .entry(target.provider.clone())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            if let toml::Value::Table(s) = section {
-                if let Some(r) = &target.region {
-                    s.insert("region".into(), toml::Value::String(r.clone()));
-                }
-                if let Some(p) = &target.profile {
-                    s.insert("profile".into(), toml::Value::String(p.clone()));
-                }
-                for (k, v) in extra {
-                    s.insert((*k).into(), toml::Value::String((*v).into()));
-                }
+            if let Some(r) = &target.region {
+                keys.push(("region", r));
+            }
+            if let Some(p) = &target.profile {
+                keys.push(("setup_profile", p));
             }
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
-        if !text.is_empty() {
-            let bak = path.with_extension("toml.bak");
-            if !bak.exists() {
-                std::fs::write(&bak, &text).map_err(io)?;
+        keys.extend_from_slice(set);
+        let section = (target.provider != "fake").then_some(target.provider.as_str());
+        crate::config::edit_config_file(
+            path,
+            &[("provider", target.provider.as_str())],
+            section,
+            &keys,
+            remove,
+        )
+        .map_err(|e| match e {
+            crate::config::EditError::Invalid | crate::config::EditError::NotTable(_) => {
+                Finding::new(
+                    "bad_config",
+                    t("init.bad_config", &[("path", &path.display().to_string())]),
+                )
             }
-        }
-        let out = toml::to_string_pretty(&table)
-            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, out).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)
+            crate::config::EditError::Io(e) => Finding::new("command_failed", e.to_string()),
+        })
     }
 
     /// Like [`persist`](Self::persist) for keys that may also be cleared: `None` removes the key.
@@ -2565,34 +2606,12 @@ impl Init<'_> {
             .iter()
             .filter_map(|(k, v)| v.map(|v| (*k, v)))
             .collect();
-        self.persist(target, &set)?;
         let removed: Vec<&str> = keys
             .iter()
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| *k)
             .collect();
-        if removed.is_empty() {
-            return Ok(());
-        }
-        let path = &self.paths.config;
-        let io = |e: std::io::Error| Finding::new("command_failed", e.to_string());
-        let text = std::fs::read_to_string(path).map_err(io)?;
-        let mut table: toml::Table = text.parse().map_err(|_| {
-            Finding::new(
-                "bad_config",
-                t("init.bad_config", &[("path", &path.display().to_string())]),
-            )
-        })?;
-        if let Some(toml::Value::Table(sec)) = table.get_mut(&target.provider) {
-            for k in removed {
-                sec.remove(k);
-            }
-        }
-        let out = toml::to_string_pretty(&table)
-            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, out).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)
+        self.persist_keys_in(target, &set, &removed)
     }
 
     /// The values setup has recorded for a provider (`state_bucket`, `subnet_id`, ...).
@@ -3551,8 +3570,106 @@ mod tests {
         assert_eq!(c.hcloud.unwrap().region.as_deref(), Some("fsn1"));
         let aws = c.aws.unwrap();
         assert_eq!(aws.subnet_id.as_deref(), Some("subnet-0abc"));
-        assert_eq!(aws.profile.as_deref(), Some("work"));
+        // the profile init was run with is the setup identity: recorded apart, never as the daily profile
+        assert_eq!(aws.setup_profile.as_deref(), Some("work"));
+        assert_eq!(aws.profile, None);
         assert!(e.dir.path().join("config.toml.bak").exists());
+    }
+
+    const OLD_FLEET: &str = "# my fleet\nprovider = \"aws\"\ndomain = \"boxes.example.org\"\n\n[aws]\nregion = \"us-east-1\" # home region\nprofile = \"ozbox-operator\"\nsubnet_id = \"subnet-0abc\"\nimage = \"ami-0abc\"\nsecrets_key_arn = \"arn:aws:kms:us-east-1:123456789012:key/abc\"\nfleet = \"ozbox\"\n";
+
+    #[test]
+    fn persisting_into_an_existing_fleet_toml_keeps_every_key_and_the_daily_profile() {
+        let e = Env::new();
+        let fleet = e.dir.path().join("fleet.toml");
+        std::fs::write(&fleet, OLD_FLEET).unwrap();
+        // what the loader reads, and so what init must write to
+        let cands = [e.dir.path().join("config.toml"), fleet.clone()];
+        assert_eq!(
+            crate::config::Config::active_in(&cands),
+            Some(fleet.clone())
+        );
+        let mut init = e.init();
+        init.paths.config = fleet.clone();
+        let mut t = target();
+        t.profile = Some("ozbox-setup".into());
+        init.persist(
+            &t,
+            &[("state_bucket", "ozbox-state-123456789012-us-east-1")],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&fleet).unwrap();
+        assert!(
+            text.contains("# my fleet") && text.contains("# home region"),
+            "{text}"
+        );
+        let c = crate::config::Config::load_from(&fleet).unwrap();
+        let aws = c.aws.unwrap();
+        assert_eq!(
+            aws.profile.as_deref(),
+            Some("ozbox-operator"),
+            "daily profile untouched"
+        );
+        assert_eq!(aws.setup_profile.as_deref(), Some("ozbox-setup"));
+        assert_eq!(aws.subnet_id.as_deref(), Some("subnet-0abc"));
+        assert_eq!(aws.image.as_deref(), Some("ami-0abc"));
+        assert_eq!(aws.fleet.as_deref(), Some("ozbox"));
+        assert!(aws.secrets_key_arn.is_some());
+        assert_eq!(
+            aws.state_bucket.as_deref(),
+            Some("ozbox-state-123456789012-us-east-1")
+        );
+        assert_eq!(c.domain.as_deref(), Some("boxes.example.org"));
+        assert!(e.dir.path().join("fleet.toml.bak").exists());
+        assert!(
+            !e.dir.path().join("config.toml").exists(),
+            "no second file that would shadow the first"
+        );
+    }
+
+    #[test]
+    fn a_subnet_in_the_config_is_found_missing_or_unknown() {
+        let e = Env::new();
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nsubnet_id = \"subnet-0abc\"\n",
+        )
+        .unwrap();
+        let init = e.init();
+        assert_eq!(init.configured_subnet().as_deref(), Some("subnet-0abc"));
+        e.runner.reply(Output {
+            status: Some(0),
+            stdout: r#"{"Subnets":[{"SubnetId":"subnet-0abc"}]}"#.into(),
+            stderr: String::new(),
+        });
+        assert_eq!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Found
+        );
+        e.runner.reply(Output {
+            status: Some(254),
+            stdout: String::new(),
+            stderr: "An error occurred (InvalidSubnetID.NotFound)".into(),
+        });
+        assert_eq!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Missing
+        );
+        e.runner.reply(Output {
+            status: Some(254),
+            stdout: String::new(),
+            stderr: "An error occurred (UnauthorizedOperation)".into(),
+        });
+        assert!(matches!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Unknown(_)
+        ));
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nsubnet_id = \"oops\"\n",
+        )
+        .unwrap();
+        assert_eq!(init.configured_subnet(), None);
     }
 
     #[test]
