@@ -490,6 +490,10 @@ fn unknown_production() -> SecretError {
     )
 }
 
+/// What a store sealed by one kind of key says when the service is configured for another.
+pub const KEK_KIND_MISMATCH: &str =
+    "the secrets file is protected by a different kind of key than the one configured";
+
 impl EncryptedSecrets {
     /// `scope` names the box or fleet the store belongs to (it is part of every seal).
     pub fn new(
@@ -537,7 +541,7 @@ impl EncryptedSecrets {
                     return Err(err("the secrets file belongs to a different box"));
                 }
                 if f.kek != self.provider.label() {
-                    return Err(err("the secrets file is protected by a different kind of key than the one configured"));
+                    return Err(err(KEK_KIND_MISMATCH));
                 }
                 Ok(Some(f))
             }
@@ -1038,6 +1042,13 @@ impl EncryptedSecrets {
     }
 
     /// The salt stored for a passphrase-derived KEK, if the file exists and has one.
+    /// The kind of key that sealed the store at `path` (its label: `file`, `kms`, ...), when it can be read. Only the label is
+    /// read; nothing is opened.
+    pub fn stored_kek(path: &Path) -> Option<String> {
+        let f: File = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        Some(f.kek).filter(|k| !k.is_empty())
+    }
+
     pub fn stored_salt(path: &Path) -> Option<Vec<u8>> {
         let f: File = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
         decode_std(&f.salt).filter(|s| !s.is_empty())

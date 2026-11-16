@@ -271,7 +271,7 @@ pub fn store_check(
             StoreFate::NotSaid,
             t("upgrade.store_not_said", &[("box", name)]),
         ),
-        Ok((Some(st), _)) if st.is_no_escrow() => check(
+        Ok((Some(st), _)) if st.is_unopenable() => check(
             StoreFate::AlreadyLost,
             t("upgrade.store_already_lost", &[("box", name)]),
         ),
@@ -547,6 +547,27 @@ pub fn old_disk_report(
     )
 }
 
+/// What the plan says about the store when the upgrade also moves the box to the fleet's KMS key (`--use-fleet-key`, which
+/// is allowed only for a store that holds nothing). Whatever the old key was (a file with or without a copy, unsaid, or
+/// already lost), the new machine is configured for KMS and cannot open a file-sealed store, so the old store is set aside
+/// after the replace (renamed, never deleted) and a new one is started on the fleet's key: it is a "new store", accepted by
+/// the flag, and the plan says so. A store already on a key that is not a file, or a box that is moving its key, is left to
+/// its own text.
+pub fn fleet_key_store_check(check: StoreCheck, box_name: &str) -> StoreCheck {
+    match check.fate {
+        StoreFate::Lost
+        | StoreFate::Unknown
+        | StoreFate::AlreadyLost
+        | StoreFate::KeptByLaptop
+        | StoreFate::KeptByEscrow
+        | StoreFate::NotSaid => StoreCheck {
+            fate: StoreFate::Lost,
+            detail: t("upgrade.store_fleet_key_plan", &[("box", box_name)]),
+        },
+        _ => check,
+    }
+}
+
 /// Whether the upgrade may go ahead, given what happens to the store. `Ok` carries the plan's note (the store's fate is
 /// always in the plan); `Err` is the refusal: a store that would be lost, or a box that could not be asked, needs the
 /// person's explicit acceptance (`--accept-new-secrets-store`).
@@ -683,7 +704,7 @@ pub(crate) fn recover_store_step(
         std::thread::sleep(waits.poll);
     };
     match state {
-        Ok((Some(s), _)) if s.is_no_escrow() => {
+        Ok((Some(s), _)) if s.is_unopenable() => {
             match super::admin::recover_secrets(agent, rec, keys) {
                 Ok(_) => Step::new(
                     StepOutcome::Done,
@@ -704,6 +725,12 @@ pub(crate) fn recover_store_step(
         Ok((Some(s), _)) if s.ready => Step::new(
             StepOutcome::Skipped,
             t("upgrade.recover_not_needed", &[("box", name)]),
+        ),
+        // a box whose program is older than the one that records this: its service loops on the mismatch and says nothing a
+        // program can act on, so the person is told what to run
+        Ok((Some(s), _)) if s.text.contains(crate::secrets_enc::KEK_KIND_MISMATCH) => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.recover_old_service", &[("box", name)]),
         ),
         Ok((Some(s), _)) => Step::new(
             StepOutcome::Failed,
@@ -1179,7 +1206,12 @@ pub(super) fn command(
                         .ok()
                         .flatten()
                         .is_some();
-                store_check(ag, rec, simulated, escrowed, root)
+                let check = store_check(ag, rec, simulated, escrowed, root);
+                if use_fleet_key {
+                    fleet_key_store_check(check, rec.spec.name.as_str())
+                } else {
+                    check
+                }
             },
             accept_new_store,
             old_disk: OldDisk::choose(p.id(), no_old_disk_snapshot, use_fleet_key),
@@ -4667,6 +4699,132 @@ mod tests {
         );
         assert!(fine.admin.lock().unwrap().is_empty());
         Ok(())
+    }
+
+    /// The 2026-11-16 upgrade of `main` (0.2.0-beta.0 to beta.1, `--accept-new-secrets-store --use-fleet-key`): the new machine
+    /// is configured for KMS over a store the old disk's file key sealed. The service now records that as unopenable, and the
+    /// step after the replace sets the old store aside, with the pinned key's approval, instead of reporting "nothing was set
+    /// aside" while the service loops.
+    #[test]
+    fn a_new_store_on_the_fleet_key_sets_the_old_file_sealed_store_aside_after_the_replace(
+    ) -> TestResult {
+        use crate::secrets::SecretStore;
+        use crate::secrets_state::{State, KIND_MISMATCH_CODE};
+        let dir = tempfile::tempdir()?;
+        let (p, name) = sandbox_box(dir.path(), None)?;
+        let (seed, pk) = crate::approval_key::generate()?;
+        let keys = crate::secrets::MemorySecrets::default();
+        keys.set("approval-key-laptop", &seed)?;
+        let mismatch = State::not_ready(
+            "sealed by a file key, configured for kms",
+            KIND_MISMATCH_CODE,
+            Some("kms"),
+            None,
+        )
+        .with_store_kek("file");
+        let a = state_agent(Ok((Some(mismatch), false)), &pk);
+        let settled = settle_after_replace(
+            &p,
+            &a,
+            &name,
+            quick(),
+            &|ag, rec| Some(recover_store_step(ag, rec, &keys, quick())),
+            &|_, _| None,
+        );
+        let r = settled.recovery.expect("the old store was dealt with");
+        assert_eq!(r.outcome, StepOutcome::Done, "{}", r.detail);
+        assert!(
+            r.detail.contains("set aside") && r.detail.contains("new one started"),
+            "{}",
+            r.detail
+        );
+        let sent = a.admin.lock().unwrap().clone();
+        assert_eq!(sent[0], "recover-secrets challenge");
+        assert!(sent[1].starts_with("recover-secrets "), "{sent:?}");
+        Ok(())
+    }
+
+    /// A box whose own program predates the record (the real `main` on beta.1) still loops with the mismatch as a restart. The
+    /// upgrade must not say "for another reason than a lost key"; it says what to run, and sets nothing aside by guesswork.
+    #[test]
+    fn a_service_still_looping_on_the_mismatch_is_told_apart_and_the_person_is_told_what_to_run(
+    ) -> TestResult {
+        use crate::secrets_state::State;
+        let dir = tempfile::tempdir()?;
+        let (_, rec) = running_box(dir.path(), "dev")?;
+        let keys = crate::secrets::MemorySecrets::default();
+        let looping = State::not_ready(
+            &format!(
+                "{} (trying again in 2 s)",
+                crate::secrets_enc::KEK_KIND_MISMATCH
+            ),
+            "transient",
+            Some("kms"),
+            None,
+        );
+        let a = state_agent(Ok((Some(looping), true)), "");
+        let step = recover_store_step(&a, &rec, &keys, quick());
+        assert_eq!(step.outcome, StepOutcome::Failed);
+        assert!(
+            step.detail.contains("0.2.0-beta.2")
+                && step.detail.contains("--accept-new-secrets-store"),
+            "{}",
+            step.detail
+        );
+        assert!(!step.detail.contains("another reason"), "{}", step.detail);
+        assert!(a.admin.lock().unwrap().is_empty(), "nothing is guessed");
+        Ok(())
+    }
+
+    /// The plan for `--use-fleet-key` with `--accept-new-secrets-store`: whatever the file key's copies, the old store is set
+    /// aside and the new one starts on the fleet's KMS key, and the apply does it (the fate is the accepted new-store one).
+    #[test]
+    fn the_plan_for_the_fleet_key_with_a_new_store_says_the_old_store_is_set_aside_and_the_new_one_starts_on_kms(
+    ) {
+        for fate in [
+            StoreFate::Lost,
+            StoreFate::Unknown,
+            StoreFate::AlreadyLost,
+            StoreFate::KeptByLaptop,
+            StoreFate::KeptByEscrow,
+            StoreFate::NotSaid,
+        ] {
+            let c = fleet_key_store_check(
+                StoreCheck {
+                    fate,
+                    detail: "the old text".into(),
+                },
+                "main",
+            );
+            assert_eq!(c.fate, StoreFate::Lost, "{fate:?}");
+            for w in [
+                "--use-fleet-key",
+                "KMS",
+                "set aside",
+                "never deleted",
+                "new store",
+            ] {
+                assert!(c.detail.contains(w), "{fate:?} {w}: {}", c.detail);
+            }
+            // accepted, so the apply runs the recovery after the replace
+            let note = store_gate(&c, "main", true).unwrap();
+            assert!(note.contains("Accepted"), "{note}");
+        }
+        // a store already on a key that is not a file, and a box mid-move, keep their own text
+        for fate in [
+            StoreFate::Kept,
+            StoreFate::MovingKey,
+            StoreFate::NotApplicable,
+        ] {
+            let c = fleet_key_store_check(
+                StoreCheck {
+                    fate,
+                    detail: "own".into(),
+                },
+                "main",
+            );
+            assert_eq!(c.detail, "own");
+        }
     }
 
     #[test]

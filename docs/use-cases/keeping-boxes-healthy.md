@@ -135,10 +135,22 @@ ozbox admin main -- recover-secrets
 ```
 
 **Underneath:** the box sets the old store aside (renamed, never deleted) only when its secrets service itself recorded
-that the key is lost with no escrow, and only with a signature of a one-time challenge by the key pinned when the box was
+that the store can never be opened, and only with a signature of a one-time challenge by the key pinned when the box was
 made, which this computer holds. Run it from that computer. A box with no pinned key can be recovered only at the machine's
 own console, as root. Anything kept only on the box (tunnel tokens, backup credentials, imported keys, laptop keys enrolled
 later) must be entered again.
+
+Two recorded states qualify. The first is a key lost with no escrow. The second is a store sealed by a key kept in a file,
+found by a box configured for the fleet's KMS key (as after `ozbox upgrade --use-fleet-key`), with that file key gone and no
+copy held: the service records it as a state of its own, never as a restart, and `recover-secrets` accepts it. A store that
+can be opened (its key file is there, or the kinds match) and a service that is only restarting are refused, and the refusal
+names the state the box was in. A box whose program is older than 0.2.0-beta.2 still loops on this state and says nothing
+the recovery can act on: `ozbox` tells you to upgrade it to an image from 0.2.0-beta.2 or later with
+`--accept-new-secrets-store`.
+
+An upgrade with `--use-fleet-key` and `--accept-new-secrets-store` does this for you: its plan says the old store will be set
+aside (renamed, never deleted) and a new one started on the fleet's KMS key, and after the machine is replaced it does exactly
+that, with the approval of this computer's pinned key.
 **Status:** Preview.
 
 ## 1c. Recovering an old secrets store from the copy an upgrade kept

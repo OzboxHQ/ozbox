@@ -30,6 +30,17 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The permissions did not widen.** Neither the daily `ozbox` sign-in nor the setup sign-in can tag an existing disk as Oz Box's, so a disk it did not make cannot be claimed and then changed. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="0.2.0-beta.2: a box moved to your fleet's key starts its secrets service">
+  ## A box upgraded onto your fleet's KMS key now starts its secrets service
+
+  Upgrading a box with a file-kept secrets key onto the fleet's KMS key (`ozbox upgrade <box> --accept-new-secrets-store --use-fleet-key`) could leave its secrets service retrying forever, with the old store unopenable and nothing set aside. This release fixes it.
+
+  - **The box says so.** A store the box can never open is now reported as exactly that, not as a service that is merely restarting.
+  - **The upgrade finishes the job.** With `--accept-new-secrets-store`, the old store is set aside (renamed, never deleted), with the approval of this computer's pinned key, and a new one starts on the fleet's key. The plan for `--use-fleet-key` says so before you confirm.
+  - **`ozbox admin <box> -- recover-secrets` handles it too**, behind the same approval. It still refuses a store that can be opened and a service that is only restarting, and tells you which state it found. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - **A box already stuck on 0.2.0-beta.1** is told what to run: upgrade it to an image from 0.2.0-beta.2 or later with `--accept-new-secrets-store`.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
   ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
 
