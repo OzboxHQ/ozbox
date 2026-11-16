@@ -119,6 +119,13 @@ then mark any disk in the account as its own.
   not applied, the policy is missing, the secrets service is not ready right now, or the box's program is older than the check),
   it says the store is unknown, says which, and asks for `--accept-new-secrets-store`, never "kept". A store kept by escrow on a
   box that answers needs no flag.
+- The same holds for a box whose record names the fleet's KMS key. The record only says which key the new machine will be given,
+  so the plan asks the box's root whether the store really opens under it, and says one of four things: **kept** (the service is
+  ready on that key and the store and its copy on `/work` are sealed by it), **will be lost** (the store is still sealed by a key
+  kept in a file: finish the move with `ozbox adopt-fleet-key`, or accept a new store), **already unopenable** (its file key is gone,
+  so its secrets service cannot start; `--accept-new-secrets-store` upgrades and then sets the old store aside and starts a new one,
+  or run `ozbox admin <name> -- recover-secrets` first) or **unknown** (the box could not be asked, so it is never called kept; the
+  upgrade asks for `--accept-new-secrets-store`). A box that is stopped is unknown too: start it and plan again.
 - It reads the box first and changes nothing if the box keeps its key anywhere but a file, cannot be asked, or cannot move
   its own store. A box made on `0.1.1` or earlier cannot: upgrade it first, **to an image built from a release that includes
   this command** (an image from an older release gains nothing). If the plan says the store would be lost,

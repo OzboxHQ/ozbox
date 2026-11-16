@@ -495,6 +495,123 @@ pub fn pre_push(
     }
 }
 
+// ---- when the secrets service cannot be reached (ADR 0029 Amendment 12) -------------------------------------------------------
+
+/// What a hook decided while the box's secrets service could not be reached.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Degraded {
+    /// Let it through. The text is printed first when there is any: what was not checked, and that nothing was lost.
+    Pass(Option<String>),
+    /// Stop it, with this message.
+    Stop(String),
+}
+
+/// The line that says what to do about the service itself. Whoever runs the box does it from their computer: the box user can
+/// neither read the service's log nor restart it.
+const OUTAGE_FIX: &str = "To see why it stopped and bring it back, ask whoever runs this box to run, from their computer, `ozbox admin <box> -- collect-logs` and then `ozbox admin <box> -- restart-services`. If the log says the store can no longer be opened, `ozbox admin <box> -- recover-secrets` sets the old store aside and starts a new one (the secrets that were entered by hand are entered again).";
+
+/// `pre-commit` while the service cannot be asked. Everything that does not need it still runs: the shapes of keys, the names of
+/// files and `.env` files. A commit that holds one is stopped, and no approval can be given while the service that records approvals
+/// is down. A clean commit is let through and says what was not checked: it stays on this box, and `pre-push`, which stays closed
+/// until the service is back, reads every commit again against the stored values before anything leaves.
+pub fn pre_commit_degraded(repo: &Path, why: &str) -> Result<Degraded, String> {
+    clear_marker(repo);
+    let tree = staged_tree(repo)?;
+    let v = check_diff(&tree_diff(repo, &tree)?, None)?;
+    if !v.clean() {
+        return Ok(Degraded::Stop(format!(
+            "{}ozbox: this box's secrets service is not running ({why}), so a person's approval cannot be recorded right now and nothing can be let through with one. Nothing was lost: your files are untouched and still staged. Remove the key and commit again. If it is a public value (a web address, a key meant for the browser), say so with `ozbox secrets import --public NAME` once the service is back.\n{OUTAGE_FIX}\n",
+            report(&v)
+        )));
+    }
+    Ok(Degraded::Pass(Some(format!(
+        "ozbox: this box's secrets service is not running ({why}), so this commit was checked for the shapes of keys but NOT against the secrets stored on this box. Nothing was lost: your work is committed here. A push is held until the service is back and has checked everything again.\n{OUTAGE_FIX}\n"
+    ))))
+}
+
+/// `pre-push` while the service cannot be asked: always stopped, because a push is what leaves the box and the stored values
+/// cannot be compared. The shapes are still read, so a person who has to fix something hears all of it at once.
+pub fn pre_push_degraded(
+    repo: &Path,
+    remote: &str,
+    remote_url: &str,
+    refs: &[PushedRef],
+    why: &str,
+) -> String {
+    let target = remote_name(repo, remote, remote_url);
+    let sent: Vec<Sent> = refs
+        .iter()
+        .map(|r| Sent {
+            old: r.old.clone(),
+            new: r.new.clone(),
+        })
+        .collect();
+    let said = match check_push(repo, &sent, target.as_deref(), None) {
+        Ok(v) if !v.clean() => report(&v),
+        _ => String::new(),
+    };
+    format!(
+        "{said}ozbox: this push was stopped because this box's secrets service is not running ({why}), so the commits could not be checked against the secrets stored on this box. Nothing was lost and nothing left the box: your commits are safe here. Push again once the service is back; the push then checks everything.\n{OUTAGE_FIX}\n"
+    )
+}
+
+/// `pre-commit` as the hook runs it: with the service, and when it cannot be reached (`scanner` is that error, or the check fails
+/// for it half way), without. Only an outage degrades; every other failure holds the change as before.
+pub fn pre_commit_or_degrade(
+    repo: &Path,
+    scanner: Result<Option<&dyn Scanner>, String>,
+    code: &str,
+    flow: Option<&mut Flow<'_>>,
+) -> Result<Degraded, String> {
+    let first = match scanner {
+        Ok(sc) => pre_commit(repo, sc, code, flow),
+        Err(e) => Err(e),
+    };
+    match first {
+        Ok(None) => Ok(Degraded::Pass(None)),
+        Ok(Some(m)) => Ok(Degraded::Stop(m)),
+        Err(e) if crate::guard::service_outage(&e) => pre_commit_degraded(repo, &outage_reason(&e)),
+        Err(e) => Err(e),
+    }
+}
+
+/// `pre-push` as the hook runs it: see [`pre_commit_or_degrade`].
+pub fn pre_push_or_degrade(
+    repo: &Path,
+    remote: &str,
+    remote_url: &str,
+    refs: &[PushedRef],
+    scanner: Result<Option<&dyn Scanner>, String>,
+    code: &str,
+    flow: Option<&mut Flow<'_>>,
+) -> Result<Degraded, String> {
+    let first = match scanner {
+        Ok(sc) => pre_push(repo, remote, remote_url, refs, sc, code, flow),
+        Err(e) => Err(e),
+    };
+    match first {
+        Ok(None) => Ok(Degraded::Pass(None)),
+        Ok(Some(m)) => Ok(Degraded::Stop(m)),
+        Err(e) if crate::guard::service_outage(&e) => Ok(Degraded::Stop(pre_push_degraded(
+            repo,
+            remote,
+            remote_url,
+            refs,
+            &outage_reason(&e),
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
+/// The short reason for a message: "its socket is missing" for a service with no socket, "it did not answer" for one that did not.
+fn outage_reason(e: &str) -> String {
+    if e.starts_with(crate::guard::OUTAGE_PREFIX) {
+        "its socket is missing".into()
+    } else {
+        "it did not answer".into()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -603,6 +720,283 @@ mod tests {
         fn override_ok(&self, _: &str, _: &Binding) -> Result<(), String> {
             Err(self.0.clone())
         }
+    }
+
+    // ---- the secrets service is down (ADR 0029 Amendment 12) ----------------------------------------------------------
+
+    /// A scanner whose service does not answer: every call is the "not reachable" error.
+    struct Down;
+    impl Scanner for Down {
+        fn scan(&self, _: &str) -> Result<Vec<String>, String> {
+            Err(crate::secrets_service::SERVICE_DOWN.into())
+        }
+        fn override_ok(&self, _: &str, _: &Binding) -> Result<(), String> {
+            Err(crate::secrets_service::SERVICE_DOWN.into())
+        }
+    }
+
+    /// A service that answers with a stored name for one value, and nothing for the rest.
+    struct Up(&'static str);
+    impl Scanner for Up {
+        fn scan(&self, text: &str) -> Result<Vec<String>, String> {
+            Ok(if text.contains(self.0) {
+                vec!["workload.app.staging.API_KEY".into()]
+            } else {
+                vec![]
+            })
+        }
+        fn override_ok(&self, _: &str, _: &Binding) -> Result<(), String> {
+            Err("no".into())
+        }
+    }
+
+    /// The error a box with no socket gives (see `ServiceScanner::connect_with`).
+    fn no_socket() -> String {
+        format!(
+            "{} (its socket is missing), so stored keys cannot be checked",
+            crate::guard::OUTAGE_PREFIX
+        )
+    }
+
+    /// A repository with one committed file, and `files` written and staged. Returns the repository's folder.
+    fn staged(files: &[(&str, &str)]) -> tempfile::TempDir {
+        use crate::guard::testgit::{git, must};
+        let d = tempfile::tempdir().unwrap();
+        for a in [
+            &["init", "-q"][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "t"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            must(git().arg("-C").arg(d.path()).args(a));
+        }
+        std::fs::write(d.path().join("seed.txt"), "seed\n").unwrap();
+        must(git().arg("-C").arg(d.path()).args(["add", "-A"]));
+        must(
+            git()
+                .arg("-C")
+                .arg(d.path())
+                .args(["commit", "-q", "-m", "seed"]),
+        );
+        for (f, c) in files {
+            std::fs::write(d.path().join(f), c).unwrap();
+        }
+        must(git().arg("-C").arg(d.path()).args(["add", "-A"]));
+        d
+    }
+
+    /// Built by concatenation, so this file holds no key-shaped literal.
+    fn payment_key() -> String {
+        format!("{}{}", "sk_li", "ve_0123456789abcdefABCDEF0123")
+    }
+
+    fn pushed(r: &Path) -> Vec<PushedRef> {
+        must_commit(r);
+        let head = git(r, &["rev-parse", "HEAD"]).unwrap();
+        vec![PushedRef {
+            remote_ref: "refs/heads/main".into(),
+            old: "0".repeat(40),
+            new: head.trim().to_string(),
+        }]
+    }
+
+    fn must_commit(r: &Path) {
+        use crate::guard::testgit::{git, must};
+        must(git().arg("-C").arg(r).args(["commit", "-q", "-m", "work"]));
+    }
+
+    const URL: &str = "https://example.com/r.git";
+
+    #[test]
+    fn a_commit_with_the_service_down_is_still_read_for_key_shapes_and_a_planted_key_is_stopped() {
+        let key = payment_key();
+        for scanner in [
+            Err(no_socket()),
+            Err(crate::secrets_service::SERVICE_DOWN.to_string()),
+        ] {
+            let d = staged(&[("config.txt", &format!("token = {key}\n"))]);
+            let out = pre_commit_or_degrade(d.path(), scanner, "", None).unwrap();
+            let Degraded::Stop(m) = out else {
+                panic!("a key shape must be stopped while the service is down")
+            };
+            assert!(
+                m.contains("config.txt:1") && m.contains("payment-provider-key"),
+                "{m}"
+            );
+            // what is wrong, that nothing was lost, and what to do, in plain words; never the key
+            assert!(m.contains("secrets service is not running"), "{m}");
+            assert!(
+                m.contains("Nothing was lost") && m.contains("still staged"),
+                "{m}"
+            );
+            assert!(
+                m.contains("collect-logs") && m.contains("restart-services"),
+                "{m}"
+            );
+            assert!(!m.contains(&key), "{m}");
+        }
+        // the service up but dying half way through the check is the same outage
+        let d = staged(&[("config.txt", &format!("token = {key}\n"))]);
+        let out = pre_commit_or_degrade(d.path(), Ok(Some(&Down)), "", None).unwrap();
+        assert!(matches!(out, Degraded::Stop(m) if m.contains("payment-provider-key")));
+        // an environment file is stopped by its name, with no service
+        let d = staged(&[(".env", "A=1\n")]);
+        let out = pre_commit_or_degrade(d.path(), Err(no_socket()), "", None).unwrap();
+        assert!(matches!(out, Degraded::Stop(m) if m.contains(".env")));
+    }
+
+    #[test]
+    fn a_clean_commit_with_the_service_down_goes_through_and_says_what_was_not_checked() {
+        for scanner in [Err(no_socket()), Ok(Some(&Down as &dyn Scanner))] {
+            let d = staged(&[("notes.txt", "nothing secret here\n")]);
+            let out = pre_commit_or_degrade(d.path(), scanner, "", None).unwrap();
+            let Degraded::Pass(Some(note)) = out else {
+                panic!("a clean commit is let through, with a note")
+            };
+            assert!(note.contains("NOT against the secrets stored"), "{note}");
+            assert!(note.contains("Nothing was lost"), "{note}");
+            assert!(note.contains("push is held"), "{note}");
+            assert!(note.contains("collect-logs"), "{note}");
+        }
+    }
+
+    #[test]
+    fn only_an_outage_degrades_every_other_failure_still_holds_the_change() {
+        struct Failing(&'static str);
+        impl Scanner for Failing {
+            fn scan(&self, _: &str) -> Result<Vec<String>, String> {
+                Err(self.0.into())
+            }
+            fn override_ok(&self, _: &str, _: &Binding) -> Result<(), String> {
+                Err(self.0.into())
+            }
+        }
+        for why in [
+            "too many scans: wait a minute",
+            "a batch was larger than the service reads in one request (this is a bug in the barrier)",
+            "the request was refused",
+        ] {
+            let d = staged(&[("notes.txt", "clean\n")]);
+            let e = pre_commit_or_degrade(d.path(), Ok(Some(&Failing(why))), "", None)
+                .unwrap_err();
+            assert_eq!(e, why);
+        }
+        assert!(crate::guard::service_outage(
+            crate::secrets_service::SERVICE_DOWN
+        ));
+        assert!(crate::guard::service_outage(&no_socket()));
+        assert!(!crate::guard::service_outage(
+            "too many scans: wait a minute"
+        ));
+    }
+
+    #[test]
+    fn with_the_service_up_a_commit_is_decided_as_before() {
+        let key = payment_key();
+        // clean: through, with no note
+        let d = staged(&[("notes.txt", "clean\n")]);
+        assert_eq!(
+            pre_commit_or_degrade(d.path(), Ok(Some(&Up("STORED-VALUE-123"))), "", None).unwrap(),
+            Degraded::Pass(None)
+        );
+        // a stored value: stopped with the usual words, which do not mention an outage
+        let d = staged(&[("a.txt", "x = STORED-VALUE-123\n")]);
+        let Degraded::Stop(m) =
+            pre_commit_or_degrade(d.path(), Ok(Some(&Up("STORED-VALUE-123"))), "", None).unwrap()
+        else {
+            panic!("a stored value must be stopped")
+        };
+        assert!(
+            m.contains("holds a value this box stores as a secret"),
+            "{m}"
+        );
+        assert!(
+            !m.contains("not running") && !m.contains("STORED-VALUE-123"),
+            "{m}"
+        );
+        // a key shape: stopped as before
+        let d = staged(&[("a.txt", &format!("{key}\n"))]);
+        let Degraded::Stop(m) =
+            pre_commit_or_degrade(d.path(), Ok(Some(&Up("STORED-VALUE-123"))), "", None).unwrap()
+        else {
+            panic!("a key shape must be stopped")
+        };
+        assert!(
+            m.contains("payment-provider-key") && !m.contains("not running"),
+            "{m}"
+        );
+        // no service at all off a box (a laptop): the shapes only, no outage words
+        let d = staged(&[("notes.txt", "clean\n")]);
+        assert_eq!(
+            pre_commit_or_degrade(d.path(), Ok(None), "", None).unwrap(),
+            Degraded::Pass(None)
+        );
+    }
+
+    #[test]
+    fn a_push_with_the_service_down_is_always_stopped_and_nothing_leaves() {
+        let d = staged(&[("notes.txt", "clean\n")]);
+        let refs = pushed(d.path());
+        for scanner in [Err(no_socket()), Ok(Some(&Down as &dyn Scanner))] {
+            let out =
+                pre_push_or_degrade(d.path(), "origin", URL, &refs, scanner, "", None).unwrap();
+            let Degraded::Stop(m) = out else {
+                panic!("a push is stopped while the stored values cannot be checked")
+            };
+            assert!(m.contains("secrets service is not running"), "{m}");
+            assert!(
+                m.contains("Nothing was lost and nothing left the box"),
+                "{m}"
+            );
+            assert!(m.contains("Push again once the service is back"), "{m}");
+            assert!(m.contains("recover-secrets"), "{m}");
+        }
+        // a code cannot get a push past an outage either: the service that spends it is the one that is down
+        let out = pre_push_or_degrade(
+            d.path(),
+            "origin",
+            URL,
+            &refs,
+            Err(no_socket()),
+            "AAAA-BBBB",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(out, Degraded::Stop(_)));
+        // a key shape in an unpushed commit is named in the same message
+        let key = payment_key();
+        let d = staged(&[("config.txt", &format!("{key}\n"))]);
+        let refs = pushed(d.path());
+        let Degraded::Stop(m) =
+            pre_push_or_degrade(d.path(), "origin", URL, &refs, Err(no_socket()), "", None)
+                .unwrap()
+        else {
+            panic!("stop")
+        };
+        assert!(
+            m.contains("config.txt") && m.contains("payment-provider-key"),
+            "{m}"
+        );
+        assert!(!m.contains(&key), "{m}");
+    }
+
+    #[test]
+    fn with_the_service_up_a_clean_push_goes_through() {
+        let d = staged(&[("notes.txt", "clean\n")]);
+        let refs = pushed(d.path());
+        assert_eq!(
+            pre_push_or_degrade(
+                d.path(),
+                "origin",
+                URL,
+                &refs,
+                Ok(Some(&Up("STORED-VALUE-123"))),
+                "",
+                None
+            )
+            .unwrap(),
+            Degraded::Pass(None)
+        );
     }
 
     #[test]

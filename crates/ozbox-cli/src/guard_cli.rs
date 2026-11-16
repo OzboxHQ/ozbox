@@ -197,37 +197,40 @@ pub(crate) fn post_commit_unscanned(repo: &Path, why: &str) -> String {
 fn hook(name: &str, args: &[String]) -> Result<(), CliError> {
     let repo = std::env::current_dir().map_err(|_| CliError::Msg("no working folder".into()))?;
     let code = std::env::var("OZBOX_GUARD_APPROVAL").unwrap_or_default();
-    let s = match scanner() {
-        Ok(s) => s,
-        // a box whose secrets service is not there cannot check stored keys. post-commit cannot stop a commit, so it still checks
-        // what it can (the shapes of keys, the names of files and `.env` files) and says the stored values were not checked; the
-        // push will check them again
-        Err(e) if name == "post-commit" => {
-            eprint!("{}", post_commit_unscanned(&repo, &e));
-            return Ok(());
-        }
-        Err(e) => {
-            return blocked(format!(
-                "ozbox: the barrier could not check this change ({e}), so it was stopped.\n"
-            ))
-        }
-    };
-    let sc = s.as_deref();
+    let s = scanner();
+    // A box whose secrets service is not there cannot check stored keys. `post-commit` cannot stop a commit, so it still checks
+    // what it can (the shapes of keys, the names of files and `.env` files) and says the stored values were not checked; the
+    // push will check them again. `pre-commit` and `pre-push` degrade as ADR 0029 Amendment 12 says (see `guard_hold`).
+    if let (Err(e), "post-commit") = (&s, name) {
+        eprint!("{}", post_commit_unscanned(&repo, e));
+        return Ok(());
+    }
     // A change the barrier cannot check is stopped rather than let through. A failure names what could not be read when it is a
-    // file or a commit (trying again will not help); a service that is busy or restarting is a moment's wait.
+    // file or a commit (trying again will not help); a service that is busy is a moment's wait.
     let unreachable = |e: String| {
         blocked(format!(
             "ozbox: the barrier could not check this change ({e}), so it was stopped. If a commit or file is named, that is what could not be read; otherwise try again in a moment.\n"
         ))
     };
+    let sc: Result<Option<&dyn Scanner>, String> = match &s {
+        Ok(o) => Ok(o.as_deref()),
+        Err(e) => Err(e.clone()),
+    };
     match name {
-        "pre-commit" => match with_flow(|flow| guard_hold::pre_commit(&repo, sc, &code, flow)) {
-            Ok(None) => Ok(()),
-            Ok(Some(m)) => blocked(m),
-            Err(e) => unreachable(e),
-        },
+        "pre-commit" => {
+            match with_flow(|flow| guard_hold::pre_commit_or_degrade(&repo, sc, &code, flow)) {
+                Ok(guard_hold::Degraded::Pass(note)) => {
+                    if let Some(n) = note {
+                        eprint!("{n}");
+                    }
+                    Ok(())
+                }
+                Ok(guard_hold::Degraded::Stop(m)) => blocked(m),
+                Err(e) => unreachable(e),
+            }
+        }
         // after the commit exists; the exit status no longer matters to git, the message does
-        "post-commit" => match guard_hold::post_commit(&repo, sc) {
+        "post-commit" => match guard_hold::post_commit(&repo, sc.ok().flatten()) {
             Ok(Some(m)) => {
                 eprint!("{m}");
                 Ok(())
@@ -283,7 +286,7 @@ fn with_flow<T>(f: impl FnOnce(Option<&mut guard_hold::Flow<'_>>) -> T) -> T {
 fn pre_push(
     repo: &Path,
     args: &[String],
-    sc: Option<&dyn Scanner>,
+    sc: Result<Option<&dyn Scanner>, String>,
     code: &str,
 ) -> Result<(), CliError> {
     // git gives the remote's name and address as arguments, and one line a ref on standard input:
@@ -312,9 +315,11 @@ fn pre_push(
     if refs.is_empty() {
         return Ok(());
     }
-    match with_flow(|flow| guard_hold::pre_push(repo, &remote, &url, &refs, sc, code, flow)) {
-        Ok(None) => Ok(()),
-        Ok(Some(m)) => blocked(m),
+    match with_flow(|flow| {
+        guard_hold::pre_push_or_degrade(repo, &remote, &url, &refs, sc, code, flow)
+    }) {
+        Ok(guard_hold::Degraded::Pass(_)) => Ok(()),
+        Ok(guard_hold::Degraded::Stop(m)) => blocked(m),
         Err(e) => blocked(format!(
             "ozbox: the barrier could not check this push ({e}).\n"
         )),
