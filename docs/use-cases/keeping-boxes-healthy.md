@@ -264,7 +264,10 @@ yourself.
 
 The box's self-test (run after every upgrade, and from the dashboard) checks that `/work` is mounted and writable, there
 is disk headroom, the filesystem fills its disk, the tools are present, the tunnels are up and a sample run works. A
-failure names the failing step.
+failure names the failing step. It also checks that the services enabled for the box user are running. A one-time service
+that already ran and finished, or that had nothing to do because its start condition was not met (such as resuming a
+session when there is nothing to resume), counts as healthy while it is stopped; a service that should keep running, or one
+that failed, does not.
 
 **Status:** Preview (runs on real boxes; one check is being corrected in the next image).
 
