@@ -190,7 +190,7 @@ It sends the repository's password and keys from this computer's secret store to
 computer never held them, add the repository in **Settings → Backups** first. To take backups off a box on purpose, remove the
 repository there: the box forgets that backups were set up, so the self-test does not fail for it.
 
-**Underneath:** a restore of a snapshot taken before backups were removed can bring the old record back; remove the repository again.
+**Underneath:** the record is never restored from a snapshot, so an old backup cannot bring back a set-up you removed. It is brought up to date every time the box starts (a box that held credentials before the record existed gets one, and a `[backup]` edit you made is kept). A kept value does not go back to the default by setting `/etc` to the default, because the default is what a new system disk starts with: to go back, delete `/work/ozbox-backup/backup.toml` as root and it is written again from `/etc` at the next start.
 **Status:** Preview.
 
 ## 5. Restore a file or folder you deleted

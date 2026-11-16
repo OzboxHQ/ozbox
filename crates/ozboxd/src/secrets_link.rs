@@ -72,15 +72,21 @@ pub fn call(
     }
 }
 
-/// Whether a secret of this name exists (never its value).
-pub fn exists(box_socket: &Path, name: &str) -> bool {
+/// Whether a secret of this name exists (never its value). `Err` when the service cannot be asked (it is not up yet, or
+/// does not answer): a missing secret and a service that is not ready are different things, and a caller must not report
+/// the second as the first.
+pub fn exists_checked(box_socket: &Path, name: &str) -> std::result::Result<bool, String> {
     call(
         box_socket,
         &json!({"op": "exists", "name": name}),
         Some(Duration::from_secs(10)),
     )
     .map(|v| v["flag"].as_bool() == Some(true))
-    .unwrap_or(false)
+}
+
+/// Whether a secret of this name exists (never its value); `false` also when the service cannot be asked.
+pub fn exists(box_socket: &Path, name: &str) -> bool {
+    exists_checked(box_socket, name).unwrap_or(false)
 }
 
 /// Runs a restic command through the service. The environment of `cmd` is ignored on purpose: the credentials are the

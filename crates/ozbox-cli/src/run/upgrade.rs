@@ -1428,7 +1428,11 @@ pub(crate) fn restore_with(
     let target = settings.backups.restic.clone()?;
     let name = rec.spec.name.as_str();
     if settings.backups.overrides.get(name).and_then(|o| o.enabled) == Some(false) {
-        return None;
+        // the person turned this box's backups off on this computer: said as a choice, never as backups that stopped
+        return Some(Step::new(
+            StepOutcome::Skipped,
+            t("upgrade.backup_opted_out", &[("box", name)]),
+        ));
     }
     // Never overwrite what the box already holds: a box whose secrets store came through the upgrade keeps its own
     // credentials, which are the ones its backups were made with. Only a box without them is given them.
@@ -1528,10 +1532,15 @@ pub(crate) fn settle_after_replace(
         .is_some_and(|s| s.outcome == StepOutcome::Done);
     let backup = match &after {
         Some(a) => verify_backups(agent, a, backups_before, restored),
+        // the box did not come back ready (or cannot be read), so nothing could be asked of it
         None => restored.unwrap_or_else(|| {
             Step::new(
                 StepOutcome::Skipped,
-                t("upgrade.backup_after", &[("box", name.as_str())]),
+                if backups_before {
+                    t("upgrade.backup_unchecked", &[("box", name.as_str())])
+                } else {
+                    t("upgrade.backup_after", &[("box", name.as_str())])
+                },
             )
         }),
     };
@@ -1569,7 +1578,7 @@ fn backup_state(agent: &dyn BoxAgent, rec: &BoxRecord) -> Option<(bool, bool)> {
 
 /// Before the upgrade: does the running box back up to a repository? (`false` when it cannot be asked: the box's own record
 /// still says so afterwards, for a box that has one.)
-fn backups_configured_now(agent: &dyn BoxAgent, rec: &BoxRecord) -> bool {
+pub(crate) fn backups_configured_now(agent: &dyn BoxAgent, rec: &BoxRecord) -> bool {
     rec.state == BoxState::Running && backup_state(agent, rec).is_some_and(|(c, e)| c || e)
 }
 
@@ -1609,6 +1618,13 @@ fn verify_backups(
         };
     };
     if !configured {
+        // turned off for this box on this computer: a choice, not a stop (the step says so)
+        if restored
+            .as_ref()
+            .is_some_and(|s| s.outcome == StepOutcome::Skipped)
+        {
+            return restored.unwrap_or_else(|| nothing(None));
+        }
         if before || recorded || restored.is_some() {
             let why = restored.map(|s| s.detail).unwrap_or_default();
             return Step::new(
@@ -1622,7 +1638,7 @@ fn verify_backups(
     let put_back = restored
         .as_ref()
         .is_some_and(|s| s.outcome == StepOutcome::Done);
-    match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
+    let checked = match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
         Ok((200, v)) => {
             let count = v["items"].as_array().map_or(0, Vec::len).to_string();
             Step::new(
@@ -1635,6 +1651,13 @@ fn verify_backups(
                     },
                     &[("box", name), ("count", &count)],
                 ),
+            )
+        }
+        // an operation holds the repository (a prune): it is working, and it was not listed
+        Ok((409, v)) if v.get("code").and_then(serde_json::Value::as_str) == Some("busy") => {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.backup_busy", &[("box", name)]),
             )
         }
         Ok((_, v)) => Step::new(
@@ -1651,6 +1674,15 @@ fn verify_backups(
             StepOutcome::Failed,
             t("upgrade.backup_unreachable", &[("box", name), ("why", &e)]),
         ),
+    };
+    // Putting the credentials back failed, yet the box holds some (the helper stored them and then refused, say): that
+    // failure is part of the report, never dropped behind a repository that happens to answer.
+    match restored {
+        Some(r) if r.outcome == StepOutcome::Failed => Step::new(
+            StepOutcome::Failed,
+            format!("{} {}", r.detail, checked.detail),
+        ),
+        _ => checked,
     }
 }
 
@@ -3031,7 +3063,7 @@ mod tests {
             crate::backup_ops::call(&agent, &rec, "GET", "/status", &serde_json::Value::Null)?;
         assert_eq!((status, &v["configured"]), (200, &serde_json::json!(true)));
 
-        // a box switched off for backups is left alone
+        // a box switched off for backups is left alone, and the report says that is a choice (never "backups stopped")
         settings.backups.overrides.insert(
             "dev".into(),
             BoxOverride {
@@ -3039,7 +3071,9 @@ mod tests {
                 schedule: None,
             },
         );
-        assert!(restore_with(&settings, &agent, &rec, &secrets).is_none());
+        let off = restore_with(&settings, &agent, &rec, &secrets).ok_or("no step")?;
+        assert_eq!(off.outcome, StepOutcome::Skipped);
+        assert!(off.detail.contains("turned off"), "{}", off.detail);
         Ok(())
     }
 

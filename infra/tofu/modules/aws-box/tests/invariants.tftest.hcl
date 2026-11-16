@@ -335,6 +335,19 @@ run "user_data_installs_the_backup_credentials_helper_with_a_narrow_hand_off" {
     condition     = strcontains(output.cloud_init, "ReadWritePaths=/etc/ozbox /run/ozbox-backup") && strcontains(output.cloud_init, "ReadWritePaths=-/run/ozbox-backup/requests")
     error_message = "the helper may write only /etc/ozbox and its spool, and the daemon only the request directory"
   }
+
+  # The helper's sandbox is ProtectSystem=strict, so a folder it is not listed for cannot be written even by root: the record
+  # that backups were set up lives in /work/ozbox-backup, and without this line every credentials request stored the
+  # credentials and then failed to keep the record.
+  assert {
+    condition     = strcontains(output.cloud_init, "ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets -/work/ozbox-backup") && strcontains(output.cloud_init, "ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup")
+    error_message = "the credentials helper must be allowed to write the record's folder on /work, and that folder is made before its sandbox starts"
+  }
+
+  assert {
+    condition     = strcontains(output.cloud_init, "RequiresMountsFor=/work") && strcontains(output.cloud_init, "systemctl, enable, ozbox-backup.service")
+    error_message = "the helper runs at every boot, after /work is mounted, so the record is brought up to date without new credentials"
+  }
 }
 
 run "user_data_gets_ozboxd_only_from_the_signed_release_and_never_on_the_oz_image" {

@@ -175,8 +175,10 @@ pub fn render_settings(env: &BTreeMap<String, String>) -> String {
 }
 
 /// Hand the credentials of one validated request to the secrets service (or remove them), then remove any file an older
-/// version left.
-pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
+/// version left. `Ok(Some(warning))`: the credentials were handled, but the record that keeps backups through an upgrade
+/// could not be written or removed. A slip there (a sandbox that does not allow the write, a full disk) never fails the
+/// credentials the person just sent, so it is a warning in the answer, never an error.
+pub fn apply(req: &Request, t: &Target) -> Result<Option<String>, String> {
     validate(req)?;
     match req.action {
         Action::Clear => {
@@ -184,7 +186,9 @@ pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
             store_delete(t, crate::secrets_link::RESTIC_PASSWORD)?;
             remove_legacy(t);
             // removed on purpose: the self-test must not call that a loss
-            crate::backup_state::remove(&t.state_dir)
+            Ok(crate::backup_state::remove(&t.state_dir)
+                .err()
+                .map(|_| RECORD_NOT_REMOVED.to_string()))
         }
         Action::Set => {
             store_set(t, crate::secrets_link::RESTIC_PASSWORD, &req.password)?;
@@ -197,9 +201,22 @@ pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
                 return Err(e);
             }
             remove_legacy(t);
-            remember(t)
+            Ok(remember(t).err())
         }
     }
+}
+
+const RECORD_NOT_REMOVED: &str = "the repository credentials were removed, but the record that backups were set up could not be removed, so the self-test may say backups stopped; look at the folder /work/ozbox-backup";
+
+const RECORD_NOT_WRITTEN: &str = "the repository credentials were stored, but the record that keeps backups through an upgrade could not be written; send the credentials again, and if that fails look at the folder /work/ozbox-backup";
+
+/// Root's own `[backup]` settings, read (never written). A file that cannot be read or understood says nothing.
+fn etc_backup(t: &Target) -> crate::config::BackupSection {
+    std::fs::read_to_string(&t.etc_config)
+        .ok()
+        .and_then(|text| crate::config::Config::from_toml(&text).ok())
+        .map(|c| c.backup)
+        .unwrap_or_default()
 }
 
 /// Keep what an upgrade must not lose, now that the credentials are in the store: the record that backups were set up, and
@@ -207,21 +224,57 @@ pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
 /// box user, who asked for the credentials, chooses none of it. The credentials are already stored when this fails, so the
 /// error says what is not kept rather than that the credentials failed.
 fn remember(t: &Target) -> Result<(), String> {
-    let etc = std::fs::read_to_string(&t.etc_config)
-        .ok()
-        .and_then(|text| crate::config::Config::from_toml(&text).ok())
-        .map(|c| c.backup)
-        .unwrap_or_default();
+    let etc = etc_backup(t);
     // an untrusted or unreadable earlier record is replaced by the record of what root's own config says now
     let before = crate::backup_state::read(&t.state_dir, t.trusted_uid)
         .ok()
         .flatten();
-    crate::backup_state::write(&t.state_dir, &crate::backup_state::merge(before.as_ref(), &etc))
-        .map_err(|_| {
-            "the repository credentials were stored, but the record that keeps backups through an upgrade could not be written; \
-             send the credentials again, and if that fails look at the folder /work/ozbox-backup"
-                .to_string()
-        })
+    crate::backup_state::write(
+        &t.state_dir,
+        &crate::backup_state::merge(before.as_ref(), &etc),
+        t.trusted_uid,
+    )
+    .map_err(|_| RECORD_NOT_WRITTEN.to_string())
+}
+
+/// Whether the secrets store holds a repository's credentials, asked over root's admin socket. `false` when it cannot be
+/// asked (the service is not up yet): a record is never invented from a guess.
+fn store_holds_credentials(t: &Target) -> bool {
+    [
+        crate::secrets_link::RESTIC_ENV,
+        crate::secrets_link::RESTIC_PASSWORD,
+    ]
+    .iter()
+    .all(|name| {
+        crate::secrets_link::call(
+            &t.admin_socket,
+            &serde_json::json!({"op": "exists", "name": name}),
+            Some(Duration::from_secs(10)),
+        )
+        .map(|v| v["flag"].as_bool() == Some(true))
+        .unwrap_or(false)
+    })
+}
+
+/// Bring the record up to date on every start of the helper, not only when credentials are sent: a box that already held
+/// credentials before the record existed gets one, and a `[backup]` setting root edited by hand since is kept. It writes
+/// only for a box that has backups (a record already, or credentials in the store), and only when something changed.
+///
+/// A carried setting never goes back to its default by setting `/etc` to the default (the default is what a new system
+/// disk starts with, and must not undo a choice). To go back to a default, delete `/work/ozbox-backup/backup.toml` as root:
+/// the next start of the helper writes it again from `/etc`.
+pub fn refresh_record(t: &Target) -> Result<(), String> {
+    let before = crate::backup_state::read(&t.state_dir, t.trusted_uid)
+        .ok()
+        .flatten();
+    if before.is_none() && !store_holds_credentials(t) {
+        return Ok(());
+    }
+    let merged = crate::backup_state::merge(before.as_ref(), &etc_backup(t));
+    if before.as_ref() == Some(&merged) {
+        return Ok(());
+    }
+    crate::backup_state::write(&t.state_dir, &merged, t.trusted_uid).map_err(|_| RECORD_NOT_WRITTEN.to_string())
 }
 
 /// Move a credentials file written by an older version into the store, then remove it. `Ok(false)` when there is none.
@@ -253,6 +306,9 @@ struct Answer {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
+    /// Handled, with something the person should know (never a value).
+    #[serde(default)]
+    warning: Option<String>,
 }
 
 /// The privileged side: handle every waiting request, then return how many were handled.
@@ -289,9 +345,17 @@ pub fn serve_requests(dir: &Path, t: &Target) -> usize {
                 Err(_) => Err("the request is not valid".to_string()),
             }
         };
-        let answer = Answer {
-            ok: outcome.is_ok(),
-            error: outcome.err(),
+        let answer = match outcome {
+            Ok(warning) => Answer {
+                ok: true,
+                error: None,
+                warning,
+            },
+            Err(error) => Answer {
+                ok: false,
+                error: Some(error),
+                warning: None,
+            },
         };
         // The answer is written where only root can change it; the request is always removed, so a secret does not
         // outlive the call. It appears whole or not at all: the waiting side reads it as soon as the name exists.
@@ -346,7 +410,8 @@ impl FileBridge {
         }
     }
 
-    pub fn send(&self, req: &Request) -> Result<(), String> {
+    /// `Ok(Some(warning))`: done, with a note (see [`apply`]).
+    pub fn send(&self, req: &Request) -> Result<Option<String>, String> {
         validate(req)?;
         let req_path = self.dir.join("requests").join(format!("{}.json", req.id));
         let result_path = self.dir.join("results").join(format!("{}.result", req.id));
@@ -365,9 +430,10 @@ impl FileBridge {
                 let a: Answer = serde_json::from_slice(&bytes).unwrap_or(Answer {
                     ok: false,
                     error: Some("the credentials helper gave no clear answer".into()),
+                    warning: None,
                 });
                 return if a.ok {
-                    Ok(())
+                    Ok(a.warning)
                 } else {
                     Err(a
                         .error
@@ -437,6 +503,13 @@ mod tests {
                     }
                     Some("delete") => {
                         st.lock().unwrap().remove(&name);
+                    }
+                    Some("exists") => {
+                        let flag = st.lock().unwrap().contains_key(&name);
+                        let mut w = &c;
+                        w.write_all(format!("{{\"ok\":true,\"flag\":{flag}}}\n").as_bytes())
+                            .unwrap();
+                        continue;
                     }
                     _ => {}
                 }
@@ -775,15 +848,85 @@ mod tests {
     }
 
     #[test]
-    fn a_record_that_cannot_be_written_says_so_without_failing_the_credentials_silently() {
+    fn a_record_that_cannot_be_written_is_a_warning_and_never_fails_the_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let (mut t, store) = fake_service(dir.path());
-        // a file where the folder must go
+        // a file where the folder must go (the same effect as a sandbox that does not allow the write)
         std::fs::write(dir.path().join("blocked"), "x").unwrap();
         t.state_dir = dir.path().join("blocked").join("ozbox-backup");
-        let e = apply(&req("w1"), &t).unwrap_err();
-        assert!(e.contains("stored") && e.contains("upgrade"), "{e}");
-        assert!(!e.contains("sekrit") && !e.contains("correct-horse"));
+        let warning = apply(&req("w1"), &t).unwrap().unwrap();
+        assert!(
+            warning.contains("stored") && warning.contains("upgrade"),
+            "{warning}"
+        );
+        assert!(!warning.contains("sekrit") && !warning.contains("correct-horse"));
         assert!(store.lock().unwrap().contains_key("restic-env"));
+        // through the hand-off: the answer is a success that carries the warning, so a request is not a 422
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(run.join("requests")).unwrap();
+        std::fs::write(
+            run.join("requests/w2.json"),
+            serde_json::to_vec(&req("w2")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(serve_requests(&run, &t), 1);
+        let a: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run.join("results/w2.result")).unwrap()).unwrap();
+        assert_eq!(a["ok"], true);
+        assert!(a["warning"].as_str().unwrap().contains("could not be written"));
+        // removing credentials is the same
+        let clear = Request {
+            id: "w3".into(),
+            action: Action::Clear,
+            env: BTreeMap::new(),
+            password: String::new(),
+        };
+        let cleared = apply(&clear, &t).unwrap();
+        assert!(cleared.is_some_and(|w| w.contains("could not be removed")));
+    }
+
+    #[test]
+    fn a_box_that_already_holds_credentials_gets_its_record_at_the_next_start_and_hand_edits_are_kept() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let (t, store) = fake_service(dir.path());
+        // a box that never had backups: nothing is written
+        refresh_record(&t).unwrap();
+        assert_eq!(read(&t.state_dir, me()), Ok(None));
+        // an existing box: credentials in the store from before the record existed, and no record
+        for k in ["restic-env", "restic-password"] {
+            store.lock().unwrap().insert(k.into(), "x".into());
+        }
+        etc_with(&t, "interval_hours = 6\n");
+        refresh_record(&t).unwrap();
+        let kept = read(&t.state_dir, me()).unwrap().unwrap();
+        assert!(kept.configured);
+        assert_eq!(kept.interval_hours, Some(6));
+        // a hand edit made later is captured at the next start, with no new credentials sent
+        etc_with(&t, "interval_hours = 6\nexcludes = [\"/work/scratch\"]\n");
+        refresh_record(&t).unwrap();
+        let again = read(&t.state_dir, me()).unwrap().unwrap();
+        assert_eq!(again.excludes, Some(vec!["/work/scratch".into()]));
+        assert_eq!(again.interval_hours, Some(6));
+        // a new system disk's defaults do not undo what was carried
+        etc_with(&t, "");
+        refresh_record(&t).unwrap();
+        assert_eq!(read(&t.state_dir, me()).unwrap().unwrap(), again);
+    }
+
+    #[test]
+    fn the_record_is_kept_through_a_start_when_the_secrets_service_is_not_up_yet() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut t, _store) = fake_service(dir.path());
+        apply(&req("s1"), &t).unwrap();
+        // the service is not there: an existing record stays, and none is invented without one
+        t.admin_socket = dir.path().join("absent.sock");
+        etc_with(&t, "interval_hours = 3\n");
+        refresh_record(&t).unwrap();
+        assert_eq!(read(&t.state_dir, me()).unwrap().unwrap().interval_hours, Some(3));
+        std::fs::remove_file(t.state_dir.join("backup.toml")).unwrap();
+        refresh_record(&t).unwrap();
+        assert_eq!(read(&t.state_dir, me()), Ok(None));
     }
 }

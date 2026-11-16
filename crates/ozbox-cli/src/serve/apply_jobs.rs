@@ -95,6 +95,9 @@ pub struct Applied {
     /// The box that was made ready for a stop: released again if the change fails, so it does not keep refusing runs.
     pub(super) quiesced: Option<BoxRecord>,
     pub(super) new_store_accepted: bool,
+    /// Did the box back up to a repository before an upgrade replaced its machine? Read from the running box on the worker,
+    /// before the replace (afterwards the new machine may have started without the credentials, and nothing could say).
+    pub(super) backups_before: bool,
     /// A backup restored into a new box: the box being made, so a failed create forgets the restore it remembered.
     pub(super) restore_to: Option<BoxName>,
 }
@@ -154,7 +157,18 @@ impl App {
         };
         let (jid, p) = (job_id.clone(), plan.clone());
         let restoring = restore_to.clone();
+        let agent = Arc::clone(&self.agent);
         let job: Job = Box::new(move || {
+            // an upgrade's follow-up must be able to tell backups that stopped from backups that never were: ask the box
+            // while it is still the old machine
+            let backups_before = match &p.operation {
+                Operation::Upgrade { name, .. } => provider
+                    .get(name)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|rec| crate::run::upgrade::backups_configured_now(agent.as_ref(), &rec)),
+                _ => false,
+            };
             let outcome = if restoring.is_some() {
                 crate::restore_new::create_box(provider.as_ref(), &p)
             } else {
@@ -167,6 +181,7 @@ impl App {
                 upgrade_checkpoint,
                 quiesced,
                 new_store_accepted,
+                backups_before,
                 restore_to: restoring,
             }))
         });
@@ -250,6 +265,7 @@ impl App {
             upgrade_checkpoint,
             quiesced,
             new_store_accepted,
+            backups_before,
             restore_to,
         } = a;
         if let (Err(_), Some(to)) = (&outcome, &restore_to) {
@@ -266,6 +282,7 @@ impl App {
             upgrade_checkpoint,
             quiesced.as_ref(),
             new_store_accepted,
+            backups_before,
         );
         self.current_actor = was;
         let state = match finished {
@@ -291,6 +308,7 @@ impl App {
         upgrade_checkpoint: Option<Step>,
         quiesced: Option<&BoxRecord>,
         new_store_accepted: bool,
+        backups_before: bool,
     ) -> Result<Value, Resp> {
         let verb = plan.operation.verb();
         let name = plan.operation.box_name().to_string();
@@ -306,7 +324,7 @@ impl App {
                     // under its name
                     self.code.forget_box(&name);
                 }
-                self.after_upgrade_applied(plan, new_store_accepted);
+                self.after_upgrade_applied(plan, new_store_accepted, backups_before);
                 self.version
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut body = json!({ "plan": plan, "applied": true, "result": result });

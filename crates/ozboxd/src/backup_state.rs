@@ -198,14 +198,23 @@ pub fn merge(existing: Option<&Carried>, etc: &BackupSection) -> Carried {
     }
 }
 
-/// Write the record where only root can change it, whole or not at all. Root's helper only.
+/// Write the record where only root can change it, whole or not at all. Root's helper only. A folder that is already there
+/// must be a real folder owned by `trusted_uid` (root, 0, on a box): a link, or a folder someone else made, is refused
+/// before anything is created or its permissions are changed (root's helper must not be turned on a path it was pointed at).
 #[cfg(unix)]
-pub fn write(dir: &Path, c: &Carried) -> Result<(), String> {
+pub fn write(dir: &Path, c: &Carried, trusted_uid: u32) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     c.validate()?;
     let fail = |_: std::io::Error| "the backup record could not be written".to_string();
-    std::fs::create_dir_all(dir).map_err(fail)?;
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.is_dir() && m.uid() == trusted_uid => {}
+        Ok(_) => return Err("the backup record's folder is not root's, so nothing was written".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir).map_err(fail)?
+        }
+        Err(e) => return Err(fail(e)),
+    }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
     let tmp = dir.join(format!(".{FILE}.tmp"));
     let _ = std::fs::remove_file(&tmp);
@@ -259,7 +268,7 @@ mod tests {
         let dir = d.path().join(DIR_NAME);
         assert_eq!(read(&dir, me()), Ok(None));
         let kept = merge(None, &custom());
-        write(&dir, &kept).unwrap();
+        write(&dir, &kept, me()).unwrap();
         assert_eq!(read(&dir, me()).unwrap(), Some(kept.clone()));
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(text.contains("configured = true") && text.contains("interval_hours = 6"));
@@ -306,7 +315,7 @@ mod tests {
     fn a_record_root_does_not_own_or_others_can_write_is_ignored_never_obeyed() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join(DIR_NAME);
-        write(&dir, &merge(None, &custom())).unwrap();
+        write(&dir, &merge(None, &custom()), me()).unwrap();
         // another uid than the trusted one: the box user's files are not root's
         assert!(read(&dir, me() + 1).unwrap_err().contains("not root's"));
         // a writable folder or file is no better
@@ -350,9 +359,34 @@ mod tests {
     fn removing_the_record_is_safe_to_repeat() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join(DIR_NAME);
-        write(&dir, &merge(None, &BackupSection::default())).unwrap();
+        write(&dir, &merge(None, &BackupSection::default()), me()).unwrap();
         remove(&dir).unwrap();
         remove(&dir).unwrap();
         assert_eq!(read(&dir, me()), Ok(None));
+    }
+
+    #[test]
+    fn writing_never_follows_a_link_or_adopts_a_folder_someone_else_made() {
+        let d = tempfile::tempdir().unwrap();
+        let rec = merge(None, &BackupSection::default());
+        // a link where the folder goes: refused, and the place it points at is untouched
+        let target = d.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = d.path().join(DIR_NAME);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write(&link, &rec, me()).unwrap_err().contains("not root's"));
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "its permissions are not changed through the link"
+        );
+        // a folder that another user owns: refused
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert!(write(&link, &rec, me() + 1).is_err());
+        // a real folder of the trusted user is used
+        write(&link, &rec, me()).unwrap();
     }
 }

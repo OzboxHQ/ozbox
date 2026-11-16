@@ -147,8 +147,9 @@ fn the_user_data_stays_inside_the_provider_limit() {
     // comment lines before rendering; the AWS module started doing so in the same change, when its rendered size had gone
     // over the limit. Raised again from 25 000 when the memory guard's first-boot line met the dashboard role's
     // additions in one template (25 118 bytes); the rendered AWS size is the one that matters and has about 1.4 KB of room.
+    // Raised again to 27 000 for the backup helper's sandbox line and boot start (26 601 bytes, comments included).
     let t = repo("infra/cloud-init/box.yaml.tftpl");
-    assert!(t.len() < 26_400, "the template is {} bytes", t.len());
+    assert!(t.len() < 27_000, "the template is {} bytes", t.len());
 }
 
 #[test]

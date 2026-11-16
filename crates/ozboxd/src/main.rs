@@ -209,6 +209,10 @@ mod daemon {
         log(&format!(
             "backup credentials helper: {n} request(s) handled"
         ));
+        // every start: a box that held credentials before the record existed gets one, and a [backup] edit is kept
+        if let Err(e) = br::refresh_record(&t) {
+            log(&format!("backup record: {e}"));
+        }
         Ok(())
     }
 
@@ -553,10 +557,16 @@ mod daemon {
         // backups that were set up on this box must still work after a boot, an upgrade or a restore: the check exists only
         // for a box that has the record, and fails when the credentials are gone or the repository does not answer
         if let Some(svc) = ozboxd::backup_service::global() {
+            // the repository is asked in the background (one check at a time), never inside the self-test: a slow network
+            // must not make the self-test, and the upgrade waiting on it, time out. Start the first check now.
+            let first = svc.clone();
+            std::thread::spawn(move || {
+                let _ = first.health();
+            });
             let svc = svc.clone();
             stcfg.backups = Some(selftest::BackupsProbe {
                 box_name: name.to_string(),
-                health: Arc::new(move || svc.health_within(Duration::from_secs(60))),
+                health: Arc::new(move || svc.health()),
             });
         }
         let selftest_fn: Arc<dyn Fn() -> SelfTestResult + Send + Sync> = {

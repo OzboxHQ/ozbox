@@ -1516,7 +1516,7 @@ impl App {
         let applied = self
             .apply_restic(&plan)
             .unwrap_or_else(|| self.provider.apply(&plan));
-        match self.finish_apply(&plan, applied, None, None, new_store_accepted) {
+        match self.finish_apply(&plan, applied, None, None, new_store_accepted, false) {
             Ok(body) => Resp::json(200, &body),
             Err(r) => r,
         }

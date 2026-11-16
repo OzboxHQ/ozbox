@@ -102,7 +102,7 @@ pub fn args_ok(args: &[String]) -> Result<(), &'static str> {
                 if rest == want.as_slice() {
                     Ok(())
                 } else {
-                    Err("a restore must leave out the secrets service's private folder and the audit chain")
+                    Err("a restore must leave out the secrets service's private folder, the audit chain and the backup record")
                 }
             }
             _ => Err(NO),
@@ -228,6 +228,25 @@ mod tests {
     }
 
     #[test]
+    fn the_broker_and_the_daemon_never_restore_the_backup_record_and_read_one_list() {
+        // the folder the root helper writes is on the never-restored list the daemon builds its command from and this check
+        // compares against: they change together, and a restore that does not name it is refused
+        assert!(NEVER_RESTORED.contains(
+            &ozboxd::backup_state::dir_for(std::path::Path::new("/work"))
+                .to_str()
+                .unwrap()
+        ));
+        let id = "aaaaaaaa11111111";
+        let mut full = vec!["restore", id, "--target", "/work/r"];
+        for p in NEVER_RESTORED {
+            full.extend(["--exclude", p]);
+        }
+        assert!(args_ok(&v(&full)).is_ok());
+        let without: Vec<&str> = full[..full.len() - 2].to_vec();
+        assert!(args_ok(&v(&without)).is_err());
+    }
+
+    #[test]
     fn only_the_exact_shapes_the_daemon_runs_are_accepted() {
         let id = "0123456789abcdef";
         for ok in [
@@ -264,6 +283,8 @@ mod tests {
                 "/work/ozbox-secrets-private",
                 "--exclude",
                 "/work/ozbox-audit",
+                "--exclude",
+                "/work/ozbox-backup",
             ]),
             v(&[
                 "restore",
@@ -274,6 +295,8 @@ mod tests {
                 "/work/ozbox-secrets-private",
                 "--exclude",
                 "/work/ozbox-audit",
+                "--exclude",
+                "/work/ozbox-backup",
             ]),
             v(&["snapshots", "--json", "--tag", "ozbox,ozbox-box=dev"]),
         ] {
@@ -346,6 +369,17 @@ mod tests {
                 "/work/r",
                 "--exclude",
                 "/work/ozbox-secrets-private",
+            ]),
+            // a restore that leaves out the folder and the chain but not the backup record (the shape before the record existed)
+            v(&[
+                "restore",
+                id,
+                "--target",
+                "/work/r",
+                "--exclude",
+                "/work/ozbox-secrets-private",
+                "--exclude",
+                "/work/ozbox-audit",
             ]),
             v(&["restore", id, "--target", "/work/../etc"]),
             v(&[

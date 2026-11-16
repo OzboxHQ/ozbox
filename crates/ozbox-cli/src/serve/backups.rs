@@ -351,7 +351,12 @@ impl App {
     /// An upgrade just replaced a box's machine, whose system disk held its repository credentials. Finish it the way
     /// `ozbox upgrade` does (the same code): wait for the box, self-test it, put the credentials back. It runs on the
     /// worker, never on the request that applied the upgrade, and ends in Activity (and an alert if it failed).
-    pub(super) fn after_upgrade_applied(&mut self, plan: &Plan, new_store: bool) {
+    pub(super) fn after_upgrade_applied(
+        &mut self,
+        plan: &Plan,
+        new_store: bool,
+        backups_before: bool,
+    ) {
         let (name, what) = match &plan.operation {
             Operation::Upgrade { name, .. } => (name, "upgrade"),
             // A restored /work leaves the system disk alone, so only the check applies (no credentials to put back).
@@ -392,9 +397,10 @@ impl App {
                         None
                     }
                 },
-                // a box whose backups were set up says so itself (a record kept on /work), so a dashboard-run upgrade needs
-                // no before-reading; the command reads the box first, for a box made before that record existed
-                false,
+                // read from the box before the replace (see `Applied`): a box made before the record existed has no record on
+                // /work to say its backups were set up, so what was seen while it was still the old machine is what tells a
+                // stop from "never had any". A restore leaves the system disk alone and reads nothing.
+                backups_before,
             );
             let (ready, selftest, backup) = (settled.ready, settled.selftest, settled.backup);
             if let Some(r) = settled.recovery {
@@ -2004,6 +2010,137 @@ mod tests {
         assert!(
             !text.contains("sekrit") && !text.contains("correct-horse"),
             "no secret reaches Activity"
+        );
+    }
+
+    /// A box that backs up to a repository, keeps no record of it (made before the record existed), and whose new machine
+    /// starts without the credentials (a new secrets store): what the dashboard's own upgrade has to catch.
+    struct LosesItsStore {
+        configured: std::sync::Mutex<bool>,
+        /// Answers what getting the box ready for the stop asks (runs, quiesce, checkpoint), as the demo box does.
+        stand_in: crate::serve::agent::SimulatedAgent,
+    }
+
+    impl crate::serve::BoxAgent for LosesItsStore {
+        fn metrics_now(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+        ) -> std::result::Result<ozbox_core::MetricsSample, crate::serve::agent::AgentError> {
+            Err(crate::serve::agent::AgentError::Unsupported("none".into()))
+        }
+        fn metrics_series(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> std::result::Result<Vec<ozbox_core::MetricsSample>, crate::serve::agent::AgentError>
+        {
+            Err(crate::serve::agent::AgentError::Unsupported("none".into()))
+        }
+        fn incidents(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+            _: u64,
+        ) -> std::result::Result<Vec<crate::serve::agent::Incident>, crate::serve::agent::AgentError>
+        {
+            Ok(Vec::new())
+        }
+        fn selftest(
+            &self,
+            _: &BoxRecord,
+            _: u64,
+        ) -> std::result::Result<crate::serve::agent::SelfTest, crate::serve::agent::AgentError> {
+            // the new machine's first self-test: from here the store is new
+            *self.configured.lock().unwrap() = false;
+            Ok(crate::serve::agent::SelfTest {
+                ts_ms: 1,
+                ok: true,
+                all_verified: true,
+                checks: Vec::new(),
+            })
+        }
+        fn checkpoint(
+            &self,
+            rec: &BoxRecord,
+        ) -> std::result::Result<
+            crate::serve::agent::CheckpointOutcome,
+            crate::serve::agent::AgentError,
+        > {
+            self.stand_in.checkpoint(rec)
+        }
+        fn runs(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            sub: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.runs(rec, m, sub, b)
+        }
+        fn quiesce_call(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.quiesce_call(rec, m, b)
+        }
+        fn agent_call(
+            &self,
+            rec: &BoxRecord,
+            m: &str,
+            p: &str,
+            b: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            self.stand_in.agent_call(rec, m, p, b)
+        }
+        fn restic(
+            &self,
+            _: &BoxRecord,
+            method: &str,
+            sub: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, Value), crate::serve::agent::AgentError> {
+            let configured = *self.configured.lock().unwrap();
+            Ok(match (method, sub) {
+                ("GET", "/status") => (
+                    200,
+                    json!({ "configured": configured, "expected": false, "running": null, "last": null }),
+                ),
+                ("GET", "/snapshots") if configured => (200, json!({ "items": [] })),
+                _ => (409, json!({ "error": "no repository", "code": "not_configured" })),
+            })
+        }
+    }
+
+    #[test]
+    fn a_dashboard_upgrade_reads_the_box_before_the_replace_so_backups_that_stopped_are_not_taken_for_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // this computer holds no repository: nothing to put back, so the only way to tell is what the box said before
+        let mut a = app(dir.path(), Backups::default()).with_agent(Box::new(LosesItsStore {
+            configured: std::sync::Mutex::new(true),
+            stand_in: Default::default(),
+        }));
+        make_box(&mut a, "dev");
+        a.backup_rt.upgrade_waits = Some(crate::run::upgrade::Waits {
+            timeout: std::time::Duration::from_secs(5),
+            poll: std::time::Duration::from_millis(1),
+        });
+        let (s, v) = plan_and_apply(
+            &mut a,
+            json!({ "op": "upgrade", "name": "dev", "image": "latest" }),
+            None,
+        );
+        assert_eq!(s, 200, "{v}");
+        a.tick(unix_ms() + 1_000);
+        let (_, act) = call_api(&mut a, "GET", "/v1/activity", Value::Null);
+        let text = act.to_string();
+        assert!(
+            text.contains("HAVE STOPPED") && text.contains("ozbox backup credentials dev"),
+            "{text}"
         );
     }
 

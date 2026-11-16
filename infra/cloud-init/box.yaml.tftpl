@@ -459,23 +459,31 @@ write_files:
       [Unit]
       Description=Hand the backup repository credentials the box daemon was given to the secrets service
       After=ozbox-secrets.service
+      RequiresMountsFor=/work
       StartLimitIntervalSec=0
       ConditionPathExists=/usr/local/bin/ozboxd
 
       # Takes no command or path from a request; hands checked settings to the secrets service (no credentials file).
+      # It also keeps the record in /work/ozbox-backup, the one place on /work its sandbox may write (made before the
+      # sandbox starts; `-` so a box without /work still takes credentials, the record then being a warning).
       [Service]
       Type=oneshot
+      ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup
       ExecStart=/usr/local/bin/ozboxd backup-root
       User=root
       NoNewPrivileges=true
       PrivateTmp=true
       ProtectHome=true
       ProtectSystem=strict
-      ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets
+      ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets -/work/ozbox-backup
       ProtectKernelModules=true
       ProtectKernelLogs=true
       ProtectClock=true
       LockPersonality=true
+
+      # Also at every boot: brings the record up to date.
+      [Install]
+      WantedBy=multi-user.target
 
   - path: /etc/apt/apt.conf.d/20auto-upgrades
     permissions: "0644"
@@ -547,6 +555,7 @@ runcmd:
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, ozbox-tools.path]
   - [systemctl, enable, --now, ozbox-backup.path]
+  - [systemctl, enable, ozbox-backup.service]
   - [systemctl, enable, --now, ozbox-admin.path]
   - [bash, /usr/local/sbin/ozbox-secrets-setup.sh, "${box_name}", "${secrets_kms_key_id}", "${secrets_kms_region}", "${approval_key}"]
   # The dashboard gets a user of its own (an existing box's dashboard is moved, idempotently; a failure must not stop the boot).

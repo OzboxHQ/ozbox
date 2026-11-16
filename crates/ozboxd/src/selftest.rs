@@ -96,6 +96,19 @@ pub fn backups_check(h: BackupHealth, box_name: &str) -> Option<Check> {
             "repository",
             format!("backups were set up on this box, but its repository did not answer, so backups are not working. Check the repository and its credentials in Settings -> Backups, then run `ozbox backup now {box_name} --to restic`"),
         )),
+        // not a failure and not a pass: the self-test never waits for a repository, so these say what was not checked
+        BackupHealth::Busy => Some(unknown(
+            NAME,
+            "a backup operation is using the repository right now, so it was not asked; run the self-test again when it finishes",
+        )),
+        BackupHealth::Pending => Some(unknown(
+            NAME,
+            "the repository has not been checked yet (the check runs in the background and can take a minute on a slow network); run the self-test again shortly",
+        )),
+        BackupHealth::ServiceNotReady => Some(unknown(
+            NAME,
+            "the box's secrets service is not ready yet, so whether the backup credentials are here was not checked; run the self-test again shortly",
+        )),
     }
 }
 
@@ -1081,6 +1094,20 @@ mod tests {
         };
         assert_eq!(step, "repository");
         assert!(reason.contains("did not answer"), "{reason}");
+        // not verified (a busy repository, a check still running, a service that has not started) is neither a pass nor a
+        // failure: the self-test stays ok and says what it did not check
+        for h in [
+            BackupHealth::Busy,
+            BackupHealth::Pending,
+            BackupHealth::ServiceNotReady,
+        ] {
+            let r = run_with(Some(probe(h)));
+            assert!(r.ok && !r.all_verified, "{h:?}");
+            assert!(
+                matches!(named(&r).unwrap().outcome, Outcome::Unknown { .. }),
+                "{h:?}"
+            );
+        }
     }
 
     #[test]
