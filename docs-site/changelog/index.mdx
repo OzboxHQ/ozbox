@@ -82,6 +82,16 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A page that could not reach the server brings itself back** as soon as the server answers, without pressing Try again.
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS operator permissions">
+  ## `ozbox init` now gives you the complete operator policy, including what `ozbox adopt-fleet-key` needs
+
+  Setting up again on an account made by an earlier release did not add the permissions `ozbox adopt-fleet-key` needs, so the command failed with "Systems Manager refused" until an administrator pasted them in by hand.
+
+  - **One complete policy, written every run.** `ozbox init` writes the whole operator policy for your account, region and fleet to `operator-policy.json` in its working folder and prints the path, whether or not anything else changed. It already includes the three Systems Manager statements the adopt command needs.
+  - **It tells you if your daily sign-in is out of date.** When your config names the daily profile, `ozbox init` checks, read only, whether that sign-in can read a Systems Manager command's result. If not, it prints the three missing statements and the one step: an administrator replaces the daily role's inline policy with the file. Applying it twice is safe.
+  - **`ozbox init` still does not change the operator role itself.** The setup sign-in has no right over the operator's permissions, so a person who could rewrite them could not widen them. Nothing is widened: still no `kms:` action, and still no first tag on an existing disk. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 
