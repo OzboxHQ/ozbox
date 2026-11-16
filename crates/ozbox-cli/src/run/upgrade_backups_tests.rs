@@ -188,6 +188,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
             recover: &|_, _| None,
             restore_backups: &|ag, rec| restore_with(&settings, ag, rec, &secrets),
             restore_services: &|_, _| None,
+            restore_dashboard: &|_, _| None,
             memory_guard: &|_, _| None,
             refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
             review_signers: &|_| None,
