@@ -719,3 +719,163 @@ fn arn_matches(pattern: &str, arn: &str) -> bool {
     }
     true
 }
+
+/// `ozbox upgrade` keeps an encrypted copy of the OLD system disk when the secrets store's key may be lost with it, and the
+/// way back from it (`docs/use-cases/keeping-boxes-healthy.md`, "Recovering an old secrets store") makes a volume from it and
+/// attaches that to the box. Every one of those calls must work, and only on what Oz Box tagged as its own: the snapshot is
+/// made from a managed volume and carries our tag from its first moment, the tags it is given (the purpose, the box, the
+/// source volume) ride on the create, and deleting it is a tagged-resource action. Nothing here is loosened for it.
+#[test]
+fn a_system_disk_can_be_snapshotted_tagged_recovered_from_and_deleted_only_as_ours() {
+    let all = statements();
+    let covers = |action: &str, resource_prefix: &str, cond: &str| {
+        all.iter().any(|s| {
+            s.allow
+                && s.actions.iter().any(|a| matches(a, action))
+                && s.resources.iter().any(|r| r.starts_with(resource_prefix))
+                && cond_value(s, cond) == vec!["true".to_string()]
+        })
+    };
+    // 1. the copy is made from one of our volumes (checked on the volume) ...
+    assert!(
+        covers(
+            "ec2:CreateSnapshot",
+            "arn:aws:ec2:*:${account_id}:",
+            "aws:ResourceTag/ozbox-managed"
+        ),
+        "CreateSnapshot on a managed volume"
+    );
+    // ... and carries our tag from the moment it exists (checked on the snapshot, which does not exist yet)
+    assert!(
+        covers(
+            "ec2:CreateSnapshot",
+            "arn:aws:ec2:*::snapshot/",
+            "aws:RequestTag/ozbox-managed"
+        ),
+        "CreateSnapshot of a snapshot that is tagged ozbox-managed on the request"
+    );
+    // 2. the purpose, box, upgrade and source-volume tags are written ON the create, never by a free-standing CreateTags
+    assert!(
+        all.iter().any(|s| s.allow
+            && s.actions == ["ec2:CreateTags"]
+            && s.resources.iter().any(|r| r == "arn:aws:ec2:*::snapshot/*")
+            && cond_value(s, "ec2:CreateAction") == vec!["CreateSnapshot".to_string()]),
+        "CreateTags on a snapshot only as part of CreateSnapshot"
+    );
+    // 3. the way back: a volume from our snapshot, attached to our machine, detached and deleted when done
+    assert!(
+        covers(
+            "ec2:CreateVolume",
+            "arn:aws:ec2:*::snapshot/",
+            "aws:ResourceTag/ozbox-managed"
+        ),
+        "CreateVolume from an Oz Box snapshot"
+    );
+    for action in [
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:DeleteVolume",
+        "ec2:DeleteSnapshot",
+    ] {
+        assert!(
+            covers(action, "arn:aws:ec2:", "aws:ResourceTag/ozbox-managed"),
+            "{action} on a managed resource"
+        );
+    }
+    // 4. and no statement allows any of it on a resource of ours or anyone's with no condition
+    for s in all.iter().filter(|s| s.allow) {
+        if s.actions
+            .iter()
+            .any(|a| a == "ec2:CreateSnapshot" || a == "ec2:DeleteSnapshot")
+        {
+            assert!(
+                s.condition.is_some(),
+                "{}: a snapshot action with no tag condition",
+                s.sid
+            );
+        }
+    }
+}
+
+/// Whether a policy document allows `ec2:CreateTags` (called on its own, not as part of creating the resource) on an existing
+/// volume, when the volume has `resource_tag` set to `true` (or no tags at all, when `None`). A condition that a standalone call
+/// cannot satisfy keeps a statement from applying: `ec2:CreateAction` is only present when a create call is tagging what it made,
+/// and a resource-tag condition needs the tag on the volume. Any other condition (the request's tags and keys) is taken as met.
+fn standalone_create_tags_on_a_volume(file: &str, resource_tag: Option<&str>) -> Vec<String> {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
+    let doc: Value = serde_json::from_str(&text).unwrap();
+    let arn = "arn:aws:ec2:us-east-1:123456789012:volume/vol-0foreign";
+    let mut hits = Vec::new();
+    for s in doc["Statement"].as_array().unwrap() {
+        if s["Effect"] != "Allow" {
+            continue;
+        }
+        if !strings(s.get("Action"))
+            .iter()
+            .any(|a| matches(a, "ec2:CreateTags"))
+        {
+            continue;
+        }
+        if !strings(s.get("Resource"))
+            .iter()
+            .any(|r| arn_matches(&r.replace("${account_id}", "123456789012"), arn))
+        {
+            continue;
+        }
+        let keys: Vec<String> = s
+            .get("Condition")
+            .and_then(Value::as_object)
+            .map(|ops| {
+                ops.values()
+                    .filter_map(Value::as_object)
+                    .flat_map(|m| m.keys().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let met = keys.iter().all(|k| {
+            if k == "ec2:CreateAction" {
+                false
+            } else if let Some(tag) = k.strip_prefix("aws:ResourceTag/") {
+                resource_tag == Some(tag)
+            } else {
+                !k.starts_with("ec2:ResourceTag/")
+            }
+        });
+        if met {
+            hits.push(s["Sid"].as_str().unwrap().to_string());
+        }
+    }
+    hits
+}
+
+/// A box made by an earlier version has a system disk with no tags. Neither the daily operator role nor the setup identity may
+/// give an existing disk its first `ozbox-managed` tag: IAM cannot say "a disk attached to one of our machines", so a statement
+/// that allowed it would let either identity mark ANY volume in the account as its own and then change or delete it. Ownership of
+/// a resource that already exists is only ever given by an account administrator (ADR 0053, amendment 1); the program refuses the
+/// plan that needs it, before anything is applied, and says what to run. If this test fails because a statement was added, that
+/// decision was reversed: say so in the ADR.
+#[test]
+fn nothing_but_an_administrator_can_give_an_existing_volume_its_first_tag() {
+    for file in [
+        "../../infra/aws/operator-policy.json",
+        "../../infra/aws/setup-policy.json",
+    ] {
+        assert_eq!(
+            standalone_create_tags_on_a_volume(file, None),
+            Vec::<String>::new(),
+            "{file}: a foreign, untagged volume must not be taggable"
+        );
+        // a volume that is already ours is: that is how the rest of a box's tags are kept
+        assert!(
+            !standalone_create_tags_on_a_volume(file, Some("ozbox-managed")).is_empty()
+                || file.contains("setup"),
+            "{file}: the operator must still change the tags of a volume that is already ours"
+        );
+        // and a volume tagged with some OTHER tag is not ours
+        assert_eq!(
+            standalone_create_tags_on_a_volume(file, Some("team")),
+            Vec::<String>::new(),
+            "{file}"
+        );
+    }
+}

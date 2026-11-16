@@ -154,6 +154,13 @@ pub enum Command {
         /// this, such an upgrade is refused.
         #[arg(long)]
         accept_new_secrets_store: bool,
+        /// AWS: do not keep a copy of the old system disk. By default, when the plan cannot show that the secrets store's key
+        /// survives (it is a file on the system disk, or ozbox cannot tell), the upgrade first takes an encrypted snapshot of
+        /// that disk, so the old store's key is not destroyed with it and the old store can be reopened (docs: Recovering an
+        /// old secrets store). The snapshot is billed like any other and nothing deletes it for you. With this flag the key
+        /// is destroyed with the disk and the old store can never be opened.
+        #[arg(long)]
+        no_pre_upgrade_snapshot: bool,
         /// Replace the box's machine from the image it already runs, so it boots with this program's first-boot
         /// configuration (/work is kept). Without this, a box on the target image is replaced only when it says its first
         /// boot differs from this program's, or has no record of it.
@@ -401,9 +408,17 @@ pub enum Command {
         /// Do not keep a final snapshot of /work.
         #[arg(long)]
         no_final_snapshot: bool,
+        /// Keep the copies of old system disks that upgrades took (each holds the box's old secrets-store key). By default they
+        /// are deleted with the box, because ozbox cannot list them once it is gone.
+        #[arg(long)]
+        keep_old_system_disks: bool,
     },
     /// The box modules and first-boot configuration this program renders: its version, their hashes, and the folder in use.
     Infra,
+    /// What this program was built with: its version and the dashboard it embeds (the content hash, or `none`, and whether
+    /// the placeholder page is compiled in). The release build runs this to check what it built. Reads no configuration.
+    #[command(hide = true)]
+    BuildInfo,
     /// The size catalogue and the machine type each provider maps it to.
     Sizes,
     /// The providers and what each can do.
@@ -847,7 +862,7 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live.
+    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -858,6 +873,11 @@ pub enum SecretsCommand {
         /// A production-looking key to store anyway (it stays flagged, and no agent's command receives it). Repeatable.
         #[arg(long = "allow-live", value_name = "NAME")]
         allow_live: Vec<String>,
+        /// Store EVERY production-looking key in the file, as if each were named with --allow-live. The same typed confirmation
+        /// (a person at a terminal; refused from a script) comes first, after the names are listed. They stay flagged and no agent's
+        /// command receives them. Use either this or --allow-live NAME, not both.
+        #[arg(long = "allow-live-all", conflicts_with = "allow_live")]
+        allow_live_all: bool,
         /// Mark a value PUBLIC: a public URL or an anonymous key that a declared command may be given as plain environment
         /// (`"public": ["NAME"]` in its declaration). Your explicit word, never guessed from a value. Refused for a name that
         /// says it is secret, a production-looking value, a kind of key that is only ever secret, and a service-role key.

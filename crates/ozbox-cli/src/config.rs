@@ -56,6 +56,9 @@ pub struct ProviderSection {
     #[allow(dead_code)]
     pub issuer_function_arn: Option<String>,
     pub root_disk_gb: Option<u32>,
+    /// AWS only: the most minutes `ozbox upgrade` waits for the copy of the old system disk it keeps (default 30). The copy finishes
+    /// by itself if it takes longer; the upgrade then stops before changing anything.
+    pub snapshot_wait_minutes: Option<u32>,
     /// AWS only: the `owner/name` GitHub repository whose image workflow signs the Oz images, used to verify
     /// `ozbox upgrade --image latest` (default: the project's own).
     pub release_repo: Option<String>,

@@ -7,7 +7,10 @@
 //! **The key is never copied.** `/work` is what a disk snapshot, a clone and a restic backup copy, so a key file beside the
 //! ciphertext would make every one of them decrypt the whole store. What is on `/work` is ciphertext under a key that is
 //! not on `/work`: with KMS the instance role is needed, with a TPM the machine, and on a box that keeps its key in a file
-//! the key stays on the system disk and is escrowed off the box (see `secrets_escrow`). A key file an older version left in
+//! the key stays on the system disk and is escrowed off the box (see `secrets_escrow`). (One deliberate, time-limited exception
+//! is not made here but by `ozbox upgrade` on AWS: when it cannot show that the key survives, it keeps an encrypted snapshot of the
+//! OLD system disk, which holds the key file beside the store's older copy, until the person deletes it; the plan, the report and
+//! the guide say so.) A key file an older version left in
 //! the folder is overwritten and removed the first time the service saves.
 //!
 //! **A copy that belongs to another box is not restored.** A clone's `/work` starts as a copy of another box's, and so does

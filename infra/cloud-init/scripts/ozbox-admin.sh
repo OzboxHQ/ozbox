@@ -288,10 +288,12 @@ run_action() {
     recover-secrets)
       # Only for a store that can no longer be opened. A running service is never stopped here (so a request cannot be
       # used to interrupt it). The program decides the rest, as root: the service's own state must say its key is lost with
-      # no escrow, and the key pinned when the box was made must have signed this box's one-time challenge. Nothing is
+      # no escrow, or that the store is sealed by a file-kept key that is gone while the box is configured for another kind, and the key pinned when the box was made must have signed this box's one-time challenge. Nothing is
       # deleted.
+      # (a service that records an unopenable store stops for good, so it is not active here; one still in its retry loop, or
+      # running, is refused with the state the unit is in)
       if "$systemctl_bin" is-active --quiet ozbox-secrets.service; then
-        echo "refused: the secrets service is running, so its store can be opened; nothing to recover"; return 1
+        echo "refused: the secrets service is running or still starting (unit state: $("$systemctl_bin" is-active ozbox-secrets.service 2>/dev/null || true)), so it has not recorded that its store cannot be opened and nothing is recorded as lost; if it keeps restarting, see ozbox secrets status on the box. Nothing was changed"; return 1
       fi
       if [ "${1:-}" = challenge ] && [ $# = 1 ]; then
         "$ozbox_bin" secrets recover-store --challenge 2>&1; return $?

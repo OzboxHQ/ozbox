@@ -845,7 +845,7 @@ fn the_setup_scripts_marker_is_the_daemons_marker() {
     )
     .unwrap();
     assert!(
-        ci.contains(&format!("grep -aq '{marker}'")),
+        ci.contains(&format!("LC_ALL=C grep -aqF '{marker}'")),
         "the image build does not check the release daemon for {marker}"
     );
 }
