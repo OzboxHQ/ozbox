@@ -588,4 +588,107 @@ mod tests {
         );
         assert_eq!(Challenge::from_output("challenge ; rm 1 2"), None);
     }
+
+    /// The on-box half of "Recovering an old secrets store" (docs/use-cases/keeping-boxes-healthy.md): the old disk's `kek.key`
+    /// reopens the store the upgrade set aside (`secrets.json.lost-<time>` beside the store and on /work), and no other key does.
+    /// The cloud half (a volume from the snapshot, attached and mounted) is described in the guide and not run here.
+    #[test]
+    fn the_key_file_of_a_kept_system_disk_reopens_the_store_that_was_set_aside() {
+        use crate::secrets::SecretStore;
+        use crate::secrets_enc::{EncryptedSecrets, KeyProvider, LocalKekProvider};
+        // (on macOS a file-kept key is chosen only when the settings say so)
+        let r = rig(&format!("{FILE_BOX}OZBOX_SECRET_KEK=file\n"), LOST);
+        // the old machine: a store sealed under a key kept in a file beside it
+        let old = r._d.path().join("old-root/var/lib/ozbox-secrets");
+        std::fs::create_dir_all(&old).unwrap();
+        let kek = LocalKekProvider::random("file").unwrap();
+        std::fs::write(
+            old.join(crate::secrets_persist::KEY_FILE),
+            kek.kek_text().as_str(),
+        )
+        .unwrap();
+        let sealed = EncryptedSecrets::new(
+            old.join("secrets.json"),
+            "main",
+            std::sync::Arc::new(kek) as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap();
+        sealed
+            .set("projects/app/DATABASE_URL", "postgres://example")
+            .unwrap();
+        // the new machine got the store back from /work without the key, and the upgrade set it aside
+        std::fs::copy(old.join("secrets.json"), &r.p.store).unwrap();
+        std::fs::copy(old.join("secrets.json"), r.p.persist.join("secrets.json")).unwrap();
+        assert_eq!(console(&r.p, &r.f).unwrap(), 2);
+        let aside = std::fs::read_dir(&r.p.persist)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().contains(".json.lost-"))
+            .unwrap();
+        // reinstating it, as the guide says: the aside store as secrets.json, the old disk's key file beside it
+        let back = r._d.path().join("reinstated");
+        std::fs::create_dir_all(&back).unwrap();
+        std::fs::copy(&aside, back.join("secrets.json")).unwrap();
+        let key = std::fs::read_to_string(old.join(crate::secrets_persist::KEY_FILE)).unwrap();
+        assert!(crate::secrets_ingress::kek_opens_store(
+            &back.join("secrets.json"),
+            "main",
+            &key
+        ));
+        let other = LocalKekProvider::random("file")
+            .unwrap()
+            .kek_text()
+            .to_string();
+        assert!(!crate::secrets_ingress::kek_opens_store(
+            &back.join("secrets.json"),
+            "main",
+            &other
+        ));
+        let names = EncryptedSecrets::new(
+            back.join("secrets.json"),
+            "main",
+            std::sync::Arc::new(LocalKekProvider::from_text("file", &key).unwrap())
+                as std::sync::Arc<dyn KeyProvider>,
+        )
+        .unwrap()
+        .names("")
+        .unwrap();
+        assert_eq!(names, ["projects/app/DATABASE_URL"]);
+    }
+
+    /// The guide names the real files, the real tags and the real commands; a rename here fails until the guide is fixed.
+    #[test]
+    fn the_recovery_guide_names_the_files_tags_and_commands_the_code_uses() {
+        let guide = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/use-cases/keeping-boxes-healthy.md"),
+        )
+        .unwrap();
+        let section = guide
+            .split("## 1c. ")
+            .nth(1)
+            .unwrap()
+            .split("\n## ")
+            .next()
+            .unwrap();
+        for needle in [
+            crate::secrets_persist::KEY_FILE,
+            ".json.lost-",
+            "/var/lib/ozbox-secrets",
+            "/work/ozbox-secrets-private",
+            ozbox_provider_aws::PURPOSE_TAG,
+            ozbox_provider_aws::PRE_UPGRADE_ROOT,
+            "ozbox-secrets.service",
+            "ozbox adopt-fleet-key",
+            "ozbox backup delete",
+        ] {
+            assert!(section.contains(needle), "the guide must say {needle}");
+        }
+        // the paths in the guide are the ones the code defaults to
+        assert!(Paths::default().store.starts_with("/var/lib/ozbox-secrets"));
+        assert!(Paths::default()
+            .persist
+            .starts_with("/work/ozbox-secrets-private"));
+    }
 }

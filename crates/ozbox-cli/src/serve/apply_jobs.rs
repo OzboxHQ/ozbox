@@ -319,6 +319,18 @@ impl App {
                     }
                     _ => {}
                 }
+                // the copy of the old system disk an upgrade kept: its id, so the dashboard can say it
+                if let (true, Operation::Upgrade { name, image, .. }) = (
+                    crate::run::upgrade::plan_keeps_old_disk(plan),
+                    &plan.operation,
+                ) {
+                    body["old_system_disk_snapshot"] = json!(crate::run::upgrade::kept_copy_id(
+                        self.provider.as_ref(),
+                        name,
+                        image
+                    )
+                    .ok());
+                }
                 Ok(body)
             }
             Err(e) => {

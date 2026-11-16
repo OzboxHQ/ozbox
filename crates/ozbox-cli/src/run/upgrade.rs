@@ -77,6 +77,13 @@ pub struct Report {
     /// [`review_signers`]). Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvers: Option<Step>,
+    /// The copy of the old system disk the upgrade kept because the store's key could not be shown to survive (see
+    /// [`OldDisk`]), or the statement that none was. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_system_disk: Option<Step>,
+    /// The id of that copy (an EBS snapshot on AWS). Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_system_disk_snapshot: Option<String>,
 }
 
 /// What an upgrade does to the box's secrets store. Its system disk is replaced and `/work` is kept, so the store's copy
@@ -380,6 +387,148 @@ pub fn fleet_key_gate(
         )),
         _ => unknown(),
     }
+}
+
+/// What an upgrade does about a copy of the OLD system disk, which holds the store's key when that key is a file. The key
+/// is destroyed with the disk, so when the plan cannot show that the store's key survives, a copy is kept by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldDisk {
+    /// Keep a copy when the store's fate calls for it (this provider can, and the person did not opt out).
+    Keep,
+    /// The person turned it off (`--no-pre-upgrade-snapshot`).
+    OptedOut,
+    /// This provider cannot keep one.
+    NotOffered,
+    /// The store is known to be empty (`--use-fleet-key`): there is no key worth keeping.
+    StoreEmpty,
+}
+
+impl OldDisk {
+    /// The choice for one upgrade: only the AWS provider keeps a copy of a system disk.
+    pub fn choose(provider_id: &str, opted_out: bool, store_empty: bool) -> Self {
+        if store_empty {
+            Self::StoreEmpty
+        } else if opted_out {
+            Self::OptedOut
+        } else if provider_id == ozbox_provider_aws::PROVIDER_ID {
+            Self::Keep
+        } else {
+            Self::NotOffered
+        }
+    }
+}
+
+/// Whether the plan takes a copy of the old system disk: the store's key is a file on that disk, or ozbox cannot tell where
+/// it is. A store that is kept (by KMS, escrow or this computer's keychain), or already lost, needs none.
+pub fn old_disk_copy_wanted(fate: StoreFate, old_disk: OldDisk) -> bool {
+    old_disk == OldDisk::Keep && matches!(fate, StoreFate::Lost | StoreFate::Unknown)
+}
+
+/// The block printed BEFORE the confirmation (never only a plan note) when the upgrade cannot keep the store: what is lost,
+/// what is kept of the old disk and what to run afterwards. `None` when nothing is lost by this upgrade or the store is empty.
+pub fn store_loss_warning(check: &StoreCheck, box_name: &str, old_disk: OldDisk) -> Option<String> {
+    let head = match (check.fate, old_disk) {
+        (_, OldDisk::StoreEmpty) => return None,
+        (StoreFate::Lost, _) => "old_disk.head_lost",
+        (StoreFate::Unknown, _) => "old_disk.head_unknown",
+        _ => return None,
+    };
+    let args = [("box", box_name), ("lost", NEW_STORE_LOSES)];
+    let copy = match old_disk {
+        OldDisk::Keep => "old_disk.kept",
+        OldDisk::OptedOut => "old_disk.opted_out",
+        _ => "old_disk.unavailable",
+    };
+    Some(format!(
+        "{}\n{}\n{}",
+        t(head, &args),
+        t(copy, &args),
+        t("old_disk.afterwards", &args)
+    ))
+}
+
+/// The same plan with the copy of the old system disk added: planned again (a plan is read-only) from the operation with the
+/// choice set. The notes the caller added since the provider's own (`base_notes` of them) are kept. An `Err` is the provider's
+/// refusal, which names the opt-out.
+pub fn with_old_disk_copy(
+    p: &dyn Provider,
+    plan: Plan,
+    base_notes: usize,
+) -> ozbox_core::Result<Plan> {
+    let mut op = plan.operation.clone();
+    if let Operation::Upgrade {
+        keep_old_system_disk,
+        ..
+    } = &mut op
+    {
+        *keep_old_system_disk = true;
+    }
+    let mut fresh = p.plan(&op)?;
+    fresh.notes.extend(plan.notes.into_iter().skip(base_notes));
+    Ok(fresh)
+}
+
+/// Whether a plan takes the copy of the old system disk.
+pub fn plan_keeps_old_disk(plan: &Plan) -> bool {
+    plan.changes
+        .iter()
+        .any(|c| c.kind == "snapshot.old_system_disk")
+}
+
+/// The id of the copy this upgrade took of the old system disk: the newest provider snapshot of the box with the purpose tag
+/// made for this image.
+pub fn kept_copy_id(
+    p: &dyn Provider,
+    name: &BoxName,
+    image: &str,
+) -> std::result::Result<String, String> {
+    let all = p.snapshots(name).map_err(|e| e.to_string())?;
+    all.into_iter()
+        .rfind(|s| {
+            s.labels
+                .get(ozbox_provider_aws::PURPOSE_TAG)
+                .map(String::as_str)
+                == Some(ozbox_provider_aws::PRE_UPGRADE_ROOT)
+                && s.labels
+                    .get(ozbox_core::UPGRADE_TO_LABEL)
+                    .map(String::as_str)
+                    == Some(image)
+        })
+        .map(|s| s.id)
+        .ok_or_else(|| "no such snapshot is listed".to_string())
+}
+
+/// What the report says about the copy of the old system disk: `None` when the plan had no reason to talk about one.
+pub fn old_disk_report(
+    p: &dyn Provider,
+    name: &BoxName,
+    image: &str,
+    kept: bool,
+    warned: bool,
+) -> (Option<Step>, Option<String>) {
+    let n = name.as_str();
+    if kept {
+        return match kept_copy_id(p, name, image) {
+            Ok(id) => (
+                Some(Step::new(
+                    StepOutcome::Done,
+                    t("old_disk.taken", &[("box", n), ("id", &id)]),
+                )),
+                Some(id),
+            ),
+            Err(why) => (
+                Some(Step::new(
+                    StepOutcome::Failed,
+                    t("old_disk.not_found", &[("box", n), ("why", &why)]),
+                )),
+                None,
+            ),
+        };
+    }
+    (
+        warned.then(|| Step::new(StepOutcome::Skipped, t("old_disk.not_taken", &[("box", n)]))),
+        None,
+    )
 }
 
 /// Whether the upgrade may go ahead, given what happens to the store. `Ok` carries the plan's note (the store's fate is
@@ -776,6 +925,10 @@ struct Outcome2<'a> {
     /// separate names on purpose: a reader must never take "called for live" as "done live".
     #[serde(skip_serializing_if = "Option::is_none")]
     upgrade_kind: Option<&'a KindReport>,
+    /// The words printed before the confirmation when the upgrade cannot keep the box's secrets store: what is lost, what is
+    /// kept of the old system disk and what to run afterwards. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secrets_store_warning: Option<&'a str>,
 }
 
 /// What every upgrade does today (ADR 0038): the box stops, its system disk is replaced and `/work` is kept.
@@ -973,6 +1126,7 @@ pub(super) fn command(
     image: Option<String>,
     allow_unverified: bool,
     accept_new_store: bool,
+    no_old_disk_snapshot: bool,
     first_boot: FirstBootOpts,
     quiesce_mode: crate::quiesce::Mode,
     use_fleet_key: bool,
@@ -1012,6 +1166,7 @@ pub(super) fn command(
                 store_check(ag, rec, simulated, escrowed, root)
             },
             accept_new_store,
+            old_disk: OldDisk::choose(p.id(), no_old_disk_snapshot, use_fleet_key),
             place_escrow: &|ag, rec| Some(place_escrow_step(ag, rec, keys.as_ref(), waits)),
             recover: &|ag, rec| Some(recover_store_step(ag, rec, keys.as_ref(), waits)),
             restore_backups: &restore_backup_credentials,
@@ -1046,6 +1201,8 @@ pub(super) struct Around<'a> {
     pub store_check: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> StoreCheck,
     /// The person accepted a new store (`--accept-new-secrets-store`).
     pub accept_new_store: bool,
+    /// Whether a copy of the old system disk is kept when the store's key cannot be shown to survive.
+    pub old_disk: OldDisk,
     /// After the reboot, for a store kept by this computer's keychain: put the key back through the ingress route.
     pub place_escrow: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     /// After the reboot, when a new store was accepted: set the old one aside.
@@ -1644,10 +1801,13 @@ pub(super) fn execute(
         name: name.clone(),
         image: target.clone(),
         reprovision,
+        keep_old_system_disk: false,
     };
     guard_rails(p, &op)?;
     crate::settings::enforce(&load_settings()?, p, &budget_view(&op, &rec))?;
     let mut plan = p.plan(&op)?;
+    // what the provider itself said; the replan that adds the copy of the old system disk keeps what is added after it
+    let base_notes = plan.notes.len();
     plan.notes.extend(first_boot_notes);
     plan.notes.extend(crate::infra_cli::plan_notes());
     // Which kind of upgrade the two signed releases call for, and why (ADR 0038, informational: this version of ozbox
@@ -1670,6 +1830,7 @@ pub(super) fn execute(
         Some(report)
     };
     let mut store = None;
+    let mut loud: Option<String> = None;
     if !plan.is_noop() {
         // An image whose release signature could be checked and was not is refused before anything is confirmed,
         // unless the person asks for it by name; the plan then carries the warning.
@@ -1691,7 +1852,15 @@ pub(super) fn execute(
         // before anything is confirmed unless the person accepts it by name.
         let check = (around.store_check)(agent, &rec);
         match store_gate(&check, name.as_str(), around.accept_new_store) {
-            Ok(note) => plan.notes.push(note),
+            Ok(note) => {
+                // The key may be destroyed with the old system disk: the plan then keeps a copy of it first (planned again,
+                // so the step is in the plan and `apply` compares it), and the warning below says it in words.
+                if old_disk_copy_wanted(check.fate, around.old_disk) {
+                    plan = with_old_disk_copy(p, plan, base_notes)?;
+                }
+                plan.notes.push(note);
+                loud = store_loss_warning(&check, name.as_str(), around.old_disk);
+            }
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
         store = Some(check);
@@ -1709,6 +1878,9 @@ pub(super) fn execute(
     }
     if !f.json {
         print!("{plan}");
+        if let Some(w) = &loud {
+            println!("\n{w}\n");
+        }
     }
     if plan.is_noop() {
         // Nothing to upgrade, but a box without the memory guard is put in order: live, nothing restarted, never on a dry run.
@@ -1729,6 +1901,7 @@ pub(super) fn execute(
                 interrupted: None,
                 memory_guard: memory.as_ref(),
                 upgrade_kind: kind.as_ref(),
+                secrets_store_warning: loud.as_deref(),
             },
         );
     }
@@ -1747,6 +1920,7 @@ pub(super) fn execute(
                 interrupted: None,
                 memory_guard: None,
                 upgrade_kind: kind.as_ref(),
+                secrets_store_warning: loud.as_deref(),
             },
         );
     }
@@ -1816,6 +1990,7 @@ pub(super) fn execute(
                     interrupted: Some(&stopped),
                     memory_guard: None,
                     upgrade_kind: kind.as_ref(),
+                    secrets_store_warning: loud.as_deref(),
                 },
             )?;
             return Err(CliError::Msg(message));
@@ -1902,6 +2077,13 @@ pub(super) fn execute(
         .then(|| p.get(&name).ok().flatten())
         .flatten()
         .and_then(|after| (around.review_signers)(&after));
+    let (old_system_disk, old_system_disk_snapshot) = old_disk_report(
+        p,
+        &name,
+        &target,
+        plan_keeps_old_disk(&plan),
+        loud.is_some(),
+    );
     let report = Report {
         image: target,
         checkpoint,
@@ -1914,8 +2096,13 @@ pub(super) fn execute(
         secrets_store: store,
         secrets_recovery,
         approvers,
+        old_system_disk,
+        old_system_disk_snapshot,
     };
     if !f.json {
+        if let Some(c) = &report.old_system_disk {
+            println!("{}", c.detail);
+        }
         println!("{}", report.ready.detail);
         if let Some(r) = &report.secrets_recovery {
             println!("{}", r.detail);
@@ -1946,6 +2133,7 @@ pub(super) fn execute(
             interrupted: None,
             memory_guard: None,
             upgrade_kind: kind.as_ref(),
+            secrets_store_warning: loud.as_deref(),
         },
     )?;
     // The change is made either way; a box that does not check out is a failure the person must not miss.
@@ -2080,6 +2268,7 @@ mod tests {
             &Around {
                 store_check: &store,
                 accept_new_store: false,
+                old_disk: OldDisk::NotOffered,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
                 restore_services: &|_, _| None,
@@ -2123,8 +2312,289 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?)?;
         Ok((p, n))
+    }
+
+    /// A box on the sandbox's first image, planned and run through the command's own flow with the store's fate chosen: the
+    /// store check says `fate`, the person did (or did not) accept a new store, and `old_disk` is the copy policy.
+    fn run_keeping(
+        p: &dyn Provider,
+        name: &BoxName,
+        fate: StoreFate,
+        accept: bool,
+        old_disk: OldDisk,
+        dry_run: bool,
+    ) -> Result<()> {
+        execute(
+            p,
+            &FirstBootBox {
+                record: Err("no route".into()),
+            },
+            name.clone(),
+            Some("fake-image-2".into()),
+            false,
+            &Flags {
+                yes: true,
+                dry_run,
+                json: true,
+            },
+            Waits::default(),
+            &Around {
+                store_check: &|_, _| StoreCheck {
+                    fate,
+                    detail: "the store's key is in a file on the system disk".into(),
+                },
+                accept_new_store: accept,
+                old_disk,
+                recover: &|_, _| None,
+                restore_backups: &|_, _| None,
+                restore_services: &|_, _| None,
+                memory_guard: &|_, _| None,
+                refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                review_signers: &|_| None,
+                place_escrow: &|_, _| None,
+                first_boot: FirstBootOpts::default(),
+                strict_checkpoint: false,
+                legacy_checkpoint: false,
+            },
+        )
+    }
+
+    fn fresh_box(
+        dir: &std::path::Path,
+    ) -> std::result::Result<
+        (
+            ozbox_core::Engine<ozbox_provider_fake::FakeBackend>,
+            BoxName,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let p = ozbox_provider_fake::open(dir);
+        let n = BoxName::new("main")?;
+        p.apply(&p.plan(&Operation::Create {
+            spec: BoxSpec::new(n.clone(), Size::S),
+        })?)?;
+        Ok((p, n))
+    }
+
+    fn old_disk_copies(
+        p: &dyn Provider,
+        n: &BoxName,
+    ) -> std::result::Result<Vec<ozbox_core::SnapshotInfo>, Box<dyn std::error::Error>> {
+        Ok(p.snapshots(n)?
+            .into_iter()
+            .filter(|s| s.labels.contains_key(ozbox_provider_aws::PURPOSE_TAG))
+            .collect())
+    }
+
+    /// The incident: a store whose key is a file on the system disk (or that cannot be told) was lost with the disk, and the
+    /// upgrade kept nothing. Now the copy is taken for exactly those fates, and only when the person did not opt out.
+    #[test]
+    fn a_copy_of_the_old_system_disk_is_wanted_exactly_when_the_stores_key_may_be_lost() {
+        use StoreFate::*;
+        for fate in [Lost, Unknown] {
+            assert!(old_disk_copy_wanted(fate, OldDisk::Keep), "{fate:?}");
+            for off in [OldDisk::OptedOut, OldDisk::NotOffered, OldDisk::StoreEmpty] {
+                assert!(!old_disk_copy_wanted(fate, off), "{fate:?} {off:?}");
+            }
+        }
+        for fate in [
+            Kept,
+            KeptByEscrow,
+            KeptByLaptop,
+            NotSaid,
+            AlreadyLost,
+            NotApplicable,
+            MovingKey,
+        ] {
+            assert!(!old_disk_copy_wanted(fate, OldDisk::Keep), "{fate:?}");
+        }
+        assert_eq!(OldDisk::choose("aws", false, false), OldDisk::Keep);
+        assert_eq!(OldDisk::choose("aws", true, false), OldDisk::OptedOut);
+        assert_eq!(OldDisk::choose("aws", false, true), OldDisk::StoreEmpty);
+        assert_eq!(OldDisk::choose("hcloud", false, false), OldDisk::NotOffered);
+    }
+
+    /// The plan carries the step (first) and keeps what the caller added after the provider's own notes.
+    #[test]
+    fn a_replanned_upgrade_lists_the_copy_first_and_keeps_the_notes_added_since() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let op = Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision: false,
+            keep_old_system_disk: false,
+        };
+        let mut plan = p.plan(&op)?;
+        let base = plan.notes.len();
+        plan.notes.push("added by the command".into());
+        let kinds = |pl: &Plan| {
+            pl.changes
+                .iter()
+                .map(|c| c.kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!plan_keeps_old_disk(&plan));
+        let fresh = with_old_disk_copy(&p, plan, base)?;
+        assert!(plan_keeps_old_disk(&fresh));
+        assert_eq!(
+            kinds(&fresh)[0],
+            "snapshot.old_system_disk",
+            "{:?}",
+            kinds(&fresh)
+        );
+        assert_eq!(
+            fresh.notes.last().map(String::as_str),
+            Some("added by the command")
+        );
+        Ok(())
+    }
+
+    /// An upgrade the plan cannot show keeps the store's key is applied only after the old system disk is copied, and the
+    /// report names the copy.
+    #[test]
+    fn an_accepted_upgrade_of_a_store_that_may_be_lost_keeps_a_copy_and_names_it() -> TestResult {
+        for fate in [StoreFate::Lost, StoreFate::Unknown] {
+            let dir = tempfile::tempdir()?;
+            let (p, n) = fresh_box(dir.path())?;
+            run_keeping(&p, &n, fate, true, OldDisk::Keep, false).map_err(|e| e.to_string())?;
+            let copies = old_disk_copies(&p, &n)?;
+            assert_eq!(copies.len(), 1, "{fate:?}: {copies:?}");
+            assert!(!copies[0].includes_work);
+            assert_eq!(
+                p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+                Some("fake-image-2"),
+                "the upgrade itself went ahead"
+            );
+            let (step, id) = old_disk_report(&p, &n, "fake-image-2", true, true);
+            let step = step.ok_or("no step")?;
+            assert_eq!(step.outcome, StepOutcome::Done);
+            assert_eq!(id.as_deref(), Some(copies[0].id.as_str()));
+            assert!(
+                step.detail.contains(&copies[0].id)
+                    && step.detail.contains("ozbox backup delete main")
+            );
+            // and it is deletable like any snapshot
+            p.apply(&p.plan(&Operation::DeleteSnapshot {
+                name: n.clone(),
+                snapshot: copies[0].id.clone(),
+            })?)?;
+            assert!(old_disk_copies(&p, &n)?.is_empty());
+        }
+        Ok(())
+    }
+
+    /// Opting out, a provider that cannot, a known-empty store, and a store that is kept: no copy, and nothing else changes.
+    #[test]
+    fn no_copy_is_kept_when_opted_out_unavailable_empty_or_the_store_is_kept() -> TestResult {
+        let cases = [
+            (StoreFate::Unknown, OldDisk::OptedOut),
+            (StoreFate::Lost, OldDisk::NotOffered),
+            (StoreFate::Lost, OldDisk::StoreEmpty),
+            (StoreFate::Kept, OldDisk::Keep),
+            (StoreFate::KeptByEscrow, OldDisk::Keep),
+            (StoreFate::KeptByLaptop, OldDisk::Keep),
+        ];
+        for (fate, old_disk) in cases {
+            let dir = tempfile::tempdir()?;
+            let (p, n) = fresh_box(dir.path())?;
+            let accept = matches!(fate, StoreFate::Lost | StoreFate::Unknown);
+            run_keeping(&p, &n, fate, accept, old_disk, false).map_err(|e| e.to_string())?;
+            assert!(old_disk_copies(&p, &n)?.is_empty(), "{fate:?} {old_disk:?}");
+            assert_eq!(
+                p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+                Some("fake-image-2")
+            );
+        }
+        Ok(())
+    }
+
+    /// A refused upgrade (no acceptance) changes nothing, takes no copy, and says what accepting does.
+    #[test]
+    fn a_refused_upgrade_takes_no_copy_and_says_what_accepting_would_keep() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let e = run_keeping(&p, &n, StoreFate::Unknown, false, OldDisk::Keep, false)
+            .err()
+            .ok_or("expected a refusal")?
+            .to_string();
+        assert!(
+            e.contains("--accept-new-secrets-store") && e.contains("--no-pre-upgrade-snapshot"),
+            "{e}"
+        );
+        assert!(old_disk_copies(&p, &n)?.is_empty());
+        assert_ne!(
+            p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+            Some("fake-image-2")
+        );
+        Ok(())
+    }
+
+    /// A dry run plans the copy (so the person sees it) and takes none.
+    #[test]
+    fn a_dry_run_plans_the_copy_and_takes_none() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        run_keeping(&p, &n, StoreFate::Unknown, true, OldDisk::Keep, true)
+            .map_err(|e| e.to_string())?;
+        assert!(old_disk_copies(&p, &n)?.is_empty());
+        Ok(())
+    }
+
+    /// The warning is its own block with what is lost, what is kept, and the exact commands afterwards (never only a note).
+    #[test]
+    fn the_warning_says_what_is_lost_what_is_kept_and_what_to_run_afterwards() {
+        let lost = StoreCheck {
+            fate: StoreFate::Lost,
+            detail: String::new(),
+        };
+        let w = store_loss_warning(&lost, "main", OldDisk::Keep).unwrap_or_default();
+        for want in [
+            "WILL BE LOST",
+            "file on its system disk",
+            "ozbox-purpose=pre-upgrade-root",
+            "ozbox backup delete main <snapshot id>",
+            "ozbox secrets import",
+            "--box",
+            "ozbox adopt-fleet-key main",
+            "imported with `ozbox secrets import`",
+        ] {
+            assert!(w.contains(want), "{want}: {w}");
+        }
+        let unknown = StoreCheck {
+            fate: StoreFate::Unknown,
+            detail: String::new(),
+        };
+        let w = store_loss_warning(&unknown, "main", OldDisk::Keep).unwrap_or_default();
+        assert!(
+            w.contains("MAY BE LOST") && w.contains("ozbox adopt-fleet-key main"),
+            "{w}"
+        );
+        let off = store_loss_warning(&unknown, "main", OldDisk::OptedOut).unwrap_or_default();
+        assert!(
+            off.contains("--no-pre-upgrade-snapshot") && off.contains("can never be opened"),
+            "{off}"
+        );
+        let none = store_loss_warning(&lost, "main", OldDisk::NotOffered).unwrap_or_default();
+        assert!(none.contains("kept on this provider"), "{none}");
+        for quiet in [
+            StoreFate::Kept,
+            StoreFate::KeptByEscrow,
+            StoreFate::AlreadyLost,
+        ] {
+            let c = StoreCheck {
+                fate: quiet,
+                detail: String::new(),
+            };
+            assert!(
+                store_loss_warning(&c, "main", OldDisk::Keep).is_none(),
+                "{quiet:?}"
+            );
+        }
+        assert!(store_loss_warning(&lost, "main", OldDisk::StoreEmpty).is_none());
     }
 
     fn replaced_with_the_store_gate(r: &Result<()>, asked: bool) -> bool {
@@ -2219,6 +2689,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: true,
+            keep_old_system_disk: false,
         })?;
         let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
         assert_eq!(
@@ -2315,6 +2786,7 @@ mod tests {
             name: n.clone(),
             image: "img-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?)?;
         // stopped after the rebuild, before the mark was cleared: running on the image, still marked
         sim.mark_upgrade(&n, "img-2")?;
@@ -2322,6 +2794,7 @@ mod tests {
             name: n.clone(),
             image: "img-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?;
         assert!(
             plan.changes.iter().any(|c| c.kind == "upgrade.finish"),
@@ -2830,6 +3303,7 @@ mod tests {
             name: rec.spec.name.clone(),
             image: "img".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         };
         assert!(matches!(budget_view(&op, &rec), Operation::Snapshot { .. }));
         let mut stopped = rec;
@@ -3252,6 +3726,7 @@ mod tests {
                         detail: String::new(),
                     },
                     accept_new_store: false,
+                    old_disk: OldDisk::NotOffered,
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,
                     restore_services: &|_, _| None,

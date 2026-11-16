@@ -159,6 +159,21 @@ pub trait Backend: Send + Sync {
         })
     }
 
+    /// What a copy of the old system disk would be, for the plan of an upgrade that asked to keep one: `Ok(Some(text))` is the
+    /// change's description (the plan names the disk; the snapshot's id exists only once it is taken, and is in the report),
+    /// `Ok(None)` says this provider cannot keep one (the plan then says so plainly), and `Err` refuses the plan with the
+    /// reason (and the opt-out). Read-only. Called only for a machine that exists.
+    fn check_system_disk_snapshot(&self, _rec: &BoxRecord) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Snapshot the (running or stopped) machine's SYSTEM disk, tagged so it is never taken for a `/work` backup, wait until
+    /// it is complete and return its id. Called by an upgrade BEFORE anything is marked or stopped, so a failure leaves
+    /// the box exactly as it was. Never reached when [`Backend::check_system_disk_snapshot`] said `None`.
+    fn snapshot_system_disk(&self, _rec: &BoxRecord, _image: &str) -> Result<String> {
+        Err(self.upgrade_unsupported("keep a copy of the old system disk"))
+    }
+
     /// Set (`Some(image)`) or clear (`None`) [`UPGRADE_TO_LABEL`], durably, on something the replacement keeps.
     fn set_upgrade_mark(&self, _rec: &BoxRecord, _image: Option<&str>) -> Result<()> {
         Err(self.upgrade_unsupported("upgrade a box"))
@@ -723,6 +738,7 @@ impl<B: Backend> Engine<B> {
                 name,
                 image,
                 reprovision,
+                keep_old_system_disk,
             } => {
                 let rec = Self::require(records, name)?;
                 // A box whose machine is gone is exactly what an interrupted upgrade leaves behind: it is the one
@@ -842,6 +858,21 @@ impl<B: Backend> Engine<B> {
                     notes.extend(capacity(&self.backend)?);
                     notes.extend(self.backend.check_upgrade(&rec, image)?);
                     let current = rec.spec.image.as_deref().unwrap_or("unknown");
+                    // The copy of the old system disk is taken first, before anything is marked or stopped: a refusal
+                    // there leaves the box as it was.
+                    if *keep_old_system_disk {
+                        match self.backend.check_system_disk_snapshot(&rec)? {
+                            Some(what) => changes.push(Change::new(
+                                "snapshot.old_system_disk",
+                                what,
+                                Risk::Low,
+                            )),
+                            None => notes.push(format!(
+                                "A copy of the old system disk of {name} was asked for, but {} cannot keep one: nothing of the old system disk survives this upgrade.",
+                                self.backend.id()
+                            )),
+                        }
+                    }
                     if running {
                         notes.push(format!(
                             "{name} is running: its agent is asked to checkpoint work in progress first when it can be reached (the plan cannot promise it), then the box is stopped, so anything running in it is interrupted."
@@ -1069,6 +1100,7 @@ impl<B: Backend> Engine<B> {
                 name,
                 image,
                 reprovision,
+                keep_old_system_disk,
             } => {
                 let rec = Self::require(records, name)?;
                 if rec.state == BoxState::InstanceMissing {
@@ -1081,6 +1113,13 @@ impl<B: Backend> Engine<B> {
                     }
                     self.backend.replace_image(&rec, image)?;
                 } else if rec.spec.image.as_deref() != Some(image.as_str()) || *reprovision {
+                    // The way back to the old system disk is made first of all: nothing is marked or stopped until it is
+                    // complete, so a failure here changes nothing.
+                    if *keep_old_system_disk
+                        && self.backend.check_system_disk_snapshot(&rec)?.is_some()
+                    {
+                        self.backend.snapshot_system_disk(&rec, image)?;
+                    }
                     // Everything that must survive an interruption is durable BEFORE the stop; a repeat of this
                     // operation finds the mark and finishes the job. (`apply` has just re-planned, which ran the
                     // provider's `check_upgrade` against the state it is about to change.)

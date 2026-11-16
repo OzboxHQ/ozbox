@@ -1145,6 +1145,7 @@ mod tests {
             name: name.clone(),
             image: image.into(),
             reprovision: false,
+            keep_old_system_disk: false,
         }
     }
 
@@ -1655,6 +1656,7 @@ mod tests {
                 name: n.clone(),
                 image: image.into(),
                 reprovision: false,
+                keep_old_system_disk: false,
             })
             .err()
             .ok_or_else(|| Error::Provider(format!("{image} must be refused")))?

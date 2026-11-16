@@ -783,6 +783,7 @@ pub fn run(cli: Cli) -> Result<()> {
             image,
             allow_unverified_image,
             accept_new_secrets_store,
+            no_pre_upgrade_snapshot,
             reprovision,
             allow_first_boot_mismatch,
             use_fleet_key,
@@ -801,6 +802,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 image,
                 allow_unverified_image,
                 accept_new_secrets_store,
+                no_pre_upgrade_snapshot,
                 upgrade::FirstBootOpts {
                     ours: crate::infra_cli::effective_first_boot(),
                     reprovision,

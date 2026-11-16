@@ -89,6 +89,8 @@ struct Account {
     releases: BTreeMap<String, String>,
     /// Make `cosign verify-blob` refuse the signature.
     cosign_refuses: bool,
+    /// Report system disks (and so their snapshots) as not encrypted.
+    plain_system_disks: bool,
 }
 
 #[derive(Default)]
@@ -546,6 +548,38 @@ impl FakeAws {
         })
     }
 
+    /// Report every system disk as not encrypted (a box made outside Oz Box's module).
+    pub fn unencrypted_system_disks(&self) {
+        self.with(|a| a.plain_system_disks = true);
+    }
+
+    /// Take the `ozbox-managed` tag off a box's system disk (what a box from before the module tagged it would look like).
+    pub fn untag_system_disk(&self, name: &BoxName) {
+        self.with(|a| {
+            for v in a.volumes.iter_mut().filter(|v| {
+                v.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                    && v.tags.get("ozbox-role").map(String::as_str) == Some("root")
+            }) {
+                v.tags.remove("ozbox-managed");
+            }
+        });
+    }
+
+    /// The ids and tags of the snapshots of a box's system disk that an upgrade kept, oldest first.
+    pub fn system_disk_snapshots(&self, name: &BoxName) -> Vec<(String, BTreeMap<String, String>)> {
+        self.with(|a| {
+            a.snapshots
+                .iter()
+                .filter(|s| {
+                    s.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                        && s.tags.get("ozbox-purpose").map(String::as_str)
+                            == Some("pre-upgrade-root")
+                })
+                .map(|s| (s.id.clone(), s.tags.clone()))
+                .collect()
+        })
+    }
+
     pub fn clear_calls(&self) {
         self.with(|a| a.calls.clear());
     }
@@ -720,6 +754,8 @@ impl FakeAws {
             }
             "describe-volumes" => {
                 let wanted = filters(args);
+                let wanted_ids = values_after(args, "--volume-ids");
+                let plain = a.plain_system_disks;
                 let in_use = |id: &str| {
                     a.instances
                         .iter()
@@ -728,6 +764,7 @@ impl FakeAws {
                 let list: Vec<Value> = a
                     .volumes
                     .iter()
+                    .filter(|v| wanted_ids.is_empty() || wanted_ids.contains(&v.id.as_str()))
                     .filter(|v| {
                         wanted.iter().all(|(k, val)| match k.strip_prefix("tag:") {
                             Some(t) => v.tags.get(t).map(String::as_str) == Some(val.as_str()),
@@ -740,6 +777,8 @@ impl FakeAws {
                             "Size": v.size,
                             "State": if in_use(&v.id) { "in-use" } else { "available" },
                             "SnapshotId": v.snapshot,
+                            "Encrypted": !(plain && v.tags.get("ozbox-role").map(String::as_str) == Some("root")),
+                            "KmsKeyId": (v.tags.get("ozbox-role").map(String::as_str) == Some("root")).then_some("arn:aws:kms:us-east-1:123456789012:key/fake"),
                             "Tags": tags_json(&v.tags),
                         })
                     })
@@ -766,7 +805,12 @@ impl FakeAws {
                             .iter()
                             .all(|(k, v)| s.tags.get(k).map(String::as_str) == Some(v.as_str()))
                     })
-                    .map(|s| json!({"SnapshotId": s.id, "StartTime": s.start, "State": s.state, "VolumeSize": s.size, "Tags": tags_json(&s.tags)}))
+                    .map(|s| {
+                        // a snapshot of a disk is encrypted when the disk is
+                        let plain_disk = a.plain_system_disks
+                            && s.tags.get("ozbox-purpose").map(String::as_str) == Some("pre-upgrade-root");
+                        json!({"SnapshotId": s.id, "StartTime": s.start, "State": s.state, "VolumeSize": s.size, "Encrypted": !plain_disk, "KmsKeyId": s.tags.contains_key("ozbox-purpose").then_some("arn:aws:kms:us-east-1:123456789012:key/fake"), "Tags": tags_json(&s.tags)})
+                    })
                     .collect();
                 ok(json!({"Snapshots": list}).to_string())
             }

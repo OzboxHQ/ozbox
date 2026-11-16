@@ -91,6 +91,12 @@ pub enum Operation {
         /// any upgrade. Additive: absent means false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         reprovision: bool,
+        /// Keep a copy of the OLD system disk before it is replaced (an encrypted snapshot the provider tags, named in the
+        /// plan and the report), so a store key that lived only on that disk can still be read afterwards. Asked for when the
+        /// plan cannot show that the store's key survives. It is part of the operation so the plan lists the step and `apply`
+        /// compares it. Additive: absent means false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_old_system_disk: bool,
     },
 }
 

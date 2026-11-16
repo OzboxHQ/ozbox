@@ -29,6 +29,21 @@ store is then set aside (never deleted) with the key this computer pinned when i
 and the web IDE's tunnel token are put back from this computer. A box that is not running cannot be asked, so start it first
 (`ozbox resume main`) or accept a new store.
 
+**On AWS, an upgrade that may lose the store's key keeps a copy of the old system disk first.** When the key is a file on the
+system disk, or ozbox cannot tell where it is (a box made on `0.1.x` cannot say, and what a box says about itself is not
+believed), the plan has one more first step: an encrypted snapshot of the old system disk, tagged `ozbox-managed=true`,
+`ozbox-box=<box>` and `ozbox-purpose=pre-upgrade-root`, taken before anything is stopped. Before you confirm, the plan prints a
+block of its own (not a note) that says what would be lost, that the copy is kept, and the commands to run afterwards:
+`ozbox secrets import … --box main` for each key, then `ozbox adopt-fleet-key main`. The snapshot's id is in the report when the
+upgrade finishes, and `ozbox backup list main` shows it any time (marked as the root disk, never as a `/work` backup, and never
+what `ozbox clone` or a restore picks). It holds the old store's key file, so keep it only while you need it: it is billed like any EBS
+snapshot, and nothing deletes it for you. Once your keys are entered again and `ozbox adopt-fleet-key main` has moved the store to the fleet's key,
+delete it with `ozbox backup delete main <snapshot id>`. To reopen the old store from it, see 1c. `--no-pre-upgrade-snapshot` turns
+the copy off: the key is then destroyed with the old disk and the old store can never be opened again. A refused plan (the disk is not
+encrypted, or this program's AWS permissions cannot snapshot it) says so and names that flag. No copy is taken when the store is kept
+(KMS, escrow, this computer's keychain), is already lost, or is known to be empty (`--use-fleet-key`). On Hetzner no copy is kept, and
+the plan says so.
+
 On AWS, a box made without a pinned approver gets this computer's key in its new machine's first-boot configuration. After
 the upgrade, laptop keys the box trusts with no record of how they were enrolled are listed, with the command that revokes
 one.
@@ -116,6 +131,58 @@ that the key is lost with no escrow, and only with a signature of a one-time cha
 made, which this computer holds. Run it from that computer. A box with no pinned key can be recovered only at the machine's
 own console, as root. Anything kept only on the box (tunnel tokens, backup credentials, imported keys, laptop keys enrolled
 later) must be entered again.
+**Status:** Preview.
+
+## 1c. Recovering an old secrets store from the copy an upgrade kept
+
+**You want:** the keys an old store held, after an upgrade that started a new store (`--accept-new-secrets-store`) on an AWS box.
+You have the id of the snapshot the upgrade reported (`ozbox backup list main`: the row marked as the root disk; it is the one tagged `ozbox-purpose=pre-upgrade-root`). Nothing here is
+automatic: reading the old key needs root on the box, which the box user does not have by design (ADR 0011), and putting the old
+store back **displaces the new one**, so keys entered since the upgrade are not in it. The steps keep both.
+
+**Underneath:** the old store's ciphertext was never lost (it came back on `/work`; the upgrade renamed it to
+`secrets.json.lost-<time>`, both in `/var/lib/ozbox-secrets` and in `/work/ozbox-secrets-private`). Only its key, the file
+`kek.key` beside the store, was on the system disk that was replaced. The snapshot has that file. The steps:
+
+1. From your computer, make a volume from the snapshot in the box's availability zone, tagged so your operator role may use it, and attach it
+   to the box as a second disk (never boot from it):
+   ```
+   aws ec2 create-volume --snapshot-id snap-OLD --availability-zone AZ \
+     --tag-specifications 'ResourceType=volume,Tags=[{Key=ozbox-managed,Value=true},{Key=ozbox-purpose,Value=recover-old-store}]'
+   aws ec2 wait volume-available --volume-ids vol-NEW
+   aws ec2 attach-volume --volume-id vol-NEW --instance-id i-BOX --device /dev/sdg
+   ```
+   `AZ` is the box's (`aws ec2 describe-instances --instance-ids i-BOX`, `Placement`).
+2. Open a root shell on the box (the machine's console; a Session Manager session if your image gives one root: `ozbox admin` has no
+   action for this, on purpose). Find the disk with `lsblk` and mount its root partition read-only: `mkdir /mnt/old && mount -o ro,nodev,nosuid,noexec
+   /dev/nvme2n1p1 /mnt/old` (use `nouuid` as well on an XFS image).
+3. Stop the secrets service and set the NEW store aside, keeping it:
+   ```
+   systemctl stop ozbox-secrets.service
+   t=$(date +%s)
+   cd /var/lib/ozbox-secrets && mv secrets.json secrets.json.new-$t && mv kek.key kek.key.new-$t
+   mv /work/ozbox-secrets-private/secrets.json /work/ozbox-secrets-private/secrets.json.new-$t
+   ```
+4. Put the OLD store and its key where the service reads them, owned by the secrets user. The old store is the newest
+   `secrets.json.lost-*` on `/work`:
+   ```
+   cp /work/ozbox-secrets-private/secrets.json.lost-TIME /var/lib/ozbox-secrets/secrets.json
+   cp /mnt/old/var/lib/ozbox-secrets/kek.key /var/lib/ozbox-secrets/kek.key
+   chown ozbox-secrets:ozbox-secrets /var/lib/ozbox-secrets/secrets.json /var/lib/ozbox-secrets/kek.key
+   chmod 600 /var/lib/ozbox-secrets/secrets.json /var/lib/ozbox-secrets/kek.key
+   systemctl start ozbox-secrets.service
+   ```
+   `ozbox secrets status` (as the box user) then lists the old store's names. If the service says the store does not open, the key
+   is not that store's: put your files back from the `.new-$t` copies.
+5. **Before anything reboots the box**, unmount and remove the second disk: `umount /mnt/old`, then
+   `aws ec2 detach-volume --volume-id vol-NEW` and `aws ec2 delete-volume --volume-id vol-NEW` from your computer. A copy of the
+   old system disk must not stay attached: it holds the key.
+6. Move the store to the fleet's KMS key straight away, so no later upgrade can lose it again: `ozbox adopt-fleet-key main`
+   (the key file on the box is destroyed by it). When it says it finished, delete the snapshot: `ozbox backup delete main snap-OLD`.
+   The new store you set aside in step 3 can be reopened the same way, or its keys entered again.
+
+The on-box half (that the old disk's `kek.key` reopens the store the upgrade set aside, and no other key does) is checked by a
+test in CI. The AWS half (a volume from the snapshot, attached and mounted) has not been run against a real account.
 **Status:** Preview.
 
 ## 2. An upgrade that was interrupted

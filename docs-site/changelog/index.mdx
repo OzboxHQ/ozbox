@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Upgrading an old box no longer destroys the key to its secrets">
+  ## An upgrade that could lose your secrets store keeps a copy of the old system disk first
+
+  A box made on `0.1.x` keeps the key to its secrets store in a file on its system disk, and an upgrade replaces that disk. The upgrade could not prove the key survived, so it refused unless you accepted a new, empty store, and accepting it destroyed the old key for good: every key had to be entered again, and the old store could never be opened.
+
+  - **On AWS, the upgrade now keeps a copy of the old system disk by default** when it cannot show the store's key survives. It is an encrypted snapshot, tagged so it is never taken for a backup of `/work`, taken before anything is stopped. If it cannot be made, nothing is changed.
+  - **The plan says it in words, before you confirm**: what would be lost, that a copy is kept, and the commands to run afterwards (`ozbox secrets import … --box`, then `ozbox adopt-fleet-key`). The snapshot's id is in the report, and `ozbox backup list` shows it.
+  - **Reopen the old store from it** with the steps in [Keeping boxes healthy](/use-cases/keeping-boxes-healthy). That guide also says when to delete the snapshot: it holds the old key, it is billed like any snapshot, and nothing deletes it for you.
+  - **`--no-pre-upgrade-snapshot`** turns the copy off, and the plan then says the old store can never be opened. No copy is taken when the store is kept, already lost or empty.
+  - **Not run on a real account yet.** Tested in CI against a simulated account and box. The steps to read the old key back from the snapshot are written down, and the part on the box is checked by a test; the part in AWS has not been run.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 

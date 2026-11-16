@@ -133,6 +133,7 @@ fn upgrade_op(n: &str, image: &str) -> Result<Operation, String> {
         name: name(n)?,
         image: image.to_string(),
         reprovision: false,
+        keep_old_system_disk: false,
     })
 }
 
@@ -532,6 +533,7 @@ pub fn plan_never_mutates(h: &Harness<'_>) -> Check {
                 .as_ref()
                 .map_or_else(|| "conformance-image".to_string(), |k| k.image.clone()),
             reprovision: false,
+            keep_old_system_disk: false,
         },
         Operation::Clone {
             from: name("conf-plan")?,
@@ -730,6 +732,7 @@ pub fn transitional_state_refused(h: &Harness<'_>) -> Check {
                 .as_ref()
                 .map_or_else(|| "conformance-image".to_string(), |k| k.image.clone()),
             reprovision: false,
+            keep_old_system_disk: false,
         },
     ];
     for op in &ops {

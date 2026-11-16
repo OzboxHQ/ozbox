@@ -68,6 +68,7 @@ mod messages_cost;
 mod messages_hardening;
 mod messages_infra;
 mod messages_models;
+mod messages_old_disk;
 mod messages_orch;
 mod messages_perm;
 mod messages_quiesce;
