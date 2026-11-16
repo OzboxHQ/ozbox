@@ -475,8 +475,8 @@ impl Gates {
 
     /// [`Gates::require`] for a write: `effect` runs once the approval is known good and the approval is spent only if it
     /// succeeds. A write the box refuses (storage, a limit) leaves the person's single-use code usable; a write that happened
-    /// can never be repeated with the same code, because the check, the write and the spend happen under one lock
-    /// ([`crate::secrets_approval::ApprovalGate::consume_then`]). Check everything that does not depend on the approval BEFORE
+    /// can never be repeated with the same code, because the approval is taken under the lock before the write and put back only
+    /// if the write fails ([`crate::secrets_approval::ApprovalGate::consume_then`]), the lock not held across the write. Check everything that does not depend on the approval BEFORE
     /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
     /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
     #[allow(clippy::too_many_arguments)]
@@ -939,7 +939,7 @@ pub fn handle_from(
         // answers "not allowed" to this op, and the laptop sends it plain values only. It comes sealed, like the import it
         // comes before (ADR 0029 Amendment 9).
         (Policy::Unsealed, "capabilities") => Resp {
-            result: Some(json!({"encoded_values": true, "declaration_v2": true, "runner_uids": true, "public_values": true})),
+            result: Some(json!({"encoded_values": true, "declaration_v2": true, "declaration_records": true, "runner_uids": true, "public_values": true})),
             ..Resp::ok()
         },
         (Policy::Unsealed, "import") => {
@@ -2724,6 +2724,8 @@ mod tests {
             &json!({"op":"capabilities"}).to_string(),
         );
         assert!(out.contains("\"encoded_values\":true"));
+        // a declaration over about 2 KB needs this: the laptop refuses it for a box that does not say so
+        assert!(out.contains("\"declaration_records\":true"));
         // the box user's import socket takes neither now: both come sealed through the ingress account (ADR 0029 A9)
         for op in ["capabilities", "import"] {
             let out = handle(&s, &m, Policy::Import, &json!({"op": op}).to_string());

@@ -554,13 +554,26 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
                 Some(b) => {
                     // A box from before this format would read the declaration, drop what it does not know and store the
                     // rest, with the owner's approval covering a declaration that is not the one written. So ask first.
-                    if p.needs_v2() || p.needs_runner_uids() || p.needs_public_values() {
+                    // A box from before declaration records keeps a declaration as one short value, so it would spend the approval and
+                    // then refuse anything over about 2 KB. The size the box would hold it at is twice the JSON (hex).
+                    let needs_records = compact.len() * 2 > crate::secrets::MAX_VALUE;
+                    if p.needs_v2()
+                        || p.needs_runner_uids()
+                        || p.needs_public_values()
+                        || needs_records
+                    {
                         let caps = ssh_receive(runner, b.as_str(), &json!({"op": "capabilities"}));
                         let has = |k: &str| {
                             caps.as_ref()
                                 .map(|v| v["result"][k] == json!(true))
                                 .unwrap_or(false)
                         };
+                        if needs_records && !has("declaration_records") {
+                            return Err(CliError::Msg(t(
+                                "secrets.policy_needs_newer_box_size",
+                                &[],
+                            )));
+                        }
                         if p.needs_v2() && !has("declaration_v2") {
                             return Err(CliError::Msg(t("secrets.policy_needs_newer_box", &[])));
                         }
@@ -1715,6 +1728,61 @@ mod tests {
             assert!(out.is_err(), "{what} was accepted");
             assert_eq!(sent, 0, "{what} reached the box");
         }
+    }
+
+    /// A declaration whose stored form is over what an older box keeps (about 2 KB) is refused on this computer for a box that does
+    /// not say it keeps declarations as records: the older box would spend the approval code and then refuse it. A box that says so
+    /// is sent it.
+    #[test]
+    fn a_big_declaration_is_not_sent_to_a_box_from_before_declaration_records() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("p.json");
+        let text = crate::workload_policy::realistic_declaration(3, 3, 8);
+        assert!(
+            text.len() * 2 > crate::secrets::MAX_VALUE
+                && text.len() < crate::secrets::MAX_RECORD_VALUE,
+            "{}",
+            text.len()
+        );
+        std::fs::write(&f, &text).unwrap();
+        let set = |r: &RecordingRunner| {
+            policy(
+                &PolicyCommand::Set {
+                    file: f.clone(),
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                r,
+                true,
+            )
+        };
+        let reply = |r: &RecordingRunner, body: &str| {
+            r.reply(Output {
+                status: Some(0),
+                stdout: body.into(),
+                stderr: String::new(),
+            })
+        };
+        // a box that has every earlier capability but not records: refused here, only the question went
+        let old = RecordingRunner::new();
+        reply(
+            &old,
+            "{\"ok\":true,\"result\":{\"encoded_values\":true,\"declaration_v2\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        let e = set(&old).unwrap_err().to_string();
+        assert!(e.contains("Nothing was sent"), "{e}");
+        assert_eq!(old.calls().len(), 1, "only the capabilities question went");
+        // a box that keeps records gets it
+        let new = RecordingRunner::new();
+        reply(
+            &new,
+            "{\"ok\":true,\"result\":{\"declaration_v2\":true,\"declaration_records\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        reply(&new, "{\"ok\":true}\n");
+        assert!(set(&new).is_ok());
+        assert_eq!(new.calls().len(), 2);
     }
 
     #[test]

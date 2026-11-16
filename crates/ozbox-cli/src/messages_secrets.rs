@@ -33,6 +33,7 @@ pub const EN: &[(&str, &str)] = &[
     ("secrets.receive_bad", "That request is not one this program takes."),
     ("secrets.policy_saved", "Saved the declaration: {count} named commands."),
     ("secrets.policy_box_only", "This declaration (or request) uses plain variables, pinned files, services, renamed secrets, tools or browsers, which only a box can hold: a computer without runner users cannot keep them. Run it on a box."),
+    ("secrets.policy_needs_newer_box_size", "This declaration is too large for that box's program, which is from before declarations could be stored as records: it keeps only about 2 KB and would refuse it after your approval code was spent. Run `ozbox upgrade` on the box first, or make the declaration smaller. Nothing was sent."),
     ("secrets.policy_needs_newer_box", "This declaration uses plain variables, pins, services, renames, tools or browsers, and that box's program is from before them: it would store the declaration without them. Run `ozbox upgrade` on the box first. Nothing was sent."),
     ("secrets.pass_shape", "--pass takes NAME=value, for example --pass PORT=3100."),
     ("secrets.service_running", "The service started and answered its health check on port {port}."),

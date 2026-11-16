@@ -280,10 +280,13 @@ fn err(m: &str) -> SecretError {
     SecretError(m.to_string())
 }
 
+/// The name every project's stored declaration starts with.
+pub const POLICY_NAME_PREFIX: &str = "workload-policy.";
+
 pub fn secret_name(project: &str) -> Result<String, SecretError> {
     // a project name is checked the way a workload secret's is
     workload_name(project, "x", "X")?;
-    Ok(format!("workload-policy.{project}"))
+    Ok(format!("{POLICY_NAME_PREFIX}{project}"))
 }
 
 fn seg_ok(s: &str, max: usize) -> bool {

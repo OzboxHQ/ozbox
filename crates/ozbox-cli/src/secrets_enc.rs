@@ -827,11 +827,17 @@ impl EncryptedSecrets {
             .unwrap_or(false))
     }
 
-    /// How many secrets are stored encoded.
+    /// How many secrets are stored encoded. A project's declaration is a record, not a secret, and is kept encoded when it
+    /// holds characters a plain value may not: it is not counted here.
     pub fn encoded_count(&self) -> Result<usize, SecretError> {
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         Ok(self.read()?.map_or(0, |f| {
-            f.secrets.values().filter(|e| !e.enc.is_empty()).count()
+            f.secrets
+                .iter()
+                .filter(|(n, e)| {
+                    !e.enc.is_empty() && !n.starts_with(crate::workload_policy::POLICY_NAME_PREFIX)
+                })
+                .count()
         }))
     }
 
@@ -1411,6 +1417,11 @@ mod tests {
                 && !text.contains("plain-0123456789")
                 && !text.contains("🔑 emoji")
         );
+        assert_eq!(s.encoded_count().unwrap(), all.len() - 1);
+        // a declaration kept as an encoded record is not a secret and is not counted as one
+        s.set_record("workload-policy.app", "{\n\"commands\": {}\n}")
+            .unwrap();
+        assert!(s.is_encoded("workload-policy.app").unwrap());
         assert_eq!(s.encoded_count().unwrap(), all.len() - 1);
         // a data-key rotation keeps every value, and the marker
         s.rotate_all_data_keys().unwrap();
