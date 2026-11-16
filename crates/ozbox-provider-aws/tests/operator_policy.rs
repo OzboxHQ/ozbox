@@ -795,6 +795,7 @@ fn a_system_disk_can_be_snapshotted_tagged_recovered_from_and_deleted_only_as_ou
             );
         }
     }
+}
 
 /// Whether a policy document allows `ec2:CreateTags` (called on its own, not as part of creating the resource) on an existing
 /// volume, when the volume has `resource_tag` set to `true` (or no tags at all, when `None`). A condition that a standalone call
