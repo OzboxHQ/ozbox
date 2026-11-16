@@ -82,6 +82,10 @@ export const IMAGE_UNVERIFIED_CODE = 'image_unverified';
  * asked; the person may accept a new store by name (`accept_new_secrets_store`), the same as the command's flag. */
 export const SECRETS_STORE_LOST_CODE = 'secrets_store_lost';
 
+/** The server's code for an upgrade refused because the store cannot be opened here but a copy of its key is held: the person may
+ * accept a new store too (the old one is set aside, never deleted, and can be reopened from the held key). */
+export const SECRETS_KEY_HELD_CODE = 'secrets_key_held';
+
 export const ops = {
   pause: (name: string): Operation => ({ op: 'pause', name }),
   resume: (name: string): Operation => ({ op: 'resume', name }),

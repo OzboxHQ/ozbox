@@ -2044,3 +2044,30 @@ every box that declared secrets of its own failed to load them, and the only tra
 - **Not covered.** OpenBao (`bao`) is still read by running the `bao` command, which the image does not carry either: a box on
   OpenBao needs the program placed (or the same treatment) before its secrets load. The native client was tested against loopback
   fakes, not a real account. A loader that has not run yet is not `failed`, so the check passes until its first run ends.
+
+## Amendment 15 (2026-11-16): the upgrade plan reads the store from the box's root even when the record names the fleet's key, and the commit barrier degrades, never silently and never open, when the service is down
+
+**What happened.** On 2026-11-16 a box whose store had been sealed by a file key (a 0.2.0-beta.1 defect), and which was configured for the fleet's KMS key, had lost the file key with its old system disk. Its secrets service exited and kept exiting. Two things were wrong around that.
+
+1. **The plan said "kept".** `ozbox upgrade --dry-run` decided the store's fate from the instance label that names the fleet's key. The label only says which key the *new machine* is given; it says nothing about whether the store opens under it. (Amendment 8 already forbade deciding from the box user's SSH answer; the label branch was ahead of the root read and escaped it.) The plan also said "kept" after its own connection to the box had failed.
+2. **Every commit on the box was blocked.** The git hooks fail closed when the secrets service cannot be asked, so no work could be committed anywhere on the box until the service was restored.
+
+**Decision, upgrade.** For a box whose record names the fleet's key, the verdict comes from what the box's root reports (Amendment 11's `adopt-status`), never from the label alone:
+
+| Root says | Verdict |
+|---|---|
+| service ready on KMS, the store and its `/work` copy sealed by the key the new machine gets, no move or cancel under way | kept |
+| the store is sealed by a key kept in a file (the move was never finished) | will be lost: finish `adopt-fleet-key`, or accept a new store |
+| the service is down, its store is sealed by a file key, the key file is gone, and the box is configured for KMS (or the service's own `no-escrow` state), and no copy of the key is held in this computer's keychain or the box's vault | already unopenable: `--accept-new-secrets-store` sets the old store aside as part of the upgrade, or `recover-secrets` first |
+| the same, but a copy of the file key IS held (this computer's keychain, or the box's vault) | key held: the store is not lost. Refused without `--accept-new-secrets-store`; with it the upgrade sets the old store aside (renamed, never deleted, its held key untouched) and starts a new one on the fleet's key, and the old store can be reopened later (use case 1c). `adopt-fleet-key` is not offered: it refuses a box whose service is not ready |
+| the box could not be asked (root channel failed, box older, box not running, no root channel) | unknown: refused without `--accept-new-secrets-store`, never "kept" |
+
+"Already unopenable" is derived from the facts root already prints (no new field, so no change to the `ozbox-adopt-status=3` shape), so it holds whichever program wrote the state. A stopped box is unknown even with the label.
+
+**Decision, commit barrier.** Only an outage degrades, and an outage is a failed connection: the socket is missing, or nothing is listening on it (`ENOENT`, `ECONNREFUSED`). A service that is there but did not answer (a read that timed out, a reply that is not a reply, a socket that refuses this user), a refusal, a busy minute and an unreadable file still hold the change, as they did before. Telling the two apart is what keeps a slow or confused service from being a way to commit unscanned.
+
+- **Commit** (`pre-commit`) still reads everything that does not need the service: key shapes, file names, `.env` files. A commit with a finding is stopped (no approval can be recorded while the service that records approvals is down). A clean commit is let through with a plain note: what was not checked, that nothing was lost, and how to bring the service back.
+- **Push** (`pre-push`) stays closed for the whole outage. A push is what leaves the box and stored values cannot be compared, so it is stopped with the same plain words; the shapes it found are listed too. Nothing is lost: the commits are on the box.
+- **No box-user override.** A command the box user could run to wave a change through would be a way for an agent to do the same, and an approval is recorded by the service that is down. The way forward is to restore the service, which the message says how to do.
+
+**What this accepts.** While the service is down a stored value can enter a local commit unseen. It cannot leave through a push that runs the hooks: `pre-push` reads every commit the remote lacks once the service is back, and a commit with such a value then has to be rewritten before it can be pushed. The hooks are a barrier against accident, not a wall (ADR 0041 lists their limits: a push with `--no-verify`, or with `core.hooksPath` moved, runs none of them). What actually stops an unscanned value leaving the box is the egress allow-list and the host's push protection; the hooks add to them and are not what they rest on. This is the same exposure `post-commit` already accepted for a service that was missing. A box user who can make the service unreachable can commit unscanned, which the hook, a barrier against accident, never claimed to stop (ADR 0023); the closed network and the push check stand behind it. **For the owner to decide:** whether the unscanned commits should also be listed in the audit chain when the service returns (the service cannot record them while it is down), and whether a push should ever be allowed during an outage by a laptop-signed approval (it would need a path that does not go through the service).

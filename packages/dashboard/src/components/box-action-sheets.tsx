@@ -20,7 +20,7 @@ import type { ApiClient } from '../api/client';
 import type { BoxRecord, Info, Operation } from '../api/types';
 import { sizeLabel } from '../lib/format';
 import { isMachineMissing } from '../lib/format';
-import { canConfirm, IMAGE_UNVERIFIED_CODE, ops, riskLabel, SECRETS_STORE_LOST_CODE, type FlowState } from '../lib/plan-flow';
+import { canConfirm, IMAGE_UNVERIFIED_CODE, ops, riskLabel, SECRETS_KEY_HELD_CODE, SECRETS_STORE_LOST_CODE, type FlowState } from '../lib/plan-flow';
 import { usePlanFlow } from '../lib/use-plan-flow';
 import { t, type MessageKey } from '../lib/i18n';
 import { UpgradeFollowUp, UpgradeForm, UpgradeProgress } from './upgrade-sheet';
@@ -287,7 +287,7 @@ function BoxActionSheetsInner({ box, kind, client, info, onClose, onApplied }: S
   }
   // The box's secrets store would not survive the upgrade (or the box could not be asked): the sheet comes back with what is
   // lost and the acceptance, which is off until the person turns it on.
-  const storeLost = flow.state.phase === 'error' && kind === 'upgrade' && flow.state.code === SECRETS_STORE_LOST_CODE ? flow.state : null;
+  const storeLost = flow.state.phase === 'error' && kind === 'upgrade' && (flow.state.code === SECRETS_STORE_LOST_CODE || flow.state.code === SECRETS_KEY_HELD_CODE) ? flow.state : null;
   if (storeLost) {
     const asked = storeLost.operation?.op === 'upgrade' && storeLost.operation.image !== 'latest' ? storeLost.operation.image : '';
     return <UpgradeForm key="store-lost" box={box} client={client} onClose={() => { flow.dispatch({ type: 'cancel' }); onClose(); }} storeRefusal={storeLost.message} initialImage={asked} onSubmit={(op, allow, accept) => flow.begin(op, allow, accept)} />;

@@ -32,6 +32,14 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** `ozbox upgrade <box>` to the release that carries this.
 </Update>
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Secrets service outages">
+  ## An upgrade plan no longer says "kept" about a store it has not checked, and you can still commit while the secrets service is down
+
+  **The upgrade plan tells the truth about the secrets store.** For a box on your fleet's KMS key, `ozbox upgrade` used to say the store was kept because the box's record named the key, even when the box's secrets service could not open its store. The plan now asks the box itself and says one of four things: kept, will be lost, already cannot be opened (and how to start a new store, as part of the upgrade with `--accept-new-secrets-store` or beforehand with `ozbox admin <box> -- recover-secrets`), or unknown because the box could not be asked. It only says a store cannot be opened when no copy of its key is held anywhere: if your computer's keychain or the box's vault holds one, it says the store is not lost, and that `--accept-new-secrets-store` sets the old store aside (never deleted) and starts a new one, so the old one can be reopened later from the held key. Unknown is never "kept". See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+
+  **Commits are not blocked while the secrets service is down.** Before, every commit on the box was stopped until the service came back, so work could not be saved. Now a commit is still checked for private keys, provider keys, signed tokens, passwords in addresses and `.env` files. A clean commit goes through, with a note that stored secrets were not compared; nothing is lost. A commit that looks like it holds a key is stopped, and the message says so. A push is held until the service is back, because that is what leaves the box, and the message says how to bring the service back. See the [CLI reference](/cli-reference).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.2: declarations that fit a real app, safer upgrades">
   ## Oz Box 0.2.0-beta.2: declarations that fit a real app, safer upgrades
 
