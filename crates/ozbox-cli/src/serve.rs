@@ -3166,6 +3166,7 @@ mod tests {
         let p = a.provider.plan(&Operation::Destroy {
             name: name.clone(),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })?;
         a.provider.apply(&p)?;
         create(&mut a, "dev")?;

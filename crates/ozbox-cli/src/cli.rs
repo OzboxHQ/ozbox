@@ -408,6 +408,10 @@ pub enum Command {
         /// Do not keep a final snapshot of /work.
         #[arg(long)]
         no_final_snapshot: bool,
+        /// Keep the copies of old system disks that upgrades took (each holds the box's old secrets-store key). By default they
+        /// are deleted with the box, because ozbox cannot list them once it is gone.
+        #[arg(long)]
+        keep_old_system_disks: bool,
     },
     /// The box modules and first-boot configuration this program renders: its version, their hashes, and the folder in use.
     Infra,

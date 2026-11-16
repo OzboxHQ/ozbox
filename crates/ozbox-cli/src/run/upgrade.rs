@@ -468,6 +468,31 @@ pub fn with_old_disk_copy(
     Ok(fresh)
 }
 
+/// The same plan with the copy of the old system disk taken already: the copy is made now, waiting as long as the provider allows,
+/// and the upgrade is planned again WITHOUT it, so the apply does not make a second. Done after the person confirmed and BEFORE the
+/// box is made ready for its stop: the hold on new runs lasts ten minutes from the start of that, and a slow copy must not eat it.
+/// An `Err` is the copy's failure; nothing has been changed.
+pub fn take_old_disk_copy_first(
+    p: &dyn Provider,
+    plan: &Plan,
+) -> ozbox_core::Result<(Plan, String)> {
+    let Operation::Upgrade { name, image, .. } = &plan.operation else {
+        return Err(ozbox_core::Error::Provider(
+            "only an upgrade keeps a copy of the old system disk".into(),
+        ));
+    };
+    let id = p.keep_old_system_disk(name, image)?;
+    let mut op = plan.operation.clone();
+    if let Operation::Upgrade {
+        keep_old_system_disk,
+        ..
+    } = &mut op
+    {
+        *keep_old_system_disk = false;
+    }
+    Ok((p.plan(&op)?, id))
+}
+
 /// Whether a plan takes the copy of the old system disk.
 pub fn plan_keeps_old_disk(plan: &Plan) -> bool {
     plan.changes
@@ -475,40 +500,31 @@ pub fn plan_keeps_old_disk(plan: &Plan) -> bool {
         .any(|c| c.kind == "snapshot.old_system_disk")
 }
 
-/// The id of the copy this upgrade took of the old system disk: the newest provider snapshot of the box with the purpose tag
-/// made for this image.
-pub fn kept_copy_id(
-    p: &dyn Provider,
-    name: &BoxName,
-    image: &str,
-) -> std::result::Result<String, String> {
-    let all = p.snapshots(name).map_err(|e| e.to_string())?;
-    all.into_iter()
-        .rfind(|s| {
-            s.labels
-                .get(ozbox_provider_aws::PURPOSE_TAG)
-                .map(String::as_str)
-                == Some(ozbox_provider_aws::PRE_UPGRADE_ROOT)
-                && s.labels
-                    .get(ozbox_core::UPGRADE_TO_LABEL)
-                    .map(String::as_str)
-                    == Some(image)
-        })
-        .map(|s| s.id)
-        .ok_or_else(|| "no such snapshot is listed".to_string())
+/// The id of the copy this upgrade took of the old system disk, as the apply itself reported it (the record it returned carries
+/// the id of the snapshot it made). Never read back from a listing: a listing is unordered and holds the copies of earlier
+/// upgrades too, and the wrong id here would send a person to delete, or to recover from, the wrong disk.
+pub fn kept_copy_id(applied: Option<&BoxRecord>) -> std::result::Result<String, String> {
+    applied
+        .and_then(|r| r.spec.labels.get(ozbox_core::PRE_UPGRADE_COPY_LABEL))
+        .cloned()
+        .ok_or_else(|| "the apply did not say which snapshot it took".to_string())
 }
 
 /// What the report says about the copy of the old system disk: `None` when the plan had no reason to talk about one.
 pub fn old_disk_report(
-    p: &dyn Provider,
+    taken_first: Option<&str>,
+    applied: Option<&BoxRecord>,
     name: &BoxName,
-    image: &str,
     kept: bool,
     warned: bool,
 ) -> (Option<Step>, Option<String>) {
     let n = name.as_str();
     if kept {
-        return match kept_copy_id(p, name, image) {
+        return match taken_first
+            .map(str::to_string)
+            .ok_or(())
+            .or_else(|()| kept_copy_id(applied))
+        {
             Ok(id) => (
                 Some(Step::new(
                     StepOutcome::Done,
@@ -1926,6 +1942,21 @@ pub(super) fn execute(
     }
     confirm(&plan, f)?;
 
+    // The copy of the old system disk is taken NOW, before the box is made ready for its stop: the hold the box puts on new runs
+    // lasts ten minutes from the start of that, and the provider may need longer than that for a first copy. A failure here has
+    // changed nothing. What is applied below is the same upgrade planned again without the step that is already done.
+    let mut copy_taken_first: Option<String> = None;
+    let apply_plan = if plan_keeps_old_disk(&plan) {
+        if !f.json {
+            println!("{}", t("old_disk.taking", &[("box", name.as_str())]));
+        }
+        let (again, id) = take_old_disk_copy_first(p, &plan)?;
+        copy_taken_first = Some(id);
+        again
+    } else {
+        plan.clone()
+    };
+
     // Quiesce replaces the plain checkpoint when the plan stops the machine (runs end cleanly, uncommitted work is
     // snapshotted without touching anything); otherwise the old step reports that there is nothing to save.
     // The hold on new runs is lifted on every way out until the change is applied (a refusal, a declined question, a
@@ -1965,7 +1996,7 @@ pub(super) fn execute(
         }
         c
     };
-    let result = match p.apply(&plan) {
+    let result = match p.apply(&apply_plan) {
         Ok(r) => r,
         Err(cause) => {
             let Some(stopped) = describe_failure(p, &name, &target, &cause) else {
@@ -2078,9 +2109,9 @@ pub(super) fn execute(
         .flatten()
         .and_then(|after| (around.review_signers)(&after));
     let (old_system_disk, old_system_disk_snapshot) = old_disk_report(
-        p,
+        copy_taken_first.as_deref(),
+        result.as_ref(),
         &name,
-        &target,
         plan_keeps_old_disk(&plan),
         loud.is_some(),
     );
@@ -2327,11 +2358,31 @@ mod tests {
         old_disk: OldDisk,
         dry_run: bool,
     ) -> Result<()> {
-        execute(
-            p,
+        run_keeping_asking(
             &FirstBootBox {
                 record: Err("no route".into()),
             },
+            p,
+            name,
+            fate,
+            accept,
+            old_disk,
+            dry_run,
+        )
+    }
+
+    fn run_keeping_asking(
+        agent: &dyn BoxAgent,
+        p: &dyn Provider,
+        name: &BoxName,
+        fate: StoreFate,
+        accept: bool,
+        old_disk: OldDisk,
+        dry_run: bool,
+    ) -> Result<()> {
+        execute(
+            p,
+            agent,
             name.clone(),
             Some("fake-image-2".into()),
             false,
@@ -2469,14 +2520,6 @@ mod tests {
                 Some("fake-image-2"),
                 "the upgrade itself went ahead"
             );
-            let (step, id) = old_disk_report(&p, &n, "fake-image-2", true, true);
-            let step = step.ok_or("no step")?;
-            assert_eq!(step.outcome, StepOutcome::Done);
-            assert_eq!(id.as_deref(), Some(copies[0].id.as_str()));
-            assert!(
-                step.detail.contains(&copies[0].id)
-                    && step.detail.contains("ozbox backup delete main")
-            );
             // and it is deletable like any snapshot
             p.apply(&p.plan(&Operation::DeleteSnapshot {
                 name: n.clone(),
@@ -2484,6 +2527,144 @@ mod tests {
             })?)?;
             assert!(old_disk_copies(&p, &n)?.is_empty());
         }
+        Ok(())
+    }
+
+    /// A box that notes, when it is first asked to get ready for its stop, how many copies of old system disks the provider holds.
+    struct ReadyAsker {
+        inner: FirstBootBox,
+        dir: std::path::PathBuf,
+        copies_when_asked: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl BoxAgent for ReadyAsker {
+        fn metrics_now(
+            &self,
+            r: &BoxRecord,
+            t: u64,
+        ) -> std::result::Result<MetricsSample, AgentError> {
+            self.inner.metrics_now(r, t)
+        }
+        fn metrics_series(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+            c: u64,
+        ) -> std::result::Result<Vec<MetricsSample>, AgentError> {
+            self.inner.metrics_series(r, a, b, c)
+        }
+        fn selftest(&self, r: &BoxRecord, t: u64) -> std::result::Result<SelfTest, AgentError> {
+            self.inner.selftest(r, t)
+        }
+        fn incidents(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+        ) -> std::result::Result<Vec<Incident>, AgentError> {
+            self.inner.incidents(r, a, b)
+        }
+        fn image_agent(
+            &self,
+            r: &BoxRecord,
+        ) -> std::result::Result<crate::serve::agent::ImageAgent, AgentError> {
+            self.inner.image_agent(r)
+        }
+        fn quiesce_call(
+            &self,
+            rec: &BoxRecord,
+            method: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, serde_json::Value), AgentError> {
+            if method == "POST" {
+                // the provider as it is right now (the sandbox keeps its state in the folder)
+                let p = ozbox_provider_fake::open(&self.dir);
+                let n = p
+                    .snapshots(&rec.spec.name)
+                    .map(|l| l.iter().filter(|s| s.is_old_system_disk_copy()).count())
+                    .unwrap_or(usize::MAX);
+                if let Ok(mut g) = self.copies_when_asked.lock() {
+                    g.push(n);
+                }
+            }
+            Err(AgentError::Unsupported("none".into()))
+        }
+    }
+
+    /// The hold the box puts on new runs lasts ten minutes from the start of its preparation for the stop, and a first copy of a
+    /// disk can take longer: so the copy is complete BEFORE the box is asked to get ready, and the apply does not take a second.
+    #[test]
+    fn the_copy_is_taken_before_the_box_is_asked_to_get_ready_for_its_stop() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let agent = ReadyAsker {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            dir: dir.path().to_path_buf(),
+            copies_when_asked: std::sync::Mutex::new(Vec::new()),
+        };
+        run_keeping_asking(&agent, &p, &n, StoreFate::Lost, true, OldDisk::Keep, false)
+            .map_err(|e| e.to_string())?;
+        let asked = agent
+            .copies_when_asked
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        assert_eq!(
+            asked,
+            vec![1],
+            "the copy existed when the box was asked to get ready"
+        );
+        assert_eq!(
+            old_disk_copies(&p, &n)?.len(),
+            1,
+            "and the apply took no second one"
+        );
+        assert_eq!(
+            p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+            Some("fake-image-2")
+        );
+        Ok(())
+    }
+
+    /// The report names the snapshot THIS apply took, said by the apply itself, even when the box already holds the copies of
+    /// earlier upgrades (a retried upgrade takes another copy): never one picked out of a listing.
+    #[test]
+    fn the_report_names_the_copy_this_apply_took_and_never_guesses() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let op = |reprovision: bool| Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision,
+            keep_old_system_disk: true,
+        };
+        let mut said = Vec::new();
+        for reprovision in [false, true, true] {
+            let rec = p.apply(&p.plan(&op(reprovision))?)?.ok_or("no record")?;
+            let (step, id) = old_disk_report(None, Some(&rec), &n, true, true);
+            let step = step.ok_or("no step")?;
+            let id = id.ok_or("no id")?;
+            assert_eq!(step.outcome, StepOutcome::Done);
+            assert!(step.detail.contains(&id) && step.detail.contains("ozbox backup delete main"));
+            said.push(id);
+        }
+        // every apply took its own copy, each report named its own, and the listing holds all of them
+        let held: Vec<String> = old_disk_copies(&p, &n)?.into_iter().map(|c| c.id).collect();
+        assert_eq!(said.len(), 3);
+        let mut distinct = said.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3, "{said:?}");
+        for id in &said {
+            assert!(held.contains(id), "{id} not in {held:?}");
+        }
+        // an apply that did not say which snapshot it took is reported as a failure, not guessed from the listing
+        let (step, id) = old_disk_report(None, None, &n, true, true);
+        assert_eq!(step.ok_or("no step")?.outcome, StepOutcome::Failed);
+        assert!(id.is_none());
         Ok(())
     }
 

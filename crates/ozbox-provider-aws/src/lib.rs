@@ -33,10 +33,10 @@ pub const DEFAULT_MODULE_DIR: &str = "infra/tofu/modules/aws-box";
 
 const TAG_BOX: &str = "ozbox-box";
 /// What a snapshot Oz Box took is for. A snapshot with no such tag is a backup of `/work`.
-pub const PURPOSE_TAG: &str = "ozbox-purpose";
+pub const PURPOSE_TAG: &str = ozbox_core::PURPOSE_LABEL;
 /// The purpose of the snapshot an upgrade takes of the OLD system disk before replacing it (`ozbox upgrade`, when the plan
 /// cannot show that the secrets store's key survives). It holds a disk, not `/work`: it is never a restore or clone source.
-pub const PRE_UPGRADE_ROOT: &str = "pre-upgrade-root";
+pub const PRE_UPGRADE_ROOT: &str = ozbox_core::PRE_UPGRADE_ROOT_PURPOSE;
 /// The volume a pre-upgrade snapshot was taken of (a tag on it).
 pub const SOURCE_VOLUME_TAG: &str = "ozbox-source-volume";
 /// Tag an Oz image carries (its release), and the one `--image latest` looks for.
@@ -347,6 +347,13 @@ pub struct AwsConfig {
     /// How often, and how many times, to look at a growing volume before giving up.
     pub poll_interval: std::time::Duration,
     pub volume_wait_polls: u32,
+    /// How many times (one `poll_interval` apart) to look at the copy of the old system disk an upgrade takes before giving up
+    /// on it: thirty minutes by default (`snapshot_wait_minutes` under `[aws]`). The upgrade stops the machine only after the copy
+    /// is complete. `ozbox upgrade` takes the copy before it makes the box ready for the stop, so it may wait this long; a copy
+    /// taken inside an apply (the dashboard's) is limited to [`ozbox_core::HOLD_SAFE_COPY_WAIT`], because the box holds new runs
+    /// back for only ten minutes from the start of that preparation. A copy not complete in time ends the upgrade with the box
+    /// untouched, and the copy finishes by itself.
+    pub snapshot_wait_polls: u32,
     /// How many more times to try creating the machine when the account refuses it for lack of capacity or quota, and
     /// the pause before the first retry (it doubles each time, to at most five minutes).
     pub create_retries: u32,
@@ -392,6 +399,7 @@ impl Default for AwsConfig {
             patch_group: None,
             poll_interval: std::time::Duration::from_secs(5),
             volume_wait_polls: 60,
+            snapshot_wait_polls: 360,
             create_retries: 4,
             create_backoff: std::time::Duration::from_secs(30),
             release_repo: ozbox_core::DEFAULT_RELEASE_REPO.to_string(),
@@ -594,11 +602,31 @@ fn is_pre_upgrade_root(tags: &[Tag]) -> bool {
     tag(tags, PURPOSE_TAG) == Some(PRE_UPGRADE_ROOT)
 }
 
+/// Where the module (and a restore, and an adoption) attaches a box's `/work` volume.
+const WORK_DEVICE: &str = "/dev/sdf";
+
+/// The `/work` volume of a machine: the disk at [`WORK_DEVICE`]. Another disk someone attached (a recovered system disk, for
+/// instance) is never taken for it, however it is ordered; only a machine with a single non-system disk and nothing at
+/// [`WORK_DEVICE`] falls back to that one disk.
 fn work_volume_of(i: &Instance) -> Option<&str> {
-    i.block_device_mappings
+    let others: Vec<(&str, &str)> = i
+        .block_device_mappings
         .iter()
         .filter(|m| Some(&m.device_name) != i.root_device_name.as_ref())
-        .find_map(|m| m.ebs.as_ref().map(|e| e.volume_id.as_str()))
+        .filter_map(|m| {
+            m.ebs
+                .as_ref()
+                .map(|e| (m.device_name.as_str(), e.volume_id.as_str()))
+        })
+        .collect();
+    others
+        .iter()
+        .find(|(d, _)| *d == WORK_DEVICE)
+        .map(|(_, v)| *v)
+        .or(match others.as_slice() {
+            [(_, only)] => Some(*only),
+            _ => None,
+        })
 }
 
 struct Scoped<'a> {
@@ -2040,9 +2068,10 @@ impl Backend for AwsBackend {
                 vol.volume_id
             )));
         }
-        if vol.encrypted == Some(false) {
+        // Fail closed: a disk the provider does not say is encrypted is treated as not (an answer without the field is not a yes).
+        if vol.encrypted != Some(true) {
             return Err(Error::Config(format!(
-                "the system disk of {name} ({}) is not encrypted, so a copy of it would not be either, and it holds the secrets store's key. Nothing was changed. Pass --no-pre-upgrade-snapshot to go on without a copy.",
+                "the system disk of {name} ({}) is not confirmed encrypted, so a copy of it would not be either, and it holds the secrets store's key. Nothing was changed. Pass --no-pre-upgrade-snapshot to go on without a copy.",
                 vol.volume_id
             )));
         }
@@ -2052,7 +2081,12 @@ impl Backend for AwsBackend {
         )))
     }
 
-    fn snapshot_system_disk(&self, rec: &BoxRecord, image: &str) -> Result<String> {
+    fn snapshot_system_disk(
+        &self,
+        rec: &BoxRecord,
+        image: &str,
+        max_wait: Option<std::time::Duration>,
+    ) -> Result<String> {
         let name = &rec.spec.name;
         let vol = self.root_volume(rec)?;
         let s = self.at_rec(rec);
@@ -2074,37 +2108,63 @@ impl Backend for AwsBackend {
                 vol.volume_id
             ),
         ])?;
-        s.run(&[
-            "ec2",
-            "wait",
-            "snapshot-completed",
-            "--snapshot-ids",
-            &created.snapshot_id,
-        ])?;
-        // Said by the provider, not assumed: the copy is encrypted, under the key the disk has. Nothing has been stopped yet,
-        // so a copy that is not is refused here and the box is as it was.
-        let seen: Snapshots = s.run_json(&[
-            "ec2",
-            "describe-snapshots",
-            "--snapshot-ids",
-            &created.snapshot_id,
-        ])?;
-        let snap = seen
-            .snapshots
-            .iter()
-            .find(|x| x.snapshot_id == created.snapshot_id)
-            .ok_or_else(|| {
-                Error::Provider(format!(
-                    "snapshot {} of the system disk of {name} was made but cannot be read back; nothing else was changed",
-                    created.snapshot_id
-                ))
-            })?;
-        if snap.encrypted == Some(false)
-            || matches!((&snap.kms_key_id, &vol.kms_key_id), (Some(a), Some(b)) if a != b)
-        {
+        // Waited for here, one look at a time, rather than with `aws ec2 wait` (which gives up after about ten minutes and says
+        // nothing about which snapshot): nothing has been stopped yet, and the box holds new runs back for ten minutes from the
+        // start of the checkpoint that came first, so the copy must be complete well inside that. A copy that is not is named, and
+        // finishes by itself.
+        let id = &created.snapshot_id;
+        let mut seen: Option<Snapshot> = None;
+        let mut polls = self.cfg.snapshot_wait_polls.max(1);
+        if let Some(d) = max_wait {
+            let every = self.cfg.poll_interval.as_secs().max(1);
+            polls = polls.min(
+                u32::try_from(d.as_secs() / every)
+                    .unwrap_or(u32::MAX)
+                    .max(1),
+            );
+        }
+        for attempt in 0..polls {
+            let listed: Snapshots = s
+                .run_json(&["ec2", "describe-snapshots", "--snapshot-ids", id])
+                .map_err(|e| {
+                    Error::Provider(format!(
+                        "snapshot {id} of the system disk of {name} was started but could not be read ({e}); nothing else was changed. It may finish: check it with `aws ec2 describe-snapshots --snapshot-ids {id}`, then delete it with `ozbox backup delete {name} {id}` or use it"
+                    ))
+                })?;
+            let Some(snap) = listed.snapshots.into_iter().find(|x| &x.snapshot_id == id) else {
+                return Err(Error::Provider(format!(
+                    "snapshot {id} of the system disk of {name} was made but cannot be read back; nothing else was changed"
+                )));
+            };
+            match snap.state.as_deref() {
+                Some("completed") => {
+                    seen = Some(snap);
+                    break;
+                }
+                Some("pending") | None => {}
+                Some(other) => {
+                    return Err(Error::Provider(format!(
+                        "snapshot {id} of the system disk of {name} ended as {other}; nothing else was changed. Delete it with `ozbox backup delete {name} {id}` and run the upgrade again"
+                    )));
+                }
+            }
+            if attempt + 1 < polls {
+                std::thread::sleep(self.cfg.poll_interval);
+            }
+        }
+        let Some(snap) = seen else {
             return Err(Error::Provider(format!(
-                "snapshot {} of the system disk of {name} is not encrypted under the disk's own key, so it is not a safe place for the secrets store's key. Nothing else was changed; delete it with `ozbox backup delete {name} {}`",
-                created.snapshot_id, created.snapshot_id
+                "snapshot {id} of the system disk of {name} is still being made after {} minutes, so the upgrade stopped before touching anything. The snapshot keeps going by itself and can be used once `aws ec2 describe-snapshots --snapshot-ids {id}` says completed. Run the upgrade again when it has (it takes another copy: delete the older one with `ozbox backup delete {name} {id}` when you do not need it)",
+                (u64::from(polls) * self.cfg.poll_interval.as_secs()).div_ceil(60).max(1)
+            )));
+        };
+        // Said by the provider, not assumed: the copy is encrypted, under the key the disk has. Both must be stated and equal; an
+        // answer that leaves either out is not a pass. Nothing has been stopped yet, so a copy that is not is refused here and the
+        // box is as it was.
+        let same_key = matches!((&snap.kms_key_id, &vol.kms_key_id), (Some(a), Some(b)) if a == b);
+        if snap.encrypted != Some(true) || !same_key {
+            return Err(Error::Provider(format!(
+                "snapshot {id} of the system disk of {name} is not confirmed encrypted under the disk's own key, so it is not a safe place for the secrets store's key. Nothing else was changed; delete it with `ozbox backup delete {name} {id}`"
             )));
         }
         Ok(created.snapshot_id)
@@ -3822,6 +3882,7 @@ Usage: ozbox secrets <COMMAND>",
         let plan = p.plan(&Operation::Destroy {
             name: name.clone(),
             final_snapshot: false,
+            keep_old_system_disks: false,
         })?;
         assert_eq!(plan.max_risk(), Some(ozbox_core::Risk::High));
         assert!(plan
@@ -3855,6 +3916,7 @@ Usage: ozbox secrets <COMMAND>",
         let plan = p.plan(&Operation::Destroy {
             name: name.clone(),
             final_snapshot: true,
+            keep_old_system_disks: false,
         })?;
         assert!(plan.changes.iter().any(|c| c.kind == "snapshot.create"));
         assert!(plan.notes.iter().any(|n| n.contains("deleted directly")));
@@ -6068,7 +6130,7 @@ Usage: ozbox secrets <COMMAND>",
             "{said}"
         );
         aws.clear_calls();
-        p.apply(&plan)?;
+        let applied = p.apply(&plan)?.ok_or("no record")?;
         let calls = aws.calls();
         let at = |f: &dyn Fn(&CommandSpec) -> bool| calls.iter().position(f);
         let snap_at = at(&|c| c.args.get(1).is_some_and(|s| s == "create-snapshot"))
@@ -6096,12 +6158,28 @@ Usage: ozbox secrets <COMMAND>",
             "{:?}",
             snap_call.args
         );
-        assert!(calls[snap_at..mark_at]
-            .iter()
-            .any(|c| c.args.get(1).is_some_and(|s| s == "wait")
-                && c.args.iter().any(|a| a == "snapshot-completed")));
+        // and it was looked at until it was complete (and its encryption read) before anything was marked
+        assert!(calls[snap_at..mark_at].iter().any(|c| {
+            c.args.get(1).is_some_and(|s| s == "describe-snapshots")
+                && c.args.iter().any(|a| a == "--snapshot-ids")
+        }));
         let kept = aws.system_disk_snapshots(&name);
         assert_eq!(kept.len(), 1, "{kept:?}");
+        // the apply itself says which snapshot it took, so a report never has to guess one from a listing
+        assert_eq!(
+            applied.spec.labels.get(ozbox_core::PRE_UPGRADE_COPY_LABEL),
+            Some(&kept[0].0),
+            "{:?}",
+            applied.spec.labels
+        );
+        assert!(
+            !p.get(&name)?
+                .ok_or("gone")?
+                .spec
+                .labels
+                .contains_key(ozbox_core::PRE_UPGRADE_COPY_LABEL),
+            "the id is the answer of one apply, never written to the provider"
+        );
         let tags = &kept[0].1;
         for (k, v) in [
             ("ozbox-managed", "true"),
@@ -6195,6 +6273,351 @@ Usage: ozbox secrets <COMMAND>",
                 .ok_or("missing")?
                 .includes_work
         );
+        Ok(())
+    }
+
+    /// Nothing was marked, stopped or replaced: no stop, no upgrade mark, no OpenTofu run, and the box is as it was.
+    fn assert_untouched(aws: &FakeAws, p: &Engine<AwsBackend>, before: &BoxRecord, what: &str) {
+        let calls = aws.calls();
+        let touched: Vec<String> = calls
+            .iter()
+            .filter(|c| {
+                (c.program == "tofu" && c.args.iter().any(|a| a == "apply" || a == "destroy"))
+                    || c.args.get(1).is_some_and(|a| a.starts_with("stop"))
+                    || c.args.iter().any(|a| a.starts_with("Key=ozbox-upgrade-to"))
+            })
+            .map(|c| c.args.join(" "))
+            .collect();
+        assert!(touched.is_empty(), "{what}: {touched:?}");
+        let after = p.get(&before.spec.name).ok().flatten();
+        assert_eq!(after.as_ref(), Some(before), "{what}: the box changed");
+    }
+
+    /// A security review (2026-11-16): the engine ignoring the result of the copy changed no test. A copy that fails at ANY step
+    /// (made, looked at, finished, encrypted, under the disk's key) ends the upgrade with nothing stopped, marked or replaced.
+    #[test]
+    fn a_copy_that_fails_at_any_step_ends_the_upgrade_before_anything_changes() -> TestResult {
+        type Setup = fn(&FakeAws);
+        let cases: [(&str, Setup, &str); 8] = [
+            (
+                "the snapshot cannot be made",
+                |a| a.fail_calls("create-snapshot"),
+                "could not create",
+            ),
+            (
+                "the snapshot cannot be read",
+                |a| a.fail_calls("describe-snapshots"),
+                "could not be read",
+            ),
+            (
+                "the snapshot never finishes",
+                |a| a.new_snapshots_report("pending"),
+                "still being made",
+            ),
+            (
+                "the snapshot ends in error",
+                |a| a.new_snapshots_report("error"),
+                "ended as error",
+            ),
+            (
+                "the copy is not encrypted",
+                |a| {
+                    a.copies_report_encryption(
+                        Some(false),
+                        Some("arn:aws:kms:us-east-1:123456789012:key/fake"),
+                    )
+                },
+                "not confirmed encrypted",
+            ),
+            (
+                "the copy does not say it is encrypted",
+                |a| {
+                    a.copies_report_encryption(
+                        None,
+                        Some("arn:aws:kms:us-east-1:123456789012:key/fake"),
+                    )
+                },
+                "not confirmed encrypted",
+            ),
+            (
+                "the copy is under another key",
+                |a| {
+                    a.copies_report_encryption(
+                        Some(true),
+                        Some("arn:aws:kms:us-east-1:123456789012:key/other"),
+                    )
+                },
+                "not confirmed encrypted",
+            ),
+            (
+                "the copy does not say its key",
+                |a| a.copies_report_encryption(Some(true), None),
+                "not confirmed encrypted",
+            ),
+        ];
+        for (what, setup, says) in cases {
+            let aws = Arc::new(FakeAws::new());
+            let p = provider_with(&aws, |c| {
+                c.poll_interval = std::time::Duration::ZERO;
+                c.snapshot_wait_polls = 3;
+            });
+            let before = running(&aws, &p, "main", Size::S)?;
+            let name = before.spec.name.clone();
+            let plan = p.plan(&upgrade_keeping_the_old_disk(&name, true))?;
+            setup(&aws);
+            aws.clear_calls();
+            let err = p
+                .apply(&plan)
+                .err()
+                .ok_or_else(|| format!("{what}: the upgrade went ahead"))?
+                .to_string();
+            assert!(err.contains(says), "{what}: {err}");
+            assert_untouched(&aws, &p, &before, what);
+        }
+        Ok(())
+    }
+
+    /// A copy still being made names the snapshot, says it will finish by itself and can be used, and the upgrade did not start.
+    #[test]
+    fn a_copy_that_is_slow_is_named_and_the_upgrade_has_not_started() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let p = provider_with(&aws, |c| {
+            c.poll_interval = std::time::Duration::ZERO;
+            c.snapshot_wait_polls = 2;
+        });
+        let before = running(&aws, &p, "main", Size::S)?;
+        let plan = p.plan(&upgrade_keeping_the_old_disk(&before.spec.name, true))?;
+        aws.new_snapshots_report("pending");
+        let err = p.apply(&plan).err().ok_or("went ahead")?.to_string();
+        let id = aws
+            .system_disk_snapshots(&before.spec.name)
+            .first()
+            .map(|s| s.0.clone())
+            .ok_or("no snapshot")?;
+        assert!(
+            err.contains(&id) && err.contains("keeps going") && err.contains("can be used"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    /// The plan fails closed too: a system disk that does not SAY it is encrypted is not assumed to be.
+    #[test]
+    fn a_system_disk_that_does_not_say_it_is_encrypted_refuses_the_plan() -> TestResult {
+        for (enc, kms) in [
+            (None, Some("arn:aws:kms:us-east-1:123456789012:key/fake")),
+            (Some(false), None),
+        ] {
+            let aws = Arc::new(FakeAws::new());
+            let p = provider(&aws);
+            let before = running(&aws, &p, "main", Size::S)?;
+            aws.system_disks_report_encryption(enc, kms);
+            let why = p
+                .plan(&upgrade_keeping_the_old_disk(&before.spec.name, true))
+                .err()
+                .ok_or("expected a refusal")?
+                .to_string();
+            assert!(
+                why.contains("not confirmed encrypted")
+                    && why.contains("--no-pre-upgrade-snapshot"),
+                "{enc:?}: {why}"
+            );
+        }
+        Ok(())
+    }
+
+    fn destroy_op(name: &BoxName, keep: bool) -> Operation {
+        Operation::Destroy {
+            name: name.clone(),
+            final_snapshot: false,
+            keep_old_system_disks: keep,
+        }
+    }
+
+    /// The copy holds the old store's key and is only reachable through the box: destroying the box deletes it, the plan says so,
+    /// and the opt-out keeps it and says what that costs.
+    #[test]
+    fn destroying_a_box_deletes_its_copies_of_old_system_disks_unless_asked_to_keep_them(
+    ) -> TestResult {
+        for keep in [false, true] {
+            let aws = Arc::new(FakeAws::new());
+            let p = provider(&aws);
+            let before = running(&aws, &p, "main", Size::S)?;
+            let name = before.spec.name.clone();
+            p.apply(&p.plan(&upgrade_keeping_the_old_disk(&name, true))?)?;
+            let copies = aws.system_disk_snapshots(&name);
+            assert_eq!(copies.len(), 1);
+            let plan = p.plan(&destroy_op(&name, keep))?;
+            let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
+            if keep {
+                assert_eq!(kinds, ["box.delete"], "{plan}");
+                assert!(
+                    plan.notes
+                        .iter()
+                        .any(|n| n.contains(&copies[0].0) && n.contains("KEPT")),
+                    "{:?}",
+                    plan.notes
+                );
+            } else {
+                assert_eq!(
+                    kinds,
+                    ["snapshot.delete_old_system_disks", "box.delete"],
+                    "{plan}"
+                );
+                let said = &plan.changes[0].description;
+                assert!(
+                    said.contains(&copies[0].0) && said.contains("--keep-old-system-disks"),
+                    "{said}"
+                );
+            }
+            p.apply(&plan)?;
+            assert!(p.get(&name)?.is_none(), "the box is gone");
+            assert_eq!(
+                aws.system_disk_snapshots(&name).len(),
+                usize::from(keep),
+                "keep={keep}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A copy that cannot be deleted stops the destroy with the box whole, rather than leaving a key with nothing to list it.
+    #[test]
+    fn a_copy_that_cannot_be_deleted_stops_the_destroy_before_the_box_goes() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let p = provider(&aws);
+        let before = running(&aws, &p, "main", Size::S)?;
+        let name = before.spec.name.clone();
+        p.apply(&p.plan(&upgrade_keeping_the_old_disk(&name, true))?)?;
+        let plan = p.plan(&destroy_op(&name, false))?;
+        aws.fail_calls("delete-snapshot");
+        aws.clear_calls();
+        assert!(p.apply(&plan).is_err());
+        assert!(p.get(&name)?.is_some(), "the box is still there");
+        assert!(
+            !aws.calls().iter().any(|c| c.program == "tofu"),
+            "nothing was destroyed"
+        );
+        Ok(())
+    }
+
+    /// A box with no copy plans a destroy exactly as before.
+    #[test]
+    fn destroying_a_box_with_no_copies_plans_no_copy_step() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let p = provider(&aws);
+        let before = running(&aws, &p, "main", Size::S)?;
+        let plan = p.plan(&destroy_op(&before.spec.name, false))?;
+        assert!(
+            plan.changes.iter().all(|c| !c.kind.contains("old_system")),
+            "{plan}"
+        );
+        Ok(())
+    }
+
+    fn instance_with(disks: &[(&str, &str)]) -> Result<Instance> {
+        let maps: Vec<serde_json::Value> = disks
+            .iter()
+            .map(|(d, v)| serde_json::json!({"DeviceName": d, "Ebs": {"VolumeId": v}}))
+            .collect();
+        Ok(serde_json::from_value(serde_json::json!({
+            "InstanceId": "i-0", "InstanceType": "m7i.large", "State": {"Name": "running"},
+            "RootDeviceName": "/dev/xvda", "BlockDeviceMappings": maps
+        }))?)
+    }
+
+    /// A disk someone attached (a recovered system disk) is never taken for /work, whatever order the machine lists its disks in.
+    #[test]
+    fn an_extra_attached_disk_is_never_taken_for_the_work_volume() -> TestResult {
+        let both = instance_with(&[
+            ("/dev/xvda", "vol-root"),
+            ("/dev/sdg", "vol-recovered"),
+            ("/dev/sdf", "vol-work"),
+        ])?;
+        assert_eq!(work_volume_of(&both), Some("vol-work"));
+        let single = instance_with(&[("/dev/xvda", "vol-root"), ("/dev/xvdb", "vol-only")])?;
+        assert_eq!(work_volume_of(&single), Some("vol-only"));
+        let ambiguous = instance_with(&[
+            ("/dev/xvda", "vol-root"),
+            ("/dev/sdg", "vol-a"),
+            ("/dev/sdh", "vol-b"),
+        ])?;
+        assert_eq!(work_volume_of(&ambiguous), None);
+        Ok(())
+    }
+
+    /// A pre-upgrade copy is never counted as a /work backup in the box's own record, and never lists as one.
+    #[test]
+    fn a_copy_of_an_old_system_disk_is_not_a_work_snapshot_in_the_record() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let p = provider(&aws);
+        let before = running(&aws, &p, "main", Size::S)?;
+        p.apply(&p.plan(&upgrade_keeping_the_old_disk(&before.spec.name, true))?)?;
+        assert!(p
+            .get(&before.spec.name)?
+            .ok_or("gone")?
+            .snapshots
+            .is_empty());
+        assert!(p
+            .snapshots(&before.spec.name)?
+            .iter()
+            .all(|s| !s.includes_work));
+        Ok(())
+    }
+
+    fn describe_by_id_calls(aws: &FakeAws) -> usize {
+        aws.calls()
+            .iter()
+            .filter(|c| {
+                c.args.get(1).is_some_and(|a| a == "describe-snapshots")
+                    && c.args.iter().any(|a| a == "--snapshot-ids")
+            })
+            .count()
+    }
+
+    /// The copy `ozbox upgrade` takes before it makes the box ready waits as long as the provider allows; one taken inside an apply
+    /// (while the box may be holding new runs back for its stop) waits only [`ozbox_core::HOLD_SAFE_COPY_WAIT`]. Neither stops
+    /// anything when the copy is slow.
+    #[test]
+    fn the_copy_taken_ahead_waits_long_and_the_one_inside_an_apply_waits_within_the_hold(
+    ) -> TestResult {
+        let polls = |ahead: bool| -> Result<usize> {
+            let aws = Arc::new(FakeAws::new());
+            let p = provider_with(&aws, |c| {
+                c.poll_interval = std::time::Duration::ZERO;
+                c.snapshot_wait_polls = 1000;
+            });
+            let before = running(&aws, &p, "main", Size::S)?;
+            let name = before.spec.name.clone();
+            let plan = p.plan(&upgrade_keeping_the_old_disk(&name, true))?;
+            aws.new_snapshots_report("pending");
+            aws.clear_calls();
+            let slow = if ahead {
+                p.keep_old_system_disk(&name, NEW_IMAGE).err()
+            } else {
+                p.apply(&plan).err()
+            };
+            assert!(slow.is_some(), "a copy that never finishes is an error");
+            assert_untouched(&aws, &p, &before, "slow copy");
+            Ok(describe_by_id_calls(&aws))
+        };
+        assert_eq!(polls(true)?, 1000);
+        assert_eq!(polls(false)?, 300);
+        Ok(())
+    }
+
+    /// `ozbox upgrade` takes the copy ahead and plans again without it: the copy is made once, and what is applied makes no second.
+    #[test]
+    fn a_copy_taken_ahead_is_not_taken_again_by_the_apply() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let p = provider(&aws);
+        let before = running(&aws, &p, "main", Size::S)?;
+        let name = before.spec.name.clone();
+        let id = p.keep_old_system_disk(&name, NEW_IMAGE)?;
+        let held = aws.system_disk_snapshots(&name);
+        assert_eq!(held.iter().map(|s| s.0.clone()).collect::<Vec<_>>(), [id]);
+        p.apply(&p.plan(&upgrade_keeping_the_old_disk(&name, false))?)?;
+        assert_eq!(aws.system_disk_snapshots(&name).len(), 1);
         Ok(())
     }
 }

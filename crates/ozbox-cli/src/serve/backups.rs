@@ -231,6 +231,14 @@ fn start_restic(
 
 // ---------- the server side ----------
 
+/// Whether the provider's snapshots of a box include `/work`, read from a backup of the box. A copy of an old system disk is not
+/// one (it never holds `/work`, and an upgrade's copy is often the newest in the list), so it never answers for the rest.
+fn provider_includes_work(list: &[SnapshotInfo]) -> Option<bool> {
+    list.iter()
+        .find(|s| s.is_work_backup())
+        .map(|s| s.includes_work)
+}
+
 fn items_of(list: &[SnapshotInfo], scheduled: &[String]) -> Vec<Value> {
     list.iter()
         .map(|s| {
@@ -1163,7 +1171,7 @@ impl App {
         let provider = match self.provider.snapshots(&rec.spec.name) {
             Ok(list) => {
                 items.extend(items_of(&list, &scheduled));
-                json!({ "supported": true, "includes_work": list.first().map(|s| s.includes_work), "error": null })
+                json!({ "supported": true, "includes_work": provider_includes_work(&list), "error": null })
             }
             Err(Error::Unsupported { why, .. }) => {
                 json!({ "supported": false, "includes_work": null, "error": why })
@@ -2192,5 +2200,41 @@ mod tests {
             !configured_on_box(&mut a, "dev"),
             "a /work swap does not touch the credentials"
         );
+    }
+
+    /// An upgrade's copy of an old system disk is often the newest snapshot of a box, and is listed first: it must never decide
+    /// whether the provider's backups include /work.
+    #[test]
+    fn a_copy_of_an_old_system_disk_never_answers_for_whether_backups_include_work() {
+        let snap = |id: &str, includes_work: bool, purpose: Option<&str>| SnapshotInfo {
+            id: id.into(),
+            kind: ozbox_core::SnapshotKind::Provider,
+            created_at: None,
+            size_bytes: None,
+            status: "completed".into(),
+            includes_work,
+            labels: purpose
+                .map(|p| {
+                    std::collections::BTreeMap::from([(
+                        ozbox_core::PURPOSE_LABEL.to_string(),
+                        p.to_string(),
+                    )])
+                })
+                .unwrap_or_default(),
+        };
+        let copy = snap(
+            "snap-root",
+            false,
+            Some(ozbox_core::PRE_UPGRADE_ROOT_PURPOSE),
+        );
+        let work = snap("snap-work", true, None);
+        assert_eq!(
+            provider_includes_work(&[copy.clone(), work.clone()]),
+            Some(true)
+        );
+        assert_eq!(provider_includes_work(&[work]), Some(true));
+        // only copies: there is no backup to speak for
+        assert_eq!(provider_includes_work(&[copy]), None);
+        assert_eq!(provider_includes_work(&[]), None);
     }
 }

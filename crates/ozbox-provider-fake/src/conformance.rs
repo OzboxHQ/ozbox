@@ -457,6 +457,7 @@ pub fn destroy_of_a_box_with_no_machine(h: &Harness<'_>) -> Check {
         let op = Operation::Destroy {
             name: n.clone(),
             final_snapshot: snapshot,
+            keep_old_system_disks: false,
         };
         if snapshot && kit.no_final_snapshot_without_machine {
             match plan(h, &op) {
@@ -543,6 +544,7 @@ pub fn plan_never_mutates(h: &Harness<'_>) -> Check {
         Operation::Destroy {
             name: name("conf-plan")?,
             final_snapshot: true,
+            keep_old_system_disks: false,
         },
     ];
     for op in &ops {
@@ -628,6 +630,7 @@ pub fn idempotence(h: &Harness<'_>) -> Check {
         &Operation::Destroy {
             name: name("conf-never-existed")?,
             final_snapshot: true,
+            keep_old_system_disks: false,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -724,6 +727,7 @@ pub fn transitional_state_refused(h: &Harness<'_>) -> Check {
         Operation::Destroy {
             name: n.clone(),
             final_snapshot: true,
+            keep_old_system_disks: false,
         },
         Operation::Upgrade {
             name: n.clone(),

@@ -8,7 +8,8 @@ pub const EN: &[(&str, &str)] = &[
     ("old_disk.opted_out", "No copy of the old system disk is kept (--no-pre-upgrade-snapshot): the key is destroyed with the old disk, and the old store can never be opened again."),
     ("old_disk.unavailable", "No copy of the old system disk can be kept on this provider: the key is destroyed with the old disk, and the old store can never be opened again."),
     ("old_disk.afterwards", "Afterwards, enter the keys again (`ozbox secrets import <file> --project <project> --env <env> --box {box}`, and the other items above), then run `ozbox adopt-fleet-key {box}` so every later upgrade keeps the store (it needs the fleet's KMS key set under [aws]: `ozbox init` writes it)."),
-    ("old_disk.taken", "A copy of the old system disk of {box} is kept: snapshot {id} (encrypted, tagged ozbox-purpose=pre-upgrade-root). It holds the old store's key file. To reopen the old store, see the docs (Recovering an old secrets store). When it is no longer needed, delete it: `ozbox backup delete {box} {id}`."),
-    ("old_disk.not_found", "A copy of the old system disk of {box} was taken, but ozbox could not find its id afterwards ({why}). `ozbox backup list {box}` lists it (it is marked as the root disk, not /work)."),
+    ("old_disk.taken", "A copy of the old system disk of {box} is kept: snapshot {id} (encrypted, tagged ozbox-purpose=pre-upgrade-root). It holds the old store's key file. To reopen the old store, see the docs (Recovering an old secrets store). When it is no longer needed, delete it: `ozbox backup delete {box} {id}`. `ozbox destroy {box}` deletes it too, unless you pass --keep-old-system-disks."),
+    ("old_disk.not_found", "A copy of the old system disk of {box} was taken, but the apply did not report its id ({why}). `ozbox backup list {box}` lists it (it is marked as the root disk, not /work)."),
+    ("old_disk.taking", "Taking the copy of the old system disk of {box} first, before anything is stopped. A first copy can take several minutes; it keeps going by itself if this gives up."),
     ("old_disk.not_taken", "No copy of the old system disk of {box} was kept, as the plan said."),
 ];

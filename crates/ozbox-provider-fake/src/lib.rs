@@ -441,7 +441,12 @@ impl Backend for FakeBackend {
         )))
     }
 
-    fn snapshot_system_disk(&self, rec: &BoxRecord, image: &str) -> Result<String> {
+    fn snapshot_system_disk(
+        &self,
+        rec: &BoxRecord,
+        image: &str,
+        _max_wait: Option<std::time::Duration>,
+    ) -> Result<String> {
         self.mutate(|s| {
             s.next_id += 1;
             let id = format!("fake-root-snap-{}", s.next_id);
@@ -1238,6 +1243,93 @@ mod tests {
                 upgrade: None,
             });
             assert!(res.is_err(), "the suite passed a provider that {label}");
+        }
+        Ok(())
+    }
+
+    /// The box, its name, the id of its backup of /work and the id of the copy of its old system disk.
+    type Kept = (Engine<FakeBackend>, BoxName, String, String);
+
+    fn made_box_with_a_backup_and_a_copy(
+        dir: &std::path::Path,
+    ) -> std::result::Result<Kept, Box<dyn std::error::Error>> {
+        let p = Engine::new(FakeBackend::new(dir));
+        let n = BoxName::new("kept")?;
+        p.apply(&p.plan(&Operation::Create {
+            spec: BoxSpec::new(n.clone(), Size::S),
+        })?)?;
+        p.apply(&p.plan(&Operation::Snapshot { name: n.clone() })?)?;
+        p.apply(&p.plan(&Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision: false,
+            keep_old_system_disk: true,
+        })?)?;
+        let all = p.snapshots(&n)?;
+        let work = all
+            .iter()
+            .find(|s| s.is_work_backup())
+            .ok_or("no backup")?
+            .id
+            .clone();
+        let copy = all
+            .iter()
+            .find(|s| s.is_old_system_disk_copy())
+            .ok_or("no copy")?
+            .id
+            .clone();
+        Ok((p, n, work, copy))
+    }
+
+    /// A copy of an old system disk is not a backup of /work: it does not stop the one real backup being "the only snapshot", and
+    /// deleting the copy is never said to leave no backup.
+    #[test]
+    fn the_only_snapshot_note_counts_backups_and_not_copies_of_old_system_disks() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, work, copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        let only = |plan: &Plan| plan.notes.iter().any(|t| t.contains("only snapshot"));
+        let del = |id: &str| Operation::DeleteSnapshot {
+            name: n.clone(),
+            snapshot: id.to_string(),
+        };
+        assert!(
+            only(&p.plan(&del(&work))?),
+            "the one backup is the only one"
+        );
+        assert!(!only(&p.plan(&del(&copy))?), "a copy is not a backup");
+        Ok(())
+    }
+
+    /// The copy holds the old store's key and cannot be reached once the box is gone: destroying the box removes it (the plan
+    /// says so) unless the person keeps it, and a backup of /work is kept as before.
+    #[test]
+    fn destroying_a_box_removes_its_copies_of_old_system_disks_by_default() -> TestResult {
+        for keep in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let (p, n, _work, copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+            let plan = p.plan(&Operation::Destroy {
+                name: n.clone(),
+                final_snapshot: false,
+                keep_old_system_disks: keep,
+            })?;
+            let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
+            if keep {
+                assert_eq!(kinds, ["box.delete"]);
+                assert!(plan
+                    .notes
+                    .iter()
+                    .any(|t| t.contains(&copy) && t.contains("KEPT")));
+            } else {
+                assert_eq!(kinds, ["snapshot.delete_old_system_disks", "box.delete"]);
+                assert!(plan.changes[0].description.contains(&copy));
+            }
+            p.apply(&plan)?;
+            let left = p.backend().load()?;
+            assert_eq!(
+                left.system_copies.iter().filter(|c| c.id == copy).count(),
+                usize::from(keep),
+                "keep={keep}"
+            );
         }
         Ok(())
     }
