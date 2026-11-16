@@ -936,6 +936,7 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "toml",
+ "toml_edit",
  "ureq",
  "webpki-roots 0.26.11",
  "zeroize",

@@ -36,6 +36,18 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Checked on a source build.** Running `ozbox init` end to end from an installed release is still to come.
 </Update>
 
+<Update label="[Release date]" tags={["CLI"]} description="AWS setup on an account that already has boxes">
+  ## `ozbox init` no longer plans a second network, stops when you skip a step, or hides your config
+
+  Running `ozbox init` on an account that already had a box planned a new private network (about $33 a month for its NAT gateway) even though your configuration named a subnet, and answering no ended the whole setup, so the secrets key, the adopt command and the box policy could never be made. It also wrote a new `config.toml` that hid an older `fleet.toml`, and set your daily AWS profile to the setup profile.
+
+  - **A subnet in your configuration is used.** Init checks it exists, plans no network and goes on.
+  - **Answering no skips that step and carries on.** Only the state bucket is required; declining it stops with nothing changed. The summary at the end lists what was applied, skipped and already in place.
+  - **Init edits the file `ozbox` already reads** (`config.toml`, else `fleet.toml`), keeps its comments and every key, and keeps a `.bak` of the old file.
+  - **Your daily `profile` is never changed.** The profile you ran init with is recorded as `setup_profile`.
+  - **If both `config.toml` and `fleet.toml` exist**, every command now warns which one is read and that the other is ignored.
+</Update>
+
 <Update label="[Release date]" tags={["Dashboard", "Security"]} description="Skills of your own, and skills on a box's disk">
   ## Add your own skills from the page, and put an approved one where a box's coding agents read it
 

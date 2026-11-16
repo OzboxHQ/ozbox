@@ -264,14 +264,6 @@ includes `OzBoxKeyAdmin`, `infra/aws/key-admin-policy.json`); your **daily opera
 create keys it says what to ask an administrator for and leaves boxes on a file key. On Hetzner there is no KMS: a box uses its
 TPM if it has one, otherwise a file key escrowed to OpenBao or your keychain (`ozbox secrets ingress escrow`).
 
-**An account that already has the key.** The state bucket is new to an account set up by an earlier version, so a step's state
-starts empty even when its resources exist (ADR 0053). Before planning, `ozbox init` runs `tofu state list`, then looks for
-`alias/ozbox-<fleet>-secrets` and its key (`kms:ListAliases`, `kms:ListResourceTags`: both in `OzBoxSetup`/`OzBoxKeyAdmin`), and
-writes `import` blocks for them into `adopt.tf` beside the generated root. The plan then reads **Adopt existing KMS key ...**
-instead of Create, and anything that differs (a key policy) is shown as a change in place. A key is adopted only if it carries
-`ozbox-managed=true`; the setup identity reads the tags of tagged keys only, so a look-alike, or a key it cannot read, is refused
-with the reason and nothing is changed. If the config's `secrets_key_arn` and the alias disagree, nothing is adopted.
-
 ### The adopt command's document (`modules/aws-adopt-command`), a step of its own
 
 `ozbox adopt-fleet-key` reads a box's store facts as root through Systems Manager, with a document of the fleet's own
@@ -281,8 +273,7 @@ document actions on `document/ozbox-adopt-*` only; it can neither send a command
 module, whose `OzBoxKeyAdmin` set is KMS-only. Setup checks that permission before it plans, and a refusal never stops the key or
 the rest of setup. When it is applied, setup writes the policy for whoever runs `ozbox adopt-fleet-key` to
 `operator-adopt-policy.json` in the step's working folder and prints the path; an administrator attaches it to that sign-in and to
-nobody else. A document `ozbox-adopt-<fleet>` that already exists and carries `ozbox-managed=true` is adopted the same way
-(`ssm:DescribeDocument`, on `document/ozbox-adopt-*` only); one without the tag is refused. A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
+nobody else. A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
 covered by the permission set that applies it.
 
 ## The box role's Session Manager policy, once per account (and what to run on an account that already has boxes)
@@ -295,18 +286,16 @@ or key), and, when a box uses them, `ozbox-box-parameters` (its own Parameter St
 again to add one), once, with
 the **setup identity** (`OzBoxSetup`, which includes `OzBoxPolicyAdmin`, `infra/aws/box-policy-admin-policy.json`). Your **daily operator role** (`infra/aws/operator-policy.json`) may attach that one policy by ARN and
 cannot create or change a policy, so it cannot widen what a box's role may do. A box cannot be created or upgraded before the
-policy exists; the plan says so. A policy that already exists under one of these names and carries `ozbox-managed=true` is adopted
-(`iam:GetPolicy`; only the policies this configuration would make are looked for); an untagged one is refused, and a plan that
-would replace or remove an adopted policy is refused (policies are shared by every box of the fleet).
+policy exists; the plan says so.
 
 On an account that already has boxes (they carry AWS's `AmazonSSMManagedInstanceCore`):
 
 1. An administrator creates the `OzBoxSetup` permission set from `infra/aws/setup-policy.json` and assigns it to the person on the
    account (the steps above), and re-applies `infra/aws/operator-policy.json` to the daily operator role (it now allows attaching
    only the new policy, reading it, and Instance Connect for the `ozbox-ingress` account).
-2. Sign in as that profile and run `ozbox init --provider aws --profile <setup-profile>`; approve the state bucket (an older account has none) and the "Session Manager policy" step. Read the **network**
-   plan before you approve it: the network is not adopted yet (ADR 0053), and init keeps its own state in the new bucket, so on an
-   account whose network was made some other way it plans a second one (a NAT gateway bills by the hour). Decline that step and use the network you have.
+2. Sign in as that profile and run `ozbox init --provider aws --profile <setup-profile>`; approve the state bucket (an older account has none, and it is the one step init needs) and the "Session Manager policy" step. When your configuration already names its subnet (`subnet_id` under `[aws]`),
+   init uses it: it checks the subnet is there, plans **no** network (a second one would bill a NAT gateway by the hour) and goes on. Answering no to any step other than the state bucket skips that step, says so and goes on to the next; the summary at the end lists what was applied, skipped and already in place. Init edits the config file `ozbox` reads
+   (`config.toml`, else `fleet.toml`), keeps its comments and every key, and never changes your daily `profile`: the profile you ran init with is recorded as `setup_profile`.
 3. For each box, either `ozbox upgrade <box>` (replaces the machine, swaps the attachment, pins your ingress key), or, without
    replacing the machine, swap the attachment (attach first, so Session Manager never drops):
 
