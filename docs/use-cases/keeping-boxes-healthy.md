@@ -85,6 +85,14 @@ and only when the service, the store and the copy on `/work` are all on KMS does
 keep the store. Then `main` destroys its key file and the copy beside the store, and the command waits for `main` to say so.
 What the store holds is kept.
 
+**A box made by `0.1.x`** has a system disk that was never tagged. The move does not touch the disk's tags, and `ozbox` never
+changes anything that its AWS permissions would refuse part way. If a plan ever needed to tag a disk that carries no `ozbox-managed`
+tag (a module of your own, say), the command stops before it changes anything and prints what to run once, with your own
+administrator sign-in, not the one `ozbox` uses: check the disk is the box's (`aws ec2 describe-volumes --volume-ids <volume>
+--query 'Volumes[].Attachments[].InstanceId'`), then `aws ec2 create-tags --resources <volume> --tags Key=ozbox-managed,Value=true
+Key=ozbox-box,Value=<box>`. Then run the same command again. Neither `ozbox` identity is allowed to do that itself, because it could
+then mark any disk in the account as its own.
+
 - While the move is not finished, `ozbox upgrade` refuses the box (and `--accept-new-secrets-store` does not change that): a
   new machine on the new key over a store the old key still seals would never open it. Run the command again to finish, or
   `ozbox adopt-fleet-key main --cancel`. A cancel is carried out on the box first, under the box's lock: the box records it (no

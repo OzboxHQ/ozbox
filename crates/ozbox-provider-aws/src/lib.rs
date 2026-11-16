@@ -3210,6 +3210,96 @@ mod tests {
         Ok(())
     }
 
+    /// A box made by an earlier version has an UNTAGGED system disk, and the operator's AWS role can put a first tag on a disk only
+    /// when the disk is created. The move to the fleet key used to plan that tag along with the grant and the pending mark, and
+    /// the tag call was refused after the other two had been applied: a box left half moved. Now the plan refuses, before anything
+    /// is applied, names the disk and the one command an administrator runs, and the move goes through once they have.
+    #[test]
+    fn an_untagged_system_disk_stops_the_move_before_anything_is_applied() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let before = running(&aws, &provider(&aws), "main", Size::S)?;
+        let name = before.spec.name.clone();
+        let p = provider_with(&aws, |c| {
+            c.secrets_key_arn = Some(KEY_ARN.into());
+            c.fleet = Some("dev".into());
+        });
+        let b = p.backend();
+        aws.untag_root_volume(&name);
+        let applies = |aws: &FakeAws| {
+            aws.calls()
+                .iter()
+                .filter(|c| c.args.iter().any(|a| a == "apply"))
+                .count()
+        };
+        let applied = applies(&aws);
+        let refusal = b
+            .plan_secrets_key_step(&before, SecretsKeyStep::Begin)
+            .err()
+            .ok_or("an untagged system disk must stop the plan")?
+            .to_string();
+        assert!(
+            refusal.contains("no ozbox-managed tag")
+                && refusal.contains("aws ec2 create-tags --resources vol-root")
+                && refusal.contains("Key=ozbox-managed,Value=true Key=ozbox-box,Value=main")
+                && refusal.contains("describe-volumes")
+                && refusal.contains("Nothing was changed"),
+            "{refusal}"
+        );
+        // nothing was applied: no apply, no grant, no pending mark, and the disk is as it was
+        assert_eq!(applies(&aws), applied);
+        assert_eq!(aws.role_grant(&name), None);
+        assert!(aws.root_volume_tags(&name).is_empty());
+        let again = p.get(&name)?.ok_or("no record")?;
+        assert_eq!(AwsBackend::secrets_key_stage(&again), SecretsKeyStage::File);
+        // the administrator runs the command once; the same move then goes through, in place
+        aws.admin_tags_root_volume(&name);
+        let plan = b.plan_secrets_key_step(&before, SecretsKeyStep::Begin)?;
+        b.apply_secrets_key_step(&plan)?;
+        assert_eq!(aws.role_grant(&name).as_deref(), Some(KEY_ARN));
+        assert_eq!(
+            aws.root_volume_tags(&name)
+                .get("ozbox-role")
+                .map(String::as_str),
+            Some("root")
+        );
+        Ok(())
+    }
+
+    /// The same refusal holds at every step of the move, so a box an older program half moved (marked, granted, disk never tagged)
+    /// is stopped at plan time too, on the way to finishing or cancelling, and nothing is applied.
+    #[test]
+    fn finishing_or_cancelling_a_move_is_stopped_too_when_the_disk_is_untagged() -> TestResult {
+        let aws = Arc::new(FakeAws::new());
+        let before = running(&aws, &provider(&aws), "main", Size::S)?;
+        let name = before.spec.name.clone();
+        let p = provider_with(&aws, |c| {
+            c.secrets_key_arn = Some(KEY_ARN.into());
+            c.fleet = Some("dev".into());
+        });
+        let b = p.backend();
+        b.apply_secrets_key_step(&b.plan_secrets_key_step(&before, SecretsKeyStep::Begin)?)?;
+        let pending = p.get(&name)?.ok_or("no record")?;
+        aws.untag_root_volume(&name);
+        let applies = |aws: &FakeAws| {
+            aws.calls()
+                .iter()
+                .filter(|c| c.args.iter().any(|a| a == "apply"))
+                .count()
+        };
+        let applied = applies(&aws);
+        for step in [SecretsKeyStep::Finish, SecretsKeyStep::Cancel] {
+            let refusal = b
+                .plan_secrets_key_step(&pending, step)
+                .err()
+                .ok_or("expected a refusal")?
+                .to_string();
+            assert!(refusal.contains("create-tags"), "{step:?}: {refusal}");
+        }
+        assert_eq!(applies(&aws), applied);
+        assert_eq!(aws.role_grant(&name).as_deref(), Some(KEY_ARN));
+        Ok(())
+    }
+
     /// H2: what a decision rests on is read through Systems Manager, as a fixed program run as root, and only a clean
     /// `Success` is an answer. The program text is one of three fixed strings; nothing a box says reaches a command.
     #[test]

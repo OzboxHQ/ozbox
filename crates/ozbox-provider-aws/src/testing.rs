@@ -384,6 +384,60 @@ impl FakeAws {
         self.with(|a| a.plan_replaces_instance_after_rm = true);
     }
 
+    /// Make the system disk of a box the way a box made by an earlier version has it: no tags at all.
+    pub fn untag_root_volume(&self, name: &BoxName) {
+        self.with(|a| {
+            let root = a
+                .instances
+                .iter()
+                .find(|i| {
+                    i.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                        && i.state != "terminated"
+                })
+                .and_then(|i| i.vols.first().map(|(_, v)| v.clone()));
+            if let Some(v) = a.volumes.iter_mut().find(|v| Some(&v.id) == root.as_ref()) {
+                v.tags.clear();
+            }
+        });
+    }
+
+    /// What an account administrator's `create-tags` does: the disk gets its first tags.
+    pub fn admin_tags_root_volume(&self, name: &BoxName) {
+        self.with(|a| {
+            let root = a
+                .instances
+                .iter()
+                .find(|i| {
+                    i.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                        && i.state != "terminated"
+                })
+                .and_then(|i| i.vols.first().map(|(_, v)| v.clone()));
+            if let Some(v) = a.volumes.iter_mut().find(|v| Some(&v.id) == root.as_ref()) {
+                v.tags.insert("ozbox-managed".into(), "true".into());
+                v.tags.insert("ozbox-box".into(), name.as_str().to_string());
+            }
+        });
+    }
+
+    /// The tags on the system disk of a box.
+    pub fn root_volume_tags(&self, name: &BoxName) -> BTreeMap<String, String> {
+        self.with(|a| {
+            let root = a
+                .instances
+                .iter()
+                .find(|i| {
+                    i.tags.get("ozbox-box").map(String::as_str) == Some(name.as_str())
+                        && i.state != "terminated"
+                })
+                .and_then(|i| i.vols.first().map(|(_, v)| v.clone()));
+            a.volumes
+                .iter()
+                .find(|v| Some(&v.id) == root.as_ref())
+                .map(|v| v.tags.clone())
+                .unwrap_or_default()
+        })
+    }
+
     /// The volumes of a box with their role tag and the snapshot each was made from: `(id, role, snapshot)`.
     pub fn volumes_of(&self, name: &BoxName) -> Vec<(String, String, Option<String>)> {
         self.with(|a| {
@@ -1169,10 +1223,46 @@ impl FakeAws {
                         "after": {"tags": {"ozbox-secrets-adopt": "b"}},
                         "after_unknown": {"tags_all": true},
                     });
+                    // The machine's system disk as the module wants it tagged (made, owned, in this box and region, root). A disk that
+                    // already carries all of that shows no change; one a version before the module tagged it shows tags `{}`.
+                    let root = a
+                        .instances
+                        .iter()
+                        .find(|i| {
+                            i.tags.get("ozbox-box") == Some(&name) && i.state != "terminated"
+                        })
+                        .and_then(|i| i.vols.first().map(|(_, v)| (i.id.clone(), v.clone())));
+                    let (instance_id, root_id) = root.clone().unwrap_or_default();
+                    let root_before = a
+                        .volumes
+                        .iter()
+                        .find(|v| v.id == root_id)
+                        .map(|v| v.tags.clone())
+                        .unwrap_or_default();
+                    let mut root_after = root_before.clone();
+                    root_after.insert("ozbox-managed".into(), "true".into());
+                    root_after.insert("ozbox-box".into(), name.clone());
+                    root_after.insert("ozbox-role".into(), "root".into());
+                    if let Some(r) = vars.get("region") {
+                        root_after.insert("ozbox-region".into(), r.clone());
+                    }
                     let machine = if a.inplace_replaces_instance {
                         json!({"actions": ["delete", "create"]})
                     } else {
-                        tags_update.clone()
+                        json!({
+                            "actions": ["update"],
+                            "before": {
+                                "id": instance_id,
+                                "tags": {"ozbox-secrets-adopt": "a"},
+                                "root_block_device": [{"volume_id": root_id, "volume_size": 30, "tags": root_before}],
+                            },
+                            "after": {
+                                "id": instance_id,
+                                "tags": {"ozbox-secrets-adopt": "b"},
+                                "root_block_device": [{"volume_id": root_id, "volume_size": 30, "tags": root_after}],
+                            },
+                            "after_unknown": {"tags_all": true},
+                        })
                     };
                     return ok(json!({"resource_changes": [
                         {"address": "aws_iam_role_policy_attachment.fleet_key[0]", "change": {"actions": policy}},
@@ -1250,6 +1340,13 @@ impl FakeAws {
                         )
                     });
                     inst.tags.extend(labels);
+                    // the system disk takes the tags the module gives it (the plan showed them)
+                    let root_id = inst.vols.first().map(|(_, v)| v.clone()).unwrap_or_default();
+                    if let Some(v) = a.volumes.iter_mut().find(|v| v.id == root_id) {
+                        v.tags.insert("ozbox-managed".into(), "true".into());
+                        v.tags.insert("ozbox-box".into(), name.clone());
+                        v.tags.insert("ozbox-role".into(), "root".into());
+                    }
                     return ok(String::new());
                 }
                 if vars.get("__mode").map(String::as_str) == Some("restore") {
