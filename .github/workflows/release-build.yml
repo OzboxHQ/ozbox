@@ -68,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           # the dashboard's switch to a stand-in socket exists for the browser tests of a DEBUG build only
-          ! grep -aq 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+          ! LC_ALL=C grep -aqF 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
             || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: The program serves the real dashboard, not the placeholder page
         env:
@@ -77,11 +77,11 @@ jobs:
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
-          if grep -aq "The dashboard is not built" "$f"; then
+          if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          grep -aq "$DASH" "$f"
+          LC_ALL=C grep -aqF "$DASH" "$f"
       - name: Check it is one self-contained file, and (where this runner can) that it starts
         env:
           ARCH: ${{ matrix.arch }}
@@ -147,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           # the dashboard's switch to a stand-in socket exists for the browser tests of a DEBUG build only
-          ! grep -aq 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+          ! LC_ALL=C grep -aqF 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
             || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: The program serves the real dashboard, not the placeholder page
         env:
@@ -156,11 +156,11 @@ jobs:
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
-          if grep -aq "The dashboard is not built" "$f"; then
+          if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          grep -aq "$DASH" "$f"
+          LC_ALL=C grep -aqF "$DASH" "$f"
       - name: Check it is a macOS program for the right processor, and (where this runner can) that it starts
         env:
           ARCH: ${{ matrix.arch }}
