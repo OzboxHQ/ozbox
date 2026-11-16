@@ -8,6 +8,16 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="AWS boxes made by 0.1.x">
+  ## `ozbox adopt-fleet-key` no longer fails half way on a box made by 0.1.x
+
+  A box made by `0.1.x` has a system disk that was never tagged. Moving its secrets store to your fleet's KMS key tried to tag that disk, the permissions `ozbox` runs with cannot put a first tag on an existing disk, and the command failed after it had already marked the box as moving. An administrator had to tag the disk by hand before it could go on.
+
+  - **The move no longer touches the system disk's tags.** It goes through on a `0.1.x` box with no administrator step. A box's system disk is still tagged when it is created, and an upgrade creates a new one.
+  - **A change that would still need a first tag stops before anything is changed.** `ozbox` names the disk and prints the two commands an account administrator runs once, with their own sign-in: check the disk belongs to the box's machine, then `aws ec2 create-tags`. Run the same `ozbox` command again afterwards. The check covers every step of the move, so a box an earlier run left half moved is stopped on the way out too, and nothing is applied.
+  - **The permissions did not widen.** Neither the daily `ozbox` sign-in nor the setup sign-in can tag an existing disk as Oz Box's, so a disk it did not make cannot be claimed and then changed. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
   ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
 

@@ -151,6 +151,21 @@ run "labels_on_every_taggable_resource" {
   }
 }
 
+# The operator's AWS role may put a first tag on a disk only when the disk is created, so a system disk that is not tagged
+# ozbox-managed from its first moment could never be tagged later by anything the daily role runs (an old box's was not).
+run "the_system_disk_is_ours_from_the_moment_it_is_created" {
+  command = apply
+
+  assert {
+    condition = (
+      aws_instance.box.root_block_device[0].tags["ozbox-managed"] == "true" &&
+      aws_instance.box.root_block_device[0].tags["ozbox-box"] == "dev-1" &&
+      aws_instance.box.root_block_device[0].tags["ozbox-role"] == "root"
+    )
+    error_message = "the system disk must carry ozbox-managed, ozbox-box and its role in the tags it is created with"
+  }
+}
+
 run "caller_cannot_override_reserved_labels" {
   command = apply
 
