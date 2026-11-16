@@ -21,6 +21,8 @@ use ozbox_core::{Change, CommandRunner, CommandSpec, Output, Risk, Size};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod adopt;
+
 use crate::messages::t;
 use crate::netguard::{Guard, HttpClient, HttpRequest};
 use crate::secrets::SecretStore;
@@ -1851,8 +1853,9 @@ impl Init<'_> {
         dir: PathBuf,
         state_key: &str,
         summary: String,
-        notes: Vec<String>,
+        mut notes: Vec<String>,
         after: After,
+        adoptables: Vec<adopt::Adoptable>,
     ) -> Res<Prepared> {
         let region = target.region_or_err()?.to_string();
         let bucket = Self::bucket_name(account, &region);
@@ -1877,6 +1880,14 @@ impl Init<'_> {
             "-backend-config=use_lockfile=true".into(),
         ]);
         self.init_with_retry(target, &init)?;
+        // What already exists in the account and is not in this step's state is adopted, not re-created (ADR 0053).
+        let adopted = if adoptables.is_empty() {
+            Vec::new()
+        } else {
+            let in_state = self.state_addresses(target, &chdir)?;
+            self.find_adoptions(target, account, &adoptables, &in_state)?
+        };
+        adopt::write_imports(&dir, &adopted)?;
         let plan_cmd = CommandSpec::new("tofu").args([
             chdir.clone(),
             "plan".into(),
@@ -1886,9 +1897,13 @@ impl Init<'_> {
             "-out=ozbox.tfplan".into(),
         ]);
         let out = self.exec(&self.tofu_env(target, plan_cmd))?;
-        let changes = match out.status {
-            Some(0) => Vec::new(),
-            Some(2) => parse_tofu_plan(&out.stdout),
+        let mut changes: Vec<Change> = adopted.iter().map(adopt::Adopted::change).collect();
+        match out.status {
+            Some(0) => {}
+            Some(2) => {
+                adopt::refuse_replacing(&adopted, &plan_entries(&out.stdout))?;
+                changes.extend(parse_tofu_plan(&out.stdout));
+            }
             _ => {
                 let why: String = out
                     .stderr
@@ -1904,7 +1919,11 @@ impl Init<'_> {
                     t("init.plan_failed", &[("why", &why)]),
                 ));
             }
-        };
+        }
+        if !adopted.is_empty() {
+            notes.push(t("init.note_adopted", &[]));
+        }
+        // an import is a change even when nothing else differs: applying is what records the resource in the state
         let noop = changes.is_empty();
         let apply = self.tofu_env(
             target,
@@ -1939,16 +1958,48 @@ impl Init<'_> {
         // policy for a key or a bucket that does not exist yet is not made; running `ozbox init` again adds it.
         let rec = self.recorded("aws");
         let mut extra = String::new();
+        // what the module makes for this configuration, so only those policies are looked for in the account
+        let mut adoptables = vec![
+            adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.session".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-session-manager".into(),
+                },
+            },
+            adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.parameters".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-parameters".into(),
+                },
+            },
+        ];
         let ok_word = |v: &str| !v.is_empty() && !v.contains(['"', '\\', '$', '%', '\n', '\r']);
         if let (Some(arn), Some(fleet)) = (rec.get("secrets_key_arn"), rec.get("fleet")) {
             if ok_word(arn) && ok_word(fleet) {
                 extra.push_str(&format!(
                     "  fleet_key_arn = \"{arn}\"\n  fleet         = \"{fleet}\"\n"
                 ));
+                // a counted resource: its address carries the index
+                adoptables.push(adopt::Adoptable {
+                    address: "module.policy.aws_iam_policy.fleet_key[0]".into(),
+                    what: "IAM policy",
+                    find: adopt::Find::IamPolicy {
+                        name: format!("ozbox-box-fleet-key-{fleet}"),
+                    },
+                });
             }
         }
         if let Some(b) = rec.get("session_log_bucket").filter(|b| ok_word(b)) {
             extra.push_str(&format!("  session_log_bucket = \"{b}\"\n"));
+            adoptables.push(adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.session_logs[0]".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-session-logs".into(),
+                },
+            });
         }
         let dir = self.paths.work.join("box-policy").join(&region);
         self.module_root(
@@ -1968,6 +2019,7 @@ impl Init<'_> {
             t("init.sum_box_policy", &[]),
             vec![t("init.note_box_policy", &[])],
             After::Nothing,
+            adoptables,
         )?;
         p.estimate_usd_month = Some(0.0);
         Ok(p)
@@ -1984,6 +2036,7 @@ impl Init<'_> {
             .get("fleet")
             .cloned()
             .unwrap_or_else(|| "ozbox".into());
+        let alias = format!("alias/ozbox-{fleet}-secrets");
         let dir = self.paths.work.join("secrets-key").join(&region);
         self.module_root(
             &self.paths.key_dir(),
@@ -2001,6 +2054,21 @@ impl Init<'_> {
             t("init.sum_key", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_key", &[("fleet", &fleet)])],
             After::Key(self.paths.work.join("secrets-key").join(&region)),
+            vec![
+                adopt::Adoptable {
+                    address: "module.key.aws_kms_key.secrets".into(),
+                    what: "KMS key",
+                    find: adopt::Find::KmsKey {
+                        alias: alias.clone(),
+                        recorded_arn: self.recorded("aws").get("secrets_key_arn").cloned(),
+                    },
+                },
+                adopt::Adoptable {
+                    address: "module.key.aws_kms_alias.secrets".into(),
+                    what: "KMS alias",
+                    find: adopt::Find::KmsAlias { alias },
+                },
+            ],
         )
     }
 
@@ -2027,6 +2095,13 @@ impl Init<'_> {
             t("init.sum_adopt", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_adopt", &[("fleet", &fleet)])],
             After::Adopt(dir),
+            vec![adopt::Adoptable {
+                address: "module.adopt.aws_ssm_document.adopt".into(),
+                what: "Systems Manager document",
+                find: adopt::Find::SsmDocument {
+                    name: format!("ozbox-adopt-{fleet}"),
+                },
+            }],
         )
     }
 
@@ -2105,6 +2180,8 @@ impl Init<'_> {
             t("init.sum_issuer", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_issuer", &[])],
             After::Issuer(dir),
+            // the issuer is not adopted yet (ADR 0053: its roles live in the reserved namespace and need an administrator)
+            Vec::new(),
         )
     }
 
@@ -2656,8 +2733,9 @@ impl Init<'_> {
     }
 }
 
-/// The resources a `tofu plan` says it will create, change or destroy, in the order shown.
-pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
+/// The (address, verb) of every resource a `tofu plan` says it will create, change or destroy, in the order shown. The verb
+/// is one of `create`, `destroy`, `update`, `replace`.
+pub fn plan_entries(stdout: &str) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
     for line in stdout.lines() {
         let l = line.trim_start();
@@ -2670,31 +2748,43 @@ pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
             (a, "destroy")
         } else if let Some(a) = rest.strip_suffix(" will be updated in-place") {
             (a, "update")
-        } else if rest.ends_with(" must be replaced") {
-            (rest.trim_end_matches(" must be replaced"), "replace")
+        } else if let Some(a) = rest.strip_suffix(" must be replaced") {
+            (a, "replace")
+        } else if let Some(a) = rest.strip_suffix(" will be replaced, as requested") {
+            (a, "replace")
         } else {
             continue;
         };
-        let kind = addr
-            .rsplit('.')
-            .nth(1)
-            .unwrap_or("resource")
-            .trim_start_matches("aws_");
-        let risk = if verb == "destroy" || verb == "replace" {
-            Risk::High
-        } else {
-            Risk::Medium
-        };
-        out.push(Change::new(
-            format!("network.{verb}"),
-            t(
-                &format!("init.net_{verb}"),
-                &[("what", &kind.replace('_', " ")), ("address", addr)],
-            ),
-            risk,
-        ));
+        out.push((addr.to_string(), verb));
     }
     out
+}
+
+/// The resources a `tofu plan` says it will create, change or destroy, in the order shown.
+pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
+    plan_entries(stdout)
+        .into_iter()
+        .map(|(addr, verb)| {
+            let kind = addr
+                .rsplit('.')
+                .nth(1)
+                .unwrap_or("resource")
+                .trim_start_matches("aws_");
+            let risk = if verb == "destroy" || verb == "replace" {
+                Risk::High
+            } else {
+                Risk::Medium
+            };
+            Change::new(
+                format!("network.{verb}"),
+                t(
+                    &format!("init.net_{verb}"),
+                    &[("what", &kind.replace('_', " ")), ("address", &addr)],
+                ),
+                risk,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -4077,6 +4167,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", "")); // init with backend
+        e.runner.reply(out(0, "", "")); // state list: nothing yet
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, "")); // no such alias in the account
         e.runner.reply(out(2, KEY_PLAN, "")); // plan
         let init = e.init();
         let p = init.plan_key(&target(), "123456789012").unwrap();
@@ -4115,10 +4207,18 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(
+            0,
+            "module.key.aws_kms_key.secrets\nmodule.key.aws_kms_alias.secrets\n",
+            "",
+        ));
         e.runner.reply(out(0, "", ""));
         let p = e.init().plan_key(&target(), "123456789012").unwrap();
         assert!(p.noop && p.run.is_empty());
     }
+
+    const NO_DOCUMENT: &str = "An error occurred (InvalidDocument) when calling the DescribeDocument operation: The specified document does not exist.";
+    const NO_POLICY: &str = "An error occurred (NoSuchEntity) when calling the GetPolicy operation: Policy was not found.";
 
     const ADOPT_PLAN: &str = "Plan: 1 to add, 0 to change, 0 to destroy.\n  # module.adopt.aws_ssm_document.adopt will be created\n";
 
@@ -4135,6 +4235,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", "")); // init with backend
+        e.runner.reply(out(0, "", "")); // state list: nothing yet
+        e.runner.reply(out(254, "", NO_DOCUMENT)); // no such document
         e.runner.reply(out(2, ADOPT_PLAN, "")); // plan
         let init = e.init();
         let p = init.plan_adopt(&target(), "123456789012").unwrap();
@@ -4431,6 +4533,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "", "")); // state list
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, "")); // no alias
         e.runner.reply(out(2, KEY_PLAN, ""));
         let init = e.init();
         let p = init.plan_key(&target(), "123456789012").unwrap();
@@ -4553,6 +4657,9 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "", "")); // state list
+        e.runner.reply(out(254, "", NO_POLICY)); // no session policy yet
+        e.runner.reply(out(254, "", NO_POLICY)); // no parameters policy yet
         e.runner.reply(out(2, "Plan: 1 to add, 0 to change, 0 to destroy.\n  # module.policy.aws_iam_policy.session will be created\n", ""));
         let init = e.init();
         let p = init.plan_box_policy(&target(), "123456789012").unwrap();
@@ -4569,5 +4676,382 @@ mod tests {
             .unwrap();
         assert!(main.contains("aws-box-policy") || main.contains("module \"policy\""));
         assert!(!main.contains("AmazonSSM"));
+    }
+
+    // ----- adopting what is already there (ADR 0053) -----
+
+    const KEY_ID: &str = "1234abcd-12ab-34cd-56ef-1234567890ab";
+    const KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+    const OTHER_KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:123456789012:key/ffffffff-12ab-34cd-56ef-1234567890ab";
+
+    fn aliases_with(alias: &str) -> String {
+        format!(
+            r#"{{"Aliases":[{{"AliasName":"alias/aws/ebs","TargetKeyId":"aaaa"}},{{"AliasName":"{alias}","TargetKeyId":"{KEY_ID}"}}]}}"#
+        )
+    }
+
+    const TAGGED_KEY: &str = r#"{"Tags":[{"TagKey":"ozbox-managed","TagValue":"true"},{"TagKey":"ozbox-fleet","TagValue":"ozbox"}]}"#;
+    const OTHER_KEY: &str = r#"{"Tags":[{"TagKey":"team","TagValue":"data"}]}"#;
+    const TAGGED_DOCUMENT: &str = r#"{"Document":{"Name":"ozbox-adopt-ozbox","Tags":[{"Key":"ozbox-managed","Value":"true"}]}}"#;
+    const TAGGED_POLICY: &str =
+        r#"{"Policy":{"PolicyName":"x","Tags":[{"Key":"ozbox-managed","Value":"true"}]}}"#;
+    const DENIED: &str = "An error occurred (AccessDeniedException) when calling the ListResourceTags operation: not authorized";
+
+    /// Queue what every state-module plan reads first: the bucket, the OpenTofu version and the backend init.
+    fn queue_prologue(e: &Env) {
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        e.runner.reply(out(0, "", ""));
+    }
+
+    fn policy_env() -> Env {
+        let e = key_env();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-box-policy")).unwrap();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-adopt-command")).unwrap();
+        e
+    }
+
+    fn adopt_tf(e: &Env, dir: &str) -> String {
+        std::fs::read_to_string(
+            e.dir
+                .path()
+                .join("work")
+                .join(dir)
+                .join("us-east-1/adopt.tf"),
+        )
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn an_existing_key_and_alias_are_adopted_not_created_a_second_time() {
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", "")); // state list: this step has no state yet
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(0, TAGGED_KEY, "")); // the key carries the tag
+                                                // the key's policy differs from the module's: shown as an in-place change, never a replacement
+        e.runner.reply(out(2, "Plan: 2 to import, 0 to add, 1 to change, 0 to destroy.\n  # module.key.aws_kms_key.secrets will be updated in-place\n  # (imported from \"1234abcd\")\n", ""));
+        let p = e.init().plan_key(&target(), "123456789012").unwrap();
+        let said: Vec<&str> = p.changes.iter().map(|c| c.description.as_str()).collect();
+        assert!(
+            said.iter().any(|d| d.starts_with("Adopt existing KMS key")
+                && d.contains(KEY_ID)
+                && d.contains("module.key.aws_kms_key.secrets")),
+            "{said:?}"
+        );
+        assert!(said
+            .iter()
+            .any(|d| d.starts_with("Adopt existing KMS alias")
+                && d.contains("alias/ozbox-ozbox-secrets")));
+        // no create for either, and the remaining difference is listed honestly
+        assert!(
+            !p.changes.iter().any(|c| c.kind == "network.create"),
+            "{said:?}"
+        );
+        assert!(p.changes.iter().any(|c| c.kind == "network.update"));
+        assert!(!p.noop && !p.run.is_empty());
+        // the import blocks sit beside the generated root, one for each, by the ids found
+        let tf = adopt_tf(&e, "secrets-key");
+        assert!(
+            tf.contains("to = module.key.aws_kms_key.secrets")
+                && tf.contains(&format!("id = \"{KEY_ID}\""))
+        );
+        assert!(
+            tf.contains("to = module.key.aws_kms_alias.secrets")
+                && tf.contains("id = \"alias/ozbox-ozbox-secrets\"")
+        );
+        // lookups only read, and the plan is written before anything is applied
+        let calls = e.runner.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "list-aliases")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "apply")));
+        assert!(p.notes.iter().any(|n| n.contains("Adopt existing")));
+    }
+
+    #[test]
+    fn a_key_the_config_already_records_is_adopted_when_the_alias_is_gone_and_a_disagreement_is_refused(
+    ) {
+        // recorded, no alias: the recorded key is adopted and only the alias is made
+        let e = key_env();
+        e.init()
+            .persist(
+                &target(),
+                &[("secrets_key_arn", KEY_ARN), ("fleet", "ozbox")],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, ""));
+        e.runner.reply(out(0, TAGGED_KEY, ""));
+        e.runner.reply(out(2, "Plan: 1 to import, 1 to add, 0 to change, 0 to destroy.\n  # module.key.aws_kms_alias.secrets will be created\n", ""));
+        let p = e.init().plan_key(&target(), "123456789012").unwrap();
+        assert!(p
+            .changes
+            .iter()
+            .any(|c| c.kind == "adopt.import" && c.description.contains(KEY_ID)));
+        assert!(!p
+            .changes
+            .iter()
+            .any(|c| c.description.starts_with("Create kms key")));
+        assert!(adopt_tf(&e, "secrets-key").contains("aws_kms_key.secrets"));
+        assert!(!adopt_tf(&e, "secrets-key").contains("aws_kms_alias"));
+        // recorded one key, the alias points at another: neither is picked
+        let e = key_env();
+        e.init()
+            .persist(
+                &target(),
+                &[("secrets_key_arn", OTHER_KEY_ARN), ("fleet", "ozbox")],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        let err = e.init().plan_key(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_mismatch");
+    }
+
+    #[test]
+    fn an_existing_adopt_document_is_imported() {
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, TAGGED_DOCUMENT, ""));
+        e.runner.reply(out(0, "", "")); // plan: nothing else differs
+        let p = e.init().plan_adopt(&target(), "123456789012").unwrap();
+        assert!(
+            !p.noop && !p.run.is_empty(),
+            "an import must still be applied to record it"
+        );
+        assert!(
+            p.changes.len() == 1
+                && p.changes[0]
+                    .description
+                    .contains("Adopt existing Systems Manager document ozbox-adopt-ozbox")
+        );
+        let tf = adopt_tf(&e, "adopt-command");
+        assert!(
+            tf.contains("to = module.adopt.aws_ssm_document.adopt")
+                && tf.contains("id = \"ozbox-adopt-ozbox\"")
+        );
+    }
+
+    #[test]
+    fn existing_box_policies_are_imported_and_the_next_plan_shows_no_change() {
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, TAGGED_POLICY, ""));
+        e.runner.reply(out(0, TAGGED_POLICY, ""));
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(
+            p.changes
+                .iter()
+                .filter(|c| c.kind == "adopt.import")
+                .count(),
+            2
+        );
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.session\n"));
+        assert!(tf.contains("id = \"arn:aws:iam::123456789012:policy/ozbox-box-session-manager\""));
+        assert!(tf.contains("id = \"arn:aws:iam::123456789012:policy/ozbox-box-parameters\""));
+        // once applied they are in the state: no lookup, no import file, nothing to do
+        let e2 = policy_env();
+        std::fs::create_dir_all(e2.dir.path().join("work/box-policy/us-east-1")).unwrap();
+        std::fs::write(
+            e2.dir.path().join("work/box-policy/us-east-1/adopt.tf"),
+            "stale",
+        )
+        .unwrap();
+        queue_prologue(&e2);
+        e2.runner.reply(out(
+            0,
+            "module.policy.aws_iam_policy.session\nmodule.policy.aws_iam_policy.parameters\n",
+            "",
+        ));
+        e2.runner.reply(out(0, "", ""));
+        let p = e2
+            .init()
+            .plan_box_policy(&target(), "123456789012")
+            .unwrap();
+        assert!(p.noop && p.run.is_empty());
+        assert!(!e2
+            .runner
+            .calls()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "get-policy")));
+        assert!(!e2
+            .dir
+            .path()
+            .join("work/box-policy/us-east-1/adopt.tf")
+            .exists());
+    }
+
+    #[test]
+    fn the_counted_policies_are_looked_for_only_when_the_module_makes_them() {
+        let e = policy_env();
+        e.init()
+            .persist(
+                &target(),
+                &[
+                    ("secrets_key_arn", KEY_ARN),
+                    ("fleet", "ozbox"),
+                    ("session_log_bucket", "logs-bucket"),
+                ],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..4 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 4);
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.fleet_key[0]"));
+        assert!(tf.contains("to = module.policy.aws_iam_policy.session_logs[0]"));
+        assert!(tf.contains("policy/ozbox-box-fleet-key-ozbox"));
+    }
+
+    #[test]
+    fn a_look_alike_without_the_ozbox_tag_is_refused_and_says_why() {
+        // a document
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(
+            0,
+            r#"{"Document":{"Name":"ozbox-adopt-ozbox","Tags":[{"Key":"team","Value":"x"}]}}"#,
+            "",
+        ));
+        let err = e.init().plan_adopt(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(
+            err.message.contains("ozbox-adopt-ozbox")
+                && err.message.contains("not tagged ozbox-managed=true"),
+            "{err}"
+        );
+        assert!(err.fix.is_some());
+        assert!(!adopt_tf(&e, "adopt-command").contains("import"));
+        // a key whose tags are there but not ours
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(0, OTHER_KEY, ""));
+        assert_eq!(
+            e.init()
+                .plan_key(&target(), "123456789012")
+                .unwrap_err()
+                .code,
+            "adopt_untagged"
+        );
+        // a key whose tags the setup rights cannot read is the same refusal, with its own reason
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(254, "", DENIED));
+        let err = e.init().plan_key(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(
+            err.message.contains("could not read it as one of its own"),
+            "{err}"
+        );
+        // a policy
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, r#"{"Policy":{"Tags":[]}}"#, ""));
+        let err = e
+            .init()
+            .plan_box_policy(&target(), "123456789012")
+            .unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(err.message.contains("ozbox-box-session-manager"));
+    }
+
+    #[test]
+    fn a_lookup_that_cannot_answer_stops_the_step_instead_of_planning_a_create() {
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(254, "", "An error occurred (AccessDeniedException) when calling the DescribeDocument operation: nope"));
+        let err = e.init().plan_adopt(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_lookup_failed");
+        // an answer that is not readable is not "absent" either
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "not json", ""));
+        assert_eq!(
+            e.init()
+                .plan_adopt(&target(), "123456789012")
+                .unwrap_err()
+                .code,
+            "adopt_lookup_failed"
+        );
+        // and the plan is never reached
+        assert!(!e
+            .runner
+            .calls()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "plan")));
+    }
+
+    #[test]
+    fn a_plan_that_would_replace_or_remove_what_was_adopted_is_refused() {
+        for verb in ["must be replaced", "will be destroyed"] {
+            let e = policy_env();
+            queue_prologue(&e);
+            e.runner.reply(out(0, "", ""));
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+            e.runner.reply(out(254, "", NO_POLICY));
+            e.runner.reply(out(
+                2,
+                &format!("Plan: 1 to import, 1 to add, 0 to change, 1 to destroy.\n  # module.policy.aws_iam_policy.session {verb}\n  # module.policy.aws_iam_policy.parameters will be created\n"),
+                "",
+            ));
+            let err = e
+                .init()
+                .plan_box_policy(&target(), "123456789012")
+                .unwrap_err();
+            assert_eq!(err.code, "adopt_replace", "{verb}");
+            assert!(err.message.contains("module.policy.aws_iam_policy.session"));
+        }
+        // a replacement of something that was NOT adopted is not this refusal's business
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(254, "", NO_POLICY));
+        e.runner.reply(out(254, "", NO_POLICY));
+        e.runner.reply(out(2, "Plan: 1 to add, 1 to destroy.\n  # module.policy.aws_iam_policy.session must be replaced\n", ""));
+        assert!(e.init().plan_box_policy(&target(), "123456789012").is_ok());
+    }
+
+    #[test]
+    fn the_import_file_is_written_for_what_was_found_and_removed_when_nothing_is() {
+        let d = tempfile::tempdir().unwrap();
+        let one = adopt::Adopted {
+            address: "module.x.aws_thing.y[0]".into(),
+            what: "thing",
+            id: "abc-123".into(),
+        };
+        adopt::write_imports(d.path(), &[one]).unwrap();
+        let text = std::fs::read_to_string(d.path().join(adopt::ADOPT_FILE)).unwrap();
+        assert!(text.contains("import {\n  to = module.x.aws_thing.y[0]\n  id = \"abc-123\"\n}"));
+        adopt::write_imports(d.path(), &[]).unwrap();
+        assert!(!d.path().join(adopt::ADOPT_FILE).exists());
+        // removing what is not there is not an error
+        adopt::write_imports(d.path(), &[]).unwrap();
     }
 }
