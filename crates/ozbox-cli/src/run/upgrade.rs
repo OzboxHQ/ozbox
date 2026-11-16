@@ -1638,43 +1638,44 @@ fn verify_backups(
     let put_back = restored
         .as_ref()
         .is_some_and(|s| s.outcome == StepOutcome::Done);
-    let checked = match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
-        Ok((200, v)) => {
-            let count = v["items"].as_array().map_or(0, Vec::len).to_string();
-            Step::new(
-                StepOutcome::Done,
+    let checked =
+        match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
+            Ok((200, v)) => {
+                let count = v["items"].as_array().map_or(0, Vec::len).to_string();
+                Step::new(
+                    StepOutcome::Done,
+                    t(
+                        if put_back {
+                            "upgrade.backup_working"
+                        } else {
+                            "upgrade.backup_kept"
+                        },
+                        &[("box", name), ("count", &count)],
+                    ),
+                )
+            }
+            // an operation holds the repository (a prune): it is working, and it was not listed
+            Ok((409, v)) if v.get("code").and_then(serde_json::Value::as_str) == Some("busy") => {
+                Step::new(
+                    StepOutcome::Skipped,
+                    t("upgrade.backup_busy", &[("box", name)]),
+                )
+            }
+            Ok((_, v)) => Step::new(
+                StepOutcome::Failed,
                 t(
-                    if put_back {
-                        "upgrade.backup_working"
-                    } else {
-                        "upgrade.backup_kept"
-                    },
-                    &[("box", name), ("count", &count)],
+                    "upgrade.backup_unreachable",
+                    &[
+                        ("box", name),
+                        ("why", &crate::backup_ops::reason(&v, "no answer")),
+                    ],
                 ),
-            )
-        }
-        // an operation holds the repository (a prune): it is working, and it was not listed
-        Ok((409, v)) if v.get("code").and_then(serde_json::Value::as_str) == Some("busy") => {
-            Step::new(
-                StepOutcome::Skipped,
-                t("upgrade.backup_busy", &[("box", name)]),
-            )
-        }
-        Ok((_, v)) => Step::new(
-            StepOutcome::Failed,
-            t(
-                "upgrade.backup_unreachable",
-                &[
-                    ("box", name),
-                    ("why", &crate::backup_ops::reason(&v, "no answer")),
-                ],
             ),
-        ),
-        Err(e) => Step::new(
-            StepOutcome::Failed,
-            t("upgrade.backup_unreachable", &[("box", name), ("why", &e)]),
-        ),
-    };
+            Err(e) => Step::new(
+                StepOutcome::Failed,
+                t("upgrade.backup_unreachable", &[("box", name), ("why", &e)]),
+            ),
+        };
     // Putting the credentials back failed, yet the box holds some (the helper stored them and then refused, say): that
     // failure is part of the report, never dropped behind a repository that happens to answer.
     match restored {

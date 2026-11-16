@@ -209,7 +209,9 @@ pub fn write(dir: &Path, c: &Carried, trusted_uid: u32) -> Result<(), String> {
     let fail = |_: std::io::Error| "the backup record could not be written".to_string();
     match std::fs::symlink_metadata(dir) {
         Ok(m) if m.is_dir() && m.uid() == trusted_uid => {}
-        Ok(_) => return Err("the backup record's folder is not root's, so nothing was written".into()),
+        Ok(_) => {
+            return Err("the backup record's folder is not root's, so nothing was written".into())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(dir).map_err(fail)?
         }

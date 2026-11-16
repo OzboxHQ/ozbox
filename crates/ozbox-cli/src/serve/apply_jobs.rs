@@ -162,11 +162,11 @@ impl App {
             // an upgrade's follow-up must be able to tell backups that stopped from backups that never were: ask the box
             // while it is still the old machine
             let backups_before = match &p.operation {
-                Operation::Upgrade { name, .. } => provider
-                    .get(name)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|rec| crate::run::upgrade::backups_configured_now(agent.as_ref(), &rec)),
+                Operation::Upgrade { name, .. } => {
+                    provider.get(name).ok().flatten().is_some_and(|rec| {
+                        crate::run::upgrade::backups_configured_now(agent.as_ref(), &rec)
+                    })
+                }
                 _ => false,
             };
             let outcome = if restoring.is_some() {

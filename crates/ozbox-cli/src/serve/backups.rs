@@ -2026,7 +2026,8 @@ mod tests {
             &self,
             _: &BoxRecord,
             _: u64,
-        ) -> std::result::Result<ozbox_core::MetricsSample, crate::serve::agent::AgentError> {
+        ) -> std::result::Result<ozbox_core::MetricsSample, crate::serve::agent::AgentError>
+        {
             Err(crate::serve::agent::AgentError::Unsupported("none".into()))
         }
         fn metrics_series(
@@ -2052,7 +2053,8 @@ mod tests {
             &self,
             _: &BoxRecord,
             _: u64,
-        ) -> std::result::Result<crate::serve::agent::SelfTest, crate::serve::agent::AgentError> {
+        ) -> std::result::Result<crate::serve::agent::SelfTest, crate::serve::agent::AgentError>
+        {
             // the new machine's first self-test: from here the store is new
             *self.configured.lock().unwrap() = false;
             Ok(crate::serve::agent::SelfTest {
@@ -2111,13 +2113,17 @@ mod tests {
                     json!({ "configured": configured, "expected": false, "running": null, "last": null }),
                 ),
                 ("GET", "/snapshots") if configured => (200, json!({ "items": [] })),
-                _ => (409, json!({ "error": "no repository", "code": "not_configured" })),
+                _ => (
+                    409,
+                    json!({ "error": "no repository", "code": "not_configured" }),
+                ),
             })
         }
     }
 
     #[test]
-    fn a_dashboard_upgrade_reads_the_box_before_the_replace_so_backups_that_stopped_are_not_taken_for_none() {
+    fn a_dashboard_upgrade_reads_the_box_before_the_replace_so_backups_that_stopped_are_not_taken_for_none(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         // this computer holds no repository: nothing to put back, so the only way to tell is what the box said before
         let mut a = app(dir.path(), Backups::default()).with_agent(Box::new(LosesItsStore {

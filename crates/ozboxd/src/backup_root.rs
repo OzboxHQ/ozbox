@@ -274,7 +274,8 @@ pub fn refresh_record(t: &Target) -> Result<(), String> {
     if before.as_ref() == Some(&merged) {
         return Ok(());
     }
-    crate::backup_state::write(&t.state_dir, &merged, t.trusted_uid).map_err(|_| RECORD_NOT_WRITTEN.to_string())
+    crate::backup_state::write(&t.state_dir, &merged, t.trusted_uid)
+        .map_err(|_| RECORD_NOT_WRITTEN.to_string())
 }
 
 /// Move a credentials file written by an older version into the store, then remove it. `Ok(false)` when there is none.
@@ -873,7 +874,10 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(run.join("results/w2.result")).unwrap()).unwrap();
         assert_eq!(a["ok"], true);
-        assert!(a["warning"].as_str().unwrap().contains("could not be written"));
+        assert!(a["warning"]
+            .as_str()
+            .unwrap()
+            .contains("could not be written"));
         // removing credentials is the same
         let clear = Request {
             id: "w3".into(),
@@ -886,7 +890,8 @@ mod tests {
     }
 
     #[test]
-    fn a_box_that_already_holds_credentials_gets_its_record_at_the_next_start_and_hand_edits_are_kept() {
+    fn a_box_that_already_holds_credentials_gets_its_record_at_the_next_start_and_hand_edits_are_kept(
+    ) {
         use crate::backup_state::read;
         let dir = tempfile::tempdir().unwrap();
         let (t, store) = fake_service(dir.path());
@@ -924,7 +929,10 @@ mod tests {
         t.admin_socket = dir.path().join("absent.sock");
         etc_with(&t, "interval_hours = 3\n");
         refresh_record(&t).unwrap();
-        assert_eq!(read(&t.state_dir, me()).unwrap().unwrap().interval_hours, Some(3));
+        assert_eq!(
+            read(&t.state_dir, me()).unwrap().unwrap().interval_hours,
+            Some(3)
+        );
         std::fs::remove_file(t.state_dir.join("backup.toml")).unwrap();
         refresh_record(&t).unwrap();
         assert_eq!(read(&t.state_dir, me()), Ok(None));

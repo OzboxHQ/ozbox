@@ -469,11 +469,15 @@ fn a_box_that_did_not_come_back_says_its_backups_were_not_checked_not_that_there
 }
 
 #[test]
-fn a_failed_put_back_is_kept_in_the_report_even_when_the_box_holds_credentials_and_answers() -> TestResult {
+fn a_failed_put_back_is_kept_in_the_report_even_when_the_box_holds_credentials_and_answers(
+) -> TestResult {
     let d = tempfile::tempdir()?;
     let (_p, rec) = running(d.path())?;
     // the helper stored the credentials and then refused (so the box says configured), and the repository answers
-    let tried = Step::new(StepOutcome::Failed, "the helper refused: it could not keep the record");
+    let tried = Step::new(
+        StepOutcome::Failed,
+        "the helper refused: it could not keep the record",
+    );
     let step = verify_backups(
         &BackupBox::new(true, true, true, true),
         &rec,
@@ -504,7 +508,11 @@ fn backups_turned_off_for_a_box_on_this_computer_are_a_choice_never_a_loud_stop(
     // the box lost its credentials (a new store); this computer would put them back, but the person turned this box off
     let agent = BackupBox::new(false, true, true, false);
     let restored = restore_with(&settings, &agent, &rec, &secrets);
-    assert_eq!(agent.said("PUT /credentials"), 0, "nothing is put back for a box turned off");
+    assert_eq!(
+        agent.said("PUT /credentials"),
+        0,
+        "nothing is put back for a box turned off"
+    );
     assert_eq!(
         restored.as_ref().map(|s| s.outcome),
         Some(StepOutcome::Skipped)
@@ -523,7 +531,11 @@ fn backups_turned_off_for_a_box_on_this_computer_are_a_choice_never_a_loud_stop(
 fn a_repository_in_use_is_not_called_unreachable() -> TestResult {
     struct InUse(BackupBox);
     impl BoxAgent for InUse {
-        fn metrics_now(&self, r: &BoxRecord, n: u64) -> std::result::Result<MetricsSample, AgentError> {
+        fn metrics_now(
+            &self,
+            r: &BoxRecord,
+            n: u64,
+        ) -> std::result::Result<MetricsSample, AgentError> {
             self.0.metrics_now(r, n)
         }
         fn metrics_series(
@@ -561,7 +573,12 @@ fn a_repository_in_use_is_not_called_unreachable() -> TestResult {
     }
     let d = tempfile::tempdir()?;
     let (_p, rec) = running(d.path())?;
-    let step = verify_backups(&InUse(BackupBox::new(true, true, true, true)), &rec, false, None);
+    let step = verify_backups(
+        &InUse(BackupBox::new(true, true, true, true)),
+        &rec,
+        false,
+        None,
+    );
     assert_eq!(step.outcome, StepOutcome::Skipped, "{}", step.detail);
     assert!(
         step.detail.contains("using the repository") && !step.detail.contains("NOT WORKING"),

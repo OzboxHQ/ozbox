@@ -422,8 +422,11 @@ mod tests {
         // the record root keeps of the backup set-up is never put back from an old snapshot: the exclusion is the folder the
         // helper writes to, whatever it is called
         #[cfg(unix)]
-        assert!(ozbox_core::backup_scope::NEVER_RESTORED
-            .contains(&crate::backup_state::dir_for(std::path::Path::new("/work")).to_str().unwrap()));
+        assert!(ozbox_core::backup_scope::NEVER_RESTORED.contains(
+            &crate::backup_state::dir_for(std::path::Path::new("/work"))
+                .to_str()
+                .unwrap()
+        ));
         assert!(r.restore_cmd("deadbeef01", "/x").is_ok());
         assert_eq!(
             r.restore_cmd("--include=/etc", "/x").unwrap_err(),

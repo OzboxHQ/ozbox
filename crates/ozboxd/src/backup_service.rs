@@ -821,8 +821,7 @@ mod tests {
 
     impl CommandRunner for GateRunner {
         fn run(&self, _cmd: &ozbox_core::CommandSpec) -> ozbox_core::Result<Output> {
-            self.asked
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = self.release.lock().unwrap().recv();
             Ok(Output {
                 status: Some(0),
@@ -902,14 +901,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn while_an_operation_holds_the_repository_health_says_busy_and_snapshots_say_busy_not_unreachable() {
+    fn while_an_operation_holds_the_repository_health_says_busy_and_snapshots_say_busy_not_unreachable(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let rec = Arc::new(RecordingRunner::new());
         let svc = recorded(dir.path(), rec.clone());
         lock(&svc.inner).running = Some(("forget".into(), 1));
         assert_eq!(svc.health(), BackupHealth::Busy);
-        assert!(rec.calls().is_empty(), "restic is not asked while one is running");
-        let (status, v) = svc.handle("GET", "/snapshots", &serde_json::Value::Null, &|_| Ok(None), 1);
+        assert!(
+            rec.calls().is_empty(),
+            "restic is not asked while one is running"
+        );
+        let (status, v) = svc.handle(
+            "GET",
+            "/snapshots",
+            &serde_json::Value::Null,
+            &|_| Ok(None),
+            1,
+        );
         assert_eq!((status, v["code"].as_str()), (409, Some("busy")));
         assert!(rec.calls().is_empty());
         // a check that finishes after an operation began is not kept: a prune's lock would make a good repository look dead
@@ -980,12 +989,27 @@ mod tests {
         // the service is not there yet (the box has just started): not verified, and not a stop
         let down = mk(dir.path().join("nothing/broker/broker.sock"));
         assert_eq!(down.health(), BackupHealth::ServiceNotReady);
-        let (status, v) = down.handle("GET", "/snapshots", &serde_json::Value::Null, &|_| Ok(None), 1);
-        assert_eq!((status, v["code"].as_str()), (503, Some("secrets_not_ready")));
+        let (status, v) = down.handle(
+            "GET",
+            "/snapshots",
+            &serde_json::Value::Null,
+            &|_| Ok(None),
+            1,
+        );
+        assert_eq!(
+            (status, v["code"].as_str()),
+            (503, Some("secrets_not_ready"))
+        );
         // the service answers and holds nothing: that one is a loss
         let empty = mk(fake_secrets(dir.path(), false));
         assert_eq!(empty.health(), BackupHealth::CredentialsMissing);
-        let (status, v) = empty.handle("GET", "/snapshots", &serde_json::Value::Null, &|_| Ok(None), 1);
+        let (status, v) = empty.handle(
+            "GET",
+            "/snapshots",
+            &serde_json::Value::Null,
+            &|_| Ok(None),
+            1,
+        );
         assert_eq!((status, v["code"].as_str()), (409, Some("not_configured")));
         assert!(rec.calls().is_empty());
     }
@@ -997,9 +1021,18 @@ mod tests {
         let s = svc(dir.path(), rec);
         let body = serde_json::json!({"env": {}, "password": "x"});
         lock(&s.inner).probe.result = Some((BackupHealth::Unreachable, 1_000));
-        let (status, v) = s.handle("PUT", "/credentials", &body, &|_| Ok(Some("note".into())), 5);
+        let (status, v) = s.handle(
+            "PUT",
+            "/credentials",
+            &body,
+            &|_| Ok(Some("note".into())),
+            5,
+        );
         assert_eq!(status, 200);
-        assert_eq!((v["ok"].as_bool(), v["warning"].as_str()), (Some(true), Some("note")));
+        assert_eq!(
+            (v["ok"].as_bool(), v["warning"].as_str()),
+            (Some(true), Some("note"))
+        );
         assert!(lock(&s.inner).probe.result.is_none());
         let (status, v) = s.handle("PUT", "/credentials", &body, &|_| Ok(None), 6);
         assert_eq!(status, 200);
