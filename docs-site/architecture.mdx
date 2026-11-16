@@ -81,6 +81,8 @@ are labelled simulated; a figure with no data behind it is shown as a dash, neve
 The dashboard also lists runs, pending plans (approvals) and an activity trail, refreshes live over a server-sent event
 stream, installs as an app (its service worker never stores API data), and offers an "Open in" menu that shows how to
 connect a desktop coding app to a box over SSH through its tunnel.
+A slow cloud or box never holds the rest of the dashboard: the box list is shown from the last read, with its age, while a new read
+runs, and a box that does not answer is reported as not reached.
 
 ### Reaching it from elsewhere
 

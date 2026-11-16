@@ -369,7 +369,7 @@ impl App {
         self.orch.merger = Some(if self.simulated_metrics {
             Box::new(super::orch_merge::SimMerger)
         } else {
-            let rec = self.provider.list().ok().and_then(|v| {
+            let rec = self.boxes_quietly().and_then(|v| {
                 v.into_iter()
                     .find(|r| r.spec.name.as_str() == o.conductor_box)
             });

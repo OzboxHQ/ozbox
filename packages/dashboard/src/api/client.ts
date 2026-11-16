@@ -41,6 +41,7 @@ import type {
 
 import { summaryQuery } from '../lib/alert-outcome';
 import { ApiError } from './error';
+import { createLimiter } from '../lib/limit';
 import { createTransport, type Transport } from './transport';
 import { createAccessApi, type AccessApi } from './access';
 import { createBackupsApi, type BackupsApi } from './backups';
@@ -63,6 +64,21 @@ import { createTelegramApi, type TelegramApi } from './telegram';
 import { createToolsApi, type ToolsApi } from './tools';
 
 export { ApiError };
+
+/** The boxes, with how old the list is. The server answers a list from its last read when asking the cloud is slow. */
+export interface BoxList {
+  boxes: BoxRecord[];
+  /** When the server read the list (ms since 1970), or null when it did not say. */
+  asOf: number | null;
+  /** A new read is running, so the list may be about to change. */
+  refreshing: boolean;
+  /** The last read failed, so this is the last list that could be read. */
+  refreshFailed: boolean;
+}
+
+/** How long a first read of the boxes is waited for (the server answers `warming` until it lands) and how often it is asked. */
+const WARMING_GIVE_UP_MS = 90_000;
+const WARMING_ASK_MS = 1500;
 
 export interface ApiClient {
   /** The one way this dashboard talks to the server: JSON, streams (the terminal), uploads and files. */
@@ -106,6 +122,8 @@ export interface ApiClient {
   /** Asks the provider now (a read-only list of its boxes). A provider that refuses is an ANSWER (`ok: false`), not an error. */
   providerCheck(signal?: AbortSignal): Promise<ProviderCheck>;
   listBoxes(signal?: AbortSignal): Promise<BoxRecord[]>;
+  /** The same list with its age. While the server reads the cloud for the first time this keeps waiting instead of failing. */
+  listBoxesView(signal?: AbortSignal): Promise<BoxList>;
   getBox(name: string, signal?: AbortSignal): Promise<BoxRecord>;
   metricsNow(name: string, signal?: AbortSignal): Promise<MetricsNow>;
   metricsSeries(name: string, since: Date, step: Step, signal?: AbortSignal): Promise<MetricsSeries>;
@@ -190,6 +208,8 @@ export interface ClientOptions {
   sleepImpl?: (ms: number) => Promise<void>;
   /** How often a running change is asked about, in ms (default 1000). */
   pollMs?: number;
+  /** The clock (a test passes one it moves). */
+  nowImpl?: () => number;
 }
 
 export function createApiClient(opts: ClientOptions): ApiClient {
@@ -200,6 +220,33 @@ export function createApiClient(opts: ClientOptions): ApiClient {
   const fetchBlob = transport.blob;
 
   const box = (name: string) => `/v1/boxes/${encodeURIComponent(name)}`;
+  const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+  const nowMs = opts.nowImpl ?? (() => Date.now());
+
+  async function listBoxesView(signal?: AbortSignal): Promise<BoxList> {
+    const began = nowMs();
+    for (;;) {
+      try {
+        const { data, headers } = await transport.requestWithHeaders<BoxRecord[]>('GET', '/v1/boxes', signal);
+        const asOf = Number(headers.get('X-Ozbox-Boxes-As-Of'));
+        return {
+          boxes: data,
+          asOf: Number.isFinite(asOf) && asOf > 0 ? asOf : null,
+          refreshing: headers.get('X-Ozbox-Boxes-Refreshing') === '1',
+          refreshFailed: headers.get('X-Ozbox-Boxes-Refresh-Failed') === '1',
+        };
+      } catch (e) {
+        // The first read of the cloud is still running: that is a wait, not a failure.
+        if (!(e instanceof ApiError && e.code === 'warming') || nowMs() - began > WARMING_GIVE_UP_MS) throw e;
+        await sleep(WARMING_ASK_MS);
+        if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+      }
+    }
+  }
+
+  // The calls that ask a box (usage, self-test, incidents) go a few at a time: see `createLimiter`.
+  const perBox = createLimiter(3);
+  const askBox = <T>(path: string, signal?: AbortSignal) => perBox(() => request<T>('GET', path, undefined, signal), signal);
 
   /** `POST /v1/apply` answers at once with a job for a change that takes time; this follows the job to its end, so a caller
    * gets the same answer (or the same error) the change itself gave. Other pages keep answering meanwhile. */
@@ -262,9 +309,10 @@ export function createApiClient(opts: ClientOptions): ApiClient {
     setup: createSetupApi(request),
     info: (s) => request('GET', '/v1/info', undefined, s),
     providerCheck: (s) => request('GET', '/v1/provider/check', undefined, s),
-    listBoxes: (s) => request('GET', '/v1/boxes', undefined, s),
+    listBoxes: async (s) => (await listBoxesView(s)).boxes,
+    listBoxesView,
     getBox: (n, s) => request('GET', box(n), undefined, s),
-    metricsNow: (n, s) => request('GET', `${box(n)}/metrics/now`, undefined, s),
+    metricsNow: (n, s) => askBox(`${box(n)}/metrics/now`, s),
     metricsSeries: (n, since, step, s) =>
       request('GET', `${box(n)}/metrics?since=${encodeURIComponent(since.toISOString())}&step=${step}`, undefined, s),
     sshEntry: (n, s) => request('GET', `${box(n)}/ssh`, undefined, s),
@@ -277,9 +325,9 @@ export function createApiClient(opts: ClientOptions): ApiClient {
     suggestions: (s) => request('GET', '/v1/suggestions', undefined, s),
     getSettings: (s) => request('GET', '/v1/settings', undefined, s),
     saveSettings: (v, s) => request('PUT', '/v1/settings', v, s),
-    selftest: (n, s) => request('GET', `${box(n)}/selftest`, undefined, s),
+    selftest: (n, s) => askBox(`${box(n)}/selftest`, s),
     boxImage: (n, s) => request('GET', `${box(n)}/image`, undefined, s),
-    incidents: (n, s) => request('GET', `${box(n)}/incidents`, undefined, s),
+    incidents: (n, s) => askBox(`${box(n)}/incidents`, s),
     plan: (operation, s, o) =>
       request(
         'POST',

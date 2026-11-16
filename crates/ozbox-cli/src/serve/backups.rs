@@ -1094,9 +1094,9 @@ impl App {
     fn backups_overview(&self) -> Resp {
         let zone = self.zone();
         let now = unix_ms();
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let b = &self.settings.backups;
         let price = self

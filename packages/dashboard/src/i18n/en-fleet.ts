@@ -8,4 +8,10 @@ export const enFleet = {
   'fleetnote.unavailable': 'Not available from this box',
   'fleetnote.sheet_title': 'Not available from this dashboard',
   'fleetnote.sheet_desc': 'Fleet not connected: this dashboard sees only this box.',
+  'listnote.refreshing': 'Showing the boxes as they were {age} ago. Reading them again now.',
+  'listnote.stale': 'Showing the boxes as they were {age} ago.',
+  'listnote.failed': 'The last read of your boxes failed, so this is the list from {age} ago. It will be tried again.',
+  'listnote.warming': 'Reading your boxes from the cloud for the first time. This can take up to half a minute.',
+  'listnote.age_seconds': '{n} s',
+  'listnote.age_minutes': '{n} min',
 } as const;
