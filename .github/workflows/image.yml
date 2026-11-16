@@ -415,11 +415,15 @@ jobs:
         run: |
           echo "::error title=AWS refused the OIDC sign-in::The build role's trust policy does not allow this run. It presented a subject like $SUBJECT: the role must trust the environment named image of this repository, in the form GitHub presents (the immutable-id form repo:ORG@ORG_ID/REPO@REPO_ID:environment:image when the organization uses it). Apply infra/aws/image-build-trust-policy.json to the role with those ids filled in (infra/README.md says how), and make sure this job runs in the environment image. Nothing was built."
           exit 1
-      - name: Public sharing is allowed in every region this release publishes to (before anything is built)
+      - name: Public sharing is allowed, and the public-image quota can hold this release, in every region (before anything is built)
         if: needs.plan.outputs.public == 'true'
         env:
           REGIONS: ${{ needs.plan.outputs.all_regions }}
-        run: bash scripts/image/preflight.sh --regions "$REGIONS"
+          ARCHS: ${{ needs.plan.outputs.archs }}
+        run: |
+          set -euo pipefail
+          owner="$(aws sts get-caller-identity --query Account --output text)"
+          bash scripts/image/preflight.sh --regions "$REGIONS" --owner "$owner" --need "$(jq length <<<"$ARCHS")"
       - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
         with:
           version: 1.11.2
@@ -646,7 +650,7 @@ jobs:
           gh release upload "$tag" out/* --clobber
 
   publish:
-    name: Make public and retire old images
+    name: Make public and (optionally) retire old images
     # Only after the release's manifest is built, signed and uploaded: a client trusts the signed manifest, so no image is
     # public before its release is. Only when this repository publishes its images (OZBOX_IMAGE_PUBLIC); a pre-release only
     # through the plan job's exact beta opt-in (it sets `public`). A `republish` run has no build: it works from the release's own manifest.
@@ -698,14 +702,21 @@ jobs:
           role-to-assume: ${{ secrets.AWS_IMAGE_ROLE_ARN }}
           aws-region: us-east-1
           role-session-name: ozbox-publish-${{ github.run_id }}
-      - name: Make the release's images public (the images in the signed manifest, in every region)
+      - name: Make room under the public-image quota (older Oz Box versions become private, never deleted)
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
         run: |
           set -euo pipefail
+          owner="$(aws sts get-caller-identity --query Account --output text)"
           bash scripts/image/preflight.sh --regions "$REGIONS"
-          bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
+          # every region is planned first; one that cannot fit fails here, before any image changes
+          bash scripts/image/make-room.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --owner "$owner" --apply
+      - name: Make the release's images public (all or nothing; images already public are skipped)
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REGIONS: ${{ needs.plan.outputs.all_regions }}
+        run: bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
       - name: Retire images outside the retention window
         env:
           VERSION: ${{ needs.plan.outputs.version }}
