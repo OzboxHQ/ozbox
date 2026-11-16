@@ -1239,26 +1239,37 @@ mod tests {
 
     /// The key, adopt and box-policy steps, each with nothing to change, then the security check's sign-in.
     fn script_after_network(r: &RecordingRunner) {
+        // the secrets key: unknown permission, nothing to adopt, an empty plan, its outputs read back
         r.reply(o(254, "", "AccessDenied")); // get-role
         r.reply(o(0, "", "")); // head-bucket
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        r.reply(o(0, r#"{"Aliases":[]}"#, "")); // no alias to adopt
         r.reply(o(0, "", "")); // plan: nothing to do
         r.reply(o(
             0,
             r#"{"key_arn":{"value":"arn:aws:kms:us-east-1:123456789012:key/abc"},"fleet":{"value":"ozbox"}}"#,
             "",
         ));
+        // the adopt command's document: unknown permission, nothing to adopt, an empty plan, its policy read back
         r.reply(o(254, "", "AccessDenied")); // get-role
-        r.reply(o(0, "", ""));
+        r.reply(o(0, "", "")); // head-bucket
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
-        r.reply(o(0, "", ""));
-        r.reply(o(0, "", ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        r.reply(o(254, "", "InvalidDocument")); // no document to adopt
+        r.reply(o(0, "", "")); // plan: nothing to do
         r.reply(o(0, r#"{"Version":"2012-10-17","Statement":[]}"#, ""));
+        // the box Session Manager policy: head-bucket, version, init, nothing to adopt, an empty plan
         r.reply(o(0, "", "")); // box policy: head-bucket
         r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
-        r.reply(o(0, "", ""));
-        r.reply(o(0, "", ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        for _ in 0..3 {
+            r.reply(o(254, "", "NoSuchEntity")); // none of the three policies exists yet
+        }
+        r.reply(o(0, "", "")); // plan: nothing to do
         r.reply(o(0, SSO, ""));
     }
 
