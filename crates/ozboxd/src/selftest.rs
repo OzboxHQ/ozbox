@@ -219,6 +219,42 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+/// Whether an enabled unit that is not `active` is nevertheless healthy: a `Type=oneshot` that ran and exited successfully
+/// (`Result=success`, exit status 0), or a unit whose start condition was not met (`ConditionResult=no`, with no failure
+/// recorded). The properties come from one `systemctl --user show -p …` of the box user's own manager. Anything else, a
+/// long-running service that is not running, a failed run, or an answer that cannot be read, is not healthy.
+fn finished_or_skipped(unit: &str, uid: Option<u32>, runner: &dyn CommandRunner) -> bool {
+    let mut spec = CommandSpec::new("systemctl").args([
+        "--user",
+        "show",
+        "-p",
+        "Type,Result,ActiveState,SubState,ConditionResult,ExecMainStatus",
+        "--",
+        unit,
+    ]);
+    if let Some(uid) = uid {
+        let run = format!("/run/user/{uid}");
+        spec = spec
+            .env("XDG_RUNTIME_DIR", run.clone())
+            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={run}/bus"));
+    }
+    let Ok(out) = runner.run(&spec) else {
+        return false;
+    };
+    let prop = |key: &str| -> Option<&str> {
+        out.stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .map(str::trim)
+    };
+    // a unit that is up, or on its way, or failed, is not "finished"
+    if prop("ActiveState") != Some("inactive") || prop("Result") != Some("success") {
+        return false;
+    }
+    let ran_ok = prop("Type") == Some("oneshot") && prop("ExecMainStatus") == Some("0");
+    ran_ok || prop("ConditionResult") == Some("no")
+}
+
 /// The units enabled for the box user (names in `default.target.wants`) that are not active. A unit that is enabled and
 /// not running is the symptom of a user manager that started before its home was mounted.
 ///
@@ -288,10 +324,13 @@ fn user_services_check(wants: &Path, runner: &dyn CommandRunner) -> Check {
             ),
         );
     }
+    // A unit that is not active is asked about once more, for the properties that say WHY. Inactive is the right state for a
+    // one-time service that ran and finished, or whose start condition was not met (nothing to do): never read from `status` text.
     let down: Vec<String> = names
         .iter()
         .zip(&states)
         .filter(|(_, s)| s.as_str() != "active")
+        .filter(|(n, _)| !finished_or_skipped(n, owner_uid(wants), runner))
         .map(|(n, s)| format!("{n} ({s})"))
         .collect();
     if down.is_empty() && broken.is_empty() {
@@ -990,6 +1029,83 @@ mod tests {
             )),
             Some(Outcome::Pass)
         );
+    }
+
+    /// What `systemctl --user show` says about a unit, as the self-test asks for it.
+    fn shown(ty: &str, result: &str, active: &str, cond: &str, status: &str) -> String {
+        format!("Type={ty}\nResult={result}\nActiveState={active}\nSubState=dead\nConditionResult={cond}\nExecMainStatus={status}\n")
+    }
+
+    #[test]
+    fn an_enabled_unit_that_is_inactive_is_healthy_only_when_it_finished_or_had_nothing_to_do() {
+        let d = tempfile::tempdir().unwrap();
+        let (cfg, _h) = setup(d.path());
+        let wants = &cfg.user_wants_dir;
+        fs::create_dir_all(wants).unwrap();
+        fs::write(wants.join("ozbox-session-resume.service"), "").unwrap();
+        let check = |is_active: &str, show: &str| {
+            let r = RecordingRunner::new();
+            reply(&r, 3, is_active);
+            reply(&r, 0, show);
+            (user_services_check(wants, &r), r)
+        };
+        let name = "user_services_active";
+        // active: no second question
+        let (c, r) = check("active\n", "");
+        assert_eq!(c, pass(name));
+        assert_eq!(r.calls().len(), 1);
+        // a one-time service that ran and exited 0 stays inactive; so does one whose condition was not met
+        let (c, r) = check(
+            "inactive\n",
+            &shown("oneshot", "success", "inactive", "yes", "0"),
+        );
+        assert_eq!(c, pass(name), "{c:?}");
+        let call = r.calls().pop().unwrap();
+        assert_eq!(&call.args[..3], ["--user", "show", "-p"]);
+        assert_eq!(
+            call.args.last().map(String::as_str),
+            Some("ozbox-session-resume.service")
+        );
+        let (c, _) = check(
+            "inactive\n",
+            &shown("oneshot", "success", "inactive", "no", "0"),
+        );
+        assert_eq!(c, pass(name), "{c:?}");
+        let (c, _) = check(
+            "inactive\n",
+            &shown("simple", "success", "inactive", "no", "0"),
+        );
+        assert_eq!(c, pass(name), "{c:?}");
+        // a failed run, a long-running service that is not running, and an answer that says nothing are failures
+        for (why, show) in [
+            (
+                "exit-code",
+                shown("oneshot", "exit-code", "inactive", "yes", "1"),
+            ),
+            (
+                "failed active",
+                shown("oneshot", "success", "failed", "yes", "0"),
+            ),
+            (
+                "simple not running",
+                shown("simple", "success", "inactive", "yes", "0"),
+            ),
+            (
+                "condition but failed",
+                shown("oneshot", "exit-code", "inactive", "no", "1"),
+            ),
+            (
+                "oneshot status",
+                shown("oneshot", "success", "inactive", "yes", "2"),
+            ),
+            ("empty", String::new()),
+        ] {
+            let (c, _) = check("inactive\n", &show);
+            assert!(
+                matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("ozbox-session-resume.service (inactive)") && reason.contains("enable-linger")),
+                "{why}: {c:?}"
+            );
+        }
     }
 
     #[test]
