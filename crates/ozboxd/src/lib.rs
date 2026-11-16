@@ -38,6 +38,7 @@ pub mod secrets_link;
 pub mod selftest;
 #[cfg(unix)]
 pub mod session_resume;
+pub mod skills;
 pub mod store;
 #[cfg(unix)]
 pub mod terminal;

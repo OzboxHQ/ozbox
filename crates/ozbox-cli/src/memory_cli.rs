@@ -217,13 +217,25 @@ pub fn run_skills(c: &SkillsCommand, json_out: bool, yes: bool) -> Result<(), Cl
                     r.license.as_deref().unwrap_or("not stated"),
                     r.description
                 );
+                for a in &r.asks.acknowledge {
+                    println!("Asks to: {}", ask_sentence(a.key));
+                    for d in &a.detail {
+                        println!("    {d}");
+                    }
+                }
+                for (k, v) in &r.asks.shown {
+                    println!("Sets {k}: {v}");
+                }
                 for f in &r.files {
                     println!("--- {} ---\n{}\n", f.path, f.text);
                 }
             }
         }
         SkillsCommand::Add { dir } => {
-            let it = h.skills.add_to_library(dir).map_err(fail)?;
+            let it = h
+                .skills
+                .add_to_library(dir, "owner", now_ms())
+                .map_err(fail)?;
             println!(
                 "Added {} ({}). It is not approved or installed yet.",
                 it.name,
@@ -241,10 +253,35 @@ pub fn run_skills(c: &SkillsCommand, json_out: bool, yes: bool) -> Result<(), Cl
                 .map_err(fail)?;
             println!("Removed {name} from {scope}.");
         }
-        SkillsCommand::Approve { name } => {
+        SkillsCommand::Approve { name, ack } => {
             let r = h.skills.review(name, None).map_err(fail)?;
             for f in &r.files {
                 println!("--- {} ---\n{}\n", f.path, f.text);
+            }
+            let mut acknowledged = Vec::new();
+            for a in &r.asks.acknowledge {
+                println!("This skill asks to: {}", ask_sentence(a.key));
+                for d in &a.detail {
+                    println!("    {d}");
+                }
+                // `--yes` skips the question about the files, never the ones about commands and permissions
+                let ok = ack.iter().any(|k| k == a.key)
+                    || (!yes
+                        && confirm(
+                            false,
+                            &format!("Acknowledge that: {}?", ask_sentence(a.key)),
+                        )?);
+                if !ok {
+                    println!(
+                        "Not approved: {} needs your explicit acknowledgement (ask again, or pass --ack {}).",
+                        a.key, a.key
+                    );
+                    return Ok(());
+                }
+                acknowledged.push(a.key.to_string());
+            }
+            for (k, v) in &r.asks.shown {
+                println!("Also sets {k}: {v}");
             }
             if !confirm(
                 yes,
@@ -254,7 +291,7 @@ pub fn run_skills(c: &SkillsCommand, json_out: bool, yes: bool) -> Result<(), Cl
                 return Ok(());
             }
             h.skills
-                .approve(name, &r.hash, "owner", now)
+                .approve(name, &r.hash, "owner", now, &acknowledged)
                 .map_err(fail)?;
             println!("Approved {name} ({}).", &r.hash[..12]);
         }
@@ -264,4 +301,18 @@ pub fn run_skills(c: &SkillsCommand, json_out: bool, yes: bool) -> Result<(), Cl
         }
     }
     Ok(())
+}
+
+/// What an acknowledgement means, in words, for the command line.
+fn ask_sentence(key: &str) -> &'static str {
+    match key {
+        "hooks" => {
+            "register hooks, which run shell commands for the rest of a coding agent session"
+        }
+        "allowed-tools" => "let the agent use the listed tools without asking you first",
+        "shell" => "choose the shell its injected commands run in",
+        "agent" => "run in a subagent, whose own tools and permissions apply",
+        "shell-injection" => "run shell commands written in its text before the agent reads it",
+        _ => "do something this version does not know",
+    }
 }

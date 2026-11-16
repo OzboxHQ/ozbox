@@ -21,6 +21,7 @@ export const enPages = {
   'source.simulated': 'Simulated',
   'source.simulated_hint': 'These numbers are generated for the demo provider, not measured.',
   'source.files_note': 'Demo files: this folder is made up for the demo, on the computer that runs the dashboard. It is not the box\'s disk.',
+  'source.skills_note': 'Demo boxes: a skill put on one lands in a private temporary folder made for this demo, not on a real disk.',
   'source.tools_note': 'Demo tools: installs here are simulated. Nothing is installed on any box.',
   'source.chat_note': 'Demo server: the agent in this chat is a stand-in that gives made-up answers. It is not Claude Code and it does not touch a box.',
   'source.schedules_note': 'Demo server: only the demo agent (fake) can run here, with made-up output. A schedule on another engine fails to start.',

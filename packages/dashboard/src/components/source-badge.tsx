@@ -11,7 +11,7 @@ export function SourceBadge({ source }: { source: MetricsSource }) {
   );
 }
 
-const NOTES: Record<'files' | 'tools' | 'terminal' | 'chat' | 'schedules' | 'triggers' | 'backups' | 'local-ai' | 'browser' | 'orch' | 'usage' | 'suggestions', MessageKey> = {
+const NOTES: Record<'files' | 'tools' | 'terminal' | 'chat' | 'schedules' | 'triggers' | 'backups' | 'local-ai' | 'browser' | 'orch' | 'usage' | 'suggestions' | 'skills', MessageKey> = {
   chat: 'source.chat_note',
   schedules: 'source.schedules_note',
   triggers: 'source.triggers_note',
@@ -19,6 +19,7 @@ const NOTES: Record<'files' | 'tools' | 'terminal' | 'chat' | 'schedules' | 'tri
   'local-ai': 'source.local_ai_note',
   usage: 'source.usage_note',
   suggestions: 'source.suggestions_note',
+  skills: 'source.skills_note',
   browser: 'source.browser_note',
   orch: 'source.orch_note',
   files: 'source.files_note',

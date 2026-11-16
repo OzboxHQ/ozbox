@@ -63,6 +63,7 @@ mod run_transport;
 mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
+mod skills_routes;
 mod telegram_bridge;
 mod telegram_link;
 #[cfg(test)]
@@ -320,6 +321,12 @@ pub struct App {
     activity: VecDeque<ActivityEntry>,
     /// Who the request being answered is from (`Automation` between requests).
     current_actor: Actor,
+    /// Skills seen on a box that this dashboard has no push record for (`box:skill:hash`), so each is audited once, not on every look.
+    unrecorded_skills: std::collections::BTreeSet<String>,
+    /// Per box: when the current day's window began, how many sightings were noted in it, and how many were held back.
+    unrecorded_budget: HashMap<String, (u64, usize, usize)>,
+    /// The same window across every box: when it began and how many sightings it has noted.
+    unrecorded_global: (u64, usize),
     /// Changes to boxes that run in the background (see `apply_jobs`).
     apply_jobs: apply_jobs::Jobs,
     version: Arc<AtomicU64>,
@@ -469,6 +476,9 @@ impl App {
             backup_rt: backups::Runtime::default(),
             activity: VecDeque::new(),
             current_actor: Actor::Automation,
+            unrecorded_skills: std::collections::BTreeSet::new(),
+            unrecorded_budget: HashMap::new(),
+            unrecorded_global: (0, 0),
             apply_jobs: apply_jobs::Jobs::default(),
             version: Arc::new(AtomicU64::new(0)),
             streams: Arc::new(AtomicUsize::new(0)),
@@ -802,6 +812,7 @@ impl App {
             ["setup", rest @ ..] => self.setup_route(rest, req),
             ["dashboard-access", rest @ ..] => self.dashboard_access(req, rest),
             ["boxes", name, "tools", rest @ ..] => self.box_tools(name, rest, req),
+            ["boxes", name, "skills", rest @ ..] => self.box_skills(name, rest, req),
             ["backups", rest @ ..] => self.backups_fleet(&req.method, rest, &req.body),
             ["boxes", name, "backups", rest @ ..] => self.box_backups(name, &req.method, rest),
             ["boxes", name, "code", rest @ ..] => self.box_code(name, &req.method, rest, &req.body),
@@ -2715,16 +2726,32 @@ pub fn serve(
             }
             continue;
         }
-        let too_big = request.body_length().is_some_and(|n| n > MAX_BODY);
+        // A skill's files may be far more than 64 KiB. That one route may carry up to the cap that holds the largest skill,
+        // and the sign-in and role checks run before any of it is read, as they do for a file transfer.
+        let limit = skills_routes::big_body_cap(&method, &path).unwrap_or(MAX_BODY);
+        if limit > MAX_BODY {
+            let meta = Req {
+                method: method.clone(),
+                path: path.clone(),
+                query: query.clone(),
+                headers: headers.clone(),
+                body: Vec::new(),
+            };
+            if let Some(refusal) = app.guard(&meta, true) {
+                let _ = request.respond(to_http(refusal, false, &[]));
+                continue;
+            }
+        }
+        let too_big = request.body_length().is_some_and(|n| n > limit);
         let mut body = Vec::new();
         let resp = if too_big {
             Resp::error(413, "too_large", "request body too large")
         } else {
             let _ = request
                 .as_reader()
-                .take(MAX_BODY as u64 + 1)
+                .take(limit as u64 + 1)
                 .read_to_end(&mut body);
-            if body.len() > MAX_BODY {
+            if body.len() > limit {
                 Resp::error(413, "too_large", "request body too large")
             } else {
                 app.handle(&Req {

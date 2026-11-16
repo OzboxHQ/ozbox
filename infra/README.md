@@ -45,6 +45,8 @@ Everything that builds an Oz Box machine. Three pieces fit together:
    52 characters; `ozbox create` sets it) reaches the root setup step in the first-boot configuration, which writes
    `/etc/ozbox/approval-keys`. A malformed value fails the plan. Hetzner's first-boot configuration is sent without the
    template's comment lines, to stay under its 32 KB limit; both modules test their size with the longest values.
+   The Hetzner render has only about 1 to 2 KB of headroom under 32,768 bytes, so measure the next template addition against
+   the Hetzner render, not the AWS one.
 
 Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects `work_snapshot_id` and clone is not yet supported on Hetzner; `/work` backups there will use encrypted file backups to object storage.
 

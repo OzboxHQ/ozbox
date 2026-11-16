@@ -103,6 +103,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -510,6 +516,15 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -519,11 +534,20 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+dependencies = [
+ "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "hashlink"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -687,7 +711,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -926,6 +950,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "yaml-rust2",
 ]
 
 [[package]]
@@ -953,6 +978,7 @@ name = "ozbox-memory"
 version = "0.2.0-beta.0"
 dependencies = [
  "getrandom 0.2.17",
+ "ozbox-core",
  "ring",
  "rusqlite",
  "serde",
@@ -1256,7 +1282,7 @@ dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
  "fallible-streaming-iterator",
- "hashlink",
+ "hashlink 0.12.2",
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
@@ -1961,6 +1987,16 @@ checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
  "curve25519-dalek",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "yaml-rust2"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b36710ce3a279cfce8465dbab826f161675a262950b922cb2c3663852dfe9eb0"
+dependencies = [
+ "arraydeque",
+ "hashlink 0.11.1",
 ]
 
 [[package]]

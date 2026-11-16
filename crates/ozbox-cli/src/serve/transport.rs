@@ -34,6 +34,8 @@ use super::agent::{
 use crate::sshconfig::{self, RouteInputs};
 use crate::state::format_rfc3339;
 
+/// Why a dashboard that is not running on the box cannot put a skill there.
+pub const SKILL_WRITE_FROM_THE_BOX: &str = "a skill is put on a box's disk, or taken off it, from that box's own dashboard (open it through the box's address). A dashboard on another computer can see what the box holds but not change it, because the box's other socket is open to every program running on it.";
 pub const DAEMON_SOCKET: &str = "/run/ozboxd/ozboxd.sock";
 /// The dashboard user's own socket to the box daemon (ADR 0040, decision 3). systemd (root) binds it in a folder root owns
 /// (`ozboxd-supervisor.socket`), `root:ozbox-supervisor 0660`, and hands it to the daemon; see `ozbox_core::daemon_scope`.
@@ -41,6 +43,7 @@ pub const DAEMON_SOCKET: &str = "/run/ozboxd/ozboxd.sock";
 pub const DAEMON_SUPERVISOR_SOCKET: &str = "/run/ozbox-supervisor-api/daemon.sock";
 /// Overrides the socket path in a DEBUG build only (the browser tests start a stand-in daemon). A release build ignores it, so
 /// nothing in a box's environment can point the dashboard at another socket.
+#[cfg(debug_assertions)]
 pub const DAEMON_SUPERVISOR_SOCKET_ENV: &str = "OZBOX_DAEMON_SUPERVISOR_SOCKET";
 /// The dashboard's own audit line for a call on its socket to the box daemon (G1 M4, N7): every change, and the terminal
 /// attach, which is a read that puts a keyboard in a session. Only the route's name and method, never a path, id or body.
@@ -271,7 +274,7 @@ impl SshAgent {
     }
 
     /// The agent of a dashboard that runs on the box it shows: the dashboard user's own socket to the daemon (a fixed path;
-    /// a debug build honours `OZBOX_DAEMON_SUPERVISOR_SOCKET` for the browser tests), loopback ports by plain TCP, and
+    /// a debug build honours an environment override for the browser tests), loopback ports by plain TCP, and
     /// nothing that needs an SSH route. The socket must be owned by root, in this process's own group and `0660` before it
     /// is used; there is no other socket to fall back to.
     pub fn local(spawner: Arc<dyn Spawn>, inputs: RouteInputs) -> Result<Self, String> {
@@ -1495,6 +1498,44 @@ impl BoxAgent for SshAgent {
         Ok((status, v))
     }
 
+    fn skill_writes(&self) -> bool {
+        self.local.is_some()
+    }
+
+    fn skills(
+        &self,
+        rec: &BoxRecord,
+        method: &str,
+        sub: &str,
+        body: &[u8],
+    ) -> Result<(u16, Value), AgentError> {
+        // On a box's own dashboard this goes through the table of routes its scoped socket carries (`skills_read`, `skill_push`,
+        // `skill_remove`), like a run or a file write; a path off the table is refused there.
+        let path = format!("/v1/skills{sub}");
+        // Only the dashboard's own socket may put a skill on a disk or take one away. A dashboard that is not on the box
+        // reaches the box socket, which every process of the box user can open and which therefore refuses both, so it is
+        // not even tried: reading is all a remote dashboard does here.
+        if self.local.is_none() && method != "GET" {
+            return Err(AgentError::Unsupported(SKILL_WRITE_FROM_THE_BOX.into()));
+        }
+        let sock = self.socket_route(rec, method, &path)?;
+        let (status, raw) = request_with_body(&sock, method, &path, body)?;
+        let v: Value = serde_json::from_slice(&raw).map_err(|_| {
+            AgentError::Unreachable(
+                "the box's agent answered with data that is not understood".into(),
+            )
+        })?;
+        // A daemon from before skills existed answers "not found" for the route itself; a skill that is not there answers
+        // with its own code.
+        if status == 404 && v["error"] == "not found" {
+            return Ok((
+                501,
+                serde_json::json!({ "code": "agent_too_old", "message": "this box's agent does not manage skills yet; upgrade the box", "error": "this box's agent does not manage skills yet; upgrade the box" }),
+            ));
+        }
+        Ok((status, v))
+    }
+
     fn metrics_now(&self, rec: &BoxRecord, _now_ms: u64) -> Result<MetricsSample, AgentError> {
         let v = self.get(rec, "/v1/metrics/now")?;
         serde_json::from_value(v).map_err(|_| {
@@ -1800,6 +1841,9 @@ mod tests {
             "/v1/local-ai/pull" => (202, serde_json::json!({ "ok": true, "state": "pulling" }).to_string()),
             "/v1/local-ai/llama3.1%3A8b" => (200, serde_json::json!({ "ok": true }).to_string()),
             "/v1/local-ai/gone%3A1b" => (404, serde_json::json!({ "error": "that model is not on this box", "message": "that model is not on this box" }).to_string()),
+            "/v1/skills" => (200, serde_json::json!({ "agents": [], "skills": [], "others": {} }).to_string()),
+            "/v1/skills/demo" => (200, serde_json::json!({ "ok": true, "name": "demo", "results": [] }).to_string()),
+            "/v1/skills/gone" => (404, serde_json::json!({ "error": "no such skill here", "message": "no such skill here", "code": "not_found" }).to_string()),
             "/v1/sessions/term-1/stop" => (200, serde_json::json!({ "stopped": true }).to_string()),
             "/v1/sessions/gone/stop" => (404, serde_json::json!({ "error": "that is not running, or it is not yours" }).to_string()),
             "/v1/processes/900/stop" => (403, serde_json::json!({ "error": "that is not a coding agent or a server, so it was left alone" }).to_string()),
@@ -2046,6 +2090,46 @@ mod tests {
         assert_eq!(v["status"]["runtimes"][0]["running"], true);
         let v = a.local_ai(&rec, &serde_json::json!({ "action": "nonsense" }))?;
         assert_eq!(v["ok"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn skills_calls_map_onto_the_daemons_routes_and_an_old_daemon_says_to_upgrade() -> TestResult {
+        let ssh = Arc::new(FakeSsh::default());
+        let a = agent(&ssh)?;
+        let rec = aws_box("dev")?;
+        let (st, v) = a.skills(&rec, "GET", "", &[])?;
+        assert_eq!((st, v["skills"].is_array()), (200, true));
+        // a dashboard that is not on the box never sends a write to the box socket, which would refuse it
+        for (m, sub) in [("PUT", "/demo"), ("DELETE", "/gone")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(e.contains("from that box's own dashboard"), "{m}: {e}");
+        }
+        // a daemon from before skills answers "not found" for the route itself
+        let (st, v) = a.skills(&rec, "GET", "/older", &[])?;
+        assert_eq!((st, v["code"].as_str()), (501, Some("agent_too_old")));
+        Ok(())
+    }
+
+    #[test]
+    fn on_a_boxs_own_dashboard_skills_go_through_the_scoped_sockets_table() -> TestResult {
+        let ssh = Arc::new(FakeSsh::default());
+        let a = SshAgent::local_at(
+            ssh.clone(),
+            RouteInputs::default(),
+            PathBuf::from("/nonexistent/ozbox-test-daemon.sock"),
+        )?;
+        let rec = aws_box("dev")?;
+        // the three routes of the table are tried on the socket (which is not there, and says so)...
+        for (m, sub) in [("GET", ""), ("PUT", "/demo"), ("DELETE", "/demo")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(!e.contains(NOT_ON_A_BOX), "{m} {sub}: {e}");
+        }
+        // ...and anything else is "not available on a box's dashboard", never sent anywhere
+        for (m, sub) in [("POST", ""), ("PUT", ""), ("GET", "/demo")] {
+            let e = a.skills(&rec, m, sub, b"{}").unwrap_err().to_string();
+            assert!(e.contains(NOT_ON_A_BOX), "{m} {sub}: {e}");
+        }
         Ok(())
     }
 

@@ -101,9 +101,7 @@ approved skill from there when it asks. When a server has no settings file to ke
 forgotten when it stops.
 
 Installing a skill chooses **who may use it** once you approve it: every agent session, the orchestration agents working on one
-box, or the orchestration agents working in one project. A task started on its own, or an agent you run yourself, is offered only the skills installed for every agent session. Nothing is copied onto a box's own disk. To add a skill of your own, put it in a folder with a
-`SKILL.md` and run `ozbox skills add <folder>` on that computer; it then appears on the page to install and approve. Adding one
-from the page, and putting a skill onto a box's own disk, are not built yet.
+box, or the orchestration agents working in one project. A task started on its own, or an agent you run yourself, is offered only the skills installed for every agent session. Those installs are not copied onto a box's own disk. To have the coding agents on a box read a skill, choose **On a box's disk**, and add skills of your own with **Add a skill**: see [Skills for your agents](skills.md).
 
 A viewer can read both pages but is offered nothing to change. A member may add, edit, approve and forget notes; only an owner
 installs, removes, reviews or approves a skill, because a skill is guidance an agent follows with the box's authority.

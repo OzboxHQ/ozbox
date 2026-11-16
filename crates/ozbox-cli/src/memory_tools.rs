@@ -55,7 +55,7 @@ fn mem_err(e: MemError) -> ToolError {
 
 fn skill_err(e: SkillError) -> ToolError {
     match e {
-        SkillError::Refused(m) => ToolError::Refused(m),
+        SkillError::Refused(m) | SkillError::NotApproved(m) => ToolError::Refused(m),
         SkillError::Invalid(m) => ToolError::Invalid(m),
         SkillError::NotFound => ToolError::NotFound("there is no such skill".into()),
         SkillError::Io(m) => ToolError::Failed(m),

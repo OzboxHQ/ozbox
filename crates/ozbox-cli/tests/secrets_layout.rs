@@ -148,7 +148,7 @@ fn the_user_data_stays_inside_the_provider_limit() {
     // over the limit. Raised again from 25 000 when the memory guard's first-boot line met the dashboard role's
     // additions in one template (25 118 bytes); the rendered AWS size is the one that matters and has about 1.4 KB of room.
     let t = repo("infra/cloud-init/box.yaml.tftpl");
-    assert!(t.len() < 26_000, "the template is {} bytes", t.len());
+    assert!(t.len() < 26_400, "the template is {} bytes", t.len());
 }
 
 #[test]
@@ -349,4 +349,164 @@ fn the_image_carries_the_ingress_account_with_no_key_and_nothing_in_a_user_writa
             );
         }
     }
+}
+
+/// The managed Claude Code setting that turns off commands written in a skill's text ships on every new box, root-owned and
+/// not writable by the box user, with exactly this content; and the box user's own settings carry it as a second layer.
+#[test]
+fn the_box_ships_claude_codes_managed_setting_that_stops_skill_commands() {
+    let t = repo("infra/cloud-init/box.yaml.tftpl");
+    let entry = t
+        .split("  - path: /etc/claude-code/managed-settings.json\n")
+        .nth(1)
+        .expect("the managed settings file is written")
+        .split("\n  - path:")
+        .next()
+        .unwrap_or_default();
+    assert!(entry.contains("permissions: \"0644\""), "{entry}");
+    assert!(entry.contains("owner: root:root"), "{entry}");
+    assert!(
+        entry.contains("{\"disableSkillShellExecution\": true}"),
+        "{entry}"
+    );
+    // a second layer in the box user's own settings, made only when there is none, and AS THE BOX USER (never root, which
+    // would follow a link the box user planted): no-clobber, no link followed
+    let body = seed_script(&t);
+    assert!(t.contains("runuser -u ozbox -- sh -c '"));
+    assert!(
+        body.contains("set -C") && body.contains("[ -L $s ]") && body.contains("[ -L $h/.claude ]")
+    );
+    // an allowlist, not a list of forbidden spellings: every line that names the box user's home is one of the known forms,
+    // so a root `cp`, `install`, `tee`, a redirect with or without a space, or a recursive chown cannot be added unseen
+    if let Err(line) = home_lines_are_known(&t) {
+        panic!("a line that touches the box user's home is not a known form: {line}");
+    }
+    if let Err(line) = runuser_lines_are_plain(&t) {
+        panic!("runuser must be `runuser -u ozbox --` without a login shell: {line}");
+    }
+    // it must not be the only copy a skill could switch off: the root-owned file is not under /work
+    assert!(!entry.contains("/work/"));
+}
+
+/// The only forms in which the work-setup block may mention the box user's home. Anything else (a root `cp -n` into it,
+/// `install -d -o ozbox`, `>/work/home/ozbox/...`, `tee`, `chown -R`) is a way for root to write there, and is refused.
+fn home_lines_are_known(tpl: &str) -> Result<(), String> {
+    const HOME: &str = "/work/home/ozbox";
+    for line in tpl.lines().filter(|l| l.contains(HOME)) {
+        let l = line.trim();
+        let known = l == "homedir: /work/home/ozbox"
+            || l == "mkdir -p /work/home/ozbox"
+            || l.starts_with("useradd $pin_uid --home-dir /work/home/ozbox --no-create-home ")
+            || l == "disk_uid=\"$(stat -c %u /work/home/ozbox)\""
+            || l == "disk_gid=\"$(stat -c %g /work/home/ozbox)\""
+            || l == "chown ozbox:ozbox /work/home/ozbox"
+            || l == "chmod 0750 /work/home/ozbox"
+            || l == "if [ ! -e /work/home/ozbox/.profile ]; then"
+            || l.starts_with("runuser -u ozbox -- sh -c '");
+        if !known {
+            return Err(l.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Every `runuser` is `runuser -u ozbox --`: no `-l`/`-` login shell (it would start a PAM session and systemd user manager).
+fn runuser_lines_are_plain(tpl: &str) -> Result<(), String> {
+    for line in tpl.lines().filter(|l| l.contains("runuser")) {
+        let l = line.trim();
+        let plain = l.starts_with("runuser -u ozbox -- ")
+            && !l.contains("runuser -l")
+            && !l.contains("runuser - ")
+            && !l.contains("--login");
+        if !plain {
+            return Err(l.to_string());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_home_guard_refuses_every_way_root_could_write_there() {
+    let t = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infra/cloud-init/box.yaml.tftpl"),
+    )
+    .expect("the box template is readable");
+    assert!(home_lines_are_known(&t).is_ok());
+    assert!(runuser_lines_are_plain(&t).is_ok());
+    for bad in [
+        "      cp -n /etc/skel/.profile /work/home/ozbox/.profile",
+        "      install -d -o ozbox -g ozbox /work/home/ozbox/.claude",
+        "      echo x >/work/home/ozbox/.profile",
+        "      echo x > /work/home/ozbox/.profile",
+        "      echo x | tee /work/home/ozbox/.profile",
+        "      chown -R ozbox:ozbox /work/home/ozbox",
+        "      mkdir -p /work/home/ozbox/.claude",
+    ] {
+        let with_bad = format!("{t}\n{bad}\n");
+        assert!(home_lines_are_known(&with_bad).is_err(), "{bad}");
+    }
+    for bad in [
+        "      runuser -l ozbox -c 'true'",
+        "      runuser - ozbox -c 'true'",
+        "      runuser ozbox -c 'true'",
+    ] {
+        let with_bad = format!("{t}\n{bad}\n");
+        assert!(runuser_lines_are_plain(&with_bad).is_err(), "{bad}");
+    }
+}
+
+/// The shell the first-boot script runs as the box user to seed its home.
+fn seed_script(tpl: &str) -> String {
+    let rest = tpl
+        .split("runuser -u ozbox -- sh -c '")
+        .nth(1)
+        .expect("the seed script is there");
+    rest.split("' || true").next().unwrap().to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_seed_script_never_follows_a_link_or_clobbers_a_file() {
+    use std::os::unix::fs::symlink;
+    let body = seed_script(&repo("infra/cloud-init/box.yaml.tftpl"));
+    let run = |home: &std::path::Path| {
+        let script = body.replace("/work/home/ozbox", home.to_str().unwrap());
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    };
+    let setting = "{\"disableSkillShellExecution\": true}";
+    // a fresh home gets the setting
+    let d = tempfile::tempdir().unwrap();
+    run(d.path());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join(".claude/settings.json"))
+            .unwrap()
+            .trim(),
+        setting
+    );
+    // an existing file is not clobbered
+    std::fs::write(d.path().join(".claude/settings.json"), "mine").unwrap();
+    run(d.path());
+    assert_eq!(
+        std::fs::read_to_string(d.path().join(".claude/settings.json")).unwrap(),
+        "mine"
+    );
+    // a dangling link is not followed: the file it points at is not created
+    let d = tempfile::tempdir().unwrap();
+    let target = d.path().join("outside-file");
+    std::fs::create_dir_all(d.path().join(".claude")).unwrap();
+    symlink(&target, d.path().join(".claude/settings.json")).unwrap();
+    run(d.path());
+    assert!(!target.exists(), "the script wrote through a dangling link");
+    // a `.claude` that is a link is skipped: nothing is made inside what it points at
+    let d = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), d.path().join(".claude")).unwrap();
+    run(d.path());
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
 }

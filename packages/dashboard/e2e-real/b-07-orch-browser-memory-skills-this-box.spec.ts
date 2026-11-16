@@ -44,9 +44,9 @@ test('the server is a box, and the four pages are live, never simulated', async 
   expect(browser.status).toBe(200);
   expect(browser.body['source']).toBe('live');
   const mem = await call('GET', '/v1/memory');
-  expect(mem.body['store']).toEqual({ persisted: true, on_a_box: true, host: s.box });
+  expect(mem.body['store']).toMatchObject({ persisted: true, on_a_box: true, host: s.box });
   const skills = await call('GET', '/v1/skills');
-  expect(skills.body['store']).toEqual({ persisted: true, on_a_box: true, host: s.box });
+  expect(skills.body['store']).toMatchObject({ persisted: true, on_a_box: true, host: s.box });
 });
 
 for (const w of WIDTHS) {
