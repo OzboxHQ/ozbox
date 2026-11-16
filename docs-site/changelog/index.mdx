@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard"]} description="Dashboard stays responsive">
+  ## The dashboard no longer freezes while your cloud or a box is slow
+
+  With a real fleet, the Fleet and Boxes pages could stop with "This page could not ask the server what it is". Listing your boxes in the cloud and asking each one how it is doing can take a long time, and while it did, every other request waited behind it.
+
+  - **Pages load while the cloud is slow.** `ozbox serve` answers what the server is, the dashboard's files and sign-in at once, however long a box takes to reply.
+  - **The box list shows what was last read, and says so.** When your cloud is slow, the Fleet and Boxes pages show the last list with how old it is and that it is being read again, instead of an error. The first read after `ozbox serve` starts says it is reading your boxes and can take up to half a minute.
+  - **A box that does not answer is reported as not reached** after a few seconds. The other boxes and the list are not held up for it, and asking again does not pile more questions on it.
+  - **A busy server says so.** If far more boxes are being asked about at once than the server will take on, the extra requests are told to try again in a moment instead of waiting without end.
+  - **A page that could not reach the server brings itself back** as soon as the server answers, without pressing Try again.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.1: fixes from the first real upgrade">
   ## Oz Box 0.2.0-beta.1: fixes from the first real upgrade
 
