@@ -268,7 +268,15 @@ mod daemon {
             Some("interruption-watch") => return interruption_watch(),
             _ => {}
         }
-        let cfg = load_config()?;
+        let mut cfg = load_config()?;
+        // What an upgrade must not lose (see `backup_state`): settings root's /etc no longer holds because the system disk
+        // was replaced. A record that cannot be trusted is ignored and said, never obeyed.
+        let backup_state_dir = ozboxd::backup_state::dir_for(&cfg.work_dir);
+        match ozboxd::backup_state::read(&backup_state_dir, 0) {
+            Ok(Some(c)) => cfg.backup = ozboxd::backup_state::effective(cfg.backup, Some(&c)),
+            Ok(None) => {}
+            Err(why) => log(&why),
+        }
         if std::env::args().nth(1).as_deref() == Some("growfs") {
             return growfs_once(&cfg);
         }
@@ -289,7 +297,8 @@ mod daemon {
                 },
                 runner.clone(),
                 clock.clone(),
-            ),
+            )
+            .with_state_dir(backup_state_dir.clone()),
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -540,6 +549,15 @@ mod daemon {
         }
         if cfg.backup.enabled {
             stcfg.tools.push("restic".into());
+        }
+        // backups that were set up on this box must still work after a boot, an upgrade or a restore: the check exists only
+        // for a box that has the record, and fails when the credentials are gone or the repository does not answer
+        if let Some(svc) = ozboxd::backup_service::global() {
+            let svc = svc.clone();
+            stcfg.backups = Some(selftest::BackupsProbe {
+                box_name: name.to_string(),
+                health: Arc::new(move || svc.health_within(Duration::from_secs(60))),
+            });
         }
         let selftest_fn: Arc<dyn Fn() -> SelfTestResult + Send + Sync> = {
             let (host, runs, clock, runner) =

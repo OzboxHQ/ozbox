@@ -25,8 +25,9 @@ open it depends on where the store's key is. A key in a cloud key service (AWS: 
 `[aws]`, and make the box with them, or move an existing box with `ozbox adopt-fleet-key main`: see 1b) or a TPM is kept, and so is a key escrowed in the box's own vault (box secrets on OpenBao
 with a token). A key kept only in a file on the system disk is lost with that disk: the upgrade is then refused and the plan
 lists what you would have to enter again. Escrow the key first, or run it again with `--accept-new-secrets-store`; the old
-store is then set aside (never deleted) with the key this computer pinned when it made the box, and the backup credentials
-and the web IDE's tunnel token are put back from this computer. A box that is not running cannot be asked, so start it first
+store is then set aside (never deleted) with the key this computer pinned when it made the box, and the web IDE's tunnel token
+is put back from this computer, as are the backup credentials when this computer holds them (if it does not, backups on that
+box stop, and the upgrade says so: see 4b). A box that is not running cannot be asked, so start it first
 (`ozbox resume main`) or accept a new store.
 
 On AWS, a box made without a pinned approver gets this computer's key in its new machine's first-boot configuration. After
@@ -154,6 +155,37 @@ deduplicated (restic).
 ozbox backup now main --to both
 ```
 
+**Status:** Preview.
+
+## 4b. Keep backups through an upgrade
+
+**You want:** an upgrade that never leaves a box quietly un-backed-up.
+
+An upgrade replaces the box's system disk and keeps `/work`. For backups to a repository that means:
+
+- **The repository, its password and its keys** stay in the box's encrypted secrets store, never in a file. A store that can
+  be opened on the new machine comes through the upgrade with them, so a box you set up backups on yourself (not from this
+  computer) keeps them without this computer holding anything.
+- **What is backed up and how often** (`paths`, `excludes` and `interval_hours` in the `[backup]` section of
+  `/etc/ozbox/ozboxd.toml`, if you changed them) is kept by root in a folder on `/work` the box's own programs cannot change, so
+  the new system disk starts with your choice. The dashboard owns the schedule, so `enabled` and where credentials come from
+  are always the image's, never `/work`'s.
+- **After the self-test** the upgrade asks the box whether backups are configured and whether the repository answers, and says
+  so: the report line starts "Backups:". If backups were set up and are not working, the self-test **fails**, the report says
+  **BACKUPS HAVE STOPPED** (or **ARE NOT WORKING**) with the command, and `ozbox upgrade` exits with an error. A box that never
+  had backups is not failed for it.
+- **A new secrets store** (you accepted `--accept-new-secrets-store`) starts without the credentials. The upgrade puts them back
+  from this computer when it holds them. If it does not, backups stop and this is what to run:
+
+```
+ozbox backup credentials main
+```
+
+It sends the repository's password and keys from this computer's secret store to the box (they are never printed). If this
+computer never held them, add the repository in **Settings → Backups** first. To take backups off a box on purpose, remove the
+repository there: the box forgets that backups were set up, so the self-test does not fail for it.
+
+**Underneath:** a restore of a snapshot taken before backups were removed can bring the old record back; remove the repository again.
 **Status:** Preview.
 
 ## 5. Restore a file or folder you deleted

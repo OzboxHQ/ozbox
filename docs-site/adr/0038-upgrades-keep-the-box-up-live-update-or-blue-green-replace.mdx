@@ -299,7 +299,7 @@ and its key still on its own disk.
    - The SSH entry on this computer points at the new machine and the old host key is forgotten (as today). Other computers
      run `ozbox ssh-config` again, which reads the active machine from the record.
    - The box record: the active slot, the image and applied releases, and the provider labels.
-   - The backup repository's credentials and the managed services are put back with the steps today's upgrade already uses.
+   - The backup repository's credentials stay in the secrets store, which comes through the upgrade with the store; when it does not, they are put back from this computer when it holds them, and otherwise backups stop and the report fails with the command that sends them. Backups that were set up are then checked to answer, as part of the self-test. The managed services are put back with the steps today's upgrade already uses.
 7. **Resume work.** The dashboard resumes each paused run from its checkpoint and the engine's own resume, offers to reopen each
    recorded coding agent in a new tmux window in its folder, and recreates the recorded tmux windows. Scrollback and plain shells
    are not kept, and the warning said so.

@@ -37,11 +37,28 @@ impl Retention {
     }
 }
 
+/// Whether backups that were set up on this box work now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupHealth {
+    /// Backups were never set up here (or were removed on purpose): nothing to check.
+    NotExpected,
+    /// They were set up, the credentials are here and the repository answered.
+    Working,
+    /// They were set up and the credentials are not on this box any more.
+    CredentialsMissing,
+    /// They were set up, the credentials are here and the repository did not answer.
+    Unreachable,
+}
+
 /// What the box is doing about backups right now, and how the last operation ended.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BackupStatus {
     /// Credentials for a repository are on this box.
     pub configured: bool,
+    /// Backups were set up on this box (a record root keeps on `/work`, so it outlives an upgrade). `expected` with no
+    /// `configured` is backups that stopped.
+    #[serde(default)]
+    pub expected: bool,
     /// `backup`, `forget` or `restore` while one runs.
     pub running: Option<String>,
     pub running_since_ms: Option<u64>,
@@ -81,6 +98,8 @@ pub struct BackupService {
     inner: Mutex<Inner>,
     /// Run operations on the calling thread (tests); the daemon starts a thread per operation.
     inline: bool,
+    /// Where the record that backups were set up lives (root's folder on `/work`, see `backup_state`).
+    state_dir: Option<(PathBuf, u32)>,
 }
 
 static GLOBAL: OnceLock<Arc<BackupService>> = OnceLock::new();
@@ -106,7 +125,59 @@ impl BackupService {
             clock,
             inner: Mutex::new(Inner::default()),
             inline: false,
+            state_dir: None,
         }
+    }
+
+    /// Read the record that backups were set up from `dir` (root's folder on `/work`).
+    pub fn with_state_dir(self, dir: PathBuf) -> Self {
+        self.with_state_dir_owned_by(dir, 0)
+    }
+
+    /// As [`Self::with_state_dir`], with the user that must own the record (root, 0, on a box; a test's own user).
+    pub fn with_state_dir_owned_by(mut self, dir: PathBuf, uid: u32) -> Self {
+        self.state_dir = Some((dir, uid));
+        self
+    }
+
+    /// Whether backups were set up on this box, by the record root keeps on `/work`. False without a folder, and for a
+    /// record that cannot be trusted (it is never obeyed).
+    #[cfg(unix)]
+    pub fn expected(&self) -> bool {
+        self.state_dir
+            .as_ref()
+            .is_some_and(|(d, uid)| matches!(crate::backup_state::read(d, *uid), Ok(Some(_))))
+    }
+
+    #[cfg(not(unix))]
+    pub fn expected(&self) -> bool {
+        false
+    }
+
+    /// Whether backups that were set up are working: the credentials are here and the repository answers. Never carries
+    /// restic's text, the repository or a credential.
+    pub fn health(&self) -> BackupHealth {
+        if !self.expected() {
+            return BackupHealth::NotExpected;
+        }
+        match self.restic() {
+            Err(_) => BackupHealth::CredentialsMissing,
+            Ok(r) => match r.snapshots() {
+                Ok(_) => BackupHealth::Working,
+                Err(_) => BackupHealth::Unreachable,
+            },
+        }
+    }
+
+    /// [`Self::health`], but a repository that does not answer in `limit` is reported as unreachable rather than waited for
+    /// (the self-test must not hang on a dead network).
+    pub fn health_within(self: &Arc<Self>, limit: std::time::Duration) -> BackupHealth {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let _ = tx.send(me.health());
+        });
+        rx.recv_timeout(limit).unwrap_or(BackupHealth::Unreachable)
     }
 
     pub fn inline(mut self) -> Self {
@@ -140,6 +211,7 @@ impl BackupService {
         let g = lock(&self.inner);
         BackupStatus {
             configured: self.configured(),
+            expected: self.expected(),
             running: g.running.as_ref().map(|r| r.0.clone()),
             running_since_ms: g.running.as_ref().map(|r| r.1),
             last: g.last.clone(),
@@ -558,5 +630,65 @@ mod tests {
         assert_eq!(list.len(), 2, "an entry with a malformed id is dropped");
         assert_eq!(list[0].id, "aaaaaaaa11111111");
         assert_eq!(list[1].size_bytes, Some(1_048_576));
+    }
+
+    #[cfg(unix)]
+    fn me() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(".").unwrap().uid()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_that_were_set_up_are_expected_and_health_says_whether_they_work() {
+        use crate::backup_state::{merge, write};
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(RecordingRunner::new());
+        let state = dir.path().join("ozbox-backup");
+        let mk = |env: PathBuf, rec: Arc<RecordingRunner>| {
+            Arc::new(
+                BackupService::new(
+                    BackupConfig {
+                        env_file: env,
+                        box_name: Some("main".into()),
+                        ..BackupConfig::default()
+                    },
+                    rec,
+                    Arc::new(FakeClock::new(1_000)),
+                )
+                .inline()
+                .with_state_dir_owned_by(state.clone(), me()),
+            )
+        };
+        // never set up: nothing to check, and the status says so
+        let svc = mk(env_file(dir.path()), rec.clone());
+        assert_eq!(svc.health(), BackupHealth::NotExpected);
+        assert!(!svc.status().expected);
+        // set up, credentials present, the repository answers
+        write(
+            &state,
+            &merge(None, &crate::config::BackupSection::default()),
+        )
+        .unwrap();
+        rec.reply(Output {
+            status: Some(0),
+            stdout: "[]".into(),
+            stderr: String::new(),
+        });
+        assert!(svc.status().expected && svc.status().configured);
+        assert_eq!(svc.health(), BackupHealth::Working);
+        // set up, credentials present, the repository does not answer
+        rec.reply(Output {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: "Fatal: unable to open repository at s3:https://objects.example.com/b".into(),
+        });
+        assert_eq!(svc.health(), BackupHealth::Unreachable);
+        // set up, and the credentials are gone (a new secrets store)
+        let lost = mk(dir.path().join("absent.env"), rec.clone());
+        assert_eq!(lost.health(), BackupHealth::CredentialsMissing);
+        assert!(lost.status().expected && !lost.status().configured);
+        // the health never carries restic's text or the repository
+        assert!(!format!("{:?}", svc.health()).contains("objects"));
     }
 }

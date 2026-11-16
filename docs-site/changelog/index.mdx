@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Backups through an upgrade">
+  ## An upgrade no longer leaves a box quietly un-backed-up
+
+  An upgrade replaces a box's system disk. If the box backed up `/work` to a repository, nothing told you afterwards whether those backups still worked, and settings you had made on the box itself could be gone.
+
+  - **Your backup settings come through.** The repository's password and keys stay in the box's encrypted secrets store, which an upgrade keeps when the store can be opened on the new machine, so backups you set up on the box itself no longer depend on this computer holding anything. What is backed up and how often, if you changed it on the box, is kept by root on `/work` and applies on the new system disk.
+  - **The upgrade checks that backups work.** After the self-test it asks the box whether backups are configured and whether the repository answers, and the report says so. A box whose backups were set up and are not working now fails its self-test, and the upgrade ends with an error naming what to run. A box that never had backups is not failed for it.
+  - **If a new secrets store was started** (`--accept-new-secrets-store`), backups stop until their credentials are sent again. The upgrade puts them back from this computer when it holds them; otherwise it says **BACKUPS HAVE STOPPED** and the command: `ozbox backup credentials <box>`.
+  - **A box that already has its credentials keeps them.** The upgrade no longer sends this computer's copy over a box's own.
+  - **New command:** `ozbox backup credentials <box>` sends the repository's password and keys from this computer's secret store to a box. They are never printed.
+</Update>
+
 <Update label="[Release date]" tags={["CLI"]} description="Fleet-key move and self-test">
   ## `adopt-fleet-key` no longer refuses a box only because its tags change, and the self-test stops reporting a one-time service that had nothing to do
 

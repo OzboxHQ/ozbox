@@ -316,9 +316,12 @@ fn the_final_output_says_exactly_what_to_do_about_backup_credentials() -> TestRe
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("Send credentials")
-                .and(predicate::str::contains("NOT restored"))
-                .and(predicate::str::contains("note: Backups:")),
+            // the plan says what an upgrade does to backups, and the command that puts credentials back if they stop
+            predicate::str::contains("note: Backups:")
+                .and(predicate::str::contains("ozbox backup credentials"))
+                .and(predicate::str::contains("STOP"))
+                // a box that reports no repository is not failed for it, and the report says there was nothing to verify
+                .and(predicate::str::contains("nothing to verify")),
         );
     let out = e
         .cmd()

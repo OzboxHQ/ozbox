@@ -119,7 +119,7 @@ pub struct StoreCheck {
 }
 
 /// What a person must enter again when a box starts a new secrets store.
-const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials and the web IDE's tunnel token when this computer holds them";
+const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials and the web IDE's tunnel token when this computer holds them. If it does not hold the backup credentials, backups on the box STOP: the self-test fails and the report gives the command that sends them (`ozbox backup credentials <box>`)";
 
 /// What the box's ROOT says about its store, read through the cloud's root channel (AWS Systems Manager). `Err` is why it
 /// could not be read. Only an AWS box has one.
@@ -1430,9 +1430,12 @@ pub(crate) fn restore_with(
     if settings.backups.overrides.get(name).and_then(|o| o.enabled) == Some(false) {
         return None;
     }
+    // Never overwrite what the box already holds: a box whose secrets store came through the upgrade keeps its own
+    // credentials, which are the ones its backups were made with. Only a box without them is given them.
     Some(
-        match crate::backup_ops::ensure_credentials(agent, rec, &target, secrets, true) {
-            Ok(_) => Step::new(
+        match crate::backup_ops::ensure_credentials(agent, rec, &target, secrets, false) {
+            Ok(false) => return None,
+            Ok(true) => Step::new(
                 StepOutcome::Done,
                 t("upgrade.backup_restored", &[("box", name)]),
             ),
@@ -1495,6 +1498,7 @@ pub(crate) fn settle_after_replace(
     waits: Waits,
     recover: &dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     restore_backups: &dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
+    backups_before: bool,
 ) -> Settled {
     let (ready, mut selftest) = verify_after(p, agent, name, waits);
     // A new store the person accepted is started before anything is put back into it; the self-test then runs again, so
@@ -1513,22 +1517,140 @@ pub(crate) fn settle_after_replace(
             }
         }
     }
-    // The box is running again with a new system disk: put its repository credentials back, when it has a repository.
-    let restored = (ready.outcome != StepOutcome::Failed)
+    // The box is running again with a new system disk: put its repository credentials back when it lacks them, then check
+    // that backups that were set up work (never a silent stop).
+    let after = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(name).ok().flatten())
-        .flatten()
-        .and_then(|after| restore_backups(agent, &after));
-    let backup = restored.unwrap_or_else(|| {
-        Step::new(
-            StepOutcome::Skipped,
-            t("upgrade.backup_after", &[("box", name.as_str())]),
-        )
-    });
+        .flatten();
+    let restored = after.as_ref().and_then(|a| restore_backups(agent, a));
+    let put_back = restored
+        .as_ref()
+        .is_some_and(|s| s.outcome == StepOutcome::Done);
+    let backup = match &after {
+        Some(a) => verify_backups(agent, a, backups_before, restored),
+        None => restored.unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.backup_after", &[("box", name.as_str())]),
+            )
+        }),
+    };
+    // credentials just put back change what the box's own self-test says about backups: it runs again, so the report
+    // describes the box as it is left
+    if put_back {
+        if let Some(a) = &after {
+            if let Ok(again) = agent.selftest(a, now_ms()) {
+                selftest = Some(again);
+            }
+        }
+    }
     Settled {
         ready,
         selftest,
         backup,
         recovery,
+    }
+}
+
+/// Whether the box says its repository credentials are on it, and whether backups were ever set up on it: `(configured,
+/// expected)`. `expected` is the box's own durable record (kept on `/work`, so it outlives the system disk) or what this
+/// program saw before the upgrade. `None` when the box cannot be asked, or answers in a shape that says nothing.
+fn backup_state(agent: &dyn BoxAgent, rec: &BoxRecord) -> Option<(bool, bool)> {
+    let (status, v) =
+        crate::backup_ops::call(agent, rec, "GET", "/status", &serde_json::Value::Null).ok()?;
+    let configured = v.get("configured").and_then(serde_json::Value::as_bool);
+    (status == 200 && configured.is_some()).then(|| {
+        (
+            configured == Some(true),
+            v.get("expected").and_then(serde_json::Value::as_bool) == Some(true),
+        )
+    })
+}
+
+/// Before the upgrade: does the running box back up to a repository? (`false` when it cannot be asked: the box's own record
+/// still says so afterwards, for a box that has one.)
+fn backups_configured_now(agent: &dyn BoxAgent, rec: &BoxRecord) -> bool {
+    rec.state == BoxState::Running && backup_state(agent, rec).is_some_and(|(c, e)| c || e)
+}
+
+/// After the replace: backups that were set up must still be configured AND working. `restored` is what putting the
+/// credentials back from this computer said. A box that never had backups says nothing here (the old advice stays, as a
+/// skipped step); one that had them and has them no more is a FAILURE with the command, never a quiet skip.
+fn verify_backups(
+    agent: &dyn BoxAgent,
+    rec: &BoxRecord,
+    before: bool,
+    restored: Option<Step>,
+) -> Step {
+    let name = rec.spec.name.as_str();
+    let nothing = |restored: Option<Step>| {
+        restored.unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.backup_after", &[("box", name)]),
+            )
+        })
+    };
+    let Some((configured, recorded)) = backup_state(agent, rec) else {
+        // the box cannot say; a failure to put credentials back is still reported, and when it was set up before, say so
+        return match restored {
+            Some(s) => s,
+            None if before => Step::new(
+                StepOutcome::Failed,
+                t(
+                    "upgrade.backup_stopped",
+                    &[
+                        ("box", name),
+                        ("why", "The box could not be asked about its backups."),
+                    ],
+                ),
+            ),
+            None => nothing(None),
+        };
+    };
+    if !configured {
+        if before || recorded || restored.is_some() {
+            let why = restored.map(|s| s.detail).unwrap_or_default();
+            return Step::new(
+                StepOutcome::Failed,
+                t("upgrade.backup_stopped", &[("box", name), ("why", &why)]),
+            );
+        }
+        return nothing(None);
+    }
+    // credentials are on the box: the repository must answer
+    let put_back = restored
+        .as_ref()
+        .is_some_and(|s| s.outcome == StepOutcome::Done);
+    match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
+        Ok((200, v)) => {
+            let count = v["items"].as_array().map_or(0, Vec::len).to_string();
+            Step::new(
+                StepOutcome::Done,
+                t(
+                    if put_back {
+                        "upgrade.backup_working"
+                    } else {
+                        "upgrade.backup_kept"
+                    },
+                    &[("box", name), ("count", &count)],
+                ),
+            )
+        }
+        Ok((_, v)) => Step::new(
+            StepOutcome::Failed,
+            t(
+                "upgrade.backup_unreachable",
+                &[
+                    ("box", name),
+                    ("why", &crate::backup_ops::reason(&v, "no answer")),
+                ],
+            ),
+        ),
+        Err(e) => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.backup_unreachable", &[("box", name), ("why", &e)]),
+        ),
     }
 }
 
@@ -1670,6 +1792,7 @@ pub(super) fn execute(
         Some(report)
     };
     let mut store = None;
+    let mut backups_before = false;
     if !plan.is_noop() {
         // An image whose release signature could be checked and was not is refused before anything is confirmed,
         // unless the person asks for it by name; the plan then carries the warning.
@@ -1695,6 +1818,13 @@ pub(super) fn execute(
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
         store = Some(check);
+        // does it back up to a repository? Read now (a running box answers), so the report afterwards can tell a box whose
+        // backups stopped from one that never had any, and the plan says what will be checked
+        backups_before = backups_configured_now(agent, &rec);
+        if backups_before {
+            plan.notes
+                .push(t("upgrade.backups_planned", &[("box", name.as_str())]));
+        }
     }
     // nothing to do asks nothing of the box
     let store = store.unwrap_or_else(|| StoreCheck {
@@ -1876,6 +2006,7 @@ pub(super) fn execute(
             }
         },
         around.restore_backups,
+        backups_before,
     );
     let (ready, selftest, backup_credentials, secrets_recovery) = (
         settled.ready,
@@ -1961,8 +2092,20 @@ pub(super) fn execute(
             &[("box", name.as_str())],
         )));
     }
+    // backups that were set up and are not working are never a quiet success
+    if report.backup_credentials.outcome == StepOutcome::Failed {
+        return Err(CliError::Msg(t(
+            "upgrade.err_backups",
+            &[("box", name.as_str())],
+        )));
+    }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "upgrade_backups_tests.rs"]
+mod backups_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

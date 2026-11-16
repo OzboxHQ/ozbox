@@ -34,7 +34,7 @@ Every command that changes something follows [plan, then apply](/adr/0002-plan-t
 | `ozbox adopt <name>` | Rebuild a box's infrastructure state from its cloud resources when the state is missing (AWS). It reads the cloud and never changes it. |
 | `ozbox admin <name> -- <action>` | The one root path: `reown`, `reinstall-ozboxd`, `restart-services`, `collect-logs`, `enable-linger`, `ensure-supervisor`, `configure-box-secrets`, `recover-secrets` or `host-guard` (`host-guard memory install` puts the memory guard on a box made from this release that is already running, with nothing restarted; an older box gets it through the machine replace of its upgrade; `host-guard helper refresh` brings the root helper in step with the installed release). There is no shell; each action is recorded on the box, and the ones that need an approval say so. `recover-secrets` signs the box's one-time challenge with the key this computer pinned when it made the box. See [ADR 0011](/adr/0011-no-sudo-one-audited-root-path). |
 | `ozbox capped [--max-gib N] [--soft] -- <command>` | On a box: run a command inside a memory cap (a production build, a test browser) so it can slow or end itself but never stall the box or kill your terminal. It never runs the command uncapped. See [ADR 0045](/adr/0045-box-memory-guard). |
-| `ozbox backup` | List, run, restore, delete and schedule backups of `/work`. |
+| `ozbox backup` | List, run, restore, delete and schedule backups of `/work`, and send the repository credentials to a box (`ozbox backup credentials <box>`). |
 | `ozbox tools` · `ozbox profile` | Install tools from the catalogue; save a box's tools and settings as a profile and create boxes from it. |
 
 ## Getting in

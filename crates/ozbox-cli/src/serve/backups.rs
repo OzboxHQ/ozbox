@@ -392,6 +392,9 @@ impl App {
                         None
                     }
                 },
+                // a box whose backups were set up says so itself (a record kept on /work), so a dashboard-run upgrade needs
+                // no before-reading; the command reads the box first, for a box made before that record existed
+                false,
             );
             let (ready, selftest, backup) = (settled.ready, settled.selftest, settled.backup);
             if let Some(r) = settled.recovery {

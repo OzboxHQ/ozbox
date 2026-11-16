@@ -34,6 +34,7 @@ pub(super) fn command(
             new_box,
             in_place,
         } => restore(p, a, &settings, &name, &id, new_box, in_place, f),
+        C::Credentials { name } => credentials(p, a, &settings, &name, f),
         C::Delete { name, id } => delete(p, a, &settings, &name, &id, f),
         C::Schedule {
             r#box,
@@ -52,6 +53,70 @@ pub(super) fn command(
             [keep_daily, keep_weekly, keep_monthly],
             f,
         ),
+    }
+}
+
+/// `ozbox backup credentials <box>`: put the repository credentials on a box from this computer's secret store. The box
+/// keeps them in its own encrypted store; nothing is printed, and nothing goes on `/work`.
+fn credentials(
+    p: &dyn Provider,
+    a: &dyn crate::serve::BoxAgent,
+    settings: &Settings,
+    name: &BoxName,
+    f: &Flags,
+) -> Result<()> {
+    credentials_with(
+        p,
+        a,
+        settings,
+        name,
+        f,
+        crate::serve::secret_store().as_ref(),
+    )
+}
+
+pub(super) fn credentials_with(
+    p: &dyn Provider,
+    a: &dyn crate::serve::BoxAgent,
+    settings: &Settings,
+    name: &BoxName,
+    f: &Flags,
+    secrets: &dyn crate::secrets::SecretStore,
+) -> Result<()> {
+    let rec = require(p, name)?;
+    let Some(target) = settings.backups.restic.clone() else {
+        return Err(CliError::Msg(t(
+            "backup.credentials_no_repo",
+            &[("box", name.as_str())],
+        )));
+    };
+    if rec.state != ozbox_core::BoxState::Running {
+        return Err(CliError::Msg(format!(
+            "box {name} is {}, so its backups cannot be reached; start it with `ozbox resume {name}`",
+            rec.state
+        )));
+    }
+    if f.dry_run {
+        if !f.json {
+            println!("{}", t("backup.credentials_dry", &[("box", name.as_str())]));
+        }
+        return Ok(());
+    }
+    match crate::backup_ops::ensure_credentials(a, &rec, &target, secrets, true) {
+        Ok(_) => {
+            if f.json {
+                return print_json(&json!({ "box": name, "sent": true }));
+            }
+            println!(
+                "{}",
+                t("backup.credentials_sent", &[("box", name.as_str())])
+            );
+            Ok(())
+        }
+        Err(why) => Err(CliError::Msg(t(
+            "backup.credentials_failed",
+            &[("box", name.as_str()), ("why", &why)],
+        ))),
     }
 }
 

@@ -120,6 +120,12 @@ pub struct Target {
     /// Where an older version left a credentials file; moved into the store and removed.
     pub legacy_env_file: PathBuf,
     pub legacy_pass_file: PathBuf,
+    /// Root's own box config, read (never written) for the settings to carry across an upgrade.
+    pub etc_config: PathBuf,
+    /// Where the record that backups were set up, and the settings kept with it, live on `/work` (see `backup_state`).
+    pub state_dir: PathBuf,
+    /// Whose folder and file the record must be (root's, 0, on a box).
+    pub trusted_uid: u32,
 }
 
 impl Default for Target {
@@ -128,6 +134,9 @@ impl Default for Target {
             admin_socket: PathBuf::from(crate::secrets_link::ADMIN_SOCKET),
             legacy_env_file: PathBuf::from(ENV_FILE),
             legacy_pass_file: PathBuf::from(PASS_FILE),
+            etc_config: PathBuf::from(crate::config::DEFAULT_CONFIG_PATH),
+            state_dir: crate::backup_state::dir_for(Path::new("/work")),
+            trusted_uid: 0,
         }
     }
 }
@@ -174,7 +183,8 @@ pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
             store_delete(t, crate::secrets_link::RESTIC_ENV)?;
             store_delete(t, crate::secrets_link::RESTIC_PASSWORD)?;
             remove_legacy(t);
-            Ok(())
+            // removed on purpose: the self-test must not call that a loss
+            crate::backup_state::remove(&t.state_dir)
         }
         Action::Set => {
             store_set(t, crate::secrets_link::RESTIC_PASSWORD, &req.password)?;
@@ -187,9 +197,31 @@ pub fn apply(req: &Request, t: &Target) -> Result<(), String> {
                 return Err(e);
             }
             remove_legacy(t);
-            Ok(())
+            remember(t)
         }
     }
+}
+
+/// Keep what an upgrade must not lose, now that the credentials are in the store: the record that backups were set up, and
+/// the non-secret settings root's `/etc/ozbox/ozboxd.toml` holds (see `backup_state`). It reads only root's own file, so the
+/// box user, who asked for the credentials, chooses none of it. The credentials are already stored when this fails, so the
+/// error says what is not kept rather than that the credentials failed.
+fn remember(t: &Target) -> Result<(), String> {
+    let etc = std::fs::read_to_string(&t.etc_config)
+        .ok()
+        .and_then(|text| crate::config::Config::from_toml(&text).ok())
+        .map(|c| c.backup)
+        .unwrap_or_default();
+    // an untrusted or unreadable earlier record is replaced by the record of what root's own config says now
+    let before = crate::backup_state::read(&t.state_dir, t.trusted_uid)
+        .ok()
+        .flatten();
+    crate::backup_state::write(&t.state_dir, &crate::backup_state::merge(before.as_ref(), &etc))
+        .map_err(|_| {
+            "the repository credentials were stored, but the record that keeps backups through an upgrade could not be written; \
+             send the credentials again, and if that fails look at the folder /work/ozbox-backup"
+                .to_string()
+        })
 }
 
 /// Move a credentials file written by an older version into the store, then remove it. `Ok(false)` when there is none.
@@ -377,6 +409,11 @@ mod tests {
         }
     }
 
+    fn me() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(".").unwrap().uid()
+    }
+
     type Store = std::sync::Arc<std::sync::Mutex<BTreeMap<String, String>>>;
 
     /// A stand-in for the secrets service's admin socket that keeps what it is given in memory.
@@ -412,6 +449,9 @@ mod tests {
                 admin_socket: sock,
                 legacy_env_file: dir.join("restic.env"),
                 legacy_pass_file: dir.join("restic.pass"),
+                etc_config: dir.join("etc-ozboxd.toml"),
+                state_dir: dir.join("state").join("ozbox-backup"),
+                trusted_uid: me(),
             },
             store,
         )
@@ -440,10 +480,11 @@ mod tests {
         assert!(!held["restic-env"].contains("correct-horse-battery"));
         // nothing was written beside it: the box user would be able to read a file
         assert!(!t.legacy_env_file.exists() && !t.legacy_pass_file.exists());
+        // the only other thing written is the record root keeps on /work (no credential in it)
         assert!(std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
-            .all(|e| e.file_name() == "admin.sock"));
+            .all(|e| e.file_name() == "admin.sock" || e.file_name() == "state"));
     }
 
     #[test]
@@ -481,6 +522,9 @@ mod tests {
             admin_socket: dir.path().join("none.sock"),
             legacy_env_file: dir.path().join("restic.env"),
             legacy_pass_file: dir.path().join("restic.pass"),
+            etc_config: dir.path().join("etc-ozboxd.toml"),
+            state_dir: dir.path().join("state").join("ozbox-backup"),
+            trusted_uid: me(),
         };
         let e = apply(&req("n1"), &t).unwrap_err();
         assert!(e.contains("secrets service") && !e.contains("sekrit"));
@@ -664,5 +708,82 @@ mod tests {
                 assert!(!e.file_name().to_string_lossy().ends_with(".tmp"));
             }
         }
+    }
+
+    fn etc_with(t: &Target, backup: &str) {
+        std::fs::write(
+            &t.etc_config,
+            format!("[backup]\nenabled = false\n{backup}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn setting_credentials_records_that_backups_exist_and_carries_root_settings_only() {
+        use crate::backup_state::{read, Carried};
+        let dir = tempfile::tempdir().unwrap();
+        let (t, _store) = fake_service(dir.path());
+        etc_with(
+            &t,
+            "service_socket = \"/run/ozbox-secrets/broker/broker.sock\"\nexcludes = [\"/work/.ozbox/metrics\", \"/work/scratch\"]\ninterval_hours = 6\n",
+        );
+        assert_eq!(read(&t.state_dir, me()), Ok(None));
+        apply(&req("r1"), &t).unwrap();
+        let kept: Carried = read(&t.state_dir, me()).unwrap().unwrap();
+        assert!(kept.configured);
+        assert_eq!(kept.interval_hours, Some(6));
+        assert_eq!(
+            kept.excludes,
+            Some(vec!["/work/.ozbox/metrics".into(), "/work/scratch".into()])
+        );
+        assert_eq!(kept.paths, None, "a default is not a choice");
+        let text = std::fs::read_to_string(t.state_dir.join("backup.toml")).unwrap();
+        for secret in ["correct-horse-battery", "sekrit-key", "objects.example.com"] {
+            assert!(!text.contains(secret), "{secret}");
+        }
+    }
+
+    #[test]
+    fn the_record_survives_a_new_system_disk_and_is_not_overwritten_by_its_defaults() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let (t, _store) = fake_service(dir.path());
+        etc_with(&t, "interval_hours = 6\n");
+        apply(&req("u1"), &t).unwrap();
+        // the upgrade: /etc starts again from the first-boot file, /work (the record) stays
+        etc_with(&t, "");
+        apply(&req("u2"), &t).unwrap();
+        let kept = read(&t.state_dir, me()).unwrap().unwrap();
+        assert_eq!(kept.interval_hours, Some(6));
+    }
+
+    #[test]
+    fn clearing_the_credentials_removes_the_record_so_a_deliberate_removal_is_not_a_loss() {
+        use crate::backup_state::read;
+        let dir = tempfile::tempdir().unwrap();
+        let (t, _store) = fake_service(dir.path());
+        apply(&req("k1"), &t).unwrap();
+        assert!(read(&t.state_dir, me()).unwrap().is_some());
+        let clear = Request {
+            id: "k2".into(),
+            action: Action::Clear,
+            env: BTreeMap::new(),
+            password: String::new(),
+        };
+        apply(&clear, &t).unwrap();
+        assert_eq!(read(&t.state_dir, me()), Ok(None));
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_says_so_without_failing_the_credentials_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut t, store) = fake_service(dir.path());
+        // a file where the folder must go
+        std::fs::write(dir.path().join("blocked"), "x").unwrap();
+        t.state_dir = dir.path().join("blocked").join("ozbox-backup");
+        let e = apply(&req("w1"), &t).unwrap_err();
+        assert!(e.contains("stored") && e.contains("upgrade"), "{e}");
+        assert!(!e.contains("sekrit") && !e.contains("correct-horse"));
+        assert!(store.lock().unwrap().contains_key("restic-env"));
     }
 }
