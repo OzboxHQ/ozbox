@@ -1,0 +1,11 @@
+Subject: [Oz Box] Box main: the work disk is 96% full
+---
+Box main: the work disk is 96% full
+Grow the work disk, or clear space, before it fills.
+
+Box: main
+
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.
+https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef
+---
+<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#111;max-width:600px"><h2 style="font-size:18px;margin:0 0 8px">Box main: the work disk is 96% full</h2><p style="margin:0 0 12px">Grow the work disk, or clear space, before it fills.</p><table role="presentation" style="border-collapse:collapse;margin:0 0 12px"><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Box</td><td style="padding:2px 0">main</td></tr></table><p style="margin:16px 0"><a href="https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef" style="background:#1f4fd0;color:#fff;text-decoration:none;border-radius:6px;padding:10px 16px;display:inline-block">Open in dashboard</a></p><p style="margin:0 0 12px;color:#333">Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.</p></div>

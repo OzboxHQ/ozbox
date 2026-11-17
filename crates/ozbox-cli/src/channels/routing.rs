@@ -671,6 +671,8 @@ pub fn digest_alert(pid: &str, items: &[DigestItem], now_ms: u64) -> Option<Aler
         lines.push(format!("...and {} more", items.len() - 20));
     }
     Some(Alert {
+        notice: None,
+        reach: Default::default(),
         key: format!("digest:{pid}:{}", now_ms / 86_400_000),
         kind: "digest".into(),
         severity: Severity::Normal,
@@ -825,12 +827,14 @@ impl Channels {
         attempt: u32,
     ) -> Delivery {
         let ctx = self.ctx();
+        // the message as this recipient gets it: a one-time link made for this person, if any
+        let notice = a.notice_for(pl.person.as_deref());
         let r = match &pl.target {
-            Target::Sms(n) => super::sms::send(&ctx, &s.apps.sms, n, &a.title, &a.body),
-            Target::Email(list) => self.email_to(s, list, a, now_s),
-            Target::Whatsapp(n) => super::chat::whatsapp(&ctx, &s.apps.whatsapp, n, a),
+            Target::Sms(n) => super::sms::send(&ctx, &s.apps.sms, n, &notice),
+            Target::Email(list) => self.email_to(s, list, a, pl.person.as_deref(), now_s),
+            Target::Whatsapp(n) => super::chat::whatsapp(&ctx, &s.apps.whatsapp, n, &notice),
             Target::Push(dev) => match push_subject(s) {
-                Some(sub) => super::push::send(&ctx, dev, &sub, a, now_s),
+                Some(sub) => super::push::send(&ctx, dev, &sub, a, &notice, now_s),
                 None => Err(
                     "set a sender address under Email so push services can identify this fleet"
                         .into(),
@@ -979,6 +983,8 @@ mod tests {
 
     fn alert(sev: Severity, key: &str) -> Alert {
         Alert {
+            notice: None,
+            reach: Default::default(),
             key: key.into(),
             kind: "x".into(),
             severity: sev,

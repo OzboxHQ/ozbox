@@ -416,6 +416,8 @@ impl App {
 
     fn tg_alert(&mut self, key: &str, title: &str, body: &str, severity: Severity, now: u64) {
         let alert = Alert {
+            notice: None,
+            reach: Default::default(),
             key: key.to_string(),
             kind: "telegram".into(),
             severity,

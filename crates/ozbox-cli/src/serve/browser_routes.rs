@@ -348,6 +348,8 @@ fn browser_alert(e: &BrowserEvent, now_ms: u64) -> crate::notify::Alert {
         _ => ("A browser event", false),
     };
     crate::notify::Alert {
+        notice: None,
+        reach: Default::default(),
         key: format!("browser:{}:{}", e.kind, e.session),
         kind: format!("browser_{}", e.kind),
         severity: if urgent {

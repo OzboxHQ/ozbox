@@ -669,6 +669,8 @@ impl App {
         let alerts = fx
             .into_iter()
             .map(|e| Alert {
+                notice: None,
+                reach: Default::default(),
                 key: e.key,
                 kind: e.kind.to_string(),
                 severity: if e.urgent {
@@ -1019,10 +1021,16 @@ impl App {
                 match self
                     .runs_update(|b| supervisor::decide_with(b, &id, approve, &who, factor, now))
                 {
-                    Ok(Ok(())) => Resp::json(
-                        200,
-                        &json!({ "id": id, "state": if approve { "approved" } else { "denied" } }),
-                    ),
+                    Ok(Ok(())) => {
+                        // every chat link to this request now reads as used
+                        if let Some(l) = self.chat.links.as_mut() {
+                            l.retire(&id);
+                        }
+                        Resp::json(
+                            200,
+                            &json!({ "id": id, "state": if approve { "approved" } else { "denied" } }),
+                        )
+                    }
                     Ok(Err(e)) => action_error(&e),
                     Err(r) => r,
                 }

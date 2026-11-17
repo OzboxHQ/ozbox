@@ -87,6 +87,11 @@ confirm with your passkey. Then `/new main fix the flaky test` from your phone s
 - When something needs a passkey, the chat sends **one link to the dashboard** and does nothing else. The link is a pointer, not a
   credential: ten minutes, only for you, with the dashboard's own host named in the message, the token in the address's fragment (so no
   tunnel or proxy ever logs it), and opening it changes nothing. The bot deletes that message when the link lapses.
+- **An approval or an alert** reaches your chat as one message: what to do first, the box and environment (Production marked),
+  who asked, the risk and the expiry, and an **Open in dashboard** button under it. The button only opens the dashboard on that
+  item, with a link made for you (the same ten minutes, only for you); once the request is decided, the link says so. That message
+  is not deleted, so after ten minutes open the dashboard → **Approvals** as it says. See
+  [Chat with your coding agents](/use-cases/chat#3-be-told-in-the-chat-decide-in-the-dashboard).
 - A lost phone: unlink from the dashboard, and secure the Telegram account itself with Telegram's two-step verification and by ending
   its other sessions. Oz Box cannot see or enforce those.
 
@@ -103,7 +108,8 @@ confirm with your passkey. Then `/new main fix the flaky test` from your phone s
   delegation used. A message from an account that is not linked is only counted.
 - The bridge stops, with an alert, when Telegram answers **409** (another program reads the bot, or a webhook is set) or when the bot's
   settings are not as above, and stays stopped across a restart until an owner confirms in **Settings → Apps**. It reads updates by
-  long polling, takes `message` updates only (there are no buttons), and ignores a message older than five minutes.
+  long polling, takes `message` updates only (the one kind of button a message carries opens a web page and sends nothing back), and
+  ignores a message older than five minutes.
 
 **Status:** Preview.
 

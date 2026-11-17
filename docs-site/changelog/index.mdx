@@ -8,6 +8,20 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="0.3.0-beta: clear chat messages that open the right request">
+  ## Chat and alert messages open exactly what they are about
+
+  A message about an approval could reach your phone with no link, and read as one block of text.
+
+  - **Every message that asks for you carries a link to that exact item**, made for you when it is sent: it works once you are signed in, only for you, for ten minutes. On Telegram it is an **Open in dashboard** button that only opens the dashboard; nothing in a chat approves or denies.
+  - **Every message reads the same way on every channel**: what to do first, the box and environment (Production marked), who asked and why, the risk, when it expires, and a short reference. Telegram, Slack, Discord, Teams, WhatsApp, email, SMS and push each show it in their own style.
+  - **Alerts link too**: a full disk opens its box, a budget alert opens Usage, and a push notification opens what it is about.
+  - **A link to something already decided says so**, and a dashboard with no public address says where to go instead of leaving the link out.
+  - **Email alerts have an HTML version**, with the plain text beside it.
+
+  See [Chat with your coding agents](/use-cases/chat) and [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

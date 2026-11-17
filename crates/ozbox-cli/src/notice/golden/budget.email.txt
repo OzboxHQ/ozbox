@@ -1,0 +1,9 @@
+Subject: [Oz Box] Budget: 80% of the monthly budget is estimated spent
+---
+Budget: 80% of the monthly budget is estimated spent
+About 80 USD of 100 USD this month.
+
+Open it on dash.example.com → Usage (sign in first).
+https://dash.example.com/usage
+---
+<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#111;max-width:600px"><h2 style="font-size:18px;margin:0 0 8px">Budget: 80% of the monthly budget is estimated spent</h2><p style="margin:0 0 12px">About 80 USD of 100 USD this month.</p><p style="margin:16px 0"><a href="https://dash.example.com/usage" style="background:#1f4fd0;color:#fff;text-decoration:none;border-radius:6px;padding:10px 16px;display:inline-block">Open in dashboard</a></p><p style="margin:0 0 12px;color:#333">Open it on dash.example.com → Usage (sign in first).</p></div>

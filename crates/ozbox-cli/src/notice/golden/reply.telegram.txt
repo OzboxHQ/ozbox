@@ -1,0 +1,8 @@
+{
+  "disable_web_page_preview": true,
+  "link_preview_options": {
+    "is_disabled": true
+  },
+  "protect_content": true,
+  "text": "Done: 3 files changed.\nTests pass."
+}

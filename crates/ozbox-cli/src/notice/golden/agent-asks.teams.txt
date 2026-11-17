@@ -1,0 +1,82 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in dashboard",
+            "type": "Action.OpenUrl",
+            "url": "https://dash.example.com/chat#link=0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "body": [
+          {
+            "color": "Attention",
+            "size": "Medium",
+            "text": "Approve or deny: push to main 🔴 PRODUCTION",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "text": "Task t\\-42 stopped and is waiting for your answer.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "facts": [
+              {
+                "title": "Box",
+                "value": "api"
+              },
+              {
+                "title": "Environment",
+                "value": "production"
+              },
+              {
+                "title": "Asked by",
+                "value": "Claude Code"
+              },
+              {
+                "title": "Why",
+                "value": "open a pull request"
+              },
+              {
+                "title": "Risk",
+                "value": "Production, or a step that cannot be undone: the dashboard asks for your passkey again."
+              }
+            ],
+            "type": "FactSet"
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Ref a\\-7",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

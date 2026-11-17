@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { CHAT_ACTS } from '../api/chat-acts';
-import { delegationStateText, linkIsLive, linkStateText, normaliseCode, pointerToken, safeInternalPath, validDays } from './telegram-flow';
+import { chatLinkToken, delegationStateText, linkIsLive, linkStateText, normaliseCode, pointerToken, safeInternalPath, validDays } from './telegram-flow';
 
 describe('the Telegram flow helpers', () => {
   it('a delegation lasts whole days from 1 to 30 and nothing else', () => {
@@ -20,10 +20,18 @@ describe('the Telegram flow helpers', () => {
     for (const bad of ['', '#', `#${t}x`, `#${t.slice(1)}`, `${t}`, `#token=${t}`, `#${'g'.repeat(48)}`]) expect(pointerToken(bad), bad).toBeNull();
   });
 
+  it('a chat page link is read from the fragment only', () => {
+    const tok = 'a'.repeat(48);
+    expect(chatLinkToken(`#link=${tok}`)).toBe(tok);
+    expect(chatLinkToken(`#link=${tok}&token=abc`)).toBe(tok);
+    for (const bad of ['', `?link=${tok}`, `#link=${tok}x`, `#link=${'g'.repeat(48)}`, `#${tok}`]) expect(chatLinkToken(bad), bad).toBeNull();
+  });
+
   it('the page a pointer names is a path inside this dashboard and nothing that leaves it', () => {
     expect(safeInternalPath('/chat')).toBe('/chat');
     expect(safeInternalPath('/settings/apps')).toBe('/settings/apps');
-    for (const bad of ['//evil.example', 'https://evil.example', 'javascript:alert(1)', '/a?b=c', '/a#b', 'chat', '', '/\\evil']) expect(safeInternalPath(bad), bad).toBeNull();
+    expect(safeInternalPath('/approvals?request=R1a-2_b')).toBe('/approvals?request=R1a-2_b');
+    for (const bad of ['//evil.example', 'https://evil.example', 'javascript:alert(1)', '/a?b=c', '/a#b', 'chat', '', '/\\evil', '/approvals?request=a&next=//evil.example', '/approvals?request=', '/approvals?request=a/b']) expect(safeInternalPath(bad), bad).toBeNull();
   });
 
   it('every state a link or a delegation can be in has words', () => {

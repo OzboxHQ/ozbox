@@ -18,6 +18,7 @@ import { ChatChannels } from '../components/chat/chat-channels';
 import { ChatTranscript } from '../components/chat/chat-view';
 import { AgentApprovals } from '../components/tasks/agent-approvals';
 import { t } from '../lib/i18n';
+import { chatLinkToken } from '../lib/telegram-flow';
 import { useAsync } from '../lib/use-async';
 import { useCan } from '../lib/use-can';
 
@@ -59,19 +60,21 @@ export function ChatPage() {
     }
   }, [data]);
 
-  // A one-time link from a chat names an approval that needs the passkey: it is shown here and decided here.
+  // A one-time link from a chat names an approval that needs the passkey: it is shown here and decided here. The token is in
+  // the address's fragment (`#link=<token>`), which a browser never sends to a server, a tunnel or a referrer; it leaves the
+  // address bar at once and is sent once, in a request body.
   useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get('link');
+    const token = chatLinkToken(window.location.hash);
     if (!token || redeemed.current) return;
     redeemed.current = true;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
     client.chat
       .redeem(token)
       .then((r) => {
         setLinked(r.pending ? r.approval : null);
         setLinkNote(r.pending ? t('chat.link_body') : t('chat.link_done'));
       })
-      .catch(() => setLinkNote(t('chat.link_bad')));
-    window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      .catch((e: unknown) => setLinkNote(e instanceof ApiError && e.status === 410 ? t('chat.link_used') : t('chat.link_bad')));
   }, [client]);
 
   const sessionId = data?.bound?.kind === 'task' ? data.bound.id : '';

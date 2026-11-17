@@ -353,6 +353,7 @@ pub fn t(key: &str, args: &[(&str, &str)]) -> String {
         .chain(crate::messages_agent::EN.iter())
         .chain(crate::messages_chat::EN.iter())
         .chain(crate::messages_hardening::EN.iter())
+        .chain(crate::messages_notice::EN.iter())
         .chain(crate::messages_infra::EN.iter())
         .chain(crate::messages_adopt_key::EN.iter())
         .chain(crate::messages_quiesce::EN.iter())
