@@ -23,6 +23,28 @@ use std::fmt;
 use crate::approvals::AgentAction;
 use crate::run::ResultLink;
 
+/// A file for one run only (ADR 0055): a sign-in the engine must read itself, which the box writes into a private folder of
+/// that run, sets `dir_env` to, and removes when the run ends. Its text is secret: never logged, serialized for anything but
+/// the start request, or put in an error.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunFile {
+    /// The engine's own documented variable for its home folder (`CODEX_HOME`).
+    pub dir_env: String,
+    /// Where in that folder (`auth.json`).
+    pub path: String,
+    pub contents: String,
+}
+
+impl fmt::Debug for RunFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunFile")
+            .field("dir_env", &self.dir_env)
+            .field("path", &self.path)
+            .field("bytes", &self.contents.len())
+            .finish()
+    }
+}
+
 /// Everything an engine needs to start one run.
 #[derive(Clone)]
 pub struct EngineStart {
@@ -50,6 +72,8 @@ pub struct EngineStart {
     /// The run was started from a chat app. An engine that can be told asks for an edit instead of making it (Claude Code is
     /// launched in its `default` permission mode, not `acceptEdits`).
     pub ask_for_edits: bool,
+    /// Files for this run only (ADR 0055), handed over only when the person opted this engine in. Secret.
+    pub run_files: Vec<RunFile>,
 }
 
 impl fmt::Debug for EngineStart {
@@ -58,6 +82,7 @@ impl fmt::Debug for EngineStart {
             .field("task_id", &self.task_id)
             .field("box_name", &self.box_name)
             .field("secret_env_keys", &self.secret_env.len())
+            .field("run_files", &self.run_files.len())
             .finish()
     }
 }
@@ -202,6 +227,8 @@ pub struct FakeEngine {
     pub sessions: Vec<Option<String>>,
     /// The `ask_for_edits` of every start, in order.
     pub ask_for_edits: Vec<bool>,
+    /// The run files of every start, in order (ADR 0055), for tests that check which run was handed a sign-in.
+    pub files: Vec<Vec<RunFile>>,
 }
 
 #[derive(Debug)]
@@ -255,6 +282,7 @@ impl AgentEngine for FakeEngine {
             .push(req.secret_env.keys().cloned().collect());
         self.models.push(req.model.clone());
         self.envs.push(req.secret_env.clone());
+        self.files.push(req.run_files.clone());
         self.sessions.push(req.resume_session.clone());
         self.ask_for_edits.push(req.ask_for_edits);
         let on_fallback = req.on_fallback;

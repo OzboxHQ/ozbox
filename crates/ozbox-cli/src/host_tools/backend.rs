@@ -129,6 +129,7 @@ impl DaemonBackend {
             keep_stdin_open: false,
             memory_max_bytes: None,
             require_capability: false,
+            files: Vec::new(),
         };
         // locked for one call at a time, never for a whole command: a long run must not hold up the others
         let lock = || {
