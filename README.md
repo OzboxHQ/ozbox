@@ -105,7 +105,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 
 | Command | What it does |
 |---|---|
-| `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS), budget, alerts. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets |
+| `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS), budget, alerts. `--dry-run` previews every step, even before the state bucket exists; `--only <steps>` / `--skip <steps>` choose steps without prompts (`state-bucket`, `network`, `secrets-key`, `adopt-command`, `operator-policy`, `box-policy`, `issuer`). The network's plan checks the Elastic IP and NAT gateway quotas first, and a step that fails part way removes what it made. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets |
 | `ozbox create <name> --size M` | Create a box (shows the plan first) and write its SSH entry on this computer (`ssh ozbox-<name>`; `--no-ssh-entry` skips it); `--tools`, `--profile`, `--label key=value`, `--disk` |
 | `ozbox list` · `show <name>` · `sizes` · `providers` | List boxes, show one, the size catalogue, what each provider can do |
 | `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot (`--no-final-snapshot` for a throwaway box) |

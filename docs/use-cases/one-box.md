@@ -20,6 +20,13 @@ See [how to read the status](README.md#how-to-read-the-status).
 A budget is required before any box can be created on a real cloud.
 **Status:** Works (AWS). Hetzner: Preview.
 
+To see every step before anything is made, run it with `--dry-run` first: each step is planned, even before the state
+bucket exists. A script picks its steps with `--only` or `--skip` (for example `--skip issuer`) and `--yes`, never by
+answering prompts. If the account has no room for the network's address or NAT gateway, the plan says so with the numbers
+and the request that raises the quota, before anything is made; and a step that fails part way removes what it had made.
+If AWS itself is down or throttling, setup says that, not that you need to sign in again.
+**Status:** Preview (built and tested with fakes; not yet run against a real account).
+
 ## 2. Create your first box
 
 **You want:** a workstation with a big persistent disk.

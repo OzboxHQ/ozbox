@@ -201,6 +201,8 @@ pub fn run(cli: Cli) -> Result<()> {
         access,
         issuer_package,
         issuer_package_sha256,
+        only,
+        skip,
     } = &cli.command
     {
         let explicit = cli.provider;
@@ -215,6 +217,8 @@ pub fn run(cli: Cli) -> Result<()> {
             access: access.clone(),
             issuer_package: issuer_package.clone(),
             issuer_package_sha256: issuer_package_sha256.clone(),
+            only: only.clone(),
+            skip: skip.clone(),
             yes: cli.yes,
             dry_run: cli.dry_run,
             json,

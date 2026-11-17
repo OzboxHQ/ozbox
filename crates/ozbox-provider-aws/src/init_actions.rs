@@ -127,6 +127,8 @@ pub fn s3api_action(subcommand: &str) -> Option<&'static str> {
     Some(match subcommand {
         "head-bucket" => "s3:ListBucket",
         "create-bucket" => "s3:CreateBucket",
+        // only to undo a bucket this run made and left half set up: S3 deletes an empty bucket only, so it cannot remove state
+        "delete-bucket" => "s3:DeleteBucket",
         "get-bucket-versioning" => "s3:GetBucketVersioning",
         "put-bucket-versioning" => "s3:PutBucketVersioning",
         "get-bucket-encryption" => "s3:GetEncryptionConfiguration",

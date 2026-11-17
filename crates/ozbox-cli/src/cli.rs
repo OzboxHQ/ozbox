@@ -459,7 +459,8 @@ pub enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    /// Guided first-run setup: provider, sign-in check, region, state bucket, network, budget, alerts, security.
+    /// Guided first-run setup: provider, sign-in check, region, state bucket, network, budget, alerts, security. Every step is
+    /// planned and shown first; --dry-run previews every step (even before the state bucket exists) and changes nothing.
     Init {
         /// The sign-in profile of your cloud CLI (AWS: a named profile).
         #[arg(long)]
@@ -489,6 +490,17 @@ pub enum Command {
         /// --issuer-package: a hash made from the file itself would prove nothing about it.
         #[arg(long, value_name = "HEX", requires = "issuer_package")]
         issuer_package_sha256: Option<String>,
+        /// Run only these setup steps (repeat, or separate with commas): state-bucket, network, secrets-key, adopt-command,
+        /// operator-policy, box-policy, issuer. The checks (sign-in, permissions, guard rail, security) always run. A step that
+        /// is left out is said and nothing about it is planned or changed. With --yes, a script chooses its steps this way.
+        #[arg(long, value_name = "STEP", value_delimiter = ',', conflicts_with = "skip",
+              value_parser = ["state-bucket", "network", "secrets-key", "adopt-command", "operator-policy", "box-policy", "issuer"])]
+        only: Vec<String>,
+        /// Leave these setup steps out (repeat, or separate with commas); the same names as --only. The state bucket cannot be
+        /// left out: every other step keeps its state there.
+        #[arg(long, value_name = "STEP", value_delimiter = ',',
+              value_parser = ["network", "secrets-key", "adopt-command", "operator-policy", "box-policy", "issuer"])]
+        skip: Vec<String>,
     },
     /// Turn on the opt-in AWS security services: GuardDuty Runtime Monitoring, a locked bucket for Session Manager logs, and
     /// Patch Manager. What you name is the whole set: leaving one out turns it off. Plan, then apply; costs are stated.

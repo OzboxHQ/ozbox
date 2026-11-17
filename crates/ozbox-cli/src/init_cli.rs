@@ -28,9 +28,79 @@ pub struct Args {
     pub issuer_package: Option<String>,
     /// The package's SHA-256 (hex) from the signed release's manifest or a reproducible build; required with the package.
     pub issuer_package_sha256: Option<String>,
+    /// Run only these steps (names from [`STEPS`]); empty means every step.
+    pub only: Vec<String>,
+    /// Leave these steps out (names from [`STEPS`]); the state bucket cannot be left out.
+    pub skip: Vec<String>,
     pub yes: bool,
     pub dry_run: bool,
     pub json: bool,
+}
+
+/// The setup steps `--only` and `--skip` name, in the order they run. The checks (sign-in, permissions, region, access, guard
+/// rail, security) are not steps: they change nothing and always run.
+pub const STEPS: [&str; 7] = [
+    "state-bucket",
+    "network",
+    "secrets-key",
+    "adopt-command",
+    "operator-policy",
+    "box-policy",
+    "issuer",
+];
+
+/// Which steps a run takes, from `--only` and `--skip`: a script chooses its steps with flags, never by answering prompts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepFilter {
+    only: Vec<String>,
+    skip: Vec<String>,
+}
+
+impl StepFilter {
+    /// Refuses a name that is not a step, and leaving out the state bucket (every other step keeps its state there).
+    pub fn new(only: &[String], skip: &[String]) -> Result<Self, String> {
+        let norm = |v: &[String]| -> Result<Vec<String>, String> {
+            v.iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    if STEPS.contains(&s.as_str()) {
+                        Ok(s)
+                    } else {
+                        Err(t(
+                            "init.step_unknown",
+                            &[("step", &s), ("steps", &STEPS.join(", "))],
+                        ))
+                    }
+                })
+                .collect()
+        };
+        let (only, skip) = (norm(only)?, norm(skip)?);
+        if skip.iter().any(|s| s == "state-bucket") {
+            return Err(t("init.step_required", &[]));
+        }
+        Ok(Self { only, skip })
+    }
+
+    /// Whether the run takes this step.
+    pub fn wants(&self, step: &str) -> bool {
+        (self.only.is_empty() || self.only.iter().any(|s| s == step))
+            && !self.skip.iter().any(|s| s == step)
+    }
+}
+
+/// A step left out with `--only` or `--skip`: said, counted as skipped, and nothing about it is read or planned.
+fn not_chosen(
+    out: &mut dyn Write,
+    json: bool,
+    ledger: &mut Ledger,
+    steps: &mut Vec<Value>,
+    step: &str,
+    label: String,
+) {
+    show(out, json, t("init.step_not_chosen", &[("step", &label)]));
+    ledger.skipped.push(label);
+    steps.push(json!({ "step": step.replace('-', "_"), "skipped": "not_chosen" }));
 }
 
 /// Where answers come from. A terminal asks; a script (or a test) answers from a list.
@@ -85,6 +155,35 @@ fn show_plan(out: &mut dyn Write, json: bool, p: &Prepared) {
             "  {}",
             t("init.cli_estimate", &[("usd", &format!("{e:.2}"))])
         );
+    }
+}
+
+/// What merging the adopt step's statements into the operator policy did, as part of the plan's output.
+fn show_merge(out: &mut dyn Write, json: bool, op: &crate::init::OperatorPolicyReport) {
+    show(
+        out,
+        json,
+        t(
+            "init.merge_title",
+            &[("total", &op.statement_count.to_string())],
+        ),
+    );
+    if let Some(n) = &op.merge_note {
+        show(out, json, format!("  {n}"));
+    }
+    match &op.merge {
+        None => show(out, json, t("init.merge_no_adopt", &[])),
+        Some(m) => {
+            for (key, v) in [
+                ("init.merge_added", &m.added),
+                ("init.merge_replaced", &m.replaced),
+                ("init.merge_unchanged", &m.unchanged),
+            ] {
+                if !v.is_empty() {
+                    show(out, json, t(key, &[("sids", &v.join(", "))]));
+                }
+            }
+        }
     }
 }
 
@@ -254,6 +353,7 @@ pub fn run(
         region: a.region.clone(),
     };
     target.validate().map_err(fail)?;
+    let filter = StepFilter::new(&a.only, &a.skip)?;
     let mut steps: Vec<Value> = Vec::new();
     let mut ledger = Ledger::default();
 
@@ -325,7 +425,14 @@ pub fn run(
         let bucket = init.plan_bucket(&target, &account).map_err(fail)?;
         show_plan(out, a.json, &bucket);
         let mut foundation = true;
-        if !bucket.noop {
+        if !bucket.noop && !filter.wants("state-bucket") {
+            // --only without the bucket: a dry run previews the chosen steps anyway; a real run cannot make them without it
+            if !a.dry_run {
+                return Err(t("init.step_bucket_needed", &[]));
+            }
+            foundation = init.preview_without_state;
+            ledger.skipped.push(t("init.step_bucket", &[]));
+        } else if !bucket.noop {
             // The one required step: everything after it keeps its state there, so declining it ends the run.
             match answer(a, ask, "state bucket")? {
                 Answer::Yes => {
@@ -333,7 +440,8 @@ pub fn run(
                     ledger.applied.push(t("init.step_bucket", &[]));
                 }
                 Answer::DryRun => {
-                    foundation = false;
+                    // a dry run still previews every later step, against an empty local state, when it can
+                    foundation = init.preview_without_state;
                     ledger.skipped.push(t("init.step_bucket", &[]));
                 }
                 Answer::No => return Err(t("init.cli_bucket_required", &[])),
@@ -346,7 +454,16 @@ pub fn run(
         if foundation {
             // A configuration that already names its subnet is using a network: plan nothing (a second one would cost a NAT
             // gateway every month), check the subnet is there and go on.
-            if let Some(subnet) = init.configured_subnet() {
+            if !filter.wants("network") {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "network",
+                    t("init.step_network", &[]),
+                );
+            } else if let Some(subnet) = init.configured_subnet() {
                 match init.check_subnet(&target, &subnet).map_err(fail)? {
                     SubnetState::Found => {
                         show(
@@ -396,12 +513,25 @@ pub fn run(
             }
             // The fleet's secrets key, made with this identity (never the daily operator role), shown and approved like the rest.
             // A failure here never stops setup: boxes keep a file key, and the message says what to ask an administrator for.
-            let perm = init.key_permission(&target, &id);
+            let perm = if filter.wants("secrets-key") {
+                init.key_permission(&target, &id)
+            } else {
+                crate::init::KeyPermission::Unknown
+            };
             let missing = match &perm {
                 crate::init::KeyPermission::Denied(m) => Some(m.join(", ")),
                 _ => None,
             };
-            if let Some(m) = &missing {
+            if !filter.wants("secrets-key") {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "secrets-key",
+                    t("init.step_key", &[]),
+                );
+            } else if let Some(m) = &missing {
                 show(out, a.json, t("init.key_denied", &[("missing", m)]));
                 steps.push(json!({ "step": "secrets_key", "permission": perm }));
             } else {
@@ -451,8 +581,21 @@ pub fn run(
             }
             // The adopt command's document and its operator policy: a step of its own, made with the permissions it needs
             // (Systems Manager documents, not the key's KMS set). A failure never stops setup or the key above.
-            let aperm = init.adopt_permission(&target, &id);
-            if let crate::init::KeyPermission::Denied(m) = &aperm {
+            let aperm = if filter.wants("adopt-command") {
+                init.adopt_permission(&target, &id)
+            } else {
+                crate::init::KeyPermission::Unknown
+            };
+            if !filter.wants("adopt-command") {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "adopt-command",
+                    t("init.step_adopt", &[]),
+                );
+            } else if let crate::init::KeyPermission::Denied(m) = &aperm {
                 show(
                     out,
                     a.json,
@@ -507,8 +650,23 @@ pub fn run(
             }
             // The complete operator policy, every run: the adopt statements live in the one file, whether or not the document
             // step above changed anything. Setup cannot apply it, so it is written, checked and explained (never a stop).
-            match init.operator_policy(&target, &account) {
-                Ok(op) => {
+            let op_report = if filter.wants("operator-policy") {
+                Some(init.operator_policy(&target, &account))
+            } else {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "operator-policy",
+                    t("init.step_operator_policy", &[]),
+                );
+                None
+            };
+            match op_report {
+                None => {}
+                Some(Ok(op)) => {
+                    show_merge(out, a.json, &op);
                     let sids = op.added_statements.join(", ");
                     let profile = init
                         .recorded("aws")
@@ -555,12 +713,26 @@ pub fn run(
                     }
                     steps.push(json!({ "step": "operator_policy", "report": op }));
                 }
-                Err(f) => show(out, a.json, f.to_string()),
+                Some(Err(f)) => show(out, a.json, f.to_string()),
             }
             // The account's policies for boxes' roles (Session Manager, and with the key and bucket above, the fleet key and session logs), made once with this identity, after the key so it can name it. Boxes cannot be created or
             // upgraded without it, so a failure says what to ask an administrator for and never stops the rest of setup.
-            match init.plan_box_policy(&target, &account) {
-                Ok(bp) => {
+            let bp_plan = if filter.wants("box-policy") {
+                Some(init.plan_box_policy(&target, &account))
+            } else {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "box-policy",
+                    t("init.step_box_policy", &[]),
+                );
+                None
+            };
+            match bp_plan {
+                None => {}
+                Some(Ok(bp)) => {
                     show_plan(out, a.json, &bp);
                     let label = t("init.step_box_policy", &[]);
                     let effect = t("init.effect_box_policy", &[]);
@@ -588,14 +760,23 @@ pub fn run(
                     }
                     steps.push(json!({ "step": "box_policy", "plan": bp }));
                 }
-                Err(f) => {
+                Some(Err(f)) => {
                     show(out, a.json, f.to_string());
                     if !f.code.starts_with("adopt_") {
                         show(out, a.json, t("init.box_policy_denied", &[]));
                     }
                 }
             }
-            if let Some(pkg) = &a.issuer_package {
+            if a.issuer_package.is_some() && !filter.wants("issuer") {
+                not_chosen(
+                    out,
+                    a.json,
+                    &mut ledger,
+                    &mut steps,
+                    "issuer",
+                    t("init.step_issuer", &[]),
+                );
+            } else if let Some(pkg) = &a.issuer_package {
                 let iss = init
                     .plan_issuer(
                         &target,
@@ -851,6 +1032,8 @@ pub fn harden(
         access: None,
         issuer_package: None,
         issuer_package_sha256: None,
+        only: Vec::new(),
+        skip: Vec::new(),
         yes: a.yes,
         dry_run: a.dry_run,
         json: a.json,
@@ -874,6 +1057,7 @@ pub fn run_harden_real(a: &HardenArgs) -> Result<(), String> {
         latency: &latency,
         paths,
         retry_delay: std::time::Duration::from_secs(3),
+        preview_without_state: false,
     };
     let v = harden(a, &init, &mut Terminal, &mut std::io::stdout())?;
     if a.json {
@@ -892,6 +1076,7 @@ pub fn run_real(a: &Args) -> Result<(), String> {
         latency: &latency,
         paths,
         retry_delay: std::time::Duration::from_secs(3),
+        preview_without_state: a.dry_run,
     };
     let secrets = crate::serve::secret_store();
     let settings_path = Settings::path();
@@ -965,17 +1150,22 @@ mod tests {
             access: None,
             issuer_package: None,
             issuer_package_sha256: None,
+            only: Vec::new(),
+            skip: Vec::new(),
             yes: true,
             dry_run: false,
             json: false,
         }
     }
-    fn with_init<R>(
+    /// As the real command builds it: a dry run previews the steps after a state bucket that does not exist yet.
+    fn with_init_as<R>(
         dir: &std::path::Path,
         runner: &RecordingRunner,
+        preview: bool,
         f: impl FnOnce(&Init<'_>) -> R,
     ) -> R {
         let http = FakeHttp::default();
+        crate::init::write_test_lock(&dir.join("work"));
         let init = Init {
             runner,
             http: &http,
@@ -988,6 +1178,7 @@ mod tests {
                 modules: dir.join("modules"),
             },
             retry_delay: Duration::ZERO,
+            preview_without_state: preview,
         };
         f(&init)
     }
@@ -999,7 +1190,7 @@ mod tests {
         tty: bool,
     ) -> (Result<Value, String>, String) {
         let secrets = MemorySecrets::default();
-        with_init(dir, runner, |init| {
+        with_init_as(dir, runner, a.dry_run, |init| {
             let env = Env {
                 init,
                 settings_path: Some(dir.join("settings.json")),
@@ -1443,5 +1634,245 @@ mod tests {
             assert!(!ran(&r, write), "{write} ran");
         }
         assert!(!d.path().join("config.toml").exists());
+    }
+
+    // ----- --dry-run previews every step; --only and --skip choose steps without prompts -----
+
+    #[test]
+    fn a_dry_run_before_the_bucket_exists_previews_every_later_step_and_changes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        modules(d.path());
+        let r = RecordingRunner::new();
+        r.reply(o(0, SSO, ""));
+        for _ in 0..6 {
+            r.reply(o(254, "", "DryRunOperation"));
+        }
+        r.reply(o(254, "", "404 Not Found")); // head-bucket: not there yet
+                                              // the network, previewed: head-bucket, version, two seeds, the preview's init, its plan
+        r.reply(o(254, "", "404 Not Found"));
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        for _ in 0..3 {
+            r.reply(o(0, "", ""));
+        }
+        r.reply(o(
+            2,
+            "  # module.network.aws_vpc.this will be created\n",
+            "",
+        ));
+        // the key, previewed: permission unknown, head-bucket, version, init, no alias, an empty plan
+        r.reply(o(254, "", "AccessDenied"));
+        r.reply(o(254, "", "404 Not Found"));
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", ""));
+        r.reply(o(0, r#"{"Aliases":[]}"#, ""));
+        r.reply(o(
+            2,
+            "  # module.key.aws_kms_key.secrets will be created\n",
+            "",
+        ));
+        // the adopt document, previewed
+        r.reply(o(254, "", "AccessDenied"));
+        r.reply(o(254, "", "404 Not Found"));
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", ""));
+        r.reply(o(254, "", "InvalidDocument"));
+        r.reply(o(0, "", ""));
+        // the box policy, previewed
+        r.reply(o(254, "", "404 Not Found"));
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", ""));
+        // the two policies the module makes without a fleet key recorded; none exists yet
+        for _ in 0..2 {
+            r.reply(o(254, "", "NoSuchEntity"));
+        }
+        r.reply(o(0, "", ""));
+        r.reply(o(0, SSO, ""));
+        let mut a = aws_args();
+        a.dry_run = true;
+        let (res, text) = go(&a, d.path(), &r, vec![], false);
+        let v = res.unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(v["dry_run"], true);
+        assert!(
+            !text.contains("The network is planned after the state bucket exists"),
+            "{text}"
+        );
+        assert!(text.contains("Private network in"), "{text}");
+        assert!(text.contains("Preview only"), "{text}");
+        let previewed: Vec<&str> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["plan"]["preview"] == true)
+            .filter_map(|s| s["step"].as_str())
+            .collect();
+        assert_eq!(
+            previewed,
+            ["network", "secrets_key", "adopt_command", "box_policy"],
+            "{text}"
+        );
+        for write in [
+            "create-bucket",
+            "apply",
+            "-backend-config=use_lockfile=true",
+        ] {
+            assert!(!ran(&r, write), "{write} ran in a dry run");
+        }
+        assert!(!d.path().join("config.toml").exists());
+    }
+
+    /// After a bucket that has to be made: the adopt step and the box policy, each with nothing to change, then the security
+    /// check's sign-in. (No network and no key: the tests below leave them out.)
+    fn script_adopt_and_box_policy(r: &RecordingRunner) {
+        r.reply(o(254, "", "AccessDenied")); // get-role
+        r.reply(o(0, "", "")); // head-bucket
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+        r.reply(o(254, "", "InvalidDocument")); // no document to adopt
+        r.reply(o(0, "", "")); // plan: nothing to do
+        r.reply(o(0, r#"{"Version":"2012-10-17","Statement":[]}"#, ""));
+        r.reply(o(0, "", "")); // box policy: head-bucket
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+                               // the two policies the module makes without a fleet key recorded; none exists yet
+        for _ in 0..2 {
+            r.reply(o(254, "", "NoSuchEntity"));
+        }
+        r.reply(o(0, "", "")); // plan: nothing to do
+        r.reply(o(0, SSO, ""));
+    }
+
+    #[test]
+    fn skipped_steps_are_said_and_nothing_about_them_is_planned_or_asked() {
+        let d = tempfile::tempdir().unwrap();
+        modules(d.path());
+        let r = RecordingRunner::new();
+        script_to_bucket(&r);
+        script_adopt_and_box_policy(&r);
+        let mut a = aws_args();
+        a.skip = vec!["network".into(), "secrets-key".into()];
+        // --yes and --skip: no prompt, no answer from standard input
+        let (res, text) = go(&a, d.path(), &r, vec![], false);
+        let v = res.unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert!(text.contains("Not run: private network"), "{text}");
+        assert!(text.contains("Not run: fleet secrets key"), "{text}");
+        assert!(!ran(&r, "ozbox/network/"), "no network was planned");
+        assert!(!ran(&r, "ozbox/secrets-key/"), "no key was planned");
+        assert!(ran(&r, "ozbox/box-policy/"), "the other steps ran");
+        let skipped = v["summary"]["skipped"].as_array().unwrap();
+        assert!(skipped.contains(&json!("private network")));
+        assert!(skipped.contains(&json!("fleet secrets key")));
+        assert_eq!(v["completed"], false, "no subnet: not marked complete");
+    }
+
+    #[test]
+    fn only_runs_the_chosen_steps_and_a_missing_bucket_is_never_skipped_silently() {
+        let d = tempfile::tempdir().unwrap();
+        modules(d.path());
+        let r = RecordingRunner::new();
+        script_to_bucket(&r);
+        let mut a = aws_args();
+        a.only = vec!["box-policy".into()];
+        let (res, _) = go(&a, d.path(), &r, vec![], false);
+        let e = res.unwrap_err();
+        assert!(e.contains("Add state-bucket to --only"), "{e}");
+        assert!(!ran(&r, "create-bucket"));
+        // with the bucket chosen too, only it and the box policy run
+        let d = tempfile::tempdir().unwrap();
+        modules(d.path());
+        let r = RecordingRunner::new();
+        script_to_bucket(&r);
+        r.reply(o(0, "", "")); // box policy: head-bucket
+        r.reply(o(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        r.reply(o(0, "", "")); // init
+        r.reply(o(0, "", "")); // state list: empty
+                               // the two policies the module makes without a fleet key recorded; none exists yet
+        for _ in 0..2 {
+            r.reply(o(254, "", "NoSuchEntity"));
+        }
+        r.reply(o(0, "", "")); // plan: nothing to do
+        r.reply(o(0, SSO, ""));
+        let mut a = aws_args();
+        a.only = vec!["state-bucket".into(), "box-policy".into()];
+        let (res, text) = go(&a, d.path(), &r, vec![], false);
+        res.unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert!(ran(&r, "create-bucket") && ran(&r, "ozbox/box-policy/"));
+        for left_out in [
+            "ozbox/network/",
+            "ozbox/secrets-key/",
+            "ozbox/adopt-command/",
+        ] {
+            assert!(!ran(&r, left_out), "{left_out}");
+        }
+        assert!(text.contains("Not run: operator policy file"), "{text}");
+    }
+
+    #[test]
+    fn a_step_name_is_checked_and_the_state_bucket_cannot_be_skipped() {
+        let names = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let e = StepFilter::new(&names(&["netwrok"]), &[]).unwrap_err();
+        assert!(e.contains("netwrok") && e.contains("box-policy"), "{e}");
+        let e = StepFilter::new(&[], &names(&["state-bucket"])).unwrap_err();
+        assert!(e.contains("cannot be skipped"), "{e}");
+        let f = StepFilter::new(&names(&[" Network ", "issuer"]), &[]).unwrap();
+        assert!(f.wants("network") && f.wants("issuer") && !f.wants("box-policy"));
+        let f = StepFilter::new(&[], &names(&["issuer"])).unwrap();
+        assert!(f.wants("network") && !f.wants("issuer"));
+        assert!(StepFilter::default().wants("state-bucket"));
+        // a script that names an unknown step is refused before anything is asked of the cloud
+        let d = tempfile::tempdir().unwrap();
+        let r = RecordingRunner::new();
+        let mut a = aws_args();
+        a.skip = names(&["everything"]);
+        let (res, _) = go(&a, d.path(), &r, vec![], false);
+        assert!(res.unwrap_err().contains("not a setup step"));
+        assert!(r.calls().is_empty());
+    }
+
+    #[test]
+    fn the_only_and_skip_flags_parse_as_lists_and_refuse_unknown_steps() {
+        use crate::cli::{Cli, Command};
+        use clap::Parser;
+        let c = Cli::try_parse_from([
+            "ozbox",
+            "--provider",
+            "aws",
+            "init",
+            "--skip",
+            "network,secrets-key",
+            "--skip",
+            "issuer",
+        ])
+        .unwrap();
+        let Command::Init { skip, only, .. } = c.command else {
+            panic!("not init");
+        };
+        assert_eq!(skip, ["network", "secrets-key", "issuer"]);
+        assert!(only.is_empty());
+        assert!(Cli::try_parse_from(["ozbox", "init", "--skip", "state-bucket"]).is_err());
+        assert!(Cli::try_parse_from(["ozbox", "init", "--only", "everything"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ozbox", "init", "--only", "network", "--skip", "issuer"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_outage_at_sign_in_stops_setup_with_the_outage_not_a_login_message() {
+        let d = tempfile::tempdir().unwrap();
+        let r = RecordingRunner::new();
+        r.reply(o(
+            255,
+            "",
+            "An error occurred (ServiceUnavailable) when calling the GetCallerIdentity operation: Service Unavailable",
+        ));
+        let (res, _) = go(&aws_args(), d.path(), &r, vec![], false);
+        let e = res.unwrap_err();
+        assert!(
+            e.contains("problem on AWS's side") && !e.contains("not signed in"),
+            "{e}"
+        );
+        assert!(e.contains("health.aws.amazon.com"), "{e}");
     }
 }

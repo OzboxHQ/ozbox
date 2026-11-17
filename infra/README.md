@@ -224,9 +224,13 @@ before anything is created. Keeping state in the encrypted bucket needs 1.10 or 
 Identity Center a sign-in profile is exactly one permission set, so everything init applies has to be in it: a person given the key,
 adopt and box-policy sets separately could not run init end to end without full administrator rights. `OzBoxSetup` holds:
 
-- the reads init's checks make (`ec2:Describe*`, the signed-in role's own policy simulation) and the tagged-create checks it probes;
+- the reads init's checks make (`ec2:Describe*`, `servicequotas:GetServiceQuota` for the network's Elastic IP and NAT gateway
+  quotas, the signed-in role's own policy simulation) and the tagged-create checks it probes. Without the quota read the plan says
+  the quota could not be checked and goes on; it never guesses;
 - the state bucket `ozbox-state-<account>-<region>`: make it, version it, encrypt it, block public access, add the TLS-only policy and
-  tags, and read and write the state objects and the lock (only this account's `ozbox-state-*` buckets);
+  tags, and read and write the state objects and the lock (only this account's `ozbox-state-*` buckets). It may also delete such a
+  bucket, which init does only to undo one it made in the same run and left half set up: S3 deletes only an empty bucket, so a bucket
+  that holds any state (or any old version of it) cannot be removed this way;
 - the network (`modules/aws-network`): the VPC, subnets, internet and NAT gateways, address and route tables, every one only when
   tagged `ozbox-managed=true`, as the operator policy conditions them;
 - the statements of `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin`, with the same resource scoping (a test holds the
@@ -242,6 +246,12 @@ It is **not** the security baseline (`ozbox harden`, which has `infra/aws/securi
 
 The separate `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin` files remain for an administrator who wants to give one of
 them alone; `OzBoxSetup` is the one a person runs init with.
+
+**One provider version for every step.** Each root `ozbox init` generates pins the AWS provider to one exact version (6.73.0 in
+this release), and every step shares one lock file: init makes it once in its working folder (`provider/.terraform.lock.hcl`) and
+copies it into each step's folder, and into the box and network modules, before they are initialised. So every step, and every
+box created afterwards, runs the same provider. The modules themselves still accept `>= 5.60.0, < 7.0.0` for anyone using them
+directly.
 
 ### Give a person `OzBoxSetup` (IAM Identity Center)
 
@@ -286,7 +296,9 @@ module, whose `OzBoxKeyAdmin` set is KMS-only. Setup checks that permission befo
 the rest of setup. When it is applied, setup writes the policy for whoever runs `ozbox adopt-fleet-key` to
 `operator-adopt-policy.json` in the step's working folder. Those three statements (`SendOnlyTheAdoptDocument`, `ToBoxesOzBoxManages`,
 `ReadACommandThatWasSent`) are also part of the daily operator policy, and **setup writes that whole policy on every run**, applied
-document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. Setup never applies it: it has
+document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. When the
+adopt step has been applied in that region, its own output is merged into that file (a statement with the same `Sid` is replaced
+where it stands, a new one is added at the end, nothing appears twice), so there is one file to apply and no JSON to merge by hand. Setup never applies it: it has
 no right over the operator's permissions, on purpose (an identity that could rewrite them could widen them). An account administrator
 replaces the daily role's policy with the file (Identity Center: Permission sets, the daily set, Inline policy). At about 8,500 characters it
 is longer than a managed policy may be (6,144), so it is an inline policy. If the config records the daily `profile`, setup also reads, as

@@ -5,7 +5,7 @@ Each record states one decision, why, and what it costs. A decision changes only
 | # | Decision |
 |---|---|
 | [0001](0001-rust-and-typescript.md) | Rust for the CLI and daemons, TypeScript for engine adapters and the dashboard |
-| [0002](0002-plan-then-apply.md) | Every mutation is planned, shown, then applied; plans are idempotent and fenced against stale state |
+| [0002](0002-plan-then-apply.md) | Every mutation is planned, shown, then applied; plans are idempotent and fenced against stale state. Amended 2026-11: a setup step that fails part way is undone, a dry run previews every step, steps are chosen by flags |
 | [0003](0003-provider-interface.md) | One provider interface; a fake provider first; lifecycle through OpenTofu, runtime through provider APIs |
 | [0004](0004-provider-neutral-sizes.md) | A provider-neutral size catalogue |
 | [0005](0005-no-inbound-network.md) | No inbound network: every way in is a tunnel the box dials out to |
