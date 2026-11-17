@@ -1142,7 +1142,7 @@ fn action_of(service: &str, command: &str) -> String {
 
 /// Calls the program makes that the DAILY operator role does not, with the reason. Each is made by `ozbox init` (the setup
 /// identity or an administrator, a different permission set: `infra/aws/setup-policy.json`), or is not an AWS call at all.
-const NOT_THE_OPERATORS: [(&str, &str, &str); 18] = [
+const NOT_THE_OPERATORS: [(&str, &str, &str); 19] = [
     (
         "kms",
         "file",
@@ -1194,6 +1194,11 @@ const NOT_THE_OPERATORS: [(&str, &str, &str); 18] = [
         "setup identity: the sign-in advice check",
     ),
     ("s3api", "create-bucket", "setup identity: the state bucket"),
+    (
+        "s3api",
+        "delete-bucket",
+        "setup identity: undoes a state bucket it made in the same run and left half set up",
+    ),
     (
         "s3api",
         "get-bucket-encryption",

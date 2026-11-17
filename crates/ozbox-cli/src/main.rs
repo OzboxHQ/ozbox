@@ -70,6 +70,7 @@ mod messages_code;
 mod messages_cost;
 mod messages_hardening;
 mod messages_infra;
+mod messages_init;
 mod messages_models;
 mod messages_old_disk;
 mod messages_orch;
