@@ -190,3 +190,74 @@ for (const width of WIDTHS) {
     }
   });
 }
+
+// ADR 0054: whether each engine can run on a person's own subscription. Honest: every row says its status with the reason
+// and the vendor's own pages, and only the one row with an opt-in (ADR 0055) has any control.
+for (const width of WIDTHS) {
+  test(`subscriptions at ${width}px: honest status, vendor links, controls only on the opt-in row`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page, '/settings/models');
+    const card = page.getByTestId('model-subscriptions');
+    await card.scrollIntoViewIfNeeded();
+    await expect(card.getByRole('heading', { name: 'Use a subscription instead of a key' })).toBeVisible();
+    await expect(card).toContainText('Only Codex with a ChatGPT plan');
+    const claude = card.getByTestId('subscription-claude-code-claude');
+    await expect(claude).toContainText('Not offered');
+    await expect(claude).toContainText("Anthropic's terms");
+    await expect(card.getByTestId('subscription-codex-chatgpt')).toContainText('On your opt-in');
+    await expect(card.getByText('Available', { exact: true })).toHaveCount(0);
+    // no row but Codex with a ChatGPT plan offers anything to press
+    for (const id of ['claude-code-claude', 'gemini-cli-google', 'opencode-claude', 'opencode-chatgpt', 'opencode-copilot', 'opencode-google', 'aider-none']) {
+      await expect(card.getByTestId(`subscription-${id}`).getByRole('button')).toHaveCount(0);
+    }
+    for (const href of await card.getByRole('link').evaluateAll((as) => as.map((a) => a.getAttribute('href') ?? ''))) {
+      expect(href.startsWith('https://')).toBe(true);
+    }
+    if (width < 1024) await expectTouchTargets(page, card);
+    await expectNoSidewaysScroll(page);
+    await axeClean(page, 'model-subscriptions');
+  });
+}
+
+// ADR 0055: the opt-in is off by default, says what an agent could read, needs the word typed, then the vendor's device
+// sign-in (the demo's stand-in shows a link and a code and makes up a sign-in), and revoking deletes it and points at the
+// vendor. The answers never carry the sign-in.
+for (const width of WIDTHS) {
+  test(`subscription opt-in at ${width}px: warning, typed confirmation, device sign-in, revoke`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const answers: string[] = [];
+    page.on('response', async (r) => {
+      if (r.url().includes('/v1/models/subscriptions')) answers.push(await r.text().catch(() => ''));
+    });
+    await open(page, '/settings/models');
+    const row = page.getByTestId('subscription-optin-codex-chatgpt');
+    await row.scrollIntoViewIfNeeded();
+    await expect(row.getByTestId('optin-state')).toHaveText('Off');
+    await expect(row.getByTestId('optin-warning')).toContainText('refresh token');
+    await expect(row.getByTestId('optin-warning')).toContainText('agent in the run');
+    const turnOn = row.getByTestId('optin-turn-on');
+    await expect(turnOn).toBeDisabled();
+    const confirm = row.getByLabel('To turn this on, type codex-chatgpt');
+    await confirm.fill('CODEX-CHATGPT');
+    await expect(turnOn).toBeDisabled();
+    await confirm.fill('codex-chatgpt');
+    await expect(turnOn).toBeEnabled();
+    if (width < 1024) await expectTouchTargets(page, row);
+    await axeClean(page, 'subscription-optin-codex-chatgpt');
+    await turnOn.click();
+    await expect(row.getByTestId('optin-state')).toHaveText('On');
+    await row.getByTestId('signin-start').click();
+    await expect(row.getByTestId('signin-code')).toHaveText('DEMO-0042');
+    await expect(row.getByRole('link', { name: /ChatGPT sign-in page/ })).toHaveAttribute('href', 'https://auth.openai.com/codex/device');
+    await expect(row.getByText('Signed in', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expectNoSidewaysScroll(page);
+    await axeClean(page, 'subscription-optin-codex-chatgpt');
+    await row.getByTestId('optin-revoke').click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('revoke it at OpenAI');
+    await dialog.getByRole('button', { name: 'Revoke and turn off' }).click();
+    await expect(row.getByTestId('revoked-note')).toContainText('revoke it at OpenAI as well');
+    await expect(row.getByTestId('optin-state')).toHaveText('Off');
+    for (const a of answers) expect(a).not.toContain('made-up sign-in');
+  });
+}

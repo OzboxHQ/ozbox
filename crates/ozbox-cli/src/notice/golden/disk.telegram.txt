@@ -1,0 +1,19 @@
+{
+  "disable_web_page_preview": true,
+  "link_preview_options": {
+    "is_disabled": true
+  },
+  "parse_mode": "HTML",
+  "protect_content": true,
+  "reply_markup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "Open in dashboard",
+          "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    ]
+  },
+  "text": "🚨 <b>Box main: the work disk is 96% full</b>\nGrow the work disk, or clear space, before it fills.\n\n<b>Box</b> main\n\nOpen it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main."
+}

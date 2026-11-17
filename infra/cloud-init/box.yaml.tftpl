@@ -29,17 +29,6 @@ users:
     lock_passwd: true
 
 write_files:
-  - path: /usr/local/sbin/ozbox-secrets-setup.sh
-    permissions: "0755"
-    owner: root:root
-%{ if provider == "aws" ~}
-    content: |
-      ${indent(6, replace(file("${scripts_dir}/ozbox-secrets-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ else ~}
-    encoding: gz+b64
-    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-secrets-setup.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ endif ~}
-
 %{ if box_secrets_env != "" ~}
   - path: /etc/ozbox/box-secrets.env
     permissions: "0644"
@@ -128,7 +117,7 @@ write_files:
         runuser -u ozbox -- sh -c 'set -C; umask 022; h=/work/home/ozbox; for f in .profile .bashrc .bash_logout; do [ -e $h/$f ] || [ -L $h/$f ] || cp /etc/skel/$f $h/$f; done; [ -L $h/.claude ] || { mkdir -p $h/.claude && s=$h/.claude/settings.json && { [ -e $s ] || [ -L $s ] || echo "{\"disableSkillShellExecution\": true}" > $s; }; }' || true
       fi
 
-  # (comment lines are dropped from the helper scripts here: the user-data limit is 16 KB compressed)
+  # (comment lines are dropped from the helper scripts written here: the user-data limit is 16 KB compressed)
   - path: /usr/local/sbin/ozbox-reown.sh
     permissions: "0755"
     owner: root:root
@@ -138,17 +127,6 @@ write_files:
 %{ else ~}
     encoding: gz+b64
     content: ${base64gzip(replace(file("${scripts_dir}/ozbox-reown.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ endif ~}
-
-  - path: /usr/local/sbin/ozbox-user-manager.sh
-    permissions: "0755"
-    owner: root:root
-%{ if provider == "aws" ~}
-    content: |
-      ${indent(6, replace(file("${scripts_dir}/ozbox-user-manager.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ else ~}
-    encoding: gz+b64
-    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-user-manager.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
 %{ endif ~}
 
   - path: /usr/local/sbin/ozbox-install-agent.sh
@@ -169,17 +147,6 @@ write_files:
       # Where a machine that is not the Oz image gets ozboxd (read by ozbox-install-agent.sh). No secrets.
       OZBOX_RELEASE_REPO="${agent_release_repo}"
       OZBOX_RELEASE_TAG="${agent_release_tag}"
-
-  - path: /usr/local/sbin/ozbox-admin.sh
-    permissions: "0755"
-    owner: root:root
-%{ if provider == "aws" ~}
-    content: |
-      ${indent(6, replace(file("${scripts_dir}/ozbox-admin.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ else ~}
-    encoding: gz+b64
-    content: ${base64gzip(replace(file("${scripts_dir}/ozbox-admin.sh"), "/(?m)^[ \t]*#([^!\n].*)?\n/", ""))}
-%{ endif ~}
 
   - path: /usr/local/bin/ozbox-admin-request
     permissions: "0755"
@@ -547,6 +514,9 @@ runcmd:
   - [bash, /usr/local/sbin/ozbox-work-setup.sh]
   # A machine made from stock Ubuntu fetches ozboxd from the signed release (the Oz image does nothing here).
   - [bash, -c, "/usr/local/sbin/ozbox-install-agent.sh || echo 'ozboxd could not be installed from the signed release' >&2"]
+  # The root helper, the secrets setup and the box-user services script are carried in the program, not in this user data
+  # (ADR 0055): written once here, from the program that was just installed (or that the image carries), before anything runs them.
+  - [bash, -c, "/usr/local/bin/ozbox first-boot install-scripts || echo 'the box scripts could not be installed from the program; run as root: ozbox first-boot install-scripts' >&2"]
   # The ingress account (ADR 0029): the one way a person's computer reaches the secrets service. Its key is the person's, pinned at create.
   - [bash, -c, "/usr/local/bin/ozbox secrets ingress-setup '${ingress_key}' || echo 'the ingress account could not be made; the box still works, but ozbox secrets --box will not reach it' >&2"]
   # /etc/ozbox is readable by the daemon's group only. It holds no credential.
@@ -560,6 +530,9 @@ runcmd:
   - [systemctl, enable, ozbox-backup.service]
   - [systemctl, enable, --now, ozbox-admin.path]
   - [bash, /usr/local/sbin/ozbox-secrets-setup.sh, "${box_name}", "${secrets_kms_key_id}", "${secrets_kms_region}", "${approval_key}"]
+  # The task router (ADR 0044) gets a user of its own, so the channel's keys, state and audit chain are out of an agent's reach (a failure
+  # must not stop the boot). Its setup is carried in the program, not here.
+  - [bash, -c, "/usr/local/bin/ozbox tasks router-setup || echo 'the task router could not be set up; run as root: ozbox tasks router-setup' >&2"]
   # The dashboard gets a user of its own (an existing box's dashboard is moved, idempotently; a failure must not stop the boot).
   - [bash, -c, "/usr/local/bin/ozbox secrets supervisor-setup || echo 'the dashboard could not be moved to the supervisor user; run: ozbox admin <box> -- ensure-supervisor' >&2"]
   # The browser gets a user of its own and a launcher only the dashboard's user may open (a failure must not stop the boot). The

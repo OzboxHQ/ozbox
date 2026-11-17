@@ -51,3 +51,11 @@ export function keyName(e: { key: string; ctrlKey: boolean; metaKey: boolean; al
   const base = e.key === ' ' ? 'Space' : e.key;
   return [...mods, base].join('+');
 }
+
+/**
+ * Whether the live view's page is the browser's empty start page (`about:blank`, which the server names `about:`). Its picture
+ * is plain white, so the live view says that nothing is open yet instead of showing a white box.
+ */
+export function isBlankPage(page: string | undefined): boolean {
+  return page === 'about:' || page === 'about:blank';
+}

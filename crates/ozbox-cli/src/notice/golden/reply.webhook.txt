@@ -1,0 +1,13 @@
+{
+  "box": null,
+  "environment": null,
+  "expires_ms": null,
+  "kind": "reply",
+  "path": null,
+  "production": false,
+  "project": null,
+  "reference": null,
+  "summary": "Done: 3 files changed. Tests pass.",
+  "title": "",
+  "url": null
+}

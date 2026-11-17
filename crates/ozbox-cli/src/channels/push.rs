@@ -21,6 +21,8 @@ use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 
 use super::{clip, Ctx, SendResult};
 use crate::netguard::{Guard, HttpRequest};
+use crate::notice::render::{Push, Renderer};
+use crate::notice::Notice;
 use crate::notify::{Alert, Severity};
 use crate::serve::auth::b64;
 
@@ -172,17 +174,20 @@ pub fn vapid_authorization(
 
 // ---------- sending ----------
 
-pub fn payload(a: &Alert) -> Vec<u8> {
+/// What the notification shows and opens: the notice's push rendering, with the alert's tag and time.
+pub fn payload(a: &Alert, n: &Notice) -> Vec<u8> {
+    let p = Push::render(n);
     let v = serde_json::json!({
-        "title": clip(&a.title, 120),
-        "body": clip(&a.body, 400),
+        "title": p.title,
+        "body": p.body,
+        "url": p.path,
         "tag": clip(&a.key, 100),
         "urgent": a.severity == Severity::Urgent,
         "ts": a.ts_ms,
     });
     let mut s = v.to_string();
     if s.len() > MAX_PAYLOAD {
-        s = serde_json::json!({ "title": clip(&a.title, 60), "tag": clip(&a.key, 100), "ts": a.ts_ms })
+        s = serde_json::json!({ "title": clip(&p.title, 60), "url": p.path, "tag": clip(&a.key, 100), "ts": a.ts_ms })
             .to_string();
     }
     s.into_bytes()
@@ -210,12 +215,19 @@ pub fn interpret(status: u16, _body: &str) -> SendResult {
 }
 
 /// Send to one stored device. `device` is the id the secrets are named after.
-pub fn send(ctx: &Ctx, device: &str, subject: &str, a: &Alert, now_secs: u64) -> SendResult {
+pub fn send(
+    ctx: &Ctx,
+    device: &str,
+    subject: &str,
+    a: &Alert,
+    n: &Notice,
+    now_secs: u64,
+) -> SendResult {
     let vapid = ctx.need("vapid-private-key", "push signing key")?;
     let endpoint = ctx.need(&format!("push-endpoint-{device}"), "device address")?;
     let key = ctx.need(&format!("push-key-{device}"), "device key")?;
     let auth = ctx.need(&format!("push-auth-{device}"), "device auth secret")?;
-    let body = encrypt(&key, &auth, &payload(a))?;
+    let body = encrypt(&key, &auth, &payload(a, n))?;
     let authz = vapid_authorization(&vapid, &endpoint, subject, now_secs)?;
     ctx.call(
         request(&authz, &endpoint, body, a.severity == Severity::Urgent),
@@ -407,7 +419,14 @@ mod tests {
         let mut a = test_alert(5);
         a.severity = Severity::Urgent;
         assert_eq!(
-            send(&g.ctx, "dev1", "mailto:ops@example.com", &a, 100),
+            send(
+                &g.ctx,
+                "dev1",
+                "mailto:ops@example.com",
+                &a,
+                &a.notice_for(None),
+                100
+            ),
             Ok("sent".into())
         );
         let r = &g.http.requests()[0];
@@ -443,6 +462,6 @@ mod tests {
     fn the_payload_stays_small() {
         let mut a = test_alert(1);
         a.body = "x".repeat(10_000);
-        assert!(payload(&a).len() < MAX_PAYLOAD);
+        assert!(payload(&a, &a.notice_for(None)).len() < MAX_PAYLOAD);
     }
 }

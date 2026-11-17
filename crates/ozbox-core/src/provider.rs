@@ -154,6 +154,18 @@ pub trait Provider: Send + Sync {
         })
     }
 
+    /// [`Provider::latest_image`] for a machine of type `machine_type` (the box's own, or the one its size maps to): a provider
+    /// that builds images for more than one CPU architecture returns the newest for that machine's. `None` is the provider's
+    /// default machine. The default ignores the machine type.
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        let _ = machine_type;
+        self.latest_image(region)
+    }
+
     /// Whether this provider can replace a box's machine from the image it already runs, so that it boots with the
     /// first-boot configuration rendered now (`Operation::Upgrade { reprovision: true }`). `Ok` carries notes for the
     /// plan; `Err` says why not and what to do instead. Read-only. The default refuses.

@@ -886,7 +886,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "ozbox-browser"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "libc",
  "ring",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-catalog"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-cli"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -944,9 +944,11 @@ dependencies = [
 
 [[package]]
 name = "ozbox-core"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
+ "ozbox-seal",
  "ring",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -956,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-issuer"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "getrandom 0.2.17",
  "ozbox-seal",
@@ -968,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-listenfd"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -976,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-memory"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "getrandom 0.2.17",
  "ozbox-core",
@@ -990,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-plugin"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "ozbox-core",
  "ring",
@@ -1002,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-provider-aws"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "ozbox-catalog",
  "ozbox-core",
@@ -1013,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-provider-fake"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "ozbox-core",
  "serde",
@@ -1023,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-provider-hcloud"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "ozbox-core",
  "ozbox-provider-fake",
@@ -1034,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "ozbox-seal"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "getrandom 0.2.17",
  "hpke",
@@ -1045,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "ozboxd"
-version = "0.2.0-beta.3"
+version = "0.3.0-beta.1"
 dependencies = [
  "libc",
  "ozbox-catalog",

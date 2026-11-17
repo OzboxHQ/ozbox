@@ -77,6 +77,10 @@ pub const MAX_VALUE: usize = 4096;
 /// store's file or the box's socket line carry.
 pub const MAX_RECORD_VALUE: usize = 256 * 1024;
 
+/// The keychain names of what `dashboard_keep` holds for one box: the prefix, then the box's name.
+pub const DASHBOARD_TOKEN_PREFIX: &str = "dashboard-tunnel-token-";
+pub const DASHBOARD_INSTALL_PREFIX: &str = "dashboard-install-";
+
 /// The names this server will store, which keeps the keychain namespace small and the command arguments plain.
 pub fn valid_name(name: &str) -> bool {
     const FIXED: [&str; 17] = [
@@ -101,8 +105,18 @@ pub fn valid_name(name: &str) -> bool {
     if FIXED.contains(&name) {
         return true;
     }
-    // A box's IDE or desktop password: the box name is the id (a box name is up to 40 characters).
-    if ["ide-password-", "desktop-password-"].iter().any(|p| {
+    // A box's IDE or desktop password, and what this computer keeps of a box's hosted dashboard (its tunnel token and install
+    // settings, see `dashboard_keep`): the box name is the id (a box name is up to 40 characters, so these are NOT held to the
+    // 32-character rule below; it refused every kept token of a box with a long name, and of any box at all before this family
+    // was named here).
+    if [
+        "ide-password-",
+        "desktop-password-",
+        DASHBOARD_TOKEN_PREFIX,
+        DASHBOARD_INSTALL_PREFIX,
+    ]
+    .iter()
+    .any(|p| {
         name.strip_prefix(p)
             .is_some_and(|id| ozbox_core::BoxName::new(id).is_ok())
     }) {
@@ -119,6 +133,12 @@ pub fn valid_name(name: &str) -> bool {
         "tunnel-token-",
         "trigger-secret-",
         "approval-key-",
+        // a subscription sign-in an engine reads itself, and its opt-in (ADR 0055): the dashboard's alone
+        "subscription-login-",
+        "subscription-optin-",
+        // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's, never the store's
+        "tasks-sign-",
+        "tasks-seal-",
     ]
     .iter()
     .any(|p| {
@@ -151,6 +171,10 @@ pub fn is_managed_secret(name: &str) -> bool {
             "trigger-secret-",
             "ide-password-",
             "desktop-password-",
+            DASHBOARD_TOKEN_PREFIX,
+            DASHBOARD_INSTALL_PREFIX,
+            // a subscription sign-in and its opt-in (ADR 0055): only the Settings -> Models sign-in writes them
+            "subscription-",
         ]
         .iter()
         .any(|p| name.starts_with(p))
@@ -208,6 +232,17 @@ pub fn check_record(value: &str) -> Result<(), SecretError> {
 #[derive(Default)]
 pub struct MemorySecrets {
     map: Mutex<BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+impl MemorySecrets {
+    /// Every name held, for tests that check nothing was left behind.
+    pub fn all_names(&self) -> Vec<String> {
+        self.map
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl SecretStore for MemorySecrets {
@@ -352,7 +387,7 @@ impl KeychainSecrets {
         ))
     }
 
-    fn check_name(name: &str) -> Result<(), SecretError> {
+    pub(crate) fn check_name(name: &str) -> Result<(), SecretError> {
         if valid_name(name) {
             Ok(())
         } else {

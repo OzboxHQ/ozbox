@@ -701,6 +701,7 @@ impl Auth {
             last_used_ms: now,
         });
         self.save(&inner);
+        self.note_enrolled();
         if sess.level == Level::EnrollRequired {
             return self.upgrade(&mut inner, &key, true);
         }
@@ -768,11 +769,11 @@ impl Auth {
     // ---- authenticator app ---------------------------------------------------------------------------------
 
     fn totp_secret_name(user: &str) -> String {
-        format!("totp-{user}")
+        totp::secret_name(user)
     }
 
     #[allow(clippy::type_complexity)]
-    fn check_totp(&self, inner: &mut Inner, user: &str, code: &str) -> R<()> {
+    pub(super) fn check_totp(&self, inner: &mut Inner, user: &str, code: &str) -> R<()> {
         self.limited(inner, &format!("totp:{user}"), 8)?;
         self.limited(inner, "verify", MAX_VERIFY_PER_WINDOW * 3)?;
         let refuse = || Out::err(401, "code_refused", "that code was not accepted");
@@ -873,6 +874,7 @@ impl Auth {
             s.pending_totp = None;
         }
         self.save(&inner);
+        self.note_enrolled();
         if sess.level == Level::EnrollRequired {
             return self.upgrade(&mut inner, &key, false);
         }

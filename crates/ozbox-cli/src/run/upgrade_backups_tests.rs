@@ -184,6 +184,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
                 detail: "test".into(),
             },
             accept_new_store: accept,
+            fleet_key: false,
             old_disk: OldDisk::NotOffered,
             recover: &|_, _| None,
             restore_backups: &|ag, rec| restore_with(&settings, ag, rec, &secrets),
@@ -191,6 +192,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
             restore_dashboard: &|_, _| None,
             memory_guard: &|_, _| None,
             refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+            secrets_pin: &|_| None,
             review_signers: &|_| None,
             place_escrow: &|_, _| None,
             first_boot: FirstBootOpts {
@@ -201,6 +203,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
             },
             strict_checkpoint: false,
             legacy_checkpoint: false,
+            no_checkpoint: false,
         },
     )
     .map_err(|e| e.to_string())

@@ -474,6 +474,14 @@ mod daemon {
                 default_max_runtime_s: (cfg.runs.default_max_runtime_s > 0)
                     .then_some(cfg.runs.default_max_runtime_s),
                 default_memory_cap: cfg.runs.default_memory_cap,
+                // a run's own files (ADR 0055) live in the box user's memory-backed runtime folder, never on /work
+                files_root: uid.and_then(|u| {
+                    let d = format!("/run/user/{u}");
+                    std::path::Path::new(&d)
+                        .is_dir()
+                        .then(|| ozboxd::run_files::default_root(Some(&d)))
+                        .flatten()
+                }),
                 ..RunConfig::default()
             },
             run_cg,
@@ -481,6 +489,11 @@ mod daemon {
             spawner,
             clock.clone(),
         )));
+        // a run's files left by runs that ended while no daemon was here go now (those still going are taken over below,
+        // which sweeps again with them kept)
+        if switch.is_none() {
+            lock(&runs).sweep_run_files();
+        }
         if let Some(sw) = &switch {
             // Runs a previous daemon left going are always carried on with, whichever way new runs go now; a record that
             // does not verify is reported. A box with no records and no manager has nothing to look for.
@@ -543,6 +556,10 @@ mod daemon {
                 Some(std::path::PathBuf::from(selftest::BOX_SECRETS_DECLARATION));
         }
         if cfg.selftest.require_mount {
+            stcfg.first_boot_steps =
+                Some(std::path::PathBuf::from(ozbox_core::first_boot::STEPS_FILE));
+        }
+        if cfg.selftest.require_mount {
             stcfg.approval_flag_files = selftest::APPROVAL_FLAG_FILES
                 .iter()
                 .map(std::path::PathBuf::from)
@@ -560,6 +577,19 @@ mod daemon {
                 handed_over: matches!(inherited, Some(Ok(_))),
                 unit_present: std::path::Path::new(selftest::DASHBOARD_SOCKET_UNIT).exists(),
             });
+        }
+        // a dashboard that was installed must be running, and no tunnel of the box user's own may be left (the marker is root's; the
+        // dashboard user's own folder is closed to this user)
+        if cfg.selftest.require_mount {
+            stcfg.dashboard_traces = Some(selftest::DashboardTraces {
+                marker: std::path::PathBuf::from(selftest::DASHBOARD_MARKER),
+                migrated: std::path::PathBuf::from(selftest::DASHBOARD_MIGRATED),
+                old_home: std::path::PathBuf::from(selftest::DASHBOARD_OLD_HOME),
+                folder: std::path::PathBuf::from(selftest::DASHBOARD_FOLDER),
+                folder_state: std::path::PathBuf::from(selftest::DASHBOARD_FOLDER_STATE),
+                passwd: std::path::PathBuf::from(selftest::PASSWD),
+            });
+            stcfg.legacy_tunnel_paths = selftest::legacy_tunnel_paths(&stcfg.user_home);
         }
         if cfg.selftest.require_mount && cfg.runs.backend != "scope" {
             stcfg.user_cgroup_root = Some(std::path::PathBuf::from("/sys/fs/cgroup"));

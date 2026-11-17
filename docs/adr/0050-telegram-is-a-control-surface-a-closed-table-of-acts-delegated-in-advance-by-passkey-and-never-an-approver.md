@@ -1,7 +1,9 @@
 # 0050 — Telegram is a control surface: a closed table of acts, delegated in advance by a passkey, and never an approver
 
 **Status.** Accepted. **Phase P1 (the policy core and identity) is built and is Preview**: tested in CI against a fake Telegram and a
-software authenticator, never run for real on a box with a phone. Phases P2 to P6 are not built. Revised 2026-11-14 after its security
+software authenticator, never run for real on a box with a phone. **Parts of P2 and P3 (box power from chat, addressing boxes,
+sessions, groups and the fleet, the stronger redaction and detail levels, `ozbox chat lock` and `ozbox chat unlink`) are built and
+Preview: see the amendment of 2026-11-17 at the end.** `/run` (P4), worker boxes over the mesh (P5) and P6 are not built. Revised 2026-11-14 after its security
 review. It builds on ADR 0021 (chat with coding agents) and ADR 0041 (the
 approval model) **as amended on 2026-11-13**, in which a chat app is notify-only: no Approve, no Deny, no Stop and no `/budget`,
 refused by the server. Those amendments are written on the branch that built them and are not on every branch yet; this ADR cites them
@@ -475,9 +477,10 @@ calls; no measured path (create, resume timing, exec, disk, network, images) cha
 - Telegram stays a notifier for every approval. Nothing in this ADR lets it decide.
 - Another cloud role, a chat profile on the box and a delegation record to build, test and review; more dashboard settings to explain.
 - **Not covered:** Production (never from chat, metadata only); worker boxes until the hub exists; cloning,
-  snapshotting and destroying boxes (and, until box power is built, creating and resizing them); voice; groups and rooms (the mesh); chat apps other than Telegram beyond what they have (the
+  snapshotting and destroying boxes; voice; groups and rooms (the mesh); chat apps other than Telegram beyond what they have (the
   typing rule applies to all of them); any claim that Telegram is private. A provider without scoped power stays unsupported. Phase P1
-  is built and Preview; box power, `/run`, the chat profile and the redactor (P2 to P4) are not, and no status mark may say "Works".
+  and the parts of P2 and P3 in the 2026-11-17 amendment are built and Preview; `/run`, the box's own deadline timer, the power-only
+  cloud role, worker boxes over the mesh and the untrusted-turn signal are not, and no status mark may say "Works".
 
 ## Open questions for the owner, each with a recommendation
 
@@ -540,3 +543,175 @@ that follows it.
   does not read a real tunnel's log. Closing it needs the harness to start a loopback reverse proxy whose address is the passkey origin,
   with the server on another port, and to assert on that proxy's log; and, on a real box, the owner's tier C run reading the tunnel's
   actual log.
+
+## Amendment, 2026-11-17: the end-to-end path, addressing, box power and agent replies
+
+**Status of this amendment: built and Preview** (tested in CI against a fake Telegram over HTTP, the fake provider, the simulated
+agent engine and a fake hub channel; never run on a real box with a real phone). It builds the parts of phases P2 and P3 listed
+below, adds one thing the text above did not have (addressing a box, a session, a group or the whole fleet), and leaves the rest
+of P2 to P6 as they were. It changes no rule above: a chat still never approves, denies, stops a run, raises a limit or touches a
+secret, and a Production box is still metadata only.
+
+### The end-to-end path
+
+One path for every message, from the vendor to the box and back. Each step is one component with one job; nothing below the
+adapter knows which chat app a message came from, and nothing above the executors knows which box or transport it reaches.
+
+| # | Component | Code | Contract |
+|---|---|---|---|
+| 1 | **Inbound adapter** | Telegram: `telegram` (Bot API client, long polling) and `serve::telegram_bridge` (polling lane); Slack: `chat::ws`, `chat::slack`; WhatsApp: `chat::whatsapp` (signed webhook) | turns a vendor update into one plain private text from one sender, or drops it (`chat_policy::admit`) |
+| 2 | **Identity, replay and freshness** | `serve::telegram_bridge` (`tg_plan`), `telegram_store` | the sender's numeric id must have a live, passkey-backed link; `(bot id, update_id)` is written to disk before anything is done; five minutes fresh (two for power and run); twenty messages a minute; the message is sealed in the transcript first |
+| 3 | **One act** | `chat_policy::acts::parse_act` | exactly one `ChatAct` from the closed table; a forwarded or quoted message is data |
+| 4 | **The policy** | `chat_policy::decide` | `Allow`, `Handoff` or `Refuse` from facts read just now (link, role, delegations whose signatures were just verified, the box's marks); an `Allow` is asked again (`Allowed::confirm`) immediately before the act |
+| 5 | **Addressing** | `chat_policy::address` | `@box`, `@box/session`, `@group`, `@fleet` and the sticky `/to` target expand to the boxes this person may reach; each box is put to `decide` on its own; a fan-out names what it left out and why |
+| 6a | **Box power executor** | `serve::telegram_acts` (`tg_power`), `chat_policy::power` | `Provider::plan`, the fleet caps of the settings, the delegation's caps, the permission engine, then the change as an apply job; the plan and one pointer link are shown; outside the caps it is a handoff with the same plan |
+| 6b | **Agent-session router** | `serve::telegram_acts` (`tg_address`), `serve::chat_routes` (`chat_exec`) | a box this dashboard runs: the supervisor's own start and send (the same as `/new` and a plain message), held to the chat profile; a worker box of a hub: `chat::remote::RemoteAgents` |
+| 7 | **Supervisor and agent engine** | `ozbox_core::supervisor`, the box daemon | the session, its turns and the requests it files, unchanged; a chat-origin run (`RunOrigin::Chat`) is always-ask and has no standing grant |
+| 8 | **Reply renderer** | `chat_policy::reply`, `serve::telegram_acts` (`tg_agent_reply`), `messages_chat` | an agent's words are redacted before they are cut, attributed to their box and session, cut to the box's detail level; every message is a catalogue key with arguments (`Said`), rendered once |
+| 9 | **Outbound adapter** | `serve::chat_routes` (`chat_say`, `chat_deliver`) | one door per app; a message never carries a button |
+
+Approvals are not on this path: an agent's request is filed by the supervisor and decided in the dashboard with a passkey; the
+chat is sent one notice with one pointer link (ADR 0041, unchanged).
+
+### Addressing a box, a session, a group or the fleet
+
+| Address | Reaches |
+|---|---|
+| `@<box>/<session> <message>` | one session on one box |
+| `@<box> <message>` | the session this chat follows on that box, or a new one |
+| `@<group> <message>` | every box in a group an owner named (`PUT /v1/telegram/marks`, field `groups`; no screen yet) (fan-out) |
+| `@fleet <message>` | every box the person may reach (fan-out, at most 20) |
+| `/to <address>` | the target plain messages go to from now on (sticky, per chat); `/who` shows it |
+| `/boxes`, `/fleets` | what this person may reach: never a Production box, never a box no delegation names |
+
+- **An address names targets, never authority.** Each box is put to `decide` with its own facts. A fan-out reaches only the boxes
+  the person's converse delegation names, and says how many it left out and why (`production`, `not_delegated`, `unknown`,
+  `too_many`). A group may not share a box's name, and `fleet` is reserved.
+- **Every copy has an id and a state**: `queued`, `delivered`, `picked_up`, `replied`, `unreachable` (with why) or `failed` (with
+  why). A box that is not running, or a worker that does not answer, is reported as unreachable, never left out silently.
+- **Replies are attributed and grouped**: each reply says its box and session and carries the message id; a fan-out sends one
+  summary when it is sent and one when every copy is final. *Not built:* Telegram's own reply threading (`reply_to_message_id`) and
+  Slack threads; the message id is the grouping until then.
+- **Worker boxes** (ADR 0042) are reached through `chat::remote::RemoteAgents`, which hands the worker the signed delegation's
+  digest so it can check the delegation itself (decision 4). The interface and a fake are built and tested; **the adapter onto
+  the agent mesh's node is Planned** until the hub and the mesh are merged; until then a dashboard has no worker boxes.
+
+### Box power, as built
+
+- `/box resume`, `/box pause`, `/box extend`, `/box create <name> <size or saved profile>` and `/box resize` are built. Each goes
+  through `Provider::plan` and the fleet caps first; the chat is shown the plan and one pointer link; it is applied only when the
+  person's power delegation names the box (create: any name) and the act fits its caps.
+- **A power delegation carries signed caps**: the largest size a chat may create or resize to (none by default, so no create or
+  resize), the daily money cap (default $10, counted from the owner's size prices in Settings, four hours a start; **an unknown
+  price is never zero**, it is a handoff), creates a day (1), resumes a day (6) and boxes started from chat running at once (2). The
+  caps are inside the delegation's digest, so an edited cap is refused like any edited row; a converse-only record digests as before.
+  The Account page's **Allow box power** sets the size cap and the money cap; the counts take their defaults (the API accepts them).
+- **A pause needs an idle box** (no run, no coding-agent session, by the box's own answer); otherwise the reply lists what it would
+  end and gives the dashboard link. A per-box cooldown of one minute holds.
+- **The four-hour deadline** is kept by the hub, which pauses the box at it and tells the chat. *Not built:* the box's own timer
+  (so a stopped hub does not pause it), `/box pause <box> when-idle` and its cancel, the power-only cloud role
+  (`ozbox-fleet-power`) and `fleet.power_credentials`, and "sessions listed, not relaunched" on resume. The change runs under the
+  dashboard's own credentials through the same apply path and the permission engine as a dashboard click.
+- A Production box (the owner's mark, or the box's own `env=production` label) is refused from chat, always.
+
+### Agent replies
+
+`chat_policy::reply` is the stronger redactor of §5 for Telegram: a 64 KiB buffer redacted before the cut, exact values of the
+server's known secrets and their base64, hex and percent encodings, key shapes, long high-entropy words, every URL, ANSI and markup;
+then the box's detail level (`full` 1,500 characters, `summary` 300, `metadata` none; a Production box is always `metadata`), set
+per box by an owner. Slack, WhatsApp and the dashboard keep the gateway's own redactor. *Not built:* the "turn that read an untrusted
+source replies at summary" signal (the function takes it; nothing sets it yet).
+
+### The command line
+
+`ozbox chat lock` and `ozbox chat unlink` (`--link <id>` or `--all`) plan from the dashboard's Telegram state and, once confirmed,
+leave a request in `telegram-requests.jsonl` beside it; the running dashboard applies it on its next tick and records it in the
+audit chain. Only `lock` and `unlink` are read from that file, so it can only make a link less able. They run where the dashboard
+keeps its state; from a laptop for a dashboard on a box, that is Planned.
+
+### Owner's brief and this ADR
+
+The owner's brief for this work (2026-11-17) asked for "`/run` — start a coding-agent session". In this ADR `/run` is the catalogue of
+read-only inspectors (§4, owner decision D14: never a free-form command), and starting a session is `/new <box> <what to do>` or an
+address (`@box <what to do>`). The table is unchanged: `/run` stays not built, and a "stop one session" from chat is `/session pause`
+(resumable); `/stop` stays refused (ADR 0041 note 50). The owner may decide otherwise; this amendment does not.
+
+**Benchmark effect: none.** Box power uses the provider's existing plan and apply; no measured path changes.
+
+## Amendment (0.3.0-beta): one message model, and a link in every actionable message
+
+Found from a real phone: an approval request's message reached Telegram with no link, and the text read as a block. The cause: a
+change request's message took the dashboard's address only from the tunnel's saved file, so a dashboard reached by its sign-in
+address sent words instead of a link; other alerts (disk, memory, budget, schedules) carried no link at all; and no link was made
+for the person who received it. What changes:
+
+- **One message model for every channel.** Every outgoing message is a structured notice: a title that starts with the verb, what is
+  asked in plain words, the box, project and environment (a Production badge), who or what asked and why, the risk, the expiry, one
+  primary action and a short reference. Each channel renders it with its own conventions and escaping (Telegram HTML, Slack Block
+  Kit, a Discord embed, a Teams Adaptive Card, WhatsApp text, email with an HTML and a plain-text part, one ASCII SMS part, push).
+  A chat reply is the same model with words only, sent as plain text. No channel adapter builds message text of its own; a test
+  fails if one does.
+- **Every actionable message carries a link to exactly its item**, made for each recipient at the moment of sending: a pointer link
+  (§2: 24 random bytes, keyed hash, ten minutes, that person only) for a person; the item's own address (which asks for sign-in) for
+  a shared place such as a Slack channel, an email list or a webhook; and words naming the page ("Open your dashboard → Approvals")
+  when there is no public address. The dashboard's address is the one the server was started with, else the tunnel's.
+- **A Telegram message may carry one inline-keyboard URL button**, "Open in dashboard". A URL button opens a web page and sends no
+  callback query to the bot, so §1's rule holds: nothing pressed in a chat decides anything, and the bridge still takes `message`
+  updates only. No callback or inline-query button is ever built (a test holds it).
+- **A decided request retires its links.** Opening a link after the request was decided answers "used" to the person it was made for
+  (and the same "did not work" as any made-up link to anyone else). The dashboard says so and points at Approvals.
+- **An alert message is not deleted when its link lapses** (unlike a handoff's): it is the person's record of what happened, and it
+  says where to go after ten minutes.
+
+- **An agent's question links to the dashboard's Chat page with its token in the fragment** (`/chat#link=<token>`), never in the
+  query, so no server, tunnel, proxy log or referrer sees it. The page takes it out of the address bar and redeems it once over
+  POST, for the person it was made for. Deciding the question (on any surface) makes the link read as used, and so does opening it
+  after the question was decided or lapsed.
+
+What this does not cover: a webhook never gets a link made for a person. The real-phone check of the new message is an owner run.
+
+## Amendment, 2026-11-17 (second pass): one gateway for every chat app, `/run`, threads, worker boxes over the mesh
+
+**Status: built and Preview** (CI only, with a fake Telegram, the fake provider, the simulated engine, and two real mesh endpoints
+with real signing and sealing over a loopback transport). **This branch stacks on the agent mesh and the hub (#17, which contains
+#16).**
+
+- **`/run [box] <what to do>` starts a session** (owner, 2026-11-17), the same start as `/new` and an address; with no box it uses
+  the box this chat follows or its `/to` target. It is a converse act (act key `run.session`). The catalogue of read-only inspectors
+  of §4 keeps its permanent act key `run` and is now written **`/check`**; it is still not built. A session is stopped from chat
+  with `/session pause` (resumable); `/stop` stays refused (ADR 0041 note 50) and help says both.
+- **Slack and WhatsApp go through the same gateway.** A paired person's message is parsed into the same `ChatAct` and put to the same
+  `decide`, with that app's ceiling (converse) and no delegation (they pair with a one-time code, not a passkey), then reaches the
+  same executors: addressing, `/to`, `/who`, `/boxes`, `/fleets`, `/run` work there; box power is refused by the ceiling. The adapters
+  verify the vendor, find the person, and say whether a message is someone else's words; nothing below them knows the app
+  (`serve::telegram_acts::chat_gate`, `chat_ctx`).
+- **Threads.** A reply to a message sent to several boxes, and the fan-out's closing line, answer the person's own message: Telegram
+  `reply_parameters`, Slack `thread_ts`. The notice model carries this as routing only (`Notice::thread`, never serialised).
+- **Box-power and hand-off messages are structured notices** with one **Open in dashboard** URL button: a pointer link made for that
+  person (§2), never a callback. With no public address the page is named in words.
+- **Worker boxes over the agent mesh.** `chat::mesh_agents::MeshAgents` implements the delivery interface on the mesh's own node: a
+  message becomes a signed, sealed question task to the worker's endpoint, carrying the words, the message id, the session and a
+  reference to the signed delegation (its digest's first 16 hex characters: the full digest reads as key-shaped to the mesh's
+  screen); the worker's messages on the task come back as replies, which the gateway treats as **untrusted** (summary at most).
+  A dashboard on a laptop uses its own task channel; **a dashboard on a box reaches workers through the hub daemon and transport,
+  which are not built yet**, so it has no worker boxes. The worker's own check of the delegation and its chat profile are not built.
+- **One delivery seam.** `serve::telegram_acts::fabric_deliver` is the one place a copy of a message is handed to an agent (the
+  supervisor for a box this dashboard runs, `RemoteAgents` for a worker). The hub's conversation fabric (participants
+  `agent:<box>/<session>`, `person:<id>`, `group:`/`fleet:`; mailboxes; its chat-participant bridge) replaces that one function and
+  the reply pump (`tg_remote_pump`); nothing above it changes. **The fabric was not committed when this was written; the switch is
+  not made.**
+- **`ozbox chat lock|unlink --box <box>`** from the owner's computer: the plan names the request; once confirmed it goes over the
+  sealed ingress route (ADR 0029 Amendment 9) as a new sealed operation, `chat_link_request`, whose value is only `lock:<link>`,
+  `unlink:<link>`, `lock:*` or `unlink:*`. The secrets service holds it (at most 50) and records it; the dashboard takes it from the
+  supervisor socket (`chat_link_take`) every five seconds and applies it. It needs no approval, because it only makes a chat less
+  able.
+
+**Still not built:** the box's own deadline timer, `/box pause … when-idle`, the power-only cloud role, the groups and detail-level
+screen (API only), the catalogue (`/check`), the worker side of a chat message (its delegation check and chat profile), the hub
+route for a dashboard on a box, and the switch to the fabric.
+
+**The switch to the fabric, when it lands** (the hub contract's "Fabric API" and "Chat participant bridge"): `fabric_deliver` calls
+`fabric::bridge::post_from_chat` with the targets already expanded and judged here, mapped by `chat_policy::address::fabric_target`
+(`agent:<box>/<session>`) and `fabric_group` (`group:<name>`, `fleet:<person>`); `tg_remote_pump` becomes `bridge::pull_replies`, each
+`ChatReply` rendered as `Notice::reply` with its attribution, box, reference and thread, then cut by `chat_policy::reply`. The address
+mapping is built and tested; the calls wait for the fabric's code.

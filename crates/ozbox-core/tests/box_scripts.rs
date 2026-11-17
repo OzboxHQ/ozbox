@@ -1132,10 +1132,12 @@ fn first_boot_and_the_image_turn_linger_on_and_carry_tmux_and_python() {
     );
     let helper = fs::read_to_string(script("ozbox-user-manager.sh")).unwrap();
     assert!(helper.contains("enable-linger \"$user\""));
-    // the helper is written by the template like the other scripts
-    assert!(
-        written_file(&t, "/usr/local/sbin/ozbox-user-manager.sh").contains("ozbox-user-manager.sh")
-    );
+    // the helper is written by the program (`ozbox first-boot install-scripts`), before anything runs it
+    let install = runcmd
+        .find("ozbox first-boot install-scripts")
+        .expect("the program writes the scripts");
+    assert!(install < secrets && install < manager);
+    assert!(!t.contains("path: /usr/local/sbin/ozbox-user-manager.sh"));
     let p = read("infra/packer/ozbox-image/scripts/provision.sh");
     assert!(
         p.contains("tmux python3"),
@@ -1211,7 +1213,13 @@ impl UserManager {
         }
         recorder(d, "loginctl");
         fs::write(d.join("mounted"), "").unwrap();
+        fs::create_dir_all(d.join("etc/ozbox")).unwrap();
+        fs::create_dir_all(d.join("linger")).unwrap();
         Self { dir }
+    }
+
+    fn steps(&self) -> String {
+        fs::read_to_string(self.dir.path().join("etc/ozbox/first-boot-steps")).unwrap_or_default()
     }
 
     fn run(&self) -> Output {
@@ -1226,6 +1234,11 @@ impl UserManager {
                 ("OZBOX_LOGINCTL", &s("loginctl")),
                 ("OZBOX_ID", &s("id")),
                 ("OZBOX_MOUNTPOINT", &s("mountpoint")),
+                ("OZBOX_ETC", &s("etc")),
+                ("OZBOX_LINGER_DIR", &s("linger")),
+                ("OZBOX_RETRY_DELAYS", "0 0 0"),
+                ("OZBOX_LOGINCTL_TIMEOUT_S", "5"),
+                ("OZBOX_START_TIMEOUT_S", "5"),
             ],
         )
         .unwrap()
@@ -1296,6 +1309,128 @@ fn the_user_manager_is_not_started_while_work_is_not_mounted() {
     assert!(!log(m.dir.path(), "systemctl").contains("start"));
 }
 
+/// B4-12: linger the image already turned on is not asked for again (an upgrade's first boot saw the login manager time
+/// out on that question), and what each step ended as is recorded for the self-test.
+#[test]
+fn linger_that_is_already_on_is_not_asked_for_and_each_step_is_recorded() {
+    let m = UserManager::new(false, 0, 0);
+    fs::write(m.dir.path().join("linger/ozbox"), "").unwrap();
+    let o = m.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        log(m.dir.path(), "loginctl"),
+        "",
+        "no question to the login manager"
+    );
+    let steps = m.steps();
+    assert!(steps.contains("enable_linger ok already-on 0\n"), "{steps}");
+    assert!(steps.contains("user_manager ok started 1\n"), "{steps}");
+    // a second run replaces the lines, never adds to them
+    assert!(m.run().status.success());
+    assert_eq!(m.steps().lines().count(), 2, "{}", m.steps());
+}
+
+/// B4-12: a login manager that does not answer is asked a bounded number of times, never forever; linger is then written
+/// to its file (as the image does), the manager is still started, and the failure is recorded, naming the step.
+#[test]
+fn a_login_manager_that_does_not_answer_is_asked_a_bounded_number_of_times() {
+    let m = UserManager::new(false, 0, 0);
+    let d = m.dir.path();
+    fs::write(
+        d.join("loginctl"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho 'Failed to enable linger: Connection timed out' >&2\nexit 1\n",
+            d.join("loginctl.log").display()
+        ),
+    )
+    .unwrap();
+    let o = m.run();
+    assert!(o.status.success(), "{}", text(&o));
+    // the first try and one per pause (three), then it stops
+    assert_eq!(log(d, "loginctl").lines().count(), 4);
+    assert!(
+        d.join("linger/ozbox").exists(),
+        "linger is written to its file"
+    );
+    assert!(
+        log(d, "systemctl").contains("start user@1500.service"),
+        "the manager is still started"
+    );
+    let steps = m.steps();
+    assert!(
+        steps.contains("enable_linger failed login-manager-no-answer 4\n"),
+        "{steps}"
+    );
+    assert!(text(&o).contains("enable-linger"), "{}", text(&o));
+}
+
+/// B4-12: a manager that does not come up is waited for a bounded time, recorded as failed, and the step fails.
+#[test]
+fn a_manager_that_does_not_come_up_is_recorded_as_failed() {
+    let m = UserManager::new(false, 0, 0);
+    let d = m.dir.path();
+    fs::write(d.join("linger/ozbox"), "").unwrap();
+    fs::write(
+        d.join("systemctl"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in start) exit 1;; is-active) exit 3;; esac\nexit 0\n",
+            d.join("systemctl.log").display()
+        ),
+    )
+    .unwrap();
+    let o = m.run();
+    assert!(!o.status.success());
+    // asked once per pause whether it came up, then it stops
+    assert_eq!(
+        log(d, "systemctl")
+            .lines()
+            .filter(|l| l.starts_with("is-active --quiet user@"))
+            .count(),
+        // once before the start, and once after each of the three pauses
+        4
+    );
+    assert!(
+        m.steps().contains("user_manager failed start-failed 1\n"),
+        "{}",
+        m.steps()
+    );
+}
+
+/// The steps the scripts record are exactly the ones the self-test knows, both ways.
+#[test]
+fn the_first_boot_steps_the_scripts_record_are_the_ones_the_self_test_knows() {
+    let mut recorded = std::collections::BTreeSet::new();
+    for f in ["ozbox-user-manager.sh", "ozbox-supervisor-setup.sh"] {
+        let t = fs::read_to_string(script(f)).unwrap();
+        for l in t.lines() {
+            let l = l.trim_start();
+            if l.starts_with('#') {
+                continue;
+            }
+            let l = l
+                .split_once("record ")
+                .filter(|(before, _)| {
+                    before.is_empty()
+                        || before.ends_with(' ')
+                        || before.ends_with(';')
+                        || before.ends_with('{')
+                })
+                .map(|(_, r)| r);
+            if let Some(r) = l {
+                let name = r.split_whitespace().next().unwrap_or("");
+                if !name.starts_with('"') && !name.is_empty() && !name.contains('(') {
+                    recorded.insert(name.to_string());
+                }
+            }
+        }
+    }
+    let known: std::collections::BTreeSet<String> = ozbox_core::first_boot::STEPS
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    assert_eq!(recorded, known);
+}
+
 #[test]
 fn the_request_helper_refuses_anything_that_is_not_plain_words() -> R {
     let d = tempfile::tempdir()?;
@@ -1327,7 +1462,6 @@ fn the_template_writes_the_helpers_with_the_right_owner_and_modes() {
     for (path, mode) in [
         ("/usr/local/sbin/ozbox-reown.sh", "0755"),
         ("/usr/local/sbin/ozbox-install-agent.sh", "0755"),
-        ("/usr/local/sbin/ozbox-admin.sh", "0755"),
         ("/usr/local/bin/ozbox-admin-request", "0755"),
     ] {
         let f = written_file(&t, path);
@@ -1777,6 +1911,79 @@ impl BoxSecrets {
 
 fn hexs(s: &str) -> String {
     s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Review open question (b), B4-27: the box-secrets binding the approval is checked against is worked out on the root helper's
+/// side, from the very words it then validates and writes (role, path, address, mount), never taken from the caller: the request
+/// carries no binding at all. It equals the laptop's `hetzner_binding` for the same declaration (the vector its own test pins),
+/// and a declaration with another vault address is checked against another binding, with that address the one written.
+#[test]
+fn the_box_secrets_binding_is_worked_out_by_root_from_what_it_writes() -> R {
+    let gate = "printf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/gate.args\"; echo laptop-key:laptop";
+    let bound = |b: &BoxSecrets| {
+        b.file("gate.args")
+            .lines()
+            .last()
+            .and_then(|l| {
+                l.split_once("--env ")
+                    .map(|(_, r)| r.split(' ').next().unwrap_or("").to_string())
+            })
+            .unwrap_or_default()
+    };
+    let b = BoxSecrets::new(gate);
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://vault.example.com:8200"),
+        "secret",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+    // the laptop's hetzner_binding for this declaration (crates/ozbox-cli/src/run/box_secrets.rs pins the same vector)
+    assert_eq!(bound(&b), "d-7805e83e21b45add", "{}", b.file("gate.args"));
+    assert!(b
+        .file("gate.args")
+        .contains("--scope box-secrets --project declaration"));
+    assert!(b
+        .file("box-secrets.env")
+        .contains("BAO_ADDR=https://vault.example.com:8200"));
+    // another address: another binding, and the address written is the one bound
+    let b = BoxSecrets::new(gate);
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://evil.example.com"),
+        "secret",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_ne!(bound(&b), "d-7805e83e21b45add");
+    assert!(
+        bound(&b).starts_with("d-") && bound(&b).len() == 18,
+        "{}",
+        bound(&b)
+    );
+    assert!(b
+        .file("box-secrets.env")
+        .contains("BAO_ADDR=https://evil.example.com"));
+    // a refusal at the gate writes nothing
+    let b = BoxSecrets::new("echo refused >&2; exit 1");
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://vault.example.com:8200"),
+        "secret",
+    ]);
+    assert!(!o.status.success());
+    assert!(b.file("box-secrets.env").is_empty());
+    Ok(())
 }
 
 #[test]
@@ -3136,4 +3343,288 @@ fn the_daemon_starts_after_the_box_users_manager() {
     assert!(line("Wants=").contains("user@1500.service"), "{unit}");
     // never Requires: a manager that is held back (no /work yet) must not stop the daemon
     assert!(!unit.contains("Requires=user@"));
+}
+
+/// The first-boot user data is limited by the provider (16 KB on AWS). The three biggest scripts are carried in the program
+/// (`ozbox first-boot install-scripts`), so the template is a small stub that must stay small: a script that grows past the
+/// bound here belongs in the program too, not in the user data.
+#[test]
+fn the_big_first_boot_scripts_are_carried_in_the_program_and_the_template_stays_small() {
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    let runcmd = &t[t.find("\nruncmd:\n").expect("runcmd")..];
+    for moved in [
+        "ozbox-admin.sh",
+        "ozbox-secrets-setup.sh",
+        "ozbox-user-manager.sh",
+    ] {
+        assert!(
+            !t.contains(&format!("scripts_dir}}/{moved}")),
+            "{moved} must not be read into the user data"
+        );
+        assert!(
+            !t.contains(&format!("path: /usr/local/sbin/{moved}")),
+            "{moved} must not be written by the user data"
+        );
+        let c = read("crates/ozbox-cli/src/first_boot_cli.rs");
+        assert!(
+            c.contains(&format!("scripts/{moved}\")")),
+            "{moved} is carried in the program"
+        );
+    }
+    // the program that carries them is installed before they are written, and they are written before anything runs them
+    let install_agent = runcmd
+        .find("ozbox-install-agent.sh ||")
+        .expect("install agent");
+    let write = runcmd
+        .find("ozbox first-boot install-scripts")
+        .expect("install-scripts");
+    let admin_path = runcmd
+        .find("enable, --now, ozbox-admin.path")
+        .expect("admin path");
+    let secrets = runcmd
+        .find("ozbox-secrets-setup.sh,")
+        .expect("secrets setup");
+    assert!(install_agent < write && write < admin_path && write < secrets);
+    assert!(runcmd[write..]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .contains("|| echo"));
+    // what the tofu test used to read out of the user data: the secrets setup (now carried in the program) still has the
+    // secrets service listen on the ingress socket
+    assert!(read("infra/cloud-init/scripts/ozbox-secrets-setup.sh")
+        .contains("--ingress-socket /run/ozbox-secrets/ingress/ingress.sock"));
+    // the stub: the template with its comments dropped (what the user data carries) stays under 18 KB, and the helper scripts
+    // that are still written into it stay under 14 KB between them (measured 2026-11-17: 16.2 KB and 12.1 KB on main)
+    let strip = |s: &str| -> usize {
+        s.lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with('#') && !t.starts_with("#!"))
+            })
+            .map(|l| l.len() + 1)
+            .sum()
+    };
+    assert!(strip(&t) < 18_000, "the template is {} bytes", strip(&t));
+    let still: usize = [
+        "ozbox-reown.sh",
+        "ozbox-install-agent.sh",
+        "ozbox-admin-request.sh",
+    ]
+    .iter()
+    .map(|n| strip(&read(&format!("infra/cloud-init/scripts/{n}"))))
+    .sum();
+    assert!(
+        still < 14_000,
+        "the scripts still in the user data are {still} bytes"
+    );
+}
+
+#[test]
+fn replacing_the_dashboards_sign_in_settings_is_gated_on_an_approval_bound_to_their_sha_before_anything_changes(
+) -> R {
+    let a = Admin::new();
+    let d = a.dir.path();
+    // a stand-in for `ozbox`: records its arguments, keeps what the gate was sent on standard input, and refuses when told to
+    fs::write(
+        d.join("ozbox"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{0}/ozbox.args'\nif [ \"$2\" = gate ]; then cat > '{0}/gate.stdin'; if [ -e '{0}/refuse' ]; then echo 'that approval is not valid, has been used, or has expired'; exit 1; fi; fi\nexit 0\n",
+            d.display()
+        ),
+    )?;
+    fs::set_permissions(d.join("ozbox"), fs::Permissions::from_mode(0o755))?;
+    let sha = "ab".repeat(32);
+    a.request(
+        "dddddddd01",
+        &format!("replace-dashboard-auth {sha} ABCD-EFGH-JKMN-PQRS"),
+    );
+    // shape errors never reach the program
+    a.request(
+        "dddddddd02",
+        "replace-dashboard-auth nothex ABCD-EFGH-JKMN-PQRS",
+    );
+    a.request("dddddddd03", &format!("replace-dashboard-auth {sha}"));
+    let o = a.process("");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        a.answer("dddddddd01").starts_with("status=ok"),
+        "{}",
+        a.answer("dddddddd01")
+    );
+    assert!(!a.answer("dddddddd02").starts_with("status=ok"));
+    assert!(!a.answer("dddddddd03").starts_with("status=ok"));
+    let args = fs::read_to_string(d.join("ozbox.args"))?;
+    let gate = args
+        .lines()
+        .position(|l| l.starts_with("secrets gate"))
+        .unwrap();
+    let setup = args
+        .lines()
+        .position(|l| l.contains("supervisor-setup --replace-auth"))
+        .unwrap();
+    assert!(
+        gate < setup,
+        "the approval is checked before the settings are replaced: {args}"
+    );
+    // bound to the first 32 digits of the sha (a field's longest), in scope dashboard-auth; the code is on stdin and in no argument
+    let g = args.lines().nth(gate).unwrap();
+    assert!(
+        g.contains("--scope dashboard-auth") && g.contains(&format!("--env {}", &sha[..32])),
+        "{g}"
+    );
+    assert!(args.contains(&format!("supervisor-setup --replace-auth {sha}")));
+    assert!(!args.contains("ABCD-EFGH-JKMN-PQRS"));
+    assert_eq!(
+        fs::read_to_string(d.join("gate.stdin"))?,
+        "ABCD-EFGH-JKMN-PQRS\n"
+    );
+    // a refusal ends there: the setup step is not run
+    fs::remove_file(d.join("ozbox.args"))?;
+    fs::write(d.join("refuse"), "")?;
+    a.request(
+        "dddddddd04",
+        &format!("replace-dashboard-auth {sha} ABCD-EFGH-JKMN-PQRS"),
+    );
+    a.process("");
+    assert!(!a.answer("dddddddd04").starts_with("status=ok"));
+    assert!(!fs::read_to_string(d.join("ozbox.args"))?.contains("supervisor-setup"));
+    // the action says it is gated, and the helper's revision moved so existing boxes receive it
+    let h = read("infra/cloud-init/scripts/ozbox-admin.sh");
+    assert!(h.contains("\nreplace-dashboard-auth gated\n"));
+    assert!(h.contains("\nhelper_rev=2\n"));
+    Ok(())
+}
+
+// ---- cloudflared's ICMP socket: the secrets user's group is inside ping_group_range (B4-18 item 10) ----
+
+/// The block of `ozbox-secrets-setup.sh` that writes the ping-range drop-in, run on its own with the paths and group id
+/// pointed at a temporary folder.
+fn ping_range(range: &str, gid: &str) -> Option<String> {
+    let s = read("infra/cloud-init/scripts/ozbox-secrets-setup.sh");
+    let start = s.find("# >>> ping-range").expect("the ping-range block");
+    let end = s
+        .find("# <<< ping-range")
+        .expect("the end of the ping-range block");
+    let d = tempfile::tempdir().unwrap();
+    let block = d.path().join("block.sh");
+    fs::write(&block, format!("set -euo pipefail\n{}", &s[start..end])).unwrap();
+    let proc_file = d.path().join("ping_group_range");
+    fs::write(&proc_file, format!("{range}\n")).unwrap();
+    let o = sh(
+        &block,
+        &[],
+        &[
+            ("OZBOX_PING_RANGE_FILE", &proc_file.to_string_lossy()),
+            ("OZBOX_SYSCTL_D", &d.path().to_string_lossy()),
+            ("OZBOX_PING_GID", gid),
+        ],
+    )
+    .unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    fs::read_to_string(d.path().join("60-ozbox-cloudflared-ping.conf")).ok()
+}
+
+#[test]
+fn the_secrets_users_group_is_put_inside_ping_group_range_and_the_range_is_never_narrowed() {
+    let line = |r: &str, g: &str| {
+        ping_range(r, g)
+            .and_then(|t| {
+                t.lines()
+                    .find(|l| l.starts_with("net."))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    };
+    // the kernel's empty default ("1 0"): just this group
+    assert_eq!(line("1\t0", "998"), "net.ipv4.ping_group_range = 998 998");
+    // already inside: unchanged
+    assert_eq!(
+        line("0\t2147483647", "998"),
+        "net.ipv4.ping_group_range = 0 2147483647"
+    );
+    // outside: widened to take it in, never narrowed
+    assert_eq!(
+        line("1000 2000", "998"),
+        "net.ipv4.ping_group_range = 998 2000"
+    );
+    assert_eq!(
+        line("100 200", "998"),
+        "net.ipv4.ping_group_range = 100 998"
+    );
+    // a range or a group id that is not a number: nothing is written
+    assert_eq!(ping_range("garbage", "998"), None);
+    assert_eq!(ping_range("1 0", "not-a-group"), None);
+    // the cloudflared units run under that group, and the drop-in is applied before they are started
+    let s = read("infra/cloud-init/scripts/ozbox-secrets-setup.sh");
+    let unit = &s[s.find("EOF_CLOUDFLARED").unwrap()..];
+    assert!(unit.contains("Group=ozbox-secrets"));
+    let applied = s.find("sysctl --system").unwrap();
+    let started = s
+        .find("systemctl enable --now ozbox-secrets.service ozbox-cloudflared.service")
+        .unwrap();
+    assert!(s.find("# >>> ping-range").unwrap() < applied && applied < started);
+}
+
+#[test]
+fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mode() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    // stand-ins for the commands that need root: the user exists after "useradd", and every call is recorded
+    for name in ["id", "useradd", "passwd", "systemctl", "systemd-tmpfiles"] {
+        let p = bin.join(name);
+        let body = if name == "id" {
+            "#!/bin/sh\nexit 1\n".to_string()
+        } else {
+            format!(
+                "#!/bin/sh\necho \"{name} $@\" >> '{}'\n",
+                d.path().join("calls.log").display()
+            )
+        };
+        fs::write(&p, body)?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = sh(
+        &script("ozbox-mesh-setup.sh"),
+        &[],
+        &[
+            ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+            ("OZBOX_MESH_NO_SYSTEMCTL", "1"),
+            ("PATH", &path),
+        ],
+    )?;
+    assert!(out.status.success(), "{}", text(&out));
+    let calls = fs::read_to_string(d.path().join("calls.log")).unwrap_or_default();
+    assert!(
+        calls.contains("useradd --system")
+            && calls.contains("ozbox-mesh")
+            && calls.contains("passwd --lock"),
+        "{calls}"
+    );
+    let tmpfiles = fs::read_to_string(etc.join("tmpfiles.d/ozbox-mesh.conf"))?;
+    // the directory modes decide who may connect: the box user's group for the agent and relay sockets, root alone for admin
+    assert!(tmpfiles.contains("/var/lib/ozbox-mesh      0700 ozbox-mesh ozbox-mesh"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/agent    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/relay    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/admin    0700 ozbox-mesh ozbox-mesh"));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-mesh.service"))?;
+    assert!(
+        unit.contains("User=ozbox-mesh") && unit.contains("tasks serve --dir /var/lib/ozbox-mesh")
+    );
+    assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
+    // carried in the program (user-data has a hard size limit), run once at first boot through it
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    assert!(
+        !t.contains("ozbox-mesh-setup.sh"),
+        "the router's setup is not in user-data"
+    );
+    assert!(t.contains("/usr/local/bin/ozbox tasks router-setup ||"));
+    Ok(())
 }

@@ -67,3 +67,23 @@ A security review (2026-11-10) found three gaps. All are fixed.
    `host-guard` (project `patch`), bound to the rule's words, as the egress list does (ADR 0034, Amendment 1); a box with no
    second factor refuses it. `never` needs none: it only takes restarts away, and an agent can already hold a restart off with
    the hold file.
+
+## Amendment 2 (2026-11-17, B4-9): a box may send alerts through SES and SNS, opt-in and to one sender and one topic only
+
+The dashboard on a box can send alert email through Amazon SES and texts through Amazon SNS with the box's own role, but the role
+a box is made with allowed neither, so a person had to widen a box's role by hand (owner decision: an opt-in variable instead).
+
+1. **Off by default, per box.** The `aws-box` module has `notify_send_grants` (default `false`), `notify_ses_identity_arn` and
+   `notify_sns_topic_arn`. Off, the role gets nothing new. On, the plan refuses to go on without both ARNs, and each must be one
+   whole ARN with no wildcard.
+2. **Still no inline policy.** The grant is a customer-managed policy, `ozbox-box-notify`, made once per account by `ozbox init`
+   (the `aws-box-policy` module) when `[aws]` names both ARNs, and only attached by the box module; the operator role may attach
+   it by its exact ARN, as the others. It allows `ses:SendEmail` on the one identity and `sns:Publish` on the one topic, with no
+   wildcard action or resource and no tag lookup.
+3. **The box checks what it attaches.** Before attaching, the box module reads the account's policy and refuses it unless it
+   allows exactly those two actions on exactly the box's two ARNs, with no condition, `NotAction` or `NotResource`. A policy
+   made with other ARNs, or edited by hand to grant more, stops the plan before anything changes.
+4. **What it does not cover.** Any process on a box that can use the box's role (an agent included) can then send email from
+   that identity and publish to that topic, within SES and SNS's own sending limits; that is the cost of turning it on, and why
+   it is off by default. A sender identity in the SES sandbox reaches only verified addresses. One sender and one topic per
+   account: two boxes that need different ones are not supported.

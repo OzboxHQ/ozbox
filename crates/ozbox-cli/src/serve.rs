@@ -50,6 +50,7 @@ mod code_routes;
 mod cost_routes;
 mod demo_telegram;
 mod files;
+mod fleet_routes;
 mod lane;
 #[cfg(test)]
 mod lane_tests;
@@ -57,6 +58,7 @@ mod memory_routes;
 mod metrics_sim;
 mod models_routes;
 pub(crate) mod no_simulation;
+mod notice_reach;
 mod orch_merge;
 mod orch_routes;
 mod perm_routes;
@@ -67,6 +69,8 @@ mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
 mod skills_routes;
+mod subscription_routes;
+mod telegram_acts;
 mod telegram_bridge;
 mod telegram_link;
 #[cfg(test)]
@@ -206,6 +210,9 @@ pub(crate) enum FleetMode {
     ThisBox,
     /// The simulated provider: nothing here is real.
     Demo,
+    /// A box's dashboard that manages the fleet through its own scoped roles (ADR 0040): every change needs a change window
+    /// opened from the owner's computer and the owner's passkey over that exact plan.
+    Managed,
 }
 
 impl FleetMode {
@@ -223,6 +230,12 @@ impl FleetMode {
                 "docs": DOCS_THIS_BOX,
             }),
             FleetMode::Demo => json!({ "mode": "demo", "connected": true, "demo": true }),
+            FleetMode::Managed => json!({
+                "mode": "managed",
+                "connected": true,
+                "demo": false,
+                "changes_need": ["change_window", "owner_passkey"],
+            }),
         }
     }
 }
@@ -323,6 +336,8 @@ pub struct App {
     runner: Arc<dyn CommandRunner>,
     secrets: Arc<dyn SecretStore>,
     http: Arc<dyn HttpClient>,
+    /// Agents on worker boxes of a hub, reached for chat over the hub's channel. None until the hub and the mesh are merged.
+    remote_agents: Arc<dyn crate::chat::remote::RemoteAgents>,
     prices: PriceCache,
     prices_path: Option<std::path::PathBuf>,
     state: ServerState,
@@ -363,6 +378,9 @@ pub struct App {
     chat: chat_routes::ChatRt,
     /// Sign-in for a dashboard on a shared machine; `None` = the local access token.
     auth: Option<Arc<auth::Auth>>,
+    /// A box's dashboard that manages the fleet (ADR 0040): the gate every change passes. `None` everywhere today but in
+    /// tests: the credential holder it needs is not built, so a box's dashboard still says the fleet is not connected.
+    fleet_gate: Option<crate::fleet_gate::FleetGate>,
     /// This server runs on a box (its secrets service is there): without a sign-in, its access token is not proof of the
     /// person there (see `roles::step_up_gate`).
     on_a_box: bool,
@@ -379,6 +397,9 @@ pub struct App {
     cost: cost_routes::CostRt,
     #[cfg(unix)]
     terminals: terminal::Sessions,
+    /// Device sign-ins for a subscription an engine reads itself (ADR 0055), and what runs the vendor's command.
+    subs: crate::subscription_signin::Flows,
+    sign_in_runner: Arc<dyn crate::subscription_signin::DeviceSignIn>,
 }
 
 #[derive(Deserialize)]
@@ -403,6 +424,9 @@ struct ApplyRequest {
     /// Optional echo of the plan being confirmed; it must equal the plan this server issued.
     plan: Option<Plan>,
     confirm_name: Option<String>,
+    /// The passkey assertion over this plan's fleet challenge (ADR 0040 §2), when the dashboard manages the fleet.
+    #[serde(default)]
+    fleet_assertion: Option<Value>,
 }
 
 /// Parse `--bind`. Only loopback addresses (and `localhost`) are accepted: nothing here may listen publicly.
@@ -486,6 +510,7 @@ impl App {
             runner: Arc::new(SystemRunner),
             secrets: Arc::new(crate::secrets::MemorySecrets::default()),
             http: Arc::new(UreqClient),
+            remote_agents: Arc::new(crate::chat::remote::NoRemote),
             prices: PriceCache::default(),
             prices_path: None,
             state: ServerState::default(),
@@ -513,6 +538,7 @@ impl App {
             test_runs: Arc::default(),
             demo_telegram: None,
             auth: None,
+            fleet_gate: None,
             extra_headers: Vec::new(),
             notified_requests: std::collections::BTreeSet::new(),
             access: access::AccessCtx::default(),
@@ -521,6 +547,15 @@ impl App {
             cost: cost_routes::CostRt::default(),
             #[cfg(unix)]
             terminals: terminal::Sessions::default(),
+            subs: Arc::default(),
+            // the demo signs in with a stand-in that makes up a sign-in; anything else runs the vendor's own command
+            sign_in_runner: if simulated_metrics {
+                Arc::new(crate::subscription_signin::DemoSignIn {
+                    wait: std::time::Duration::from_millis(1500),
+                })
+            } else {
+                Arc::new(crate::subscription_signin::ProcessSignIn)
+            },
         }
     }
 
@@ -568,6 +603,19 @@ impl App {
         self.secrets = secrets;
         self.sync_second_factor();
         self
+    }
+
+    /// Worker boxes reached over this computer's task channel, when it runs here.
+    fn with_chat_mesh(mut self, m: Option<crate::chat::mesh_agents::MeshAgents>) -> Self {
+        if let Some(m) = m {
+            self.remote_agents = Arc::new(m);
+        }
+        self
+    }
+
+    #[cfg(test)]
+    fn set_remote_agents(&mut self, r: Arc<dyn crate::chat::remote::RemoteAgents>) {
+        self.remote_agents = r;
     }
 
     #[cfg(test)]
@@ -739,6 +787,14 @@ impl App {
     }
 
     /// Turn on sign-in (the `--public-behind-tunnel` mode): the local token no longer opens anything.
+    /// Manage the fleet from this dashboard through `gate` (ADR 0040). Every change then also needs a window for its plan and
+    /// the owner's passkey over that plan; nothing else about plan and apply changes.
+    #[cfg(test)]
+    pub(crate) fn with_fleet_gate(mut self, gate: crate::fleet_gate::FleetGate) -> Self {
+        self.fleet_gate = Some(gate);
+        self
+    }
+
     pub fn with_auth(mut self, auth: Arc<auth::Auth>) -> Self {
         self.auth = Some(auth);
         self.sync_second_factor();
@@ -853,6 +909,7 @@ impl App {
                 FleetMode::Connected => "connected",
                 FleetMode::ThisBox => "this_box",
                 FleetMode::Demo => "demo",
+                FleetMode::Managed => "managed",
             },
         };
         let query = req.query.clone();
@@ -992,6 +1049,7 @@ impl App {
                 self.demo_telegram_sent()
             }
             ["models"] if get => self.models(),
+            ["models", "subscriptions", rest @ ..] => self.subscriptions_route(req, rest),
             ["models", "catalog"] if get => self.models_catalog(),
             ["models", "usage"] if get => self.models_usage(&req.query),
             ["models", "local"] if get => self.models_local(),
@@ -1038,9 +1096,10 @@ impl App {
             ["jobs", id] if get => self.apply_job(id),
             ["plans", id] if get => self.get_plan(id),
             ["plans"] if post => self.issue_plan(&req.body),
+            ["fleet", "plans", id, "challenge"] if post => self.fleet_challenge(req, id),
             ["apply"] if post => {
                 let step_up = self.step_up_state(req);
-                self.apply(&req.body, step_up)
+                self.apply_from(Some(req), &req.body, step_up)
             }
             ["info"]
             | ["boxes"]
@@ -1085,6 +1144,9 @@ impl App {
 
     /// What the boxes this dashboard lists are: a fleet it can manage, this box alone, or made-up demo boxes.
     fn fleet_mode(&self) -> FleetMode {
+        if self.fleet_gate.is_some() {
+            return FleetMode::Managed;
+        }
         match self.provider_id.as_str() {
             crate::this_box::PROVIDER_ID => FleetMode::ThisBox,
             ozbox_provider_fake::PROVIDER_ID => FleetMode::Demo,
@@ -1169,7 +1231,10 @@ impl App {
                 if let Some(m) = crate::run::upgrade::finishing_image(&rec) {
                     *image = m;
                 } else {
-                    match self.provider.latest_image(rec.spec.region.as_deref()) {
+                    match self
+                        .provider
+                        .latest_image_for(rec.spec.region.as_deref(), rec.machine_type.as_deref())
+                    {
                         Ok(i) => *image = i.id,
                         Err(e) => return Resp::from_core(&e),
                     }
@@ -1209,14 +1274,16 @@ impl App {
             (&request.operation, plan.is_noop())
         {
             // The same rule as the command: an image whose signature could be checked and was not is refused.
-            let region = self.record(name.as_str()).ok().and_then(|r| r.spec.region);
+            let rec = self.record(name.as_str()).ok();
+            let region = rec.as_ref().and_then(|r| r.spec.region.clone());
+            let machine = rec.as_ref().and_then(|r| r.machine_type.clone());
             let info = self
                 .provider
                 .image_info(image, region.as_deref())
                 .ok()
                 .or_else(|| {
                     self.provider
-                        .latest_image(region.as_deref())
+                        .latest_image_for(region.as_deref(), machine.as_deref())
                         .ok()
                         .filter(|i| &i.id == image)
                 });
@@ -1403,6 +1470,12 @@ impl App {
     }
 
     fn apply(&mut self, body: &[u8], step_up: roles::StepUp) -> Resp {
+        self.apply_from(None, body, step_up)
+    }
+
+    /// `apply` for a person's own request (`req`), or for the server's own follow-up (`None`: an orchestration's step). A
+    /// fleet-managing dashboard refuses the second kind: only a person's passkey over the plan lets a fleet change through.
+    fn apply_from(&mut self, req: Option<&Req>, body: &[u8], step_up: roles::StepUp) -> Resp {
         let request: ApplyRequest = match serde_json::from_slice(body) {
             Ok(r) => r,
             Err(e) => return Resp::error(400, "bad_request", &format!("invalid request: {e}")),
@@ -1479,6 +1552,18 @@ impl App {
                 200,
                 &json!({ "plan": plan, "applied": false, "result": Value::Null }),
             );
+        }
+        // A box's dashboard that manages the fleet: a window for this plan and the owner's passkey over it, checked last,
+        // just before the plan is used up (ADR 0040 §2). A later ask while the box is made ready was already let through.
+        if !quiescing {
+            if let Some(refusal) = self.fleet_gate_refusal(
+                req,
+                &request.plan_id,
+                &plan,
+                request.fleet_assertion.as_ref(),
+            ) {
+                return refusal;
+            }
         }
         // A change that stops the machine (a resize, an upgrade) gets the box ready first: runs end cleanly and uncommitted
         // work is snapshotted, bounded in time, on a thread of its own (see `quiesce_jobs`). An upgrade that does not stop
@@ -2490,6 +2575,7 @@ pub fn serve(
                 .or_else(|| dirs::home_dir().map(|h| h.join(".ssh"))),
         )
         .with_secrets(Arc::clone(&secrets))
+        .with_chat_mesh(crate::tasks_cli::chat_route())
         .with_code_settings(crate::code::settings_path())
         .with_files(prices_path, state_path)
         .with_bill_file(bill_path)
@@ -2583,6 +2669,14 @@ pub fn serve(
             )
             .map_err(|e| e.to_string())?,
         );
+        // the first-day window closes on the first enrolment (and is closed again at every start once anyone is enrolled, so an
+        // enrolment made by an older dashboard, or a close that did not reach the service, is caught up)
+        a.set_on_enrolled(Arc::new(|| {
+            let _ = crate::secrets_ingress::close_setup_window();
+        }));
+        if a.has_second_factor() {
+            let _ = crate::secrets_ingress::close_setup_window();
+        }
         setup_code = a.issue_setup_code();
         // On a box the code goes to the secrets service, which gives it to the owner's computer through the ingress route
         // (`ozbox secrets ingress setup-code`); it is never printed where the box user reads logs.

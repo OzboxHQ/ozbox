@@ -1,0 +1,12 @@
+Approve or deny: push to main [PRODUCTION]
+Task t-42 stopped and is waiting for your answer.
+
+Box: api · Environment: production
+Asked by: Claude Code
+Why: open a pull request
+Risk: Production, or a step that cannot be undone: the dashboard asks for your passkey again.
+
+This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.
+https://dash.example.com/chat#link=0123456789abcdef0123456789abcdef0123456789abcdef
+Ref a-7

@@ -122,3 +122,60 @@ the box was made with (ADR 0029, Amendment 8), so on a Hetzner box made before t
 `ozbox admin <box> -- ensure-supervisor` (which does not check the sign-in settings' digest) and then `ensure-supervisor finish`
 was the way. An upgrade on Hetzner now replaces the server and so brings the current root helper (ADR 0029, Amendment 8, follow-up built): upgrade
 the box, then install.
+
+## Amendment 2 (2026-11-17): the dashboard survives `ozbox upgrade`, and replacing its sign-in settings needs an approval
+
+`ozbox upgrade` replaces the system disk and keeps `/work`. The dashboard's own folder (`/work/ozbox-supervisor`, with its
+`.migrated` marker and `auth.toml`) stayed, but its systemd unit lived on the system disk and was gone. On the first real
+upgrade of a box with a dashboard, the install step then took the "already has sign-in settings of its own" branch and
+exited successfully without making the unit; `ensure-supervisor` said "no dashboard is installed"; and the laptop reported that
+the dashboard "already runs as its own user" while nothing ran. The self-test passed. What changed:
+
+- **Root keeps the dashboard's address.** When the dashboard starts as `ozbox-supervisor`, the setup step records its port,
+  host and tunnel kind in `/work/ozbox-supervisor-keep` (root-owned, mode 0711; the record is 0600 and sealed with its own
+  sha256, an empty readable marker beside it says a dashboard was installed). It is a folder of its own because
+  `/work/ozbox-supervisor` belongs to the supervisor user, which could replace any file in it. What is kept is the three validated
+  words, **not the rendered unit**: the unit text changes between images, and a sha over it would refuse the very upgrade this
+  is for. A record that is missing, cut short, changed or shaped differently from what the unit would carry is not used. A box
+  made before the record existed gets one from its running unit at the next `ensure-supervisor` or program upgrade.
+- **First boot and `ensure-supervisor` make the unit again** from that record when the folder has been moved before, the unit is
+  gone and the sign-in settings are there: the same verified path that starts any dashboard (it is waited for and asked whether it
+  answers on its port). The address of a dashboard is never taken from a unit file the box user staged once a record exists;
+  without a record (a box upgraded before this change) the person's own install, which carries the sha256 of the settings, may
+  still supply it, as before.
+- **Kept settings no longer mean "do nothing".** When the person's computer sends settings that differ from the ones the dashboard
+  has, the dashboard keeps its own, is started if it was not running, and the box says so with a machine-readable line
+  (`state dashboard=running settings=kept|installed|replaced|unchanged`) written by root. The laptop trusts that line, or, from an
+  older helper that does not write it, asks the box whether the dashboard stayed up; it never says "already runs" without one of
+  the two.
+- **Replacing the settings is a gated root-helper action.** `replace-dashboard-auth SHA256 CODE` is a new top-level, *gated*
+  action (not a sub-word of the ungated `ensure-supervisor`, so the action table stays true). Sign-in settings decide who may
+  approve on the box, so the box user must never be able to replace them. The helper spends a single-use approval of the new scope
+  `dashboard-auth` (ADR 0041 amendment), bound to the first 32 hex digits of the sha256 of the new settings, and only then asks the
+  setup step to install the staged file whose own copy hashes to that sha256. A passkey or authenticator code in the dashboard, can approve (the laptop's key does not: no command makes this approval with it). A box with no second
+  factor refuses it. The old settings are kept beside the new (`auth.toml.replaced`) and put back if the dashboard does not start
+  with the new ones. The address in the unit is never changed by this approval.
+- **Everything under the dashboard's folder is put back under its user at every run**, not only at the first move
+  (`chown -R -h`, mode go-rwx). An upgrade makes the user again with a new id, and what the old one made (the agent memory and skills
+  folders) stayed under the old id, so the dashboard's Memory and Skills pages failed with "Permission denied". The page now names
+  the folder and the command that fixes it. After every repair (and after a first move) root counts what inside the folder is
+  still not the user's own or is open to others, and keeps `uid=<id> wrong=<count>` in its own folder
+  (`/work/ozbox-supervisor-keep/folder.state`, no names). The self-test's **`dashboard_folder`** check reads that record. It also
+  checks, live, that the folder's owner is the dashboard user's id today. It fails, naming the folder and the step, when the owner
+  differs, when the record is from an older id, or when the count is not zero. It is "unknown" when there is no record (a box set
+  up before this change).
+- **The self-test fails `dashboard`** when a dashboard was installed and no service runs. It runs as the box user, which cannot
+  look inside the dashboard's closed folder, so it reads root's readable marker (and the box user's old dashboard folder as a
+  second trace); a refusal to look is "unknown", never a pass.
+- **A tunnel the box user runs itself** (`oz-cloudflared.service` with `--token-file ~/.config/ozbox-tunnel/token`, left by an older
+  setup) is flagged by the self-test (`legacy_tunnel`): the token is readable by every agent. `ozbox dashboard retire-legacy-tunnel
+  <box>` retires it, as the box user over the box's own route, and only once the box's own connector is active, has not restarted
+  and shows connections that are not the old connector's. The token is destroyed, never moved into the store; the person rotates it
+  in Cloudflare.
+
+**Still not covered.** A box upgraded to an image from before this change has no record: its first upgrade onto this image can
+only recover the dashboard through `ozbox dashboard install` from the person's computer, and the address of that one install
+is the box user's staged file (its sha256 proves the sign-in settings, not the address). The approval is spent even if the staged
+file turns out not to match, so a box user can only waste a code, not use one. The retire step cannot tell the two connectors apart
+on a box without `ss`; it then refuses rather than guess. The `dashboard_folder` record is what the last repair saw: only the folder's own owner is checked live,
+so a file inside that goes wrong later is seen at the next first boot or `ensure-supervisor`, not at once.

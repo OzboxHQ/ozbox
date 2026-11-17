@@ -32,7 +32,7 @@ data that is not yours.
 
 ## Supported versions
 
-Oz Box is in Beta. **The latest 0.2.x release (starting with 0.2.0-beta.0) is the supported one** and gets features and fixes.
+Oz Box is in Beta. **The latest 0.3.x release (starting with 0.3.0-beta.1) is the supported one** and gets features and fixes.
 Once a newer minor version ships, the previous minor gets security patches for three months; see
 [docs/releases.md](docs/releases.md). The `main` branch is development, not a supported release. Anything older: upgrade.
 
@@ -40,6 +40,20 @@ What the software does and does not protect against is written down in the decis
 each with a "what is not covered" list), the [shared responsibility](docs/shared-responsibility.md) page and the
 [hardening checklist](docs/hardening-checklist.md). Oz Box describes controls; it makes no claim of certification or
 compliance.
+
+## Managing the fleet from a box's dashboard (ADR 0040, Preview, not turned on)
+
+A box has no cloud credentials by design, so a box's dashboard cannot change the fleet. ADR 0040 designs how it could, and its
+first part is built but not turned on in any release: the cloud roles, and a gate in front of every change. The roles may change
+only boxes Oz Box manages, never the box the dashboard runs on, and never who may do what (no IAM, no direct key use, no secrets,
+no shell). The change role cannot be used from the box at all: it trusts only your own sign-in on your computer, for one plan at
+a time. Every change from the dashboard is planned and shown first, and then needs a change window for that plan and your passkey
+over that exact plan; an authenticator code, a computer's key or another plan's confirmation is refused. The agents on the box
+never hold the credentials: they reach neither the instance's metadata service nor the dashboard's change step. A box the change
+role launches can only be in Oz Box's own subnets, even when the launch names an existing network interface; no disk can be
+attached to the managing box or taken from it, and a change attaches only its own box's disks; the managing box is protected by
+its name as well as its tag, so its older snapshots cannot be cloned. **Security review required before this is turned on.** Its
+open limits are in the ADR's "Amendment 1".
 
 ## What a chat app can and cannot do (Telegram, Preview)
 
@@ -51,3 +65,13 @@ inside the agent's own ask-before-acting rules**: a taken-over Telegram account 
 on that box until the link is revoked. The redaction of what an agent writes back is a net, not a wall: it does not stop a
 prompt-injected agent from encoding what it can read into its replies. Lock a link with `/lock` or from the dashboard, and cut it
 with `/unlink`.
+
+## When a box's secrets service is down (the commit barrier, Preview)
+
+The secrets service records approvals and writes the audit trail, so while it is down nothing can be approved. A box's git hooks
+then still read commits for key shapes, file names and `.env` files, and a clean commit goes through with a note. Each such commit
+is noted on the box and added to the audit trail, marked as made in the outage, once the service is back. **A push stays stopped
+for the whole outage, and no approval opens it**, not even one signed on the owner's own computer: the push is read in full once
+the service is back. The note is kept in a file the box user owns, so it records accidents, not an attacker who is the box user;
+the hooks are a barrier against accident (see [ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md),
+Amendments 15 and 18).

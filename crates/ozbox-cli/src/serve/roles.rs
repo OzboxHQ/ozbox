@@ -126,6 +126,11 @@ pub(super) fn classify_named(method: &str, path: &str) -> Option<Need> {
         // messages out: a test message, a phone that is to receive alerts
         ["alerts", "test"] | ["push", "devices", ..] => Need::Act(MessageSend),
         ["models", _, "list" | "test"] => Need::Act(ToolCall),
+        // a subscription sign-in (ADR 0055): the vendor's one-time code decides whose account the box holds, so even looking
+        // at it is the owner's; the list of which engines are opted in is a look
+        ["models", "subscriptions", _, "sign-in"] => Need::Act(SettingsChange),
+        ["models", "subscriptions"] if get => Need::Read,
+        ["models", "subscriptions", ..] => Need::Act(SettingsChange),
         // not named here: the default applies (see `classify`)
         _ => return None,
     })
@@ -562,6 +567,8 @@ mod tests {
             "events",
             "demo",
             "code",
+            // a box's dashboard that manages the fleet: the plan-bound passkey challenge is an owner's (ADR 0040)
+            "fleet",
             "boxes",
             // named by sub-route in the table (a test message, a model's list or test, a push device); anything else under
             // them is an owner's

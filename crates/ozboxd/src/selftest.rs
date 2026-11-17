@@ -55,6 +55,9 @@ pub struct SelfTestConfig {
     /// root's, or that others can write, is ignored by the secrets service, so root's setting does not hold: that fails the
     /// test (phase 2 re-check NL9). Empty off a box; absent files are fine (the setting is its default).
     pub approval_flag_files: Vec<PathBuf>,
+    /// First boot's record of the steps that can fail on their own (`/etc/ozbox/first-boot-steps`). `None` off a box; a box
+    /// without the file (made before the record) has no check.
+    pub first_boot_steps: Option<PathBuf>,
     /// The dashboard user's socket to this daemon, set only on a box that has a dashboard user.
     pub dashboard_socket: Option<DashboardSocket>,
     /// The cgroup root (`/sys/fs/cgroup`) to look for the box user's manager under, to check it has the memory and cpu
@@ -66,6 +69,14 @@ pub struct SelfTestConfig {
     pub run_backend: Option<RunBackendNow>,
     /// The box user's home on /work: its owner is the box user, whose manager is looked for.
     pub user_home: PathBuf,
+    /// Where it can be seen that a dashboard was installed on this box, and that survives an upgrade (the system disk, with the
+    /// dashboard's unit, does not). This daemon runs as the box user and the dashboard's own folder is closed to it, so the
+    /// marker is a content-free file root keeps in a folder the box user can pass through; the box user's old dashboard folder
+    /// is the other trace. `None` off a box.
+    pub dashboard_traces: Option<DashboardTraces>,
+    /// The tunnel leftovers an older setup left in the box user's own home: a connector unit it runs and a token file it can read.
+    /// Empty off a box.
+    pub legacy_tunnel_paths: Vec<PathBuf>,
     /// Set on a box that has a backup service. The check only appears for a box on which backups were set up.
     pub backups: Option<BackupsProbe>,
 }
@@ -181,6 +192,195 @@ pub fn dashboard_socket_check(d: &DashboardSocket) -> Check {
     pass("dashboard_socket")
 }
 
+/// The traces that say a dashboard was installed on this box.
+#[derive(Debug, Clone)]
+pub struct DashboardTraces {
+    /// Root's empty marker (`/work/ozbox-supervisor-keep/installed`), written when the dashboard started as its own user.
+    pub marker: PathBuf,
+    /// The dashboard user's own marker (`/work/ozbox-supervisor/.migrated`). The folder is closed to this user, so this is only
+    /// seen when the daemon runs as root; a refusal is never read as "absent".
+    pub migrated: PathBuf,
+    /// The box user's old dashboard folder, which an upgrade leaves on /work.
+    pub old_home: PathBuf,
+    /// The dashboard user's own folder (`/work/ozbox-supervisor`): its owner can be seen from here, its contents cannot.
+    pub folder: PathBuf,
+    /// Root's record of what the last repair found inside that folder (`/work/ozbox-supervisor-keep/folder.state`).
+    pub folder_state: PathBuf,
+    /// The user database, to learn the dashboard user's id now (`/etc/passwd`).
+    pub passwd: PathBuf,
+}
+
+/// Where each trace is on a box.
+pub const DASHBOARD_MARKER: &str = "/work/ozbox-supervisor-keep/installed";
+pub const DASHBOARD_MIGRATED: &str = "/work/ozbox-supervisor/.migrated";
+pub const DASHBOARD_OLD_HOME: &str = "/work/home/ozbox/ozbox-dashboard";
+pub const DASHBOARD_FOLDER: &str = "/work/ozbox-supervisor";
+pub const DASHBOARD_FOLDER_STATE: &str = "/work/ozbox-supervisor-keep/folder.state";
+pub const PASSWD: &str = "/etc/passwd";
+/// The dashboard's own user (ADR 0023).
+const SUPERVISOR_USER: &str = "ozbox-supervisor";
+
+/// Does this path exist, and is that known? A refusal to look (a folder that is closed to us) is `None`, never `false`.
+fn seen(p: &Path) -> Option<bool> {
+    match fs::symlink_metadata(p) {
+        Ok(_) => Some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// A dashboard that was installed on this box must be running. An upgrade replaces the system disk and the dashboard's unit with
+/// it while its settings stay on /work, so a box can come back from an upgrade with everything in place except the dashboard, and
+/// every other check would pass. `None` when nothing says one was installed.
+pub fn dashboard_check(
+    t: &DashboardTraces,
+    user_wants: &Path,
+    runner: &dyn CommandRunner,
+) -> Option<Check> {
+    const NAME: &str = "dashboard";
+    let traces = [seen(&t.marker), seen(&t.migrated), seen(&t.old_home)];
+    let installed = traces.contains(&Some(true));
+    if !installed {
+        // nothing seen: but if the one place that would say is closed to us, we do not know, and that is never a pass
+        return if traces.contains(&None) {
+            Some(unknown(
+                NAME,
+                "whether a dashboard was installed on this box could not be seen from here (its folder is the dashboard user's); run: ozbox admin <box> -- ensure-supervisor",
+            ))
+        } else {
+            None
+        };
+    }
+    // a dashboard still run by the box user's own manager is checked with the box user's other services
+    if user_wants.join("ozbox-dashboard.service").exists() {
+        return None;
+    }
+    let up = runner
+        .run(&CommandSpec::new("systemctl").args(["is-active", "ozbox-dashboard.service"]))
+        .map(|o| o.status == Some(0) && o.stdout.trim() == "active")
+        .unwrap_or(false);
+    Some(if up {
+        pass(NAME)
+    } else {
+        fail(
+            NAME,
+            "systemctl is-active",
+            "a dashboard was installed on this box but no dashboard service is running (an upgrade removes the service and keeps the settings). Run: ozbox admin <box> -- ensure-supervisor; it makes the service again from the address kept on this box. If it says nothing is kept, run `ozbox dashboard install` from your computer",
+        )
+    })
+}
+
+/// The id of `user` in a user database's text (`/etc/passwd` lines, `name:x:uid:gid:...`), or `None`.
+pub fn uid_in_passwd(text: &str, user: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == user).then_some(())?;
+        f.next()?;
+        f.next()?.trim().parse().ok()
+    })
+}
+
+/// Root's record of the last repair of the dashboard's folder: `uid=<n> wrong=<n>`, either may be `unknown` (`None`). A record
+/// that is not in that shape is `None` as a whole.
+pub fn parse_folder_state(text: &str) -> Option<(Option<u32>, Option<u64>)> {
+    let mut words = text.split_whitespace();
+    let uid = words.next()?.strip_prefix("uid=")?;
+    let wrong = words.next()?.strip_prefix("wrong=")?;
+    if words.next().is_some() {
+        return None;
+    }
+    Some((uid.parse().ok(), wrong.parse().ok()))
+}
+
+/// The dashboard can write in its own folder: the folder belongs to the dashboard's user AS IT IS NOW (an upgrade makes the user
+/// again, and it may get a new id), and the last repair found nothing inside that is not its own or is open to others. A dashboard
+/// that cannot write there shows "Permission denied" on its Memory and Skills pages. This daemon runs as the box user and cannot
+/// look inside, so the inside comes from root's record of the repair. `None` when no dashboard was installed or it was never
+/// moved to its own user.
+pub fn dashboard_folder_check(t: &DashboardTraces) -> Option<Check> {
+    const NAME: &str = "dashboard_folder";
+    let traces = [seen(&t.marker), seen(&t.migrated), seen(&t.old_home)];
+    if !traces.contains(&Some(true)) {
+        return None;
+    }
+    let passwd = fs::read_to_string(&t.passwd).ok()?;
+    let uid = uid_in_passwd(&passwd, SUPERVISOR_USER)?;
+    if seen(&t.folder) != Some(true) {
+        return None;
+    }
+    let folder = t.folder.display().to_string();
+    let fix = "Run from your computer: ozbox admin <box> -- ensure-supervisor (it puts everything in the dashboard's folder back under the dashboard's own user)";
+    let Some(owner) = owner_uid(&t.folder) else {
+        return Some(unknown(
+            NAME,
+            format!("the owner of {folder} could not be read"),
+        ));
+    };
+    if owner != uid {
+        return Some(fail(
+            NAME,
+            "owner",
+            format!("{folder} belongs to user id {owner}, not to the dashboard's user ({SUPERVISOR_USER}, id {uid}; an upgrade made the user again with a new id), so the dashboard cannot write its memory and skills there. {fix}"),
+        ));
+    }
+    let record = match fs::read_to_string(&t.folder_state) {
+        Ok(r) => r,
+        Err(_) => {
+            return Some(unknown(
+                NAME,
+                format!("nothing records whether everything inside {folder} is the dashboard's own (a box set up before that record existed). {fix}"),
+            ))
+        }
+    };
+    Some(match parse_folder_state(&record) {
+        Some((Some(r), _)) if r != uid => fail(
+            NAME,
+            "record",
+            format!("the dashboard's user was made again (id {uid}) after the last repair of {folder} (id {r}), so what is inside may still belong to the old one. {fix}"),
+        ),
+        Some((Some(_), Some(0))) => pass(NAME),
+        Some((Some(_), Some(n))) => fail(
+            NAME,
+            "record",
+            format!("{n} entries inside {folder} are not the dashboard user's own or are open to other users, so the dashboard may not be able to write its memory and skills. {fix}"),
+        ),
+        _ => unknown(
+            NAME,
+            format!("the last repair could not check everything inside {folder}. {fix}"),
+        ),
+    })
+}
+
+/// Where an older setup left a tunnel of the box user's own, under its home.
+pub fn legacy_tunnel_paths(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".config/ozbox-tunnel/token"),
+        home.join(".config/systemd/user/oz-cloudflared.service"),
+    ]
+}
+
+/// A tunnel connector the box user runs itself, with a token file the box user can read. Whatever the box user can read, every
+/// coding agent on the box can read too, and that token can open the box's public address to anyone holding it. `None` when none is
+/// left.
+pub fn legacy_tunnel_check(paths: &[PathBuf]) -> Option<Check> {
+    let found: Vec<String> = paths
+        .iter()
+        .filter(|p| fs::symlink_metadata(p).is_ok())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    Some(fail(
+        "legacy_tunnel",
+        "box user's own tunnel",
+        format!(
+            "an older setup left a tunnel connector and token of the box user's own ({}). Anything the box user can read, an agent can read. Once the box's own tunnel is running, retire them from your computer with: ozbox dashboard retire-legacy-tunnel <box>, then rotate the tunnel token in your Cloudflare account",
+            found.join(", ")
+        ),
+    ))
+}
+
 /// Where root's approval setting files are on a box.
 pub const APPROVAL_FLAG_FILES: &[&str] = &[
     "/etc/ozbox/approvals-legacy-codes-off",
@@ -190,22 +390,19 @@ pub const APPROVAL_FLAG_FILES: &[&str] = &[
 /// Where the secrets service writes its state.
 pub const SECRETS_STATE_FILE: &str = "/run/ozbox-secrets/state";
 
-/// What the service writes at the end of its state's first line when it has used up its tries in this round and exits to be
-/// started again (`ozbox-cli`'s `secrets_cli`), against `(trying again in N s)` while it is still retrying.
-const SERVICE_GAVE_UP: &str = "(starting again)";
-
 /// How long a box set up for KMS may stay not ready before the self-test calls it failed, counted from the `failing_since` line
 /// the service keeps across its restarts. The service says `(starting again)` only for the few seconds between giving up and
-/// the unit starting it, so the phrase alone would read as unknown nearly all of a long outage. Not a figure to tune lightly:
+/// the unit starting it, so that state alone would read as unknown nearly all of a long outage. Not a figure to tune lightly:
 /// a key service that is only slow to answer must not fail a box.
 pub const PERSISTENT_FAILURE_SECS: u64 = 180;
 
 /// Whether a not-ready KMS service has failed for good: for `PERSISTENT_FAILURE_SECS` when it says since when, else (an older
-/// service) when it has just given up its tries.
-fn kms_failure_has_lasted(first: &str, failing_since: Option<u64>, now_ms: u64) -> bool {
+/// service) when it has just given up its tries. "Given up" is the service's typed `phase=gave-up` line
+/// (`ozbox_core::secrets_phase`), and the sentence it ends its first line with only for a file from before that line.
+fn kms_failure_has_lasted(state_text: &str, failing_since: Option<u64>, now_ms: u64) -> bool {
     match failing_since {
         Some(since) => (now_ms / 1000).saturating_sub(since) >= PERSISTENT_FAILURE_SECS,
-        None => first.ends_with(SERVICE_GAVE_UP),
+        None => ozbox_core::secrets_phase::gave_up(state_text),
     }
 }
 
@@ -216,7 +413,7 @@ fn kms_failure_has_lasted(first: &str, failing_since: Option<u64>, now_ms: u64) 
 /// * Not ready for good (`code=` config, no-escrow or kind-mismatch) fails, and says what to do about THAT: a lost or
 ///   mismatched store is mended with `recover-secrets` or `adopt-fleet-key`, never by looking at IAM or the network.
 /// * Not ready on a KMS key because the key service did not answer fails only once the service has used up its tries
-///   (`(starting again)`) or, when it says since when (`failing_since=`, kept across its restarts), has been failing for
+///   (its `phase=gave-up` line, or `(starting again)` from an older service) or, when it says since when (`failing_since=`, kept across its restarts), has been failing for
 ///   `PERSISTENT_FAILURE_SECS`; sooner than that (`(trying again in N s)`) it is `unknown`, as is any other kind of key that is
 ///   not ready. An older service that writes no `failing_since` is judged by the phrase alone.
 /// * No state file: `None` on a box with no secrets service (its folder is absent); `unknown` when the folder is there but the
@@ -226,7 +423,7 @@ fn secrets_key_check(host: &dyn HostSource, path: &Path, now_ms: u64) -> Option<
     let text = match host.read(&path.to_string_lossy()) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !path.parent().is_some_and(Path::exists) {
+            if !path.parent().is_some_and(|p| host.exists(p)) {
                 return None;
             }
             return Some(unknown(
@@ -271,7 +468,7 @@ fn secrets_key_check(host: &dyn HostSource, path: &Path, now_ms: u64) -> Option<
                 "the secrets service is not configured, so no secret can be read or saved. The service says: {why}. Check `/etc/ozbox/secrets.env` names the key, then restart ozbox-secrets.service"
             ),
         ),
-        (_, Some("kms")) if kms_failure_has_lasted(first, failing_since, now_ms) => fail(
+        (_, Some("kms")) if kms_failure_has_lasted(&text, failing_since, now_ms) => fail(
             NAME,
             "the secrets service's state",
             format!(
@@ -353,10 +550,13 @@ impl SelfTestConfig {
             secrets_state_file: None,
             box_secrets_declaration: None,
             approval_flag_files: Vec::new(),
+            first_boot_steps: None,
             dashboard_socket: None,
             user_cgroup_root: None,
             run_backend: None,
             user_home: work_dir.join("home/ozbox"),
+            dashboard_traces: None,
+            legacy_tunnel_paths: Vec::new(),
             backups: None,
             work_dir,
         }
@@ -778,6 +978,30 @@ fn memory_guard_check(host: &dyn HostSource) -> Option<Check> {
     Some(pass(NAME))
 }
 
+/// The steps first boot records on their own (the agents' Oz Box tools, linger, the box user's manager). Only a box with the
+/// record has the check; the first failed step is named, with the command that runs it again.
+fn first_boot_steps_check(host: &dyn HostSource, path: &Path) -> Option<Check> {
+    use ozbox_core::first_boot::{failure_text, parse};
+    const NAME: &str = "first_boot_steps";
+    let text = host.read(&path.to_string_lossy()).ok()?;
+    let steps = parse(&text);
+    if steps.is_empty() {
+        return None;
+    }
+    let failed: Vec<_> = steps.iter().filter(|s| !s.ok).collect();
+    Some(match failed.first() {
+        None => pass(NAME),
+        Some(first) => {
+            let mut reason = failure_text(first);
+            if failed.len() > 1 {
+                let more: Vec<&str> = failed[1..].iter().map(|s| s.info.name).collect();
+                reason.push_str(&format!("; also failed: {}", more.join(", ")));
+            }
+            fail(NAME, first.info.name, reason)
+        }
+    })
+}
+
 /// Run every check. `sample_run` starts a trivial run in a cgroup and reports whether it worked.
 pub fn run(
     cfg: &SelfTestConfig,
@@ -939,6 +1163,20 @@ pub fn run(
         checks.push(run_backend_check(now));
     }
 
+    // a dashboard that was installed is running (an upgrade removes its unit and keeps its settings)
+    if let Some(t) = &cfg.dashboard_traces {
+        if let Some(c) = dashboard_check(t, &cfg.user_wants_dir, runner) {
+            checks.push(c);
+        }
+        // and it can write in its own folder (B4-22: an upgrade made its user again with a new id)
+        if let Some(c) = dashboard_folder_check(t) {
+            checks.push(c);
+        }
+    }
+    if let Some(c) = legacy_tunnel_check(&cfg.legacy_tunnel_paths) {
+        checks.push(c);
+    }
+
     // the secrets service's sockets answer this user (a socket in the wrong group answers nobody)
     if let Some(d) = &cfg.dashboard_socket {
         checks.push(dashboard_socket_check(d));
@@ -966,6 +1204,15 @@ pub fn run(
 
     // root's approval setting files, when there are any, are ones the service trusts
     if let Some(c) = approval_flags_check(&cfg.approval_flag_files) {
+        checks.push(c);
+    }
+
+    // the steps first boot records on their own finished (a failed one is named, with the command that repairs it)
+    if let Some(c) = cfg
+        .first_boot_steps
+        .as_deref()
+        .and_then(|p| first_boot_steps_check(host, p))
+    {
         checks.push(c);
     }
 
@@ -1200,17 +1447,75 @@ mod tests {
     #[test]
     fn a_missing_state_file_is_unknown_where_the_service_has_a_folder_and_skipped_where_it_has_none(
     ) {
-        let d = tempfile::tempdir().unwrap();
-        let (_, h) = setup(d.path());
+        // B4-16: the folder is asked of the host, so this runs on fixtures alone (a box that has the real folder, or a laptop
+        // that has none, decides nothing here). The paths are made up and never exist on the machine running the test.
+        let h = FakeHost::default();
+        let state = Path::new("/fixture-only/run/ozbox-secrets/state");
+        // no folder: a box without the service
+        assert!(secrets_key_check(&h, state, 7).is_none());
         // the service's runtime folder is there, its state file is not: not verified, never skipped
-        match secrets_key_check(&h, &d.path().join("state"), 7).map(|c| c.outcome) {
+        h.set_dir("/fixture-only/run/ozbox-secrets");
+        match secrets_key_check(&h, state, 7).map(|c| c.outcome) {
             Some(Outcome::Unknown { reason }) => {
                 assert!(reason.contains("not written"), "{reason}")
             }
             o => panic!("{o:?}"),
         }
-        // no folder: a box without the service
-        assert!(secrets_key_check(&h, &d.path().join("absent/state"), 7).is_none());
+        assert!(
+            !state.parent().unwrap().exists(),
+            "the test reads the fixture, not the disk"
+        );
+        // the real host asks the disk, as before
+        let d = tempfile::tempdir().unwrap();
+        assert!(crate::host::FsHost.exists(d.path()));
+        assert!(!crate::host::FsHost.exists(&d.path().join("absent")));
+    }
+
+    /// B4-16: whether the service has given up is its typed `phase` line; the sentence only for a file from an older service.
+    /// The behaviour is unchanged: the same states decide the same way, and a reworded sentence decides nothing.
+    #[test]
+    fn a_kms_service_that_gave_up_is_known_by_its_typed_phase_and_the_sentence_only_for_an_older_file(
+    ) {
+        let h = FakeHost::default();
+        let state = Path::new("/fixture-only/state");
+        let at = |text: &str| {
+            h.set("/fixture-only/state", text);
+            secrets_key_check(&h, state, 7).map(|c| c.outcome)
+        };
+        // the typed line, whatever the sentence says
+        assert!(matches!(
+            at("not-ready: the key service did not answer\nkek=kms\ncode=transient\nphase=gave-up\n"),
+            Some(Outcome::Fail { .. })
+        ));
+        assert!(matches!(
+            at("not-ready: x (starting again)\nkek=kms\ncode=transient\nphase=retrying\n"),
+            Some(Outcome::Unknown { .. })
+        ));
+        // the very text the service writes, from its own state type
+        let written = |p: ozbox_core::secrets_phase::Phase| {
+            format!(
+                "not-ready: the key service could not be reached {}\nkek=kms\ncode=transient\nphase={}\n",
+                ozbox_core::secrets_phase::LEGACY_GAVE_UP,
+                p.word()
+            )
+        };
+        assert!(matches!(
+            at(&written(ozbox_core::secrets_phase::Phase::GaveUp)),
+            Some(Outcome::Fail { .. })
+        ));
+        // an older service: the sentence alone, as it always was
+        assert!(matches!(
+            at("not-ready: x (starting again)\nkek=kms\ncode=transient\n"),
+            Some(Outcome::Fail { .. })
+        ));
+        assert!(matches!(
+            at("not-ready: x (trying again in 2 s)\nkek=kms\ncode=transient\n"),
+            Some(Outcome::Unknown { .. })
+        ));
+        // and the source no longer carries the sentence of its own: the shared word is the one place it lives
+        let src = include_str!("selftest.rs");
+        let code = src.split("\nmod tests {").next().unwrap();
+        assert!(!code.contains(&["\"(starting", " again)\""].concat()));
     }
 
     #[test]
@@ -1419,6 +1724,55 @@ mod tests {
             }
             o => panic!("{o:?}"),
         }
+    }
+
+    /// B4-12: a first-boot step that failed on its own (the agents' Oz Box tools after an upgrade) fails the self-test, naming
+    /// the step and the command that repairs it; a box without the record, or one the test does not understand, has no check.
+    #[test]
+    fn a_first_boot_step_that_failed_fails_the_self_test_naming_the_step() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut cfg, h) = setup(d.path());
+        let at = Path::new(ozbox_core::first_boot::STEPS_FILE);
+        cfg.first_boot_steps = Some(at.to_path_buf());
+        let check = |h: &FakeHost| first_boot_steps_check(h, at).map(|c| c.outcome);
+        // no record (a box made before it): no check
+        assert_eq!(check(&h), None);
+        // a record of steps from a newer script only: no check, never a pass
+        h.set(ozbox_core::first_boot::STEPS_FILE, "a_new_step ok fine 1\n");
+        assert_eq!(check(&h), None);
+        h.set(
+            ozbox_core::first_boot::STEPS_FILE,
+            "agent_tools ok runuser 1\nenable_linger ok already-on 0\nuser_manager ok started 1\n",
+        );
+        assert_eq!(check(&h), Some(Outcome::Pass));
+        h.set(
+            ozbox_core::first_boot::STEPS_FILE,
+            "agent_tools failed switch-user-refused 4\nenable_linger failed login-manager-no-answer 5\nuser_manager ok started 1\n",
+        );
+        match check(&h) {
+            Some(Outcome::Fail { step, reason }) => {
+                assert_eq!(step, "agent_tools");
+                assert!(
+                    reason.contains("coding agents' settings")
+                        && reason.contains("ozbox admin <box> -- ensure-supervisor")
+                        && reason.contains("also failed: enable_linger"),
+                    "{reason}"
+                );
+            }
+            o => panic!("{o:?}"),
+        }
+        // and it is part of the self-test, failing it
+        let r = run(
+            &cfg,
+            &h,
+            &RecordingRunner::new(),
+            "/bin:/usr/bin",
+            &|| Ok(()),
+            0,
+        );
+        assert!(!r.ok);
+        assert!(r.checks.iter().any(|c| c.name == "first_boot_steps"
+            && matches!(&c.outcome, Outcome::Fail { step, .. } if step == "agent_tools")));
     }
 
     #[test]
@@ -2038,5 +2392,230 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.program == "systemctl" && c.args == ["is-active", "tunnel-b.service"]));
+    }
+
+    // ---- the dashboard survives an upgrade; no box-user tunnel is left (beta.4) ----
+
+    fn traces(root: &Path) -> DashboardTraces {
+        DashboardTraces {
+            marker: root.join("ozbox-supervisor-keep/installed"),
+            migrated: root.join("ozbox-supervisor/.migrated"),
+            old_home: root.join("home/ozbox/ozbox-dashboard"),
+            folder: root.join("ozbox-supervisor"),
+            folder_state: root.join("ozbox-supervisor-keep/folder.state"),
+            passwd: root.join("passwd"),
+        }
+    }
+
+    const PASSWD_FIXTURE: &str = "root:x:0:0:root:/root:/bin/bash
+ozbox:x:1500:1500::/work/home/ozbox:/bin/bash
+ozbox-supervisor-x:x:7:7::/nonexistent:/usr/sbin/nologin
+ozbox-supervisor:x:995:986:Oz Box supervisor:/work/ozbox-supervisor/home:/usr/sbin/nologin
+";
+
+    #[test]
+    fn the_dashboards_user_id_and_roots_record_are_read_from_their_real_text() {
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "ozbox-supervisor"), Some(995));
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "ozbox"), Some(1500));
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "nobody"), None);
+        assert_eq!(
+            uid_in_passwd(
+                "ozbox-supervisor:x:abc:1::/:/bin/false\n",
+                "ozbox-supervisor"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_folder_state("uid=995 wrong=0\n"),
+            Some((Some(995), Some(0)))
+        );
+        assert_eq!(
+            parse_folder_state("uid=995 wrong=12\n"),
+            Some((Some(995), Some(12)))
+        );
+        assert_eq!(
+            parse_folder_state("uid=unknown wrong=unknown\n"),
+            Some((None, None))
+        );
+        assert_eq!(parse_folder_state("uid=995\n"), None);
+        assert_eq!(parse_folder_state("uid=995 wrong=0 /etc/shadow\n"), None);
+    }
+
+    /// B4-22: the Memory and Skills pages said "Permission denied (os error 13)" after an upgrade made the dashboard's user again
+    /// with a new id. The self-test now says so, names the folder and the step, and passes only on a clean record for today's id.
+    #[cfg(unix)]
+    #[test]
+    fn a_dashboard_folder_the_dashboard_cannot_write_in_fails_the_self_test_with_the_folder_and_the_step(
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        // no dashboard installed: not asked
+        assert!(dashboard_folder_check(&t).is_none());
+        fs::create_dir_all(t.marker.parent().unwrap()).unwrap();
+        fs::write(&t.marker, "").unwrap();
+        fs::create_dir_all(&t.folder).unwrap();
+        let me = fs::metadata(&t.folder).unwrap().uid();
+        // no dashboard user yet (still the box user's): not asked
+        fs::write(&t.passwd, "ozbox:x:1500:1500::/work/home/ozbox:/bin/bash\n").unwrap();
+        assert!(dashboard_folder_check(&t).is_none());
+        // the user was made again with another id than the folder's owner: a failure naming the folder and the step
+        fs::write(
+            &t.passwd,
+            format!("ozbox-supervisor:x:{}:1::/:/usr/sbin/nologin\n", me + 1),
+        )
+        .unwrap();
+        let c = dashboard_folder_check(&t).unwrap();
+        let folder = t.folder.display().to_string();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains(&folder) && reason.contains("ensure-supervisor") && reason.contains("new id")),
+            "{c:?}"
+        );
+        fs::write(
+            &t.passwd,
+            format!("ozbox-supervisor:x:{me}:1::/:/usr/sbin/nologin\n"),
+        )
+        .unwrap();
+        // no record of the inside: unknown, never a pass
+        let c = dashboard_folder_check(&t).unwrap();
+        assert!(matches!(c.outcome, Outcome::Unknown { .. }), "{c:?}");
+        // a record from before the user was made again
+        fs::write(&t.folder_state, format!("uid={} wrong=0\n", me + 1)).unwrap();
+        assert!(matches!(
+            dashboard_folder_check(&t).unwrap().outcome,
+            Outcome::Fail { .. }
+        ));
+        // entries inside that are not its own
+        fs::write(&t.folder_state, format!("uid={me} wrong=3\n")).unwrap();
+        let c = dashboard_folder_check(&t).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("3 entries") && reason.contains(&folder)),
+            "{c:?}"
+        );
+        // the repair could not look
+        fs::write(&t.folder_state, format!("uid={me} wrong=unknown\n")).unwrap();
+        assert!(matches!(
+            dashboard_folder_check(&t).unwrap().outcome,
+            Outcome::Unknown { .. }
+        ));
+        // clean: a pass
+        fs::write(&t.folder_state, format!("uid={me} wrong=0\n")).unwrap();
+        assert_eq!(dashboard_folder_check(&t).unwrap().outcome, Outcome::Pass);
+    }
+
+    fn systemctl_says(active: bool) -> RecordingRunner {
+        let rec = RecordingRunner::new();
+        reply(
+            &rec,
+            if active { 0 } else { 3 },
+            if active { "active\n" } else { "inactive\n" },
+        );
+        rec
+    }
+
+    #[test]
+    fn a_dashboard_that_was_installed_but_is_not_running_fails_the_self_test_with_the_step_to_take()
+    {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        // the state an upgrade leaves: the marker and settings on /work, no service on the new system disk
+        fs::create_dir_all(t.marker.parent().unwrap()).unwrap();
+        fs::write(&t.marker, "").unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("no dashboard service is running") && reason.contains("ensure-supervisor")),
+            "{c:?}"
+        );
+        // and passes once it runs
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(true)).unwrap();
+        assert_eq!(c.outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn the_box_users_old_dashboard_folder_is_also_a_trace_for_a_box_upgraded_before_the_marker_existed(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        fs::create_dir_all(&t.old_home).unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).unwrap();
+        assert!(matches!(c.outcome, Outcome::Fail { .. }), "{c:?}");
+    }
+
+    #[test]
+    fn a_box_that_never_had_a_dashboard_is_not_asked_and_one_run_by_the_box_user_is_left_to_the_services_check(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        assert!(dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).is_none());
+        fs::create_dir_all(&t.old_home).unwrap();
+        let wants = d.path().join("wants");
+        fs::create_dir_all(&wants).unwrap();
+        fs::write(wants.join("ozbox-dashboard.service"), "").unwrap();
+        assert!(dashboard_check(&t, &wants, &systemctl_says(false)).is_none());
+    }
+
+    /// The daemon runs as the box user and the dashboard's folder is closed to it: a refusal to look is never read as "absent"
+    /// and never as a pass. (A fixture that is readable by its author would pass whatever the real box reads.)
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_is_closed_to_this_user_is_unknown_never_a_pass() {
+        use std::os::unix::fs::PermissionsExt;
+        if running_as_root() {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        let closed = d.path().join("ozbox-supervisor");
+        fs::create_dir_all(&closed).unwrap();
+        fs::write(closed.join(".migrated"), "").unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false));
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        let c = c.unwrap();
+        assert!(matches!(c.outcome, Outcome::Unknown { .. }), "{c:?}");
+    }
+
+    #[test]
+    fn a_token_file_or_connector_unit_of_the_box_users_own_fails_the_self_test() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home/ozbox");
+        let paths = legacy_tunnel_paths(&home);
+        assert!(legacy_tunnel_check(&paths).is_none());
+        fs::create_dir_all(home.join(".config/ozbox-tunnel")).unwrap();
+        fs::write(home.join(".config/ozbox-tunnel/token"), "x").unwrap();
+        let c = legacy_tunnel_check(&paths).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("token") && reason.contains("retire-legacy-tunnel") && !reason.contains(home.to_str().unwrap())),
+            "{c:?}"
+        );
+        // the unit alone is enough
+        fs::remove_file(home.join(".config/ozbox-tunnel/token")).unwrap();
+        fs::create_dir_all(home.join(".config/systemd/user")).unwrap();
+        fs::write(home.join(".config/systemd/user/oz-cloudflared.service"), "").unwrap();
+        assert!(legacy_tunnel_check(&paths).is_some());
+    }
+
+    #[test]
+    fn the_new_checks_are_part_of_the_run_only_when_configured() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut cfg, h) = setup(d.path());
+        let rec = RecordingRunner::new();
+        reply(&rec, 0, "disk\n");
+        let r = run(&cfg, &h, &rec, "/bin", &|| Ok(()), 7);
+        assert!(r
+            .checks
+            .iter()
+            .all(|c| c.name != "dashboard" && c.name != "legacy_tunnel"));
+        cfg.dashboard_traces = Some(traces(d.path()));
+        fs::create_dir_all(&cfg.dashboard_traces.as_ref().unwrap().old_home).unwrap();
+        cfg.legacy_tunnel_paths = legacy_tunnel_paths(&cfg.user_home);
+        let rec = RecordingRunner::new();
+        reply(&rec, 0, "disk\n");
+        let r = run(&cfg, &h, &rec, "/bin", &|| Ok(()), 7);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.name == "dashboard" && matches!(c.outcome, Outcome::Fail { .. })));
+        assert!(!r.ok);
     }
 }

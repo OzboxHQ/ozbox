@@ -172,3 +172,70 @@ run "across_every_policy_no_secrets_manager_no_wildcard_action_and_no_decrypt_ou
     error_message = "no Secrets Manager, no wildcard action, and every kms:Decrypt is conditioned and on a named key"
   }
 }
+
+# B4-9: alert sending from a box is off unless both ARNs are given, and then names exactly one identity and one topic.
+run "no_notify_policy_unless_both_arns_are_given" {
+  command = plan
+
+  assert {
+    condition     = length(aws_iam_policy.notify) == 0 && length(data.aws_iam_policy_document.notify) == 0
+    error_message = "no box may send SES email or publish to SNS unless asked for"
+  }
+}
+
+run "the_notify_policy_sends_from_one_identity_and_publishes_to_one_topic" {
+  command = plan
+
+  variables {
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+  }
+
+  assert {
+    condition     = aws_iam_policy.notify[0].name == "ozbox-box-notify"
+    error_message = "the name the box module and the operator policy attach"
+  }
+
+  assert {
+    condition = length(data.aws_iam_policy_document.notify[0].statement) == 2 && alltrue([
+      for s in data.aws_iam_policy_document.notify[0].statement :
+      (s.effect == null || s.effect == "Allow") && length(s.condition) == 0 && (
+        (s.actions == toset(["ses:SendEmail"]) && s.resources == toset(["arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"])) ||
+        (s.actions == toset(["sns:Publish"]) && s.resources == toset(["arn:aws:sns:us-east-1:123456789012:ozbox-alerts"]))
+      )
+    ])
+    error_message = "exactly ses:SendEmail on the one identity and sns:Publish on the one topic, nothing else"
+  }
+}
+
+run "one_notify_arn_without_the_other_is_refused" {
+  command = plan
+
+  variables {
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+  }
+
+  expect_failures = [var.notify_sns_topic_arn]
+}
+
+run "a_wildcard_ses_identity_is_refused" {
+  command = plan
+
+  variables {
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/*"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+  }
+
+  expect_failures = [var.notify_ses_identity_arn]
+}
+
+run "a_wildcard_sns_topic_is_refused" {
+  command = plan
+
+  variables {
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:*"
+  }
+
+  expect_failures = [var.notify_sns_topic_arn]
+}

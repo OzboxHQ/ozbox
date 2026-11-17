@@ -66,7 +66,10 @@ impl Rig {
         let b = r.join("bin");
         let log = r.join("calls.log");
         let l = log.display();
-        tool(&b, "id", &format!("case \"$*\" in '-u ozbox') echo 1500;; '-nG ozbox-supervisor') if [ -e '{0}/ingroup' ]; then echo 'ozbox-supervisor ozbox'; else echo ozbox-supervisor; fi;; ozbox-supervisor) [ -e '{0}/user' ];; *) exit 1;; esac", r.display()));
+        // `-u ozbox-supervisor` answers the id the files here really have (this test's own), or the one in `supuid` when a test
+        // plays a user made again with a new id
+        let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(r).unwrap());
+        tool(&b, "id", &format!("case \"$*\" in '-u ozbox') echo 1500;; '-u ozbox-supervisor') [ -e '{0}/user' ] || exit 1; if [ -e '{0}/supuid' ]; then cat '{0}/supuid'; else echo {me}; fi;; '-nG ozbox-supervisor') if [ -e '{0}/ingroup' ]; then echo 'ozbox-supervisor ozbox'; else echo ozbox-supervisor; fi;; ozbox-supervisor) [ -e '{0}/user' ];; *) exit 1;; esac", r.display()));
         tool(
             &b,
             "gpasswd",
@@ -89,6 +92,11 @@ impl Rig {
             &format!("echo shred \"$@\" >>'{l}'; shift; rm -f \"$@\" 2>/dev/null; exit 0"),
         );
         tool(&b, "runuser", &format!("echo runuser \"$@\" >>'{l}'"));
+        tool(
+            &b,
+            "systemd-run",
+            &format!("echo systemd-run \"$@\" >>'{l}'"),
+        );
         tool(&b, "install", &format!("echo install \"$@\" >>'{l}'"));
         tool(&b, "systemctl", &format!("echo systemctl \"$@\" >>'{l}'; case \"$1\" in restart) touch '{0}/active';; disable) [ \"$2\" = --now ] && rm -f '{0}/active';; is-active) [ -e '{0}/active' ];; esac; exit 0", r.display()));
         // the installed daemon: one that takes its socket from systemd carries the marker (G1 N4)
@@ -120,6 +128,8 @@ impl Rig {
             .env("OZBOX_PASSWD", b.join("passwd"))
             .env("OZBOX_SHRED", b.join("shred"))
             .env("OZBOX_RUNUSER", b.join("runuser"))
+            .env("OZBOX_SYSTEMD_RUN", b.join("systemd-run"))
+            .env("OZBOX_RETRY_DELAYS", "0 0")
             .env("OZBOX_GPASSWD", b.join("gpasswd"))
             .env("OZBOX_DAEMON_BIN", r.join("ozboxd"))
             .env("OZBOX_DASHBOARD_SETTLE_S", "0")
@@ -298,6 +308,7 @@ fn a_dashboard_that_does_not_start_puts_the_old_one_back() {
         .env("OZBOX_CHOWN", b.join("chown"))
         .env("OZBOX_PASSWD", b.join("passwd"))
         .env("OZBOX_RUNUSER", b.join("runuser"))
+        .env("OZBOX_SYSTEMD_RUN", b.join("systemd-run"))
         .output()
         .unwrap();
     assert!(!o.status.success());
@@ -1343,4 +1354,519 @@ fn a_dashboard_that_runs_but_does_not_answer_is_reported_as_failed_not_ok() {
         "{}",
         rig.log()
     );
+}
+
+// ---- the dashboard survives `ozbox upgrade` (beta.4) ----
+
+fn keep(rig: &Rig) -> PathBuf {
+    rig.dir.path().join("work/ozbox-supervisor-keep")
+}
+
+fn mode(p: &Path) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+/// A box whose dashboard moved, then was upgraded: /work (the supervisor's folder, its settings and root's record) is as it was and
+/// the system disk has no unit. The box user's staged copies are gone too, as `--finish` left them.
+fn box_after_an_upgrade() -> Rig {
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    // the new system disk: no unit, and the service is not active
+    std::fs::remove_file(rig.dir.path().join("units/ozbox-dashboard.service")).unwrap();
+    let _ = std::fs::remove_file(rig.dir.path().join("active"));
+    let m = rig
+        .dir
+        .path()
+        .join("work/home/ozbox/.config/systemd/user/ozbox-dashboard.service.migrated");
+    let _ = std::fs::remove_file(m);
+    rig
+}
+
+#[test]
+fn the_dashboards_address_is_kept_by_root_when_it_starts_and_a_changed_record_is_refused() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    let k = keep(&rig);
+    assert_eq!(
+        std::fs::read_to_string(k.join("dashboard.args")).unwrap(),
+        "7878 ozbox.example.com cloudflare\n"
+    );
+    assert_eq!(mode(&k.join("dashboard.args")), 0o600);
+    assert_eq!(mode(&k.join("dashboard.args.sha256")), 0o600);
+    // content-free and readable, so the box user's self-test can see that a dashboard was installed; the folder lists nothing
+    assert_eq!(mode(&k.join("installed")), 0o644);
+    assert!(std::fs::read(k.join("installed")).unwrap().is_empty());
+    assert_eq!(mode(&k), 0o711);
+    // no address, no secret, in what the box user can read
+    assert!(!k.join("installed").to_string_lossy().is_empty());
+}
+
+#[test]
+fn after_an_upgrade_first_boot_makes_the_unit_again_from_the_kept_address_and_starts_it() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = box_after_an_upgrade();
+    assert!(rig.unit().is_empty());
+    let n = rig.log().matches("restart ozbox-dashboard").count();
+    // what first boot and `ensure-supervisor` run: no argument, nothing staged
+    let o = rig.run(&[]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        rig.unit()
+            .contains("--port 7878 --public-url https://ozbox.example.com --tunnel cloudflare"),
+        "{}",
+        rig.unit()
+    );
+    assert!(
+        rig.log().matches("restart ozbox-dashboard").count() > n,
+        "{}",
+        rig.log()
+    );
+    assert!(
+        text(&o).contains("made again from the address kept"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        text(&o).contains("state dashboard=running settings=unchanged"),
+        "{}",
+        text(&o)
+    );
+    assert!(!text(&o).contains("no dashboard is installed"));
+}
+
+/// The owner's real box: sign-in settings that differ from the ones the person's computer sends, a unit that is gone, and a
+/// staged unit file the box user wrote. The dashboard must come back, with its own settings and its own address.
+#[test]
+fn kept_settings_that_differ_still_bring_the_dashboard_back_with_the_kept_address() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = box_after_an_upgrade();
+    let before = home_auth(&rig);
+    let home = rig.dir.path().join("work/home/ozbox");
+    std::fs::write(
+        home.join("ozbox-dashboard/auth.toml"),
+        "from-the-laptop = true\n",
+    )
+    .unwrap();
+    // a box-user file that names another port and host: never the address of the dashboard
+    std::fs::write(
+        home.join(".config/systemd/user/ozbox-dashboard.service"),
+        OLD_UNIT
+            .replace("7878", "9999")
+            .replace("ozbox.example.com", "evil.example.org"),
+    )
+    .unwrap();
+    let o = rig.run(&["--expect-auth", &sha_hex(b"from-the-laptop = true\n")]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        home_auth(&rig),
+        before,
+        "the kept settings are not replaced"
+    );
+    assert!(
+        rig.unit()
+            .contains("--port 7878 --public-url https://ozbox.example.com"),
+        "{}",
+        rig.unit()
+    );
+    assert!(!rig.unit().contains("evil.example.org"));
+    assert!(
+        rig.log().contains("restart ozbox-dashboard"),
+        "{}",
+        rig.log()
+    );
+    let said = text(&o);
+    // the old sentence (an older laptop parses it) and the new state line (this one trusts it)
+    assert!(
+        said.contains("already has sign-in settings of its own"),
+        "{said}"
+    );
+    assert!(
+        said.contains("state dashboard=running settings=kept"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_record_that_was_changed_or_cut_short_is_not_used() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = box_after_an_upgrade();
+    std::fs::write(keep(&rig).join("dashboard.args"), "9999 evil.example.org\n").unwrap();
+    let o = rig.run(&[]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(rig.unit().is_empty());
+    assert!(
+        text(&o).contains("nothing records its address"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        !rig.log().contains("restart ozbox-dashboard")
+            || rig.log().matches("restart ozbox-dashboard").count() == 1
+    );
+    // a valid sha over an address with something extra on its line is refused too
+    let k = keep(&rig);
+    std::fs::write(
+        k.join("dashboard.args"),
+        "7878 ozbox.example.com cloudflare extra\n",
+    )
+    .unwrap();
+    std::fs::write(
+        k.join("dashboard.args.sha256"),
+        sha_hex(b"7878 ozbox.example.com cloudflare extra\n"),
+    )
+    .unwrap();
+    let o = rig.run(&[]);
+    assert!(
+        text(&o).contains("nothing records its address"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn a_box_made_before_the_record_existed_gets_one_from_its_running_unit() {
+    if !have_sha256sum() {
+        return;
+    }
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    std::fs::remove_dir_all(keep(&rig)).unwrap();
+    // the program-upgrade step (`--socket-only`) backfills it from the unit that is there
+    assert!(rig.run(&["--socket-only"]).status.success());
+    assert!(keep(&rig).join("dashboard.args").exists());
+    assert!(keep(&rig).join("installed").exists());
+}
+
+fn replace_rig() -> (Rig, String) {
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    let home = rig.dir.path().join("work/home/ozbox");
+    std::fs::write(
+        home.join("ozbox-dashboard/auth.toml"),
+        "new-people = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".config/systemd/user/ozbox-dashboard.service"),
+        OLD_UNIT,
+    )
+    .unwrap();
+    (rig, sha_hex(b"new-people = true\n"))
+}
+
+#[test]
+fn the_approved_replacement_installs_the_staged_settings_keeps_the_old_ones_and_restarts() {
+    if !have_sha256sum() {
+        return;
+    }
+    let (rig, sha) = replace_rig();
+    let n = rig.log().matches("restart ozbox-dashboard").count();
+    let o = rig.run(&["--replace-auth", &sha]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(home_auth(&rig).as_deref(), Some("new-people = true\n"));
+    assert_eq!(
+        std::fs::read_to_string(
+            rig.dir
+                .path()
+                .join("work/ozbox-supervisor/auth.toml.replaced")
+        )
+        .unwrap(),
+        "y = 2\n"
+    );
+    assert_eq!(rig.log().matches("restart ozbox-dashboard").count(), n + 1);
+    assert!(
+        text(&o).contains("state dashboard=running settings=replaced"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn a_replacement_only_installs_the_file_whose_sha_was_approved() {
+    if !have_sha256sum() {
+        return;
+    }
+    let (rig, _) = replace_rig();
+    // the box user rewrote the staged file after the approval was made for the other one
+    let o = rig.run(&["--replace-auth", &sha_hex(b"something-else\n")]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert_eq!(home_auth(&rig).as_deref(), Some("y = 2\n"));
+}
+
+#[test]
+fn replacement_settings_that_do_not_start_the_dashboard_are_taken_back() {
+    if !have_sha256sum() {
+        return;
+    }
+    let (rig, sha) = replace_rig();
+    let silent = rig.dir.path().join("bin/probe-silent");
+    let o = rig.run_env(
+        &["--replace-auth", &sha],
+        &[("OZBOX_DASHBOARD_PROBE", &silent)],
+    );
+    assert!(!o.status.success(), "{}", text(&o));
+    assert_eq!(home_auth(&rig).as_deref(), Some("y = 2\n"));
+    assert!(text(&o).contains("old ones were put back"), "{}", text(&o));
+}
+
+#[test]
+fn without_the_replace_flag_the_same_staged_settings_are_not_applied() {
+    if !have_sha256sum() {
+        return;
+    }
+    let (rig, sha) = replace_rig();
+    let o = rig.run(&["--expect-auth", &sha]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(home_auth(&rig).as_deref(), Some("y = 2\n"));
+    assert!(!rig
+        .dir
+        .path()
+        .join("work/ozbox-supervisor/auth.toml.replaced")
+        .exists());
+}
+
+/// "the memory store could not be used: Permission denied (os error 13)": an upgrade makes the supervisor user again with a new id,
+/// and what the old one made under its folder stays under the old id (or was made by the box user or root).
+#[test]
+fn everything_under_the_dashboards_folder_is_put_back_under_its_user_and_closed_to_others_at_every_run(
+) {
+    let rig = Rig::new(Some(OLD_UNIT));
+    assert!(rig.run(&[]).status.success());
+    let mem = rig
+        .dir
+        .path()
+        .join("work/ozbox-supervisor/agent-memory/skills");
+    std::fs::create_dir_all(&mem).unwrap();
+    std::fs::write(mem.join("note.md"), "x").unwrap();
+    std::fs::set_permissions(&mem, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(mem.join("note.md"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    // a link left in there is never followed by the repair
+    std::os::unix::fs::symlink(
+        "/etc",
+        rig.dir
+            .path()
+            .join("work/ozbox-supervisor/agent-memory/link"),
+    )
+    .unwrap();
+    for args in [&[][..], &["--socket-only"][..]] {
+        std::fs::set_permissions(&mem, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(mem.join("note.md"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let n = rig
+            .log()
+            .matches("chown -R -h ozbox-supervisor:ozbox-supervisor")
+            .count();
+        assert!(rig.run(args).status.success());
+        assert_eq!(mode(&mem), 0o700, "{args:?}");
+        assert_eq!(mode(&mem.join("note.md")), 0o600, "{args:?}");
+        let after = rig
+            .log()
+            .matches("chown -R -h ozbox-supervisor:ozbox-supervisor")
+            .count();
+        assert!(after > n, "{args:?}: {}", rig.log());
+    }
+    assert!(rig.log().contains(&format!(
+        "ozbox-supervisor:ozbox-supervisor {}",
+        rig.dir.path().join("work/ozbox-supervisor").display()
+    )));
+}
+
+/// B4-22: after the repair, root records whether everything under the dashboard's folder is its user's own and closed to others,
+/// in root's folder where the box user's self-test can read it (an id and a count, never a name). A user made again with a new id,
+/// whose files the repair could not put back, is counted and said.
+#[test]
+fn the_repair_records_whether_the_dashboards_folder_is_its_users_own_and_says_when_it_is_not() {
+    let rig = Rig::new(Some(OLD_UNIT));
+    let out = rig.run(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(rig.dir.path()).unwrap());
+    let state = rig
+        .dir
+        .path()
+        .join("work/ozbox-supervisor-keep/folder.state");
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        format!("uid={me} wrong=0\n")
+    );
+    // the box user's self-test reads it: the record is readable, and its folder can be passed through but not listed
+    assert_eq!(mode(&state), 0o644);
+    assert_eq!(mode(state.parent().unwrap()), 0o711);
+    // the user was made again with a new id, and the files (here: the recorder's chown changes nothing) stay under the old one
+    std::fs::write(rig.dir.path().join("supuid"), format!("{}\n", me + 1)).unwrap();
+    let out = rig.run(&["--socket-only"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout);
+    let rec = std::fs::read_to_string(&state).unwrap();
+    let wrong: u32 = rec
+        .trim()
+        .strip_prefix(&format!("uid={} wrong=", me + 1))
+        .unwrap_or_else(|| panic!("{rec}"))
+        .parse()
+        .unwrap();
+    assert!(wrong > 0, "{rec}");
+    assert!(
+        said.contains("Permission denied")
+            && said.contains("ozbox-supervisor")
+            && said.contains("chown -R -h"),
+        "{said}"
+    );
+    // nothing in the record names a file
+    assert!(!rec.contains('/') && !rec.contains("auth"), "{rec}");
+}
+
+fn steps(rig: &Rig) -> String {
+    std::fs::read_to_string(rig.dir.path().join("etc/ozbox/first-boot-steps")).unwrap_or_default()
+}
+
+fn agent_rig() -> (Rig, PathBuf) {
+    let rig = Rig::new(Some(OLD_UNIT));
+    std::fs::create_dir_all(rig.dir.path().join("work/home/ozbox")).unwrap();
+    std::fs::create_dir_all(rig.dir.path().join("etc/ozbox")).unwrap();
+    let bin = executable(&rig, "ozbox-bin");
+    (rig, bin)
+}
+
+/// B4-12: the plain way works: one runuser call, systemd is not asked, and the step is recorded for the self-test.
+#[test]
+fn the_agent_settings_step_is_recorded_when_it_works() {
+    let (rig, bin) = agent_rig();
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!rig.log().contains("systemd-run"), "{}", rig.log());
+    assert_eq!(steps(&rig), "agent_tools ok runuser 1\n");
+}
+
+/// B4-12: after an upgrade the setup's `runuser` was refused ("cannot set user id"), so the coding agents never got the Oz
+/// Box tools. Now systemd starts the step as the box user instead, in a unit of its own, with no terminal and no privileges
+/// to gain, and the person's home.
+#[test]
+fn a_refused_runuser_hands_the_agent_settings_step_to_systemd_as_the_box_user() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        &format!(
+            "echo runuser \"$@\" >>'{}'; echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+            l.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    let call = rig
+        .log()
+        .lines()
+        .find(|x| x.starts_with("systemd-run "))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("systemd was not asked:\n{}", rig.log()));
+    for want in [
+        "--wait",
+        "--pipe",
+        "--uid=ozbox",
+        "--gid=ozbox",
+        "--property=NoNewPrivileges=yes",
+        "/work/home/ozbox",
+        "ozbox-bin agent-mcp install",
+    ] {
+        assert!(call.contains(want), "{want}: {call}");
+    }
+    assert!(!call.contains("ozbox-supervisor"), "{call}");
+    assert_eq!(steps(&rig), "agent_tools ok systemd-run 1\n");
+}
+
+/// B4-12: a systemd that is not answering yet is asked again after a pause, a bounded number of times, never forever; a
+/// step that never ran is recorded as failed, naming why, and does not stop the rest of the setup.
+#[test]
+fn a_systemd_that_is_not_ready_is_asked_a_bounded_number_of_times() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        "echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+    );
+    // not ready on the first try, then it works
+    let n = rig.dir.path().join("tries");
+    tool(
+        &b,
+        "systemd-run",
+        &format!(
+            "echo systemd-run \"$@\" >>'{}'; echo x >>'{}'; if [ \"$(wc -l <'{}')\" -lt 2 ]; then echo 'Failed to connect to bus: No such file or directory' >&2; exit 1; fi; exit 0",
+            l.display(),
+            n.display(),
+            n.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(steps(&rig), "agent_tools ok systemd-run 2\n");
+
+    // never ready: the first try and one per pause (two), then it stops and says what to run
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        "echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+    );
+    tool(
+        &b,
+        "systemd-run",
+        &format!(
+            "echo systemd-run \"$@\" >>'{}'; echo 'Failed to start transient service unit: Connection timed out' >&2; exit 1",
+            l.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(
+        o.status.success(),
+        "the rest of the setup still runs: {}",
+        text(&o)
+    );
+    assert_eq!(
+        rig.log()
+            .lines()
+            .filter(|x| x.starts_with("systemd-run "))
+            .count(),
+        3
+    );
+    assert_eq!(steps(&rig), "agent_tools failed switch-user-refused 3\n");
+    assert!(
+        text(&o).contains("ozbox admin <box> -- ensure-supervisor"),
+        "{}",
+        text(&o)
+    );
+}
+
+/// B4-12: a coding agent's settings the program refused (the person's own file) are said, recorded, and never retried or
+/// handed to systemd: switching user worked.
+#[test]
+fn a_refused_agent_setting_is_recorded_and_not_retried() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    tool(
+        &b,
+        "runuser",
+        "echo '  Claude Code: left alone, it is not valid JSON.'; exit 1",
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!rig.log().contains("systemd-run"), "{}", rig.log());
+    assert_eq!(steps(&rig), "agent_tools failed agent-settings-refused 1\n");
 }

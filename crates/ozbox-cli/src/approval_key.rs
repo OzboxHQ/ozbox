@@ -1015,6 +1015,18 @@ pub fn handle(
             if in_wait(store, id, now)? {
                 return Err(IN_WAIT.into());
             }
+            // a key kept on a computer never approves Production (ADR 0041 §3): said before anything is signed
+            let signer = crate::secrets_signer::Signer::SoftwareKey(id.to_string());
+            if !crate::secrets_signer::allowed(&signer, &s("scope"), &s("env"), false) {
+                gates.audit_event_bounded(
+                    store,
+                    "secrets.signer.refused",
+                    id,
+                    "why=software-key-production",
+                    now,
+                );
+                return Err(crate::secrets_signer::refusal(&s("scope")));
+            }
             let (nonce, expires_ms) = gates.challenges.issue(
                 policy.word(),
                 id,
@@ -1060,12 +1072,14 @@ pub fn handle(
             if !verify(&pk, &msg, &s("signature")) {
                 return refuse("bad-signature");
             }
-            let via = format!("laptop-key:{id}");
+            // every code this path makes is a software key's (an Ed25519 key in a keychain): the gate refuses it for Production
+            let signer = crate::secrets_signer::Signer::SoftwareKey(id.to_string());
+            let via = signer.via();
             let code = gates.approvals.mint(
                 &ch.scope,
                 &ch.project,
                 &ch.env,
-                &via,
+                &signer,
                 now,
                 crate::secrets_approval::DEFAULT_TTL_MS,
             )?;
@@ -1156,6 +1170,21 @@ mod tests {
         fn chain(&self) -> String {
             std::fs::read_to_string(self.dir.join("tasks.audit.jsonl")).unwrap_or_default()
         }
+    }
+
+    /// Integration (RC 0.3.0-beta): B4-28 says a laptop's software key never decides who may approve on a box, so the pinned key's
+    /// code for replacing the dashboard's sign-in settings is refused when it is spent. (B4-30's earlier test had it approving.)
+    /// Only the dashboard (a passkey or authenticator) approves this change.
+    #[test]
+    fn the_laptop_key_does_not_approve_a_dashboard_sign_in_replacement() {
+        let r = rig();
+        let (seed, pk) = generate().unwrap();
+        r.enroll("laptop", &pk).unwrap();
+        let a = "ab".repeat(16);
+        let e = r
+            .approve(&seed, "laptop", "dashboard-auth", "", &a, NOW)
+            .unwrap_err();
+        assert!(e.contains("never approves"), "{e}");
     }
 
     #[test]
@@ -1371,7 +1400,14 @@ mod tests {
         let code = r
             .gates
             .approvals
-            .mint("signer-enroll", "mine", "", "dashboard-stepup", NOW, 60_000)
+            .mint(
+                "signer-enroll",
+                "mine",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                NOW,
+                60_000,
+            )
             .unwrap();
         let v = r.call(Policy::Unsealed, json!({"op":"approval_key_enroll","key_id":"mine","public_key":pk2,"approval":code}), NOW + 2).unwrap();
         assert_eq!(v["via"], "dashboard-stepup");

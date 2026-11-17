@@ -211,11 +211,12 @@
    "store_id": "store-1",
    "subject": {
     "scope": "policy",
+    "project": "app",
     "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "predecessor_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "sensitivity": "ordinary"
    },
-   "digest": "5852d0e5861fc629dd058374f2ab5e4c9067620240ae98971e41a0babc953f1a"
+   "digest": "1ab5161bed3cd7da305fde8ed1c4ee15812dea66eb7c608afe1d96f3f7d5a803"
   },
   {
    "name": "policy: widens a guarded scope",
@@ -223,11 +224,12 @@
    "store_id": "store-1",
    "subject": {
     "scope": "policy",
+    "project": "app",
     "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "predecessor_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "sensitivity": "widens-guarded"
    },
-   "digest": "4481224012248702bd43383f9498183ae89d1c9cba115f7bbdc1c1c81bdeef10"
+   "digest": "f9ac739151613487bd1388430a99e9a5741c2ef38feeb820e652be4a7044b8f0"
   },
   {
    "name": "guard-override commit: one match",

@@ -141,7 +141,7 @@ run "comments_are_dropped_from_the_template_text_not_from_what_is_put_into_it" {
   }
 
   assert {
-    condition     = strcontains(hcloud_server.box.user_data, "path: /usr/local/sbin/ozbox-admin.sh") && strcontains(hcloud_server.box.user_data, "hostname: dev-1")
+    condition     = strcontains(hcloud_server.box.user_data, "path: /usr/local/sbin/ozbox-reown.sh") && strcontains(hcloud_server.box.user_data, "hostname: dev-1")
     error_message = "what the template puts in is still there after the comments are dropped"
   }
 

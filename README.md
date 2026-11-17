@@ -9,7 +9,7 @@ dials out to, never an open port. You can pause it, resize it, clone it, throw i
 Nothing is hosted by this project. There is no Oz Box cloud, account, relay or default domain: the boxes live in **your**
 cloud account, the dashboard runs on **your** computer or behind **your** domain, and the keys are **yours**.
 
-> **Status: Beta (0.2.0-beta.3).** The single box is real and has been used on a real cloud account. **Beta does not mean
+> **Status: Beta (0.3.0-beta.1).** The single box is real and has been used on a real cloud account. **Beta does not mean
 > every feature has been proven:** anything marked **Preview** is built and tested in CI but has not been run on a real box,
 > and the agent-side controls are mostly in that group. [What works and what does not](#status) says exactly what.
 
@@ -56,8 +56,8 @@ anything, and never uses `sudo`. Pre-releases are skipped when you ask for "the 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/OzboxHQ/ozbox/main/scripts/install.sh
 less install.sh                                   # read it first
-sh install.sh --version 0.2.0-beta.3              # puts ozbox in ~/.local/bin
-ozbox --version                                   # ozbox 0.2.0-beta.3
+sh install.sh --version 0.3.0-beta.1              # puts ozbox in ~/.local/bin
+ozbox --version                                   # ozbox 0.3.0-beta.1
 ```
 
 Nothing else is published for this release: no Homebrew formula, no crates.io or npm package. To build the program
@@ -105,15 +105,15 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 
 | Command | What it does |
 |---|---|
-| `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS), budget, alerts. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets |
-| `ozbox create <name> --size M` | Create a box (shows the plan first); `--tools`, `--profile`, `--label key=value`, `--disk` |
+| `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS), budget, alerts. `--dry-run` previews every step, even before the state bucket exists; `--only <steps>` / `--skip <steps>` choose steps without prompts (`state-bucket`, `network`, `secrets-key`, `adopt-command`, `operator-policy`, `box-policy`, `issuer`). The network's plan checks the Elastic IP and NAT gateway quotas first, and a step that fails part way removes what it made. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets |
+| `ozbox create <name> --size M` | Create a box (shows the plan first) and write its SSH entry on this computer (`ssh ozbox-<name>`; `--no-ssh-entry` skips it); `--tools`, `--profile`, `--label key=value`, `--disk` |
 | `ozbox list` · `show <name>` · `sizes` · `providers` | List boxes, show one, the size catalogue, what each provider can do |
-| `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot |
+| `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot (`--no-final-snapshot` for a throwaway box) |
 | `ozbox upgrade <name>` | Replace the system disk from a newer signed image, keep `/work`, run the self-test. An image whose signature cannot be verified is refused unless `--allow-unverified-image` is given; an upgrade that would lose the box's secrets store is refused unless `--accept-new-secrets-store` is given (on AWS the old system disk is first kept as an encrypted snapshot, so the old store's key can be read back; `--no-pre-upgrade-snapshot` turns that off). On AWS, a box already on the image whose machine was made with another first boot (or has no record of it) is replaced from the same image (`--reprovision` forces it); a signed AWS image built with another first-boot configuration is refused unless `--allow-first-boot-mismatch` is given |
 | `ozbox infra` | The box modules and first-boot configuration this program renders: its version, their hashes and the folder in use |
 | `ozbox adopt-fleet-key <name>` | Move an AWS box's secrets store from a key kept in a file to your fleet's KMS key, in place, so an upgrade keeps it (the box re-wraps its own store; nothing is entered again) |
 | `ozbox adopt <name>` | Rebuild a box's OpenTofu state from its cloud resources when the state is missing (AWS) |
-| `ozbox admin <name> -- <action>` | The one root path: a short allow-list of actions, each recorded on the box. The box user has no `sudo` |
+| `ozbox admin <name> -- <action>` | The one root path: a short allow-list of actions, each recorded on the box. The box user has no `sudo`. `-- replace-tunnel-token cloudflare --token-stdin` rotates a tunnel token and puts the old one back if the new tunnel is not healthy |
 | `ozbox backup` | List, run, restore and schedule backups of `/work` |
 | `ozbox tools` · `ozbox profile` | Install tools from the catalogue; save a box's tools and settings as a profile |
 
@@ -135,6 +135,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox permissions show\|mode\|grant\|revoke\|check` | The default mode, the active rules, and time-boxed Production grants; rules are edited in the dashboard |
 | `ozbox audit list\|verify\|seal` | The tamper-evident audit log, and a check that nothing in it was changed |
 | `ozbox memory` · `ozbox skills` | Notes in git that agents read once you approve them; skills usable only after you approve their exact files |
+| `ozbox tasks` | Typed, signed tasks between your computer and a box (questions, answers, status), with a state and an audit record; acts are refused until the passkey approval path exists. Preview |
 | `ozbox orch` | One conductor agent hands features to worker boxes, with claims, contracts, a mailbox and a merge queue |
 | `ozbox schedule` · `ozbox trigger` | Agent runs on a schedule in your time zone, or started by signed webhooks |
 | `ozbox models` · `ozbox cost` | Your model providers, which engine uses which model, usage and prices; the real cloud bill beside the estimate |
@@ -143,7 +144,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 
 | Command | What it does |
 |---|---|
-| `ozbox secrets` | Report on the encrypted secret store (names and ages, never values), rotate its keys, import a project's `.env` keys. `ozbox secrets ingress pin\|escrow\|setup-code --box <name>`: the sealed route to a box's secrets service ([ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md)) |
+| `ozbox secrets` | Report on the encrypted secret store (names and ages, never values), rotate its keys, import a project's `.env` keys. `ozbox secrets import <file> --project <p> --env <e> --box <name> --yes` asks the box for its own approval when one is needed and waits while you approve it in the dashboard (passkey or authenticator; `--wait MINUTES`; `--approval CODE` is the fallback). `ozbox env policy set --box`, `ozbox dashboard install` (a new tunnel token) and `ozbox box-secrets` (Hetzner) wait for your approval the same way. `ozbox secrets ingress pin\|escrow\|setup-code\|requests --box <name>`: the sealed route to a box's secrets service ([ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md), [ADR 0041](docs/adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on.md)) A Production import is approved in the dashboard only: `secrets approve --scope import --env production` says so and makes no code. |
 | `ozbox env run\|policy` | Run a named command with only the secrets a project declared it may receive, on a closed network except the hosts it declared |
 | `ozbox guard install` | Git hooks that stop a commit or push containing a key |
 | `ozbox box-secrets <name>` | Declare which non-production keys a box reads from your cloud's parameter store, into memory only |
@@ -167,9 +168,11 @@ at any time; `--access` answers it without a prompt.
 | `ozbox serve` | Serve the web dashboard on this computer only (loopback, with a random access token in the address) |
 | `ozbox tunnel setup\|status\|remove` | The outbound tunnel that reaches the dashboard from outside, with your own account |
 | `ozbox auth init` | The sign-in settings for a dashboard on a shared machine |
-| `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
+| `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user); it survives `ozbox upgrade` |
+| `ozbox dashboard retire-legacy-tunnel <name>` | Remove an old tunnel and token file the box user could read, once the box's own tunnel is up |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
+| `ozbox chat lock\|unlink --link <id>` (or `--all`) [`--box <box>`] | Lock a Telegram link so it can only read, or cut it: on the computer that runs the dashboard, or for a dashboard on a box with `--box` over the sealed route. Shows the plan first; the dashboard applies it within seconds |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
 
 ## The dashboard
@@ -193,6 +196,8 @@ ozbox serve --public-url https://dash.example.com --tunnel cloudflare
 Everyone who signs in has a role (`--person you,role=owner|member|viewer`; the first person is the owner, the rest are
 members): an owner changes settings, permissions, secrets and costs, a member does the work, a viewer only looks
 ([ADR 0039](docs/adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md)).
+A `--person` starts with an id you choose (lowercase letters, digits and dashes, up to 32), never an email; the email goes
+after it, for the way they sign in: `--person jane,google=jane@example.com` or `--person jane,access=jane@example.com`.
 
 `ozbox dashboard install` can instead run it as a service on a box, which then goes down whenever that box is paused or
 upgraded; a machine outside the fleet is the better home ([ADR 0010](docs/adr/0010-bring-your-own-tunnels.md)).
@@ -221,7 +226,7 @@ claim of certification or compliance.
 
 ## Status
 
-Oz Box is in **Beta**, version 0.2.0-beta.3. The latest 0.2.x release is the supported one (see [SECURITY.md](SECURITY.md)),
+Oz Box is in **Beta**, version 0.3.0-beta.1. The latest 0.3.x release is the supported one (see [SECURITY.md](SECURITY.md)),
 and the signed program is published on GitHub Releases only (no package-manager packages yet). A Beta may still break between
 releases (see [docs/releases.md](docs/releases.md)). We mark every worked example with one of three words, and update them as things are proven:
 
@@ -235,11 +240,14 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration, schedules and triggers, chat, linking Telegram with a passkey, and from a linked chat talking to a box, a session, a group or the whole fleet and starting, pausing, extending, creating or resizing boxes inside limits you allowed with a passkey ([ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); `/run` and worker boxes of another hub are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 
-**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, and signed skills. The
+**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, and signed skills. Running an engine on
+your own subscription instead of an API key is Preview for Codex with a ChatGPT plan only, on your opt-in, which lets an agent in
+that run read the sign-in ([ADR 0055](docs/adr/0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone.md)); Settings → Models says, per engine, whether the vendor allows it and why not
+([ADR 0054](docs/adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach.md)). The
 [use-case guides](docs/use-cases/README.md) say, example by example, where each stands.
 
 ## Community and support

@@ -42,6 +42,12 @@ run "an_ingress_key_is_written_at_first_boot_and_the_user_data_still_fits" {
     error_message = "Hetzner accepts at most 32 KB of user data, and the ingress key must still fit"
   }
 
+  # The big scripts are in the program, so Hetzner's render stays well under its limit (measured 2026-11-17: 21 116 bytes).
+  assert {
+    condition     = length(hcloud_server.box.user_data) < 24576 && strcontains(hcloud_server.box.user_data, "ozbox first-boot install-scripts")
+    error_message = "the user data must stay under 24 KB: a large script belongs in the program, not here"
+  }
+
   assert {
     condition     = strcontains(hcloud_server.box.user_data, "ozbox secrets ingress-setup 'zyxwvutsrqponmlkjihgfedcba234567zyxwvutsrqponmlkjihg'")
     error_message = "the ingress key must reach the setup step from the label"

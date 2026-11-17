@@ -182,3 +182,37 @@ resource "aws_iam_policy" "session_logs" {
   policy      = data.aws_iam_policy_document.session_logs[0].json
   tags        = { "ozbox-managed" = "true" }
 }
+
+# ---- alerts sent from a box's dashboard: one SES sender identity and one SNS topic, named in full (B4-9) ----------------------
+#
+# Off unless both ARNs are given. The statements name the two resources exactly (no wildcard, no tag lookup), and a box attaches
+# the policy only when it is created with notify_send_grants on and the same two ARNs, which the box module checks against this
+# policy's own document before it attaches it.
+
+locals {
+  notify = var.notify_ses_identity_arn != null && var.notify_sns_topic_arn != null
+}
+
+data "aws_iam_policy_document" "notify" {
+  count = local.notify ? 1 : 0
+
+  statement {
+    sid       = "SendAlertEmailFromTheOneIdentity"
+    actions   = ["ses:SendEmail"]
+    resources = [var.notify_ses_identity_arn]
+  }
+
+  statement {
+    sid       = "PublishAlertTextsToTheOneTopic"
+    actions   = ["sns:Publish"]
+    resources = [var.notify_sns_topic_arn]
+  }
+}
+
+resource "aws_iam_policy" "notify" {
+  count       = local.notify ? 1 : 0
+  name        = "ozbox-box-notify"
+  description = "Oz Box: send alert email from one SES identity and publish alert texts to one SNS topic, nothing else."
+  policy      = data.aws_iam_policy_document.notify[0].json
+  tags        = { "ozbox-managed" = "true" }
+}

@@ -52,6 +52,86 @@ pub struct Alert {
     pub title: String,
     pub body: String,
     pub ts_ms: u64,
+    /// The structured message (what is asked, where, who asked, the page to open). Absent on an alert that has only a
+    /// title and a body: one is derived from them when it is sent ([`Alert::notice`]). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<crate::notice::Notice>,
+    /// Where its link points for each recipient: set just before sending, never stored.
+    #[serde(skip)]
+    pub reach: Reach,
+}
+
+/// The dashboard's public address and the one-time link tokens made for this send, by person. Never serialised, and its
+/// `Debug` never shows a token.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Reach {
+    pub base: Option<String>,
+    pub tokens: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Reach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reach")
+            .field("base", &self.base)
+            .field("tokens", &self.tokens.len())
+            .finish()
+    }
+}
+
+impl Alert {
+    /// The structured message for this alert: its own, or one made from the title and the body, with the page a person
+    /// would open for it (the box, Usage, Schedules or Activity).
+    pub fn notice(&self) -> crate::notice::Notice {
+        use crate::notice::{Notice, NoticeKind};
+        if let Some(n) = &self.notice {
+            return n.clone();
+        }
+        let kind = match self.kind.as_str() {
+            "budget" => NoticeKind::Budget,
+            "test" => NoticeKind::Test,
+            "digest" => NoticeKind::Digest,
+            _ => NoticeKind::Alert,
+        };
+        let mut n = Notice::new(kind, &self.title, &self.body);
+        n.urgent = self.severity == Severity::Urgent;
+        n.box_name.clone_from(&self.box_name);
+        n.created_ms = self.ts_ms;
+        let (path, place) = match (&self.box_name, self.kind.as_str()) {
+            (_, "budget") => ("/usage".to_string(), t("notice.place_usage", &[])),
+            (_, "schedule") => ("/schedules".to_string(), t("notice.place_schedules", &[])),
+            (_, "test" | "digest") => ("/activity".to_string(), t("notice.place_activity", &[])),
+            (Some(b), _) => (
+                format!("/boxes/{}", percent_path(b)),
+                t("notice.place_box", &[("box", b)]),
+            ),
+            (None, _) => ("/activity".to_string(), t("notice.place_activity", &[])),
+        };
+        n.opens(path, place)
+    }
+
+    /// The message as one recipient gets it: the link made for `person`, the item's address for a shared place, or words
+    /// when the dashboard has no public address.
+    pub fn notice_for(&self, person: Option<&str>) -> crate::notice::Notice {
+        let n = self.notice();
+        let token = person
+            .and_then(|p| self.reach.tokens.get(p))
+            .map(String::as_str);
+        let action = n.action_for(self.reach.base.as_deref(), token);
+        n.with_action(action)
+    }
+}
+
+/// A box name in a path: only the characters a name may hold pass through.
+fn percent_path(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u32 & 0xff)
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +362,8 @@ impl Engine {
                 format!("mem:{name}"),
                 sustained,
                 Alert {
+                    notice: None,
+                    reach: Default::default(),
                     key: format!("mem:{name}"),
                     kind: "memory_pressure".into(),
                     severity: Severity::Normal,
@@ -300,6 +382,8 @@ impl Engine {
                 format!("disk:{name}"),
                 disk > DISK_PCT,
                 Alert {
+                    notice: None,
+                    reach: Default::default(),
                     key: format!("disk:{name}"),
                     kind: "disk_high".into(),
                     severity: if disk > DISK_URGENT_PCT {
@@ -324,6 +408,8 @@ impl Engine {
                 format!("selftest:{name}"),
                 bx.selftest_failed.is_some(),
                 Alert {
+                    notice: None,
+                    reach: Default::default(),
                     key: format!("selftest:{name}"),
                     kind: "self_test_failed".into(),
                     severity: Severity::Urgent,
@@ -363,6 +449,8 @@ impl Engine {
                 );
                 live.insert(key.clone());
                 out.push(Alert {
+                    notice: None,
+                    reach: Default::default(),
                     key,
                     kind: format!("incident_{kind}"),
                     severity: sev,
@@ -428,6 +516,8 @@ impl Engine {
                     if !(quiet && sev == Severity::Normal) {
                         st.budget_fired.extend(crossed);
                         out.push(Alert {
+                            notice: None,
+                            reach: Default::default(),
                             key: format!("budget:{}:{top}", obs.month),
                             kind: "budget".into(),
                             severity: sev,
@@ -610,10 +700,6 @@ impl Channels {
         self.secrets.get(name).map_err(|e| e.to_string())
     }
 
-    fn text(a: &Alert) -> String {
-        format!("{}\n{}", a.title, a.body)
-    }
-
     fn post(&self, req: HttpRequest) -> Result<String, String> {
         match self.http.send(&req) {
             Ok(r) if r.ok() => Ok(t("alert.sent", &[])),
@@ -628,13 +714,14 @@ impl Channels {
             http: Arc::clone(&self.http),
             runner: Arc::clone(&self.runner),
             aws_profile: self.aws_profile.clone(),
+            aws: crate::aws_native::shared(),
         }
     }
 
     /// Email to the fleet's own recipient list, through whichever sending service is set up.
     #[cfg(test)]
     pub fn email(&self, s: &Settings, a: &Alert) -> Result<String, String> {
-        self.email_to(s, &s.apps.email.to, a, 0)
+        self.email_to(s, &s.apps.email.to, a, None, 0)
     }
 
     pub fn email_to(
@@ -642,18 +729,22 @@ impl Channels {
         s: &Settings,
         to: &[String],
         a: &Alert,
+        person: Option<&str>,
         now_s: u64,
     ) -> Result<String, String> {
+        use crate::notice::render::{Email, Renderer};
         if to.is_empty() {
             return fail("alert.email_not_set");
         }
+        let m = Email::render(&a.notice_for(person));
         crate::channels::mail::send(
             &self.ctx(),
             &crate::channels::mail::Mail {
                 cfg: &s.apps.email,
                 to,
-                subject: &crate::channels::mail::subject(&a.title),
-                text: &Self::text(a),
+                subject: &m.subject,
+                text: &m.text,
+                html: Some(&m.html),
                 now_secs: now_s,
             },
         )
@@ -672,13 +763,17 @@ impl Channels {
         // A chat that is busy, or a Telegram that is down, is worth another try; a chat that blocked the bot is not.
         let mut every_failure_is_transient = true;
         for c in chats {
+            use crate::notice::render::{Renderer, Telegram};
+            // each chat gets the link made for its own person
+            let mut body = Telegram::render(&a.notice_for(c.person.as_deref()));
+            body["chat_id"] = json!(c.id);
             let r = self.post(
                 HttpRequest::new(
                     "POST",
                     format!("https://api.telegram.org/bot{token}/sendMessage"),
                     Guard::Public,
                 )
-                .json(&json!({ "chat_id": c.id, "text": Self::text(a) })),
+                .json(&body),
             );
             if let Err(why) = r {
                 failed += 1;
@@ -721,8 +816,10 @@ impl Channels {
         let Some(url) = self.secret("slack-webhook-url")? else {
             return fail("alert.slack_no_url");
         };
+        use crate::notice::render::{Renderer, Slack};
+        // a Slack channel is a shared place: the item's address, never a link made for one person
         self.post(
-            HttpRequest::new("POST", url, Guard::Public).json(&json!({ "text": Self::text(a) })),
+            HttpRequest::new("POST", url, Guard::Public).json(&Slack::render(&a.notice_for(None))),
         )
     }
 
@@ -741,6 +838,7 @@ impl Channels {
             "box": a.box_name,
             "title": a.title,
             "body": a.body,
+            "notice": <crate::notice::render::Webhook as crate::notice::render::Renderer>::render(&a.notice_for(None)),
         })
         .to_string();
         let mut req = HttpRequest::new("POST", url, Guard::Public)
@@ -763,11 +861,11 @@ impl Channels {
         now_s: u64,
     ) -> Delivery {
         let r = match channel {
-            "email" => self.email_to(s, &s.apps.email.to, a, now_s),
+            "email" => self.email_to(s, &s.apps.email.to, a, None, now_s),
             "telegram" => self.telegram(chats, a),
             "slack" => self.slack(a),
-            "discord" => crate::channels::chat::discord(&self.ctx(), a),
-            "teams" => crate::channels::chat::teams(&self.ctx(), a),
+            "discord" => crate::channels::chat::discord(&self.ctx(), &a.notice_for(None)),
+            "teams" => crate::channels::chat::teams(&self.ctx(), &a.notice_for(None)),
             c => match c.strip_prefix("webhook:") {
                 Some(id) => self.webhook(id, a, now_s),
                 None => fail("alert.unknown_channel"),
@@ -824,6 +922,8 @@ impl Channels {
 
 pub fn test_alert(now_ms: u64) -> Alert {
     Alert {
+        notice: None,
+        reach: Default::default(),
         key: format!("test:{now_ms}"),
         kind: "test".into(),
         severity: Severity::Normal,
@@ -1207,6 +1307,8 @@ mod tests {
     fn the_hourly_limit_drops_ordinary_alerts_first() {
         let mut st = AlertState::default();
         let mk = |i: usize, sev| Alert {
+            notice: None,
+            reach: Default::default(),
             key: format!("k{i}"),
             kind: "x".into(),
             severity: sev,

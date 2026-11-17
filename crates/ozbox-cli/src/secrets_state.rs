@@ -17,6 +17,9 @@
 //! * `failing_since`: unix seconds when the service first stopped being ready, kept across the unit's restarts (it is carried
 //!   over while the file before said not-ready too, and left out once ready). The box's self-test reads it to tell a failure
 //!   that has lasted from one that is only starting; a file from an older service has no such line.
+//! * `phase`: where a not-ready service is: `retrying` (it tries again in this process), `gave-up` (it used up its tries and
+//!   exits for the unit to start it again) or `stopped` (for good). See `ozbox_core::secrets_phase`; a file from an older
+//!   service has no such line.
 //! * `code`: why the service is not ready: `no-escrow` (the store is there, its key is not, and nothing holds a copy) or
 //!   `kind-mismatch` (the store is sealed by a key kept in a file, the service is configured for another kind, and the file
 //!   key is gone with no copy): the only two states in which `recover-store` may set the store aside, both meaning the store
@@ -47,6 +50,8 @@ pub struct State {
     /// Unix seconds when the service first stopped being ready, carried across restarts while it stays not ready. `None`: ready,
     /// or written by a service that does not say.
     pub failing_since: Option<u64>,
+    /// Where a not-ready service is (`phase=`). `None`: ready, or written by a service that does not say.
+    pub phase: Option<ozbox_core::secrets_phase::Phase>,
 }
 
 /// The one not-ready code under which a store may be set aside.
@@ -69,6 +74,7 @@ impl State {
             adopt: true,
             names: None,
             failing_since: None,
+            phase: None,
         }
     }
 
@@ -83,6 +89,7 @@ impl State {
             adopt: true,
             names: None,
             failing_since: None,
+            phase: None,
         }
     }
 
@@ -94,6 +101,11 @@ impl State {
 
     pub fn with_failing_since(mut self, unix_secs: u64) -> Self {
         self.failing_since = Some(unix_secs);
+        self
+    }
+
+    pub fn with_phase(mut self, p: ozbox_core::secrets_phase::Phase) -> Self {
+        self.phase = Some(p);
         self
     }
 
@@ -132,6 +144,13 @@ impl State {
         if let Some(t) = self.failing_since {
             out.push_str(&format!("failing_since={t}\n"));
         }
+        if let (false, Some(p)) = (self.ready, self.phase) {
+            out.push_str(&format!(
+                "{}={}\n",
+                ozbox_core::secrets_phase::FIELD,
+                p.word()
+            ));
+        }
         out
     }
 
@@ -168,6 +187,7 @@ impl State {
                 Some(("adopt", "kms")) => s.adopt = true,
                 Some(("names", v)) => s.names = v.parse().ok(),
                 Some(("failing_since", v)) => s.failing_since = v.parse().ok(),
+                Some(("phase", v)) => s.phase = ozbox_core::secrets_phase::Phase::parse(v),
                 _ => {}
             }
         }

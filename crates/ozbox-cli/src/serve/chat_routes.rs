@@ -75,6 +75,18 @@ pub struct Out {
     pub buttons: Vec<(String, String)>,
     /// The "said once" flag this message answers for: a failed delivery clears it so the notice is tried again.
     pub announce: Option<String>,
+    /// The structured message, when this is one (an approval an agent asked for): each channel renders it its own way,
+    /// and `text` is its plain-text form. A reply has none and is sent as plain text through `Notice::reply`.
+    pub notice: Option<crate::notice::Notice>,
+}
+
+impl Out {
+    /// What every channel renders: the notice, or the words as a reply.
+    pub fn notice(&self) -> crate::notice::Notice {
+        self.notice
+            .clone()
+            .unwrap_or_else(|| crate::notice::Notice::reply(&self.text))
+    }
 }
 
 #[derive(Default)]
@@ -83,7 +95,7 @@ pub struct ChatRt {
     pub(super) rate: RateLimit,
     throttle: BTreeMap<String, Throttle>,
     /// `<conv>|<task>` -> the answers already sent.
-    seen_turns: BTreeMap<String, u32>,
+    pub(super) seen_turns: BTreeMap<String, u32>,
     /// `<conv>|<task>|<what>` for things said once.
     announced: BTreeSet<String>,
     /// A notice that failed to send: how many times, and the earliest next try.
@@ -97,7 +109,7 @@ pub struct ChatRt {
     slack_stop: Option<Arc<AtomicBool>>,
     /// The last screen read from each attached terminal session.
     screens: BTreeMap<String, Vec<String>>,
-    next_tick_ms: u64,
+    pub(super) next_tick_ms: u64,
     next_terminal_ms: u64,
     /// Numbers told that WhatsApp's window had closed.
     told_closed: BTreeSet<String>,
@@ -263,7 +275,7 @@ impl App {
 
     /// The exact values that must never reach a chat: the keys and tokens this server keeps for chat and for models. Read
     /// when needed and dropped with the message, never stored here.
-    fn chat_secrets(&self) -> Vec<String> {
+    pub(super) fn chat_secrets(&self) -> Vec<String> {
         let mut names: Vec<String> = [
             "telegram-bot-token",
             "slack-app-token",
@@ -362,9 +374,9 @@ impl App {
                 (
                     "Telegram",
                     Some(Box::new(move || {
-                        // a Telegram message never carries a button: nothing is decided there
-                        let ok =
-                            telegram::send_text(http.as_ref(), &token, chat_id, &o.text).is_ok();
+                        // at most a URL button that opens the dashboard: nothing is decided there
+                        let ok = telegram::send_notice(http.as_ref(), &token, chat_id, &o.notice())
+                            .is_ok();
                         Done::ChatSent {
                             flag: f,
                             to: "Telegram",
@@ -381,8 +393,11 @@ impl App {
                 (
                     "Slack",
                     Some(Box::new(move || {
-                        let ok =
-                            slack::post(http.as_ref(), &token, &o.id, &o.text, &o.buttons).is_ok();
+                        let ok = if o.buttons.is_empty() {
+                            slack::post_notice(http.as_ref(), &token, &o.id, &o.notice()).is_ok()
+                        } else {
+                            slack::post(http.as_ref(), &token, &o.id, &o.text, &o.buttons).is_ok()
+                        };
                         Done::ChatSent {
                             flag: f,
                             to: "Slack",
@@ -402,7 +417,8 @@ impl App {
                 };
                 let open = whatsapp::in_window(self.state.chat.wa_inbound.get(&o.id).copied(), now);
                 let body = if open {
-                    whatsapp::text_body(&o.id, &o.text, &o.buttons)
+                    use crate::notice::render::{Renderer, Text};
+                    whatsapp::text_body(&o.id, &Text::render(&o.notice()), &o.buttons)
                 } else if !template.is_empty() {
                     whatsapp::template_body(&o.id, &template)
                 } else {
@@ -458,6 +474,7 @@ impl App {
         let key = conv_key(channel, id);
         let reply = |s: String| Out {
             announce: None,
+            notice: None,
             channel,
             id: id.to_string(),
             text: s,
@@ -509,7 +526,7 @@ impl App {
         self.chat_say(outs, now);
     }
 
-    fn chat_exec(
+    pub(super) fn chat_exec(
         &mut self,
         channel: Channel,
         id: &str,
@@ -522,6 +539,7 @@ impl App {
         let say = |outs: &mut Vec<Out>, s: String| {
             outs.push(Out {
                 announce: None,
+                notice: None,
                 channel,
                 id: id.to_string(),
                 text: s,
@@ -1188,11 +1206,18 @@ impl App {
         }
     }
 
-    /// As `dashboard_where`, with a one-time link to the dashboard's chat page that names an approval. No link is made
-    /// (and no token issued) when there is no public address.
-    fn chat_link(&mut self, approval_id: &str, person: &str, now: u64) -> String {
+    /// A one-time link to the dashboard's chat page that names an agent's approval, for one person: the token is in the
+    /// address's fragment (`/chat#link=<token>`), so no server, tunnel, proxy or referrer ever sees it; the page takes it out
+    /// of the address bar and redeems it once over POST, and shows that request. With no public address, words that name
+    /// the page (and no token is made).
+    pub(super) fn chat_link_action(
+        &mut self,
+        approval_id: &str,
+        person: &str,
+        now: u64,
+    ) -> crate::notice::Action {
         let Some(base) = self.chat_public_base() else {
-            return t("chat.where_none", &[]);
+            return crate::notice::Action::Words;
         };
         if self.chat.links.is_none() {
             self.chat.links = Links::new().ok();
@@ -1203,10 +1228,10 @@ impl App {
             .as_mut()
             .and_then(|l| l.issue(approval_id, person, now).ok())
             .unwrap_or_default();
-        t(
-            "chat.where_link",
-            &[("url", &format!("{base}/chat?link={token}"))],
-        )
+        crate::notice::Action::OneTime {
+            host: crate::notice::host_of(&base),
+            url: format!("{base}/chat#link={token}"),
+        }
     }
 
     /// Whether a said-once notice is due now, marking it said. A notice whose delivery failed waits out its backoff first.
@@ -1267,7 +1292,7 @@ impl App {
         }
         self.chat.next_tick_ms = now + 1000;
         self.chat_slack_pump(now);
-        if self.state.chat.binds.is_empty() {
+        if self.state.chat.binds.is_empty() && self.state.chat.watch.is_empty() {
             return;
         }
         let Some(book) = self.chat_book() else { return };
@@ -1280,7 +1305,32 @@ impl App {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let mut outs: Vec<(String, Out)> = Vec::new();
-        for (key, b) in &binds {
+        // what each conversation hears from: the session it follows, and the sessions a message was addressed to
+        // (conversation, session, the message id a watched session answers for, and the thread to answer in)
+        type Heard = (String, Bind, Option<(String, Option<String>)>);
+        let mut heard: Vec<Heard> = binds
+            .iter()
+            .map(|(k, b)| (k.clone(), b.clone(), None))
+            .collect();
+        for (k, ws) in &self.state.chat.watch {
+            for w in ws {
+                let already = binds
+                    .iter()
+                    .any(|(bk, b)| bk == k && matches!(b, Bind::Task { id } if *id == w.task));
+                let msg = Some((w.msg_id.clone(), w.thread.clone()));
+                if already {
+                    // the followed session's replies carry the message id too
+                    if let Some(h) = heard.iter_mut().find(|(hk, hb, _)| {
+                        hk == k && matches!(hb, Bind::Task { id } if *id == w.task)
+                    }) {
+                        h.2 = msg;
+                    }
+                } else {
+                    heard.push((k.clone(), Bind::Task { id: w.task.clone() }, msg));
+                }
+            }
+        }
+        for (key, b, msg) in &heard {
             let Some((chan, cid)) = key.split_once(':') else {
                 continue;
             };
@@ -1295,6 +1345,7 @@ impl App {
             let Some(task) = book.task(tid) else { continue };
             let mk = |text: String, buttons: Vec<(String, String)>| Out {
                 announce: None,
+                notice: None,
                 channel,
                 id: cid.to_string(),
                 text,
@@ -1305,7 +1356,26 @@ impl App {
             let seen = self.chat.seen_turns.get(&seen_key).copied().unwrap_or(0);
             if task.turns > seen {
                 self.chat.seen_turns.insert(seen_key, task.turns);
-                if let Some(reply) = &task.last_reply {
+                let attributed = channel == Channel::Telegram
+                    || (msg.is_some() && matches!(channel, Channel::Slack | Channel::Whatsapp));
+                if let (Some(reply), true) = (&task.last_reply, attributed) {
+                    // a Telegram chat, and any app's addressed message, gets the stronger redaction, the box's detail level
+                    // and the attribution; a reply to an addressed message is threaded under it
+                    let text = self.tg_agent_reply(
+                        key,
+                        (task.spec.box_name.as_str(), tid),
+                        msg.as_ref().map(|(m, _)| m.as_str()),
+                        reply,
+                        false,
+                        now,
+                    );
+                    let mut o = mk(text.clone(), Vec::new());
+                    if let Some((_, Some(th))) = msg {
+                        o.notice =
+                            Some(crate::notice::Notice::reply(text).in_thread(Some(th.clone())));
+                    }
+                    outs.push((key.clone(), o));
+                } else if let Some(reply) = &task.last_reply {
                     let (body, left) = text::summarise(reply, &secrets);
                     let msg = if left > 0 {
                         t(
@@ -1330,19 +1400,31 @@ impl App {
                         // one-time link to the dashboard's approval page, never a button, and nothing said back in a chat
                         // approves, denies or cancels anything
                         let person = task.spec.requested_by.clone();
-                        let place = self.chat_link(approval_id, &person, now);
-                        let key_text = if is_risky(a.kind, a.production, a.needs_step_up) {
-                            "chat.approval_risky"
-                        } else {
-                            "chat.approval"
-                        };
-                        let mut m = mk(
-                            t(
-                                key_text,
-                                &[("task", tid), ("action", &a.action), ("where", &place)],
-                            ),
-                            Vec::new(),
+                        let action = self.chat_link_action(approval_id, &person, now);
+                        let mut n = crate::notice::Notice::new(
+                            crate::notice::NoticeKind::AgentAsks,
+                            t("notice.agent_title", &[("action", &a.action)]),
+                            t("notice.agent_summary", &[("task", tid)]),
                         );
+                        n.box_name = Some(a.box_name.clone()).filter(|b| !b.is_empty());
+                        n.production = a.production;
+                        n.asked_by = Some(a.asked_by.clone()).filter(|b| !b.is_empty());
+                        if is_risky(a.kind, a.production, a.needs_step_up) {
+                            n.risk = Some(t("notice.agent_risky", &[]));
+                        }
+                        n.created_ms = now;
+                        n.expires_ms = Some(a.expires_ms.max(now));
+                        n.reference = Some(crate::notice::reference(approval_id));
+                        n.only_tells = true;
+                        let n = n
+                            .opens("/chat", t("notice.place_chat", &[]))
+                            .with_action(Some(action));
+                        let text = {
+                            use crate::notice::render::{Renderer, Text};
+                            Text::render(&n)
+                        };
+                        let mut m = mk(text, Vec::new());
+                        m.notice = Some(n);
                         m.announce = Some(flag);
                         outs.push((key.clone(), m));
                     }
@@ -1433,6 +1515,7 @@ impl App {
                         key.clone(),
                         Out {
                             announce: None,
+                            notice: None,
                             channel,
                             id: cid.to_string(),
                             text: t(
@@ -1452,7 +1535,7 @@ impl App {
         let mut ready: Vec<Out> = Vec::new();
         for (key, o) in outs {
             let th = self.chat.throttle.entry(key).or_default();
-            if !o.buttons.is_empty() || o.announce.is_some() {
+            if !o.buttons.is_empty() || o.announce.is_some() || o.notice.is_some() {
                 // a question with buttons, and a notice that is retried if it fails, is not held back or merged
                 ready.push(o);
             } else if let Some(text) = th.offer(o.text.clone(), now) {
@@ -1472,6 +1555,7 @@ impl App {
                         };
                         ready.push(Out {
                             announce: None,
+                            notice: None,
                             channel,
                             id: cid.to_string(),
                             text,
@@ -1539,6 +1623,7 @@ impl App {
                 user,
                 text: body,
                 forwarded,
+                ts,
                 ..
             } => {
                 if let Some(person) = self
@@ -1547,7 +1632,16 @@ impl App {
                     .person_of(Channel::Slack, &user)
                     .map(str::to_string)
                 {
-                    self.chat_inbound(Channel::Slack, &user, &person, &body, forwarded, now);
+                    // through the same act table and decide as Telegram; replies to it are threaded under it
+                    let thread = Some(ts).filter(|t| !t.is_empty());
+                    self.chat_gate(
+                        (Channel::Slack, &user),
+                        &person,
+                        &body,
+                        forwarded,
+                        thread,
+                        now,
+                    );
                 } else {
                     self.chat_try_pair(Channel::Slack, &user, &body, now);
                 }
@@ -1588,6 +1682,7 @@ impl App {
             self.chat_say(
                 vec![Out {
                     announce: None,
+                    notice: None,
                     channel,
                     id: id.to_string(),
                     text: t("chat.paired", &[]),
@@ -1672,6 +1767,7 @@ impl App {
                         self.chat_say(
                             vec![Out {
                                 announce: None,
+                                notice: None,
                                 channel: Channel::Whatsapp,
                                 id: m.from.clone(),
                                 text: t("chat.window_closed", &[]),
@@ -1683,12 +1779,13 @@ impl App {
                     match m.button {
                         // a button decides nothing: a chat only notifies
                         Some(_) => {}
-                        None => self.chat_inbound(
-                            Channel::Whatsapp,
-                            &m.from,
+                        // through the same act table and decide as Telegram
+                        None => self.chat_gate(
+                            (Channel::Whatsapp, &m.from),
                             &person,
                             &m.text,
                             m.forwarded,
+                            None,
                             now,
                         ),
                     }
@@ -1827,8 +1924,12 @@ impl App {
                 };
                 // opening a pointer link changes nothing and spends nothing; a wrong person or a lapsed link is one answer
                 match self.tg_open_pointer(&b.token, &who, now) {
-                    Some(path) => Resp::json(200, &json!({ "path": path })),
-                    None => Resp::error(
+                    Ok(path) => Resp::json(200, &json!({ "path": path })),
+                    // said only to the person the link was made for: a stranger gets the answer below
+                    Err(crate::chat::links::LinkError::Used) => {
+                        Resp::error(410, "link_used", &t("notice.link_used", &[]))
+                    }
+                    Err(_) => Resp::error(
                         404,
                         "not_found",
                         "that link did not work (it lapses after ten minutes)",
@@ -1863,12 +1964,20 @@ impl App {
                             })
                         });
                         match a {
-                            Some((v, pending)) => Resp::json(
+                            Some((v, true)) => Resp::json(
                                 200,
-                                &json!({ "approval_id": aid, "pending": pending, "approval": v }),
+                                &json!({ "approval_id": aid, "pending": true, "approval": v }),
                             ),
+                            // decided (here, on another device, or it lapsed) before the link was opened: the link is used
+                            Some((_, false)) => {
+                                Resp::error(410, "link_used", &t("notice.link_used", &[]))
+                            }
                             None => Resp::error(404, "not_found", "that request is gone"),
                         }
+                    }
+                    // decided while the link was still in the chat: said only to the person the link was made for
+                    Some(Err(crate::chat::links::LinkError::Used)) => {
+                        Resp::error(410, "link_used", &t("notice.link_used", &[]))
                     }
                     _ => Resp::error(
                         404,
@@ -2116,6 +2225,18 @@ mod tests {
             self.now += 5_000;
             self.a.tick(self.now);
         }
+        /// The addresses of every URL button the server put under a message.
+        fn opens(&self) -> Vec<String> {
+            let v: Value = serde_json::from_slice(&self.a.demo_telegram_sent().body).unwrap();
+            v["sent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["opens"].as_array().cloned().unwrap_or_default())
+                .filter_map(|u| u.as_str().map(str::to_string))
+                .collect()
+        }
+
         fn sent(&self) -> Vec<(i64, String, Vec<String>)> {
             let r = self.a.demo_telegram_sent();
             let v: Value = serde_json::from_slice(&r.body).unwrap();
@@ -2329,15 +2450,36 @@ mod tests {
         let (_, text, buttons) = r
             .sent()
             .into_iter()
-            .find(|(_, t, _)| t.contains("Decide it in the dashboard"))
+            .find(|(_, t, _)| t.contains("Nothing in a chat approves"))
             .unwrap();
         assert!(text.contains("sudo"), "the exact action is shown: {text}");
         assert!(
             buttons.is_empty(),
             "no button decides anything from a chat: {buttons:?}"
         );
-        let token = text.split("link=").nth(1).unwrap().trim().to_string();
+        assert!(
+            text.contains("<b>Approve or deny: sudo</b>"),
+            "a verb first: {text}"
+        );
+        // the Telegram message carries the link as a URL button that only opens the dashboard
+        let opens = r.opens();
+        let url = opens
+            .iter()
+            .find(|u| u.contains("/chat#link="))
+            .unwrap_or_else(|| panic!("no link button: {opens:?}"))
+            .clone();
+        assert!(
+            url.starts_with("https://ozbox.example.com/chat#link="),
+            "{url}"
+        );
+        let token = url.split("#link=").nth(1).unwrap().to_string();
         assert_eq!(token.len(), 48);
+        // the token is in the fragment only: a browser never sends it to a server, a tunnel or a referrer
+        let (sent_part, _) = url.split_once('#').unwrap();
+        assert!(
+            !sent_part.contains(&token) && !sent_part.contains('?'),
+            "{url}"
+        );
         fn pending(r: &Rig) -> Vec<String> {
             r.a.chat_book()
                 .unwrap()
@@ -2366,10 +2508,14 @@ mod tests {
             .sent()
             .into_iter()
             .rev()
-            .find(|(_, t, _)| t.contains("passkey"))
+            .find(|(_, t, _)| t.contains("cannot be undone"))
             .unwrap();
         assert!(buttons.is_empty());
-        assert_eq!(risky.split("link=").nth(1).unwrap().trim().len(), 48);
+        assert!(risky.contains("<b>Risk</b>"), "{risky}");
+        assert!(r2
+            .opens()
+            .iter()
+            .any(|u| u.split("link=").nth(1).is_some_and(|t| t.len() == 48)));
         // the link opens the dashboard on that request once; a second use, and a made-up one, do nothing
         let (st, v) = r.call("POST", "/v1/chat/links/redeem", json!({ "token": token }));
         assert_eq!(st, 200, "{v}");
@@ -2388,11 +2534,41 @@ mod tests {
             .0,
             404
         );
-        // the token is in no file this server wrote
+        // the token is in no file this server wrote, and in no activity or audit line
         for f in ["tasks.json", "state.json", "settings.json"] {
             let t = std::fs::read_to_string(r._dir.path().join(f)).unwrap_or_default();
             assert!(!t.contains(&token), "{f}");
         }
+        let (_, act) = r.get("/v1/activity");
+        assert!(!act.to_string().contains(&token));
+        let (_, said) = r.get("/v1/chat");
+        assert!(
+            !said.to_string().contains(&token),
+            "the dashboard's own copy names no token"
+        );
+        // a link whose request is decided before it is opened reads as used, to its own person
+        let url2 = r2
+            .opens()
+            .into_iter()
+            .find(|u| u.contains("/chat#link="))
+            .unwrap();
+        let token2 = url2.split("#link=").nth(1).unwrap().to_string();
+        let aid2 =
+            r2.a.chat_book()
+                .unwrap()
+                .approvals
+                .iter()
+                .find(|a| a.state == ApprovalState::Pending)
+                .map(|a| a.id.clone())
+                .unwrap();
+        let (st, v) = r2.call(
+            "POST",
+            &format!("/v1/approval-requests/{aid2}/deny"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{v}");
+        let (st, v) = r2.call("POST", "/v1/chat/links/redeem", json!({ "token": token2 }));
+        assert_eq!((st, v["code"].as_str()), (410, Some("link_used")), "{v}");
     }
 
     #[test]
@@ -2481,6 +2657,7 @@ mod tests {
             channel: "D1".into(),
             text: text.into(),
             forwarded: false,
+            ts: String::new(),
         };
         r.a.chat_slack_event(ev("U1", "/new alpha hello"), r.now);
         assert_eq!(r.task_count(), 0, "a stranger is not heard");
@@ -2506,6 +2683,7 @@ mod tests {
                 channel: "D1".into(),
                 text: "/new alpha again".into(),
                 forwarded: true,
+                ts: String::new(),
             },
             r.now + 2,
         );
@@ -2912,13 +3090,14 @@ mod tests {
                     .filter(|(k, _)| k == key)
                     .map(|(_, t)| t)
                     .collect();
+            // Slack and WhatsApp go through the same act table and decide as Telegram, so they are refused in its words
             assert!(
-                said.iter().any(|t| t.contains("not from a chat app")),
+                said.iter()
+                    .any(|t| t.contains("stopped in the dashboard, not from a chat")),
                 "{key} was not told to use the dashboard: {said:?}"
             );
             assert!(
-                said.iter()
-                    .any(|t| t.contains("cap is raised in the dashboard")),
+                said.iter().any(|t| t.contains("raised in the dashboard")),
                 "{key} /budget was not refused: {said:?}"
             );
         }
@@ -3649,8 +3828,10 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("Open it there:"), "{said}");
-        let w = r.a.chat_link("a1", "owner", r.now);
-        assert_eq!(w, "Open the dashboard on the computer that runs it.");
+        assert_eq!(
+            r.a.chat_link_action("a1", "owner", r.now),
+            crate::notice::Action::Words
+        );
         assert!(
             r.a.chat.links.is_none(),
             "a one-time link was made for nothing"
@@ -3660,10 +3841,16 @@ mod tests {
             r.a.dashboard_where("/tasks"),
             "Open it there: https://ozbox.example.com/tasks"
         );
-        assert!(r
-            .a
-            .chat_link("a1", "owner", r.now)
-            .starts_with("Open it there: https://ozbox.example.com/chat?link="),);
+        match r.a.chat_link_action("a1", "owner", r.now) {
+            crate::notice::Action::OneTime { url, host } => {
+                assert!(
+                    url.starts_with("https://ozbox.example.com/chat#link="),
+                    "{url}"
+                );
+                assert_eq!(host, "ozbox.example.com");
+            }
+            other => panic!("{other:?}"),
+        }
         let (_, v) = r.get("/v1/chat");
         assert_eq!(v["public_url_set"], true);
     }

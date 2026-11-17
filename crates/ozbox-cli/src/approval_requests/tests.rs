@@ -927,7 +927,7 @@ fn the_await_caps_hold_and_resolve_and_the_broker_still_answer_while_they_are_fu
     let ex = r.call(
         Policy::Box,
         Some(BOX_UID),
-        json!({"op":"exists","name":"nothing"}),
+        json!({"op":"exists","name":"email-api-key"}),
     );
     assert_eq!(ex["ok"], true);
     assert!(
@@ -1540,6 +1540,7 @@ fn an_approval_a_laptop_key_gave_dies_at_spend_when_the_key_is_revoked() {
                 authenticator_data: None,
                 attestation_digest: None,
             }),
+            authenticator: None,
         };
         let input = |evidence: Evidence| DecideInput {
             class: SocketClass::Ingress,
@@ -1803,8 +1804,10 @@ fn a_spend_recomputes_the_matches_from_the_text_the_hook_sends() {
     .unwrap();
 }
 
+/// A policy change is filed with the declaration's text (B4-27): a subject of the filer's own making (its digests and its
+/// label) is never read, so one with no declaration is refused.
 #[test]
-fn a_policy_change_is_not_filed_through_this_operation_yet() {
+fn a_policy_change_is_filed_with_its_declaration_never_a_filers_subject() {
     let r = rig(true, false);
     let p = json!({"scope":"policy","policy_sha256":hex64('d'),"predecessor_sha256":hex64('e'),"sensitivity":"ordinary"});
     let e = r
@@ -1815,7 +1818,7 @@ fn a_policy_change_is_not_filed_through_this_operation_yet() {
             json!({"op":"areq_file","subject":p}),
         )
         .unwrap_err();
-    assert!(e.contains("policy change is not filed"), "{e}");
+    assert!(!e.is_empty());
 }
 
 /// a caller that cannot see a request cannot hold a place in its await cap, and the per-request cap is per class.
@@ -2057,14 +2060,19 @@ fn a_chat_app_can_decide_nothing_and_no_chat_source_names_a_request_operation_th
         checked += 1;
     }
     assert_eq!(checked, 13);
-    // the notification builder offers a link and no button
+    // the notification builder offers a link, and the one button a message may carry only opens it: no callback a chat could
+    // answer with exists anywhere a message is built
     let route = include_str!("../serve/approval_requests.rs");
     assert!(route.contains("approvals?request="));
-    for banned in ["inline_keyboard", "callback_data", "reply_markup"] {
-        assert!(
-            !route.contains(banned) && !include_str!("../notify.rs").contains(banned),
-            "{banned}"
-        );
+    for src in [
+        route,
+        include_str!("../notify.rs"),
+        include_str!("../notice/render.rs"),
+        include_str!("../notice/mod.rs"),
+    ] {
+        for banned in ["callback_data", "switch_inline", "callback_game"] {
+            assert!(!src.contains(banned), "{banned}");
+        }
     }
 }
 

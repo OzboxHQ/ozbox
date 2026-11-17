@@ -106,7 +106,7 @@ test('a one-time link from a chat opens its approval in the dashboard, and a sec
   const item = page.getByTestId('chat-approvals').getByTestId('agent-approval').filter({ hasText: 'git push origin main' }).first();
   await expect(item).toBeVisible({ timeout: 40_000 });
   // a bad link says so
-  await open(page, `/chat?link=${'0'.repeat(48)}`);
+  await open(page, `/chat#link=${'0'.repeat(48)}`);
   await expect(page.getByTestId('chat-link-note')).toContainText('That link did not work', { timeout: 20_000 });
   await open(page, '/approvals');
   await page.getByTestId('agent-approval').filter({ hasText: 'git push origin main' }).first().getByRole('button', { name: 'Deny' }).click();

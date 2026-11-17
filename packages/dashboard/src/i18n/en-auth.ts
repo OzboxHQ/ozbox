@@ -143,7 +143,7 @@ export const enAuth = {
   'terminal.paste_empty': 'The clipboard is empty, so nothing was pasted.',
   'terminal.paste_too_large': 'That is {chars} characters, too much to paste at once. Paste less, or put it in a file.',
   'terminal.paste_title': 'Paste into the terminal',
-  'terminal.paste_help': 'Your browser does not let this page read the clipboard. Paste here with Ctrl+V (Cmd+V on a Mac, or long-press and choose Paste), then send it.',
+  'terminal.paste_help': 'This browser did not hand the clipboard to the page (Firefox and Safari ask with a small Paste button each time, and a refused or dismissed request ends up here). Paste here with Ctrl+V (Cmd+V on a Mac, or press and hold and choose Paste), then send it. Pasting with the keyboard straight into the terminal works too.',
   'terminal.paste_label': 'Text to paste',
   'terminal.paste_cancel': 'Cancel',
   'terminal.paste_send': 'Send to terminal',

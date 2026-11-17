@@ -18,6 +18,11 @@ const EN: &[(&str, &str)] = &[
     ("tools.step_line", "  {line}"),
     ("tools.job_ok", "Done."),
     ("tools.job_failed", "The job failed: {error}"),
+    ("tools.step_skipped_line", "  {line} (skipped: its tool, or a tool it needs, did not install)"),
+    ("tools.outcome_ok", "  {id}: done"),
+    ("tools.outcome_failed", "  {id}: failed: {error}"),
+    ("tools.outcome_skipped", "  {id}: {error}"),
+    ("tools.job_partly_failed", "{failed} of {total} tool(s) in this job did not finish; the others did (see each line above). Fix the cause, then run the same install again: the tools already in place are left alone."),
     ("tools.job_timeout", "Stopped waiting. The job keeps running on the box; check it with: ozbox tools jobs {box}"),
     ("tools.post_install", "{name}: {note}"),
     ("tools.pick_prompt", "{group}: numbers to install (for example 1,3), `all`, `none`, or Enter to keep the ticked ones: "),
@@ -197,6 +202,8 @@ const EN: &[(&str, &str)] = &[
     ("init.cli_done", "Setup is complete. Start the dashboard with: ozbox serve"),
     ("auth.exists", "{path} already exists. Pass --yes to replace it."),
     ("auth.bad_person", "A person is written like: owner,label=Alice,github=alice-gh,google=alice@example.com,role=owner (only the id is required; the role is owner, member or viewer)."),
+    ("auth.person_is_email", "{given} looks like an email address, but a person starts with an id: a short name you choose for them (lowercase letters, digits and dashes, up to 32), such as {id}. Put the email after it, for the way they sign in: --person {id},google={given} (Google) or --person {id},access={given} (Cloudflare Access). For someone already on a dashboard, the id is the first word of the --person you gave when it was installed; the dashboard shows it as \"Your id on the allow-list\" when they set up."),
+    ("auth.bad_person_id", "{given} is not a person's id: an id is a short name you choose for them, lowercase letters, digits and dashes, up to 32 (such as alice). Then add how they sign in, like --person alice,github=alice-gh."),
     ("auth.written", "Wrote the sign-in settings to {path}."),
     ("auth.next", "Next: run `ozbox serve --public-behind-tunnel` on the shared machine and point your tunnel at the address it listens on. The first time, it prints a one-time setup code to enrol your first passkey."),
     ("auth.github_guide", "To sign in with GitHub, create your own OAuth app (Oz Box ships none, and it needs no secret):\n  1. Open https://github.com/settings/developers (for an organisation: its Settings, then Developer settings), choose OAuth Apps, then New OAuth App.\n  2. Name it Oz Box. Homepage URL: {origin}. Authorization callback URL: {origin} (the device flow does not use it, but GitHub asks for one).\n  3. Tick Enable Device Flow, then Register application.\n  4. Copy the Client ID (it is not a secret) and run this command again with --github-client-id <the id>, or paste it under Account, Sign-in methods in the dashboard."),
@@ -220,6 +227,14 @@ const EN: &[(&str, &str)] = &[
     ("create.err_publisher", "`image_publisher` under [aws] must be a 12-digit AWS account id, or none."),
     ("upgrade.trust_verified", "Release signature: {detail}."),
     ("upgrade.trust_not_applicable", "Release signature: not checked ({detail})."),
+    ("upgrade.kms_target_unknown_image", "the provider cannot say which release the image carries"),
+    ("upgrade.kms_target_unknown_release", "its release ({release}) is not one this program can compare"),
+    ("upgrade.kms_target_manifest", "its signed manifest says its secrets service opens stores sealed by: {keys}"),
+    ("upgrade.kms_target_version_yes", "its release {release} is {since} or later, whose secrets service reaches the KMS key by itself"),
+    ("upgrade.kms_target_version_no", "its release {release} is older than {since}: its secrets service reached the KMS key through the aws command, which no image carries"),
+    ("upgrade.kms_target_ok", "Secrets store key: the new machine opens the store on the fleet's KMS key ({why})."),
+    ("upgrade.err_kms_target_no", "Refused: {box}'s secrets store is sealed by the fleet's KMS key, and image {image} cannot open it ({why}). Upgrading to it would leave the store unopenable on a machine whose old system disk is already gone. Nothing was changed, and no flag lifts this (`--accept-new-secrets-store` would not help: a new store is on the same key). Upgrade to {since} or later instead (`ozbox upgrade {box}` picks the newest)."),
+    ("upgrade.err_kms_target_unknown", "Refused: {box}'s secrets store is sealed by the fleet's KMS key, and whether image {image} can open it could not be told ({why}). Nothing was changed. Name an image whose signed release is {since} or later (`ozbox upgrade {box}` picks the newest)."),
     ("upgrade.trust_unknown", "Image {image}: where it came from could not be checked by this provider."),
     ("upgrade.trust_overridden", "WARNING: image {image} could not be verified as a signed Oz release ({detail}). It is used only because --allow-unverified-image was given."),
     ("upgrade.err_unverified", "Refusing to upgrade to image {image}: it could not be verified as a signed Oz release ({detail}). Nothing was changed. Check the image, or pass --allow-unverified-image to use it anyway."),
@@ -260,6 +275,11 @@ const EN: &[(&str, &str)] = &[
     ("upgrade.ssh_forgot", "SSH: {forgotten} old host key(s) for {box} removed from ~/.ssh/known_hosts."),
     ("upgrade.ssh_nothing", "SSH: nothing to update for {box} (it has no entry in ~/.ssh/ozbox/config)."),
     ("upgrade.ssh_none", "SSH: no ~/.ssh directory was found, so nothing was updated for {box}."),
+    ("create.ssh_plan", "After {box} is created, this computer gets its SSH entry in ~/.ssh/ozbox/config, so `ssh {alias}` works (one Include line is added at the top of ~/.ssh/config if it has none, after a copy is made). Nothing on the box changes. Add --no-ssh-entry to skip it."),
+    ("create.ssh_written", "SSH: wrote the entry for {box} to {file}. Connect with: ssh {alias}"),
+    ("create.ssh_include_added", "Added one Include line to {config} (the previous file was copied beside it)."),
+    ("create.ssh_no_route", "SSH: {box} has no SSH route yet, so no entry was written (an AWS box needs a region, any other box a domain). Write it later with: ozbox connect {box} --ssh --write"),
+    ("create.ssh_failed", "SSH: the entry for {box} was not written ({why}). The box is created; write it with: ozbox connect {box} --ssh --write"),
     ("destroy.ssh_removed", "SSH: the entry for {box} was removed from ~/.ssh/ozbox/config and {forgotten} host key(s) from ~/.ssh/known_hosts."),
     ("upgrade.ssh_failed", "SSH: your entry for {box} could not be updated ({why}). Run `ozbox connect {box} --ssh --write` to write it again."),
     ("upgrade.image_no_agent", "{box} came up, but {image} has no ozboxd (the box agent), so it can never answer. /work is safe. Put it back with `ozbox admin {box} -- reinstall-ozboxd`, or upgrade to an image built with it."),
@@ -351,11 +371,15 @@ pub fn t(key: &str, args: &[(&str, &str)]) -> String {
         .chain(crate::messages_secrets::EN.iter())
         .chain(crate::messages_orch::EN.iter())
         .chain(crate::messages_agent::EN.iter())
+        .chain(crate::messages_tasks::EN.iter())
         .chain(crate::messages_chat::EN.iter())
         .chain(crate::messages_hardening::EN.iter())
+        .chain(crate::messages_init::EN.iter())
+        .chain(crate::messages_notice::EN.iter())
         .chain(crate::messages_infra::EN.iter())
         .chain(crate::messages_adopt_key::EN.iter())
         .chain(crate::messages_quiesce::EN.iter())
+        .chain(crate::messages_fleet::EN.iter())
         .find(|(k, _)| *k == key)
         .map(|(_, v)| (*v).to_string())
         .unwrap_or_else(|| key.to_string());
@@ -386,6 +410,7 @@ pub fn keys() -> Vec<&'static str> {
         .chain(crate::messages_code::EN.iter())
         .chain(crate::messages_alerts::EN.iter())
         .chain(crate::messages_cost::EN.iter())
+        .chain(crate::messages_init::EN.iter())
         .map(|(k, _)| *k)
         .collect()
 }

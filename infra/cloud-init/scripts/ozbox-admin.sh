@@ -17,6 +17,9 @@
 #   ensure-supervisor [finish|rollback|expect SHA256]
 #                                         give the dashboard a user of its own (ADR 0023); finish destroys the box user's old
 #                                         copies; expect refuses unless the staged sign-in settings have that sha256
+#   replace-dashboard-auth SHA256 CODE    replace the dashboard's kept sign-in settings (they decide who may approve) with the ones the
+#                                         person's computer staged, which must have that sha256; CODE is a single-use approval bound
+#                                         to it (a passkey or authenticator code in the dashboard, or the laptop's pinned key)
 #   configure-box-secrets                 read this box's secrets declaration (instance tags) again and write the loader's settings
 #   recover-secrets challenge | NONCE EXPIRES SIGNATURE
 #                                         start a new secrets store on a box whose store can no longer be opened (system disk
@@ -43,7 +46,7 @@
 # OZBOX_JOURNALCTL, OZBOX_LOGINCTL, OZBOX_REQUESTER_UID, OZBOX_USER_MANAGER.
 set -euo pipefail
 
-helper_rev=1
+helper_rev=2
 dir="${OZBOX_ADMIN_DIR:-/run/ozbox-admin}"
 log="${OZBOX_ADMIN_LOG:-/var/log/ozbox-admin.log}"
 reown="${OZBOX_REOWN:-/usr/local/sbin/ozbox-reown.sh}"
@@ -70,7 +73,7 @@ admin_socket="${OZBOX_SECRETS_ADMIN_SOCKET:-/run/ozbox-secrets/admin/admin.sock}
 #              own; a rollback returns only what the box user could already read before finish), configure-box-secrets
 #              (reads tags the box cannot change), enable-linger (the box user's own services)
 #   gated    the action needs an approval the box user cannot make, and the program checks it before anything changes:
-#              replace-tunnel-token, clear-tunnel-token (scope tunnel-token), host-guard (a change that loosens a guard),
+#              replace-tunnel-token, clear-tunnel-token (scope tunnel-token), replace-dashboard-auth (scope dashboard-auth), host-guard (a change that loosens a guard),
 #              write-box-secrets, clear-box-secrets, place-bao-token (scope box-secrets), recover-secrets (the pinned key's
 #              signature: the secrets service is down, so it cannot spend an approval)
 action_gates="
@@ -83,6 +86,7 @@ clear-tunnel-token gated
 ensure-runner ungated
 migrate-legacy-tunnel ungated
 ensure-supervisor ungated
+replace-dashboard-auth gated
 configure-box-secrets ungated
 recover-secrets gated
 host-guard gated
@@ -273,6 +277,19 @@ run_action() {
           "$ozbox_bin" secrets supervisor-setup --expect-auth "$2" 2>&1 ;;
         *) echo "ensure-supervisor takes finish, rollback, or expect SHA256"; return 2 ;;
       esac ;;
+    replace-dashboard-auth)
+      local sha="${1:-}" code="${2:-}" via
+      [ $# = 2 ] || { echo "replace-dashboard-auth takes the sha256 of the new sign-in settings and an approval code"; return 2; }
+      printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$' || { echo "the sha256 must be 64 hex digits"; return 2; }
+      printf '%s' "$code" | grep -Eq '^[A-Za-z0-9-]{16,32}$' || { echo "the approval code is not in the expected shape"; return 2; }
+      # The code is bound to the first 32 hex digits of the sha256 of the settings (the longest a field may be), so it approves THESE
+      # settings and no others. The code goes on standard input. The service spends it; a refusal ends here and nothing changes.
+      # What is installed is then the staged file whose own sha256 is this one: the setup step copies it first, hashes the copy and
+      # installs the copy, so a file the box user rewrites after this check is never installed.
+      if ! via="$(printf '%s\n' "$code" | "$ozbox_bin" secrets gate --scope dashboard-auth --project '' --env "${sha:0:32}" --socket "$admin_socket" 2>&1)"; then
+        echo "$via"; return 3
+      fi
+      "$ozbox_bin" secrets supervisor-setup --replace-auth "$sha" 2>&1 ;;
     configure-box-secrets)
       [ $# = 0 ] || { echo "configure-box-secrets takes no arguments"; return 2; }
       "$ozbox_bin" secrets configure-box 2>&1 ;;
@@ -307,7 +324,14 @@ run_action() {
     enable-linger)
       [ $# = 0 ] || { echo "enable-linger takes no arguments"; return 2; }
       # The user is fixed here, never taken from the request.
-      "$loginctl_bin" enable-linger ozbox 2>&1 && echo "the box user's services now start at boot and keep running after logout" || return 1
+      # bounded: a login manager that does not answer must not hold the helper (and every request after it) forever; the
+      # box user's step below then turns linger on itself, with its own retries
+      if timeout 60 "$loginctl_bin" enable-linger ozbox 2>&1; then
+        echo "the box user's services now start at boot and keep running after logout"
+      else
+        [ -x "$user_manager" ] || return 1
+        echo "the login manager did not answer; the box user's service step turns linger on instead"
+      fi
       # and a manager that started before /work was mounted (so started none of the enabled units) is started properly
       # once; a healthy one is left alone
       if [ -x "$user_manager" ]; then "$user_manager" 2>&1 || return 1; fi ;;

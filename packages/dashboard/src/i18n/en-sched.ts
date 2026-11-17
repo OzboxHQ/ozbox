@@ -159,6 +159,7 @@ export const enSched = {
   'triggers.created_body': 'Copy the secret now. It is shown only this once and is stored where nothing can read it back.',
   'triggers.secret': 'Signing secret',
   'triggers.copy': 'Copy',
+  'triggers.copy_failed': 'Could not copy. Select the secret and copy it.',
   'triggers.copied': 'Copied.',
   'triggers.done': 'I have saved it',
   'triggers.col_when': 'When',

@@ -13,6 +13,7 @@ import type { CreatedToken, FileEntry, FilesApi, SearchResponse } from '../../ap
 import { baseName, breadcrumbs, joinPath, SHARE_TTLS, validName } from '../../lib/files';
 import { fmtRelative } from '../../lib/format';
 import { t, type MessageKey } from '../../lib/i18n';
+import { copyAndSay } from '../../lib/copy-and-say';
 import { useAsync } from '../../lib/use-async';
 import { fileErrorText } from './messages';
 
@@ -273,13 +274,9 @@ export function ShareSheet({ api, box, entries, onClose }: { api: FilesApi; box:
       setBusy(false);
     }
   }
-  async function copy(url: string) {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success(t('files.share_copied'));
-    } catch {
-      toast.error(t('files.share_copy_failed'));
-    }
+  // a share link opens the file for anyone who has it: copied as a secret
+  function copy(url: string) {
+    return copyAndSay(url, { kind: 'secret', done: t('files.share_copied'), failed: t('files.share_copy_failed') });
   }
   async function revoke(id: string) {
     try {

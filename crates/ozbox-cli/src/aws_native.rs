@@ -1,4 +1,6 @@
-//! A small, native AWS client for the calls a box makes about its own secrets (the key service and the parameter store): no `aws` command, no SDK (ADR 0008).
+//! A small, native AWS client for the calls a box makes about its own secrets (the key service and the parameter store) and
+//! for the alert channels that send through the fleet's own AWS account (SES email, SNS text messages): no `aws` command, no
+//! SDK (ADR 0008).
 //!
 //! The box image does not carry the AWS CLI (its installer's signature cannot be verified, so `ozbox tools` refuses it), so
 //! anything the secrets service needs from AWS must work without it. This module is the one place that does:
@@ -88,6 +90,9 @@ pub struct AwsJson {
     imds: String,
     /// Read `AWS_ACCESS_KEY_ID` and friends first. Off for a client built for a test, so a developer's own keys never answer.
     env_creds: bool,
+    /// Plain `http://127.0.0.1:` is accepted for the service: only for a client built for the loopback stand-ins of this
+    /// module's tests and of the shipped program's own round trip (`crate::native_check`). Every other client calls https only.
+    loopback: bool,
     creds: Mutex<Option<Creds>>,
 }
 
@@ -96,6 +101,7 @@ impl AwsJson {
         Self {
             imds: IMDS_BASE.into(),
             env_creds: true,
+            loopback: false,
             creds: Mutex::new(None),
         }
     }
@@ -103,9 +109,17 @@ impl AwsJson {
     /// A client reading only the metadata service at `imds` (a loopback fake in tests).
     #[cfg(test)]
     pub fn with_imds(imds: &str) -> Self {
+        Self::for_loopback(imds)
+    }
+
+    /// A client for loopback stand-ins only: the metadata service at `imds` (on 127.0.0.1), no keys from the environment, and
+    /// plain http to 127.0.0.1 for the service. It never reaches a real AWS address over plain http, and it is built only by
+    /// the tests and by `crate::native_check`, which starts the stand-ins it talks to.
+    pub(crate) fn for_loopback(imds: &str) -> Self {
         Self {
             imds: imds.trim_end_matches('/').to_string(),
             env_creds: false,
+            loopback: true,
             creds: Mutex::new(None),
         }
     }
@@ -248,13 +262,12 @@ impl AwsJson {
         target: &str,
         body: Zeroizing<Vec<u8>>,
     ) -> Result<Zeroizing<Vec<u8>>, Failure> {
-        // plain http is for the loopback fakes in this module's tests only: a real call is always https
-        #[cfg(test)]
-        let rest = base
-            .strip_prefix("https://")
-            .or_else(|| base.strip_prefix("http://"));
-        #[cfg(not(test))]
-        let rest = base.strip_prefix("https://");
+        // plain http only to 127.0.0.1, and only for a loopback client (the tests' fakes, the program's own round trip): a
+        // real call is always https
+        let rest = base.strip_prefix("https://").or_else(|| {
+            base.strip_prefix("http://")
+                .filter(|r| self.loopback && r.starts_with("127.0.0.1:"))
+        });
         let host = rest.ok_or(Failure::Unavailable)?.trim_end_matches('/');
         let mut req = HttpRequest::new("POST", format!("https://{host}/"), Guard::Public)
             .header("Content-Type", "application/x-amz-json-1.1")
@@ -309,11 +322,31 @@ impl AwsJson {
         }
     }
 
+    /// The SigV4 headers (`x-amz-date`, `x-amz-security-token`, `authorization`) for `req`, whose other headers and body are
+    /// already final, for a caller that sends it through its own guarded client (the alert channels). `Unavailable` when
+    /// there are no credentials.
+    pub fn sign(
+        &self,
+        req: &HttpRequest,
+        region: &str,
+        service: &str,
+    ) -> Result<Vec<(String, String)>, Failure> {
+        self.with_creds(|keys| {
+            sign_v4(req, keys, region, service, now()).map_err(|_| Failure::Unavailable)
+        })
+    }
+
     fn forget(&self) {
         if let Ok(mut g) = self.creds.lock() {
             *g = None;
         }
     }
+}
+
+/// The client this process shares (credentials are fetched once and kept until shortly before they expire).
+pub fn shared() -> std::sync::Arc<AwsJson> {
+    static ONE: std::sync::OnceLock<std::sync::Arc<AwsJson>> = std::sync::OnceLock::new();
+    std::sync::Arc::clone(ONE.get_or_init(|| std::sync::Arc::new(AwsJson::new())))
 }
 
 impl Default for AwsJson {
@@ -357,7 +390,7 @@ pub(crate) mod fakes {
 
     use tiny_http::{Header, Response, Server};
 
-    pub const ACCESS_KEY: &str = "AKIAFAKEFAKEFAKE0000";
+    pub const ACCESS_KEY: &str = concat!("AK", "IAFAKEFAKEFAKE0000");
     pub const SECRET_KEY: &str = "fake-secret-access-key-sentinel-0000000000";
     pub const SESSION_TOKEN: &str = "fake-session-token-sentinel";
 

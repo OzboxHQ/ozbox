@@ -23,6 +23,7 @@ mod backup;
 mod box_guard;
 mod box_secrets;
 mod state;
+mod tunnel_rotate;
 pub(crate) mod upgrade;
 
 /// What the CLI reports. Core errors print as they are; the rest are the CLI's own refusals.
@@ -111,6 +112,9 @@ pub fn run(cli: Cli) -> Result<()> {
     if let Command::BrowserSetup { args } = &cli.command {
         return crate::browser_launch::run_setup(args);
     }
+    if let Command::FirstBoot { words } = &cli.command {
+        return crate::first_boot_cli::run(words);
+    }
     if let Command::Capped { args } = &cli.command {
         match crate::capped::run(args) {
             Ok(code) => std::process::exit(code),
@@ -144,6 +148,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 yes: cli.yes,
             };
             return crate::runs_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
+        }
+        Command::Tasks { command } => {
+            let f = crate::runs_cli::Flags {
+                json,
+                dry_run: cli.dry_run,
+                yes: cli.yes,
+            };
+            return crate::tasks_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
         }
         Command::Orch { command } => {
             let f = crate::runs_cli::Flags {
@@ -198,6 +210,8 @@ pub fn run(cli: Cli) -> Result<()> {
         access,
         issuer_package,
         issuer_package_sha256,
+        only,
+        skip,
     } = &cli.command
     {
         let explicit = cli.provider;
@@ -212,6 +226,8 @@ pub fn run(cli: Cli) -> Result<()> {
             access: access.clone(),
             issuer_package: issuer_package.clone(),
             issuer_package_sha256: issuer_package_sha256.clone(),
+            only: only.clone(),
+            skip: skip.clone(),
             yes: cli.yes,
             dry_run: cli.dry_run,
             json,
@@ -307,6 +323,9 @@ pub fn run(cli: Cli) -> Result<()> {
     }
     if let Command::Telemetry { command } = &cli.command {
         return crate::telemetry_cli::run(command, cli.yes, cli.dry_run, json);
+    }
+    if let Command::Chat { command } = &cli.command {
+        return crate::chat_cli::run(command, cli.yes, cli.dry_run, json);
     }
     if let Command::Dashboard { command } = &cli.command {
         return crate::dashboard_cli::run(command, cli.yes, cli.dry_run, json);
@@ -454,10 +473,12 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Cost { .. }
         | Command::Run { .. }
         | Command::Orch { .. }
+        | Command::Tasks { .. }
         | Command::Adopt { .. }
         | Command::State { .. }
         | Command::HostGuard { .. }
         | Command::Capped { .. }
+        | Command::FirstBoot { .. }
         | Command::BrowserWorker
         | Command::AgentMcp { .. }
         | Command::BrowserLaunch
@@ -468,6 +489,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Permissions { .. }
         | Command::Audit { .. }
         | Command::Telemetry { .. }
+        | Command::Chat { .. }
         | Command::Plugin { .. }
         | Command::Init { .. }
         | Command::Harden { .. } => Ok(()),
@@ -646,6 +668,7 @@ pub fn run(cli: Cli) -> Result<()> {
             tools,
             profile,
             allow_first_boot_mismatch,
+            no_ssh_entry,
         } => {
             let settings = load_settings()?;
             let profile = match &profile {
@@ -773,7 +796,34 @@ pub fn run(cli: Cli) -> Result<()> {
                     None => Vec::new(),
                 }
             };
+            // This computer's SSH entry for the box is written after it is created (B4-11): said in the plan first.
+            let ssh_at = if kind == ProviderKind::Fake || no_ssh_entry {
+                None
+            } else {
+                ssh_dir()
+            };
+            let mut first_boot_notes = first_boot_notes;
+            if ssh_at.is_some() {
+                first_boot_notes.push(create_ssh_note(name.as_str()));
+            }
             mutate_with_notes(p, Operation::Create { spec }, &f, first_boot_notes)?;
+            if created {
+                if let (Some(dir), Ok(Some(rec))) = (&ssh_at, p.get(&name)) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let line = write_ssh_after_create(
+                        &SystemRunner,
+                        dir,
+                        &rec,
+                        &route_inputs(&config),
+                        now,
+                    );
+                    if !json {
+                        println!("{line}");
+                    }
+                }
+            }
             if created && !ids.is_empty() {
                 tools_cli::after_create(
                     p,
@@ -798,6 +848,7 @@ pub fn run(cli: Cli) -> Result<()> {
             use_fleet_key,
             strict_checkpoint,
             legacy_checkpoint,
+            no_checkpoint,
         } => {
             // On AWS the store's fate is read from the box's root, never from the box user's SSH answer
             let root_fn = |rec: &ozbox_core::BoxRecord| aws_root_facts(&config, rec);
@@ -822,6 +873,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 crate::quiesce::Mode {
                     strict: strict_checkpoint,
                     legacy: legacy_checkpoint,
+                    none: no_checkpoint,
                 },
                 use_fleet_key,
                 root,
@@ -873,6 +925,28 @@ pub fn run(cli: Cli) -> Result<()> {
                 &deps,
                 name.as_str(),
                 cancel,
+                &flags(cli.yes, cli.dry_run, json),
+            )
+        }
+        // rotating a tunnel token is a flow of this computer's (read the token, hand it over, watch, put the old one back), not
+        // one request to the box's helper
+        Command::Admin { name, action }
+            if action.first().map(String::as_str) == Some("replace-tunnel-token") =>
+        {
+            let rec = p
+                .get(&name)?
+                .ok_or_else(|| ozbox_core::Error::NotFound(name.to_string()))?;
+            if rec.state != ozbox_core::BoxState::Running {
+                return Err(CliError::Msg(crate::messages::t(
+                    "admin.err_not_running",
+                    &[("box", name.as_str()), ("state", &rec.state.to_string())],
+                )));
+            }
+            tunnel_rotate::command(
+                &ozbox_core::SystemRunner,
+                kind == ProviderKind::Fake,
+                name,
+                &action[1..],
                 &flags(cli.yes, cli.dry_run, json),
             )
         }
@@ -988,6 +1062,7 @@ pub fn run(cli: Cli) -> Result<()> {
             disk,
             strict_checkpoint,
             legacy_checkpoint,
+            no_checkpoint,
         } => {
             let agent = crate::serve::agent_for(kind == ProviderKind::Fake, route_inputs(&config));
             mutate_quiesced(
@@ -1002,6 +1077,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 crate::quiesce::Mode {
                     strict: strict_checkpoint,
                     legacy: legacy_checkpoint,
+                    none: no_checkpoint,
                 },
             )
         }
@@ -1364,6 +1440,9 @@ fn aws_config(config: &Config, force_s3: bool) -> Result<ozbox_provider_aws::Aws
         }
         cfg.session_log_bucket = s.session_log_bucket.clone();
         cfg.patch_group = s.patch_group.clone();
+        cfg.notify_send_grants = s.notify_send_grants.unwrap_or(false);
+        cfg.notify_ses_identity_arn = s.notify_ses_identity_arn.clone().filter(|a| !a.is_empty());
+        cfg.notify_sns_topic_arn = s.notify_sns_topic_arn.clone().filter(|a| !a.is_empty());
         if let Some(r) = &s.release_repo {
             cfg.release_repo = r.clone();
         }
@@ -1466,6 +1545,63 @@ struct Outcome<'a> {
 }
 
 /// plan, print, (nothing to do | dry run | confirm), apply, report.
+/// The plan line `create` adds: the SSH entry it writes on this computer once the box exists (B4-11).
+fn create_ssh_note(name: &str) -> String {
+    crate::messages::t(
+        "create.ssh_plan",
+        &[("box", name), ("alias", &sshconfig::host_alias(name))],
+    )
+}
+
+/// After a create: write the box's SSH entry (and the keys it names), as `connect --ssh --write` does, and say what happened
+/// in one line. Never fails the create, which has already happened: a box with no route yet, or a file that could not be
+/// written, says how to write it later.
+fn write_ssh_after_create(
+    runner: &dyn ozbox_core::CommandRunner,
+    dir: &std::path::Path,
+    rec: &BoxRecord,
+    inputs: &RouteInputs,
+    now_unix: u64,
+) -> String {
+    let name = rec.spec.name.as_str();
+    let Some(route) = sshconfig::routes(rec, inputs).into_iter().next() else {
+        return crate::messages::t("create.ssh_no_route", &[("box", name)]);
+    };
+    let block = sshconfig::block(name, &route);
+    let written = (|| -> Result<sshconfig::WriteReport> {
+        let _ = sshconfig::ensure_named_key(runner, dir, sshconfig::INGRESS_KEY_NAME);
+        let report = sshconfig::write_config(dir, name, &block, now_unix)?;
+        if matches!(route, sshconfig::Route::AwsSsm { .. }) {
+            sshconfig::ensure_key(runner, dir)?;
+        }
+        Ok(report)
+    })();
+    match written {
+        Ok(w) => {
+            let mut line = crate::messages::t(
+                "create.ssh_written",
+                &[
+                    ("box", name),
+                    ("file", &w.included_file.display().to_string()),
+                    ("alias", &sshconfig::host_alias(name)),
+                ],
+            );
+            if w.include_added {
+                line.push(' ');
+                line.push_str(&crate::messages::t(
+                    "create.ssh_include_added",
+                    &[("config", &w.main_config.display().to_string())],
+                ));
+            }
+            line
+        }
+        Err(e) => crate::messages::t(
+            "create.ssh_failed",
+            &[("box", name), ("why", &e.to_string())],
+        ),
+    }
+}
+
 /// After a destroy: the box's SSH entry and its host key go too. A convenience for this computer; never fails the
 /// destroy, which has already happened.
 fn forget_ssh_entry(name: &str, json: bool) {
@@ -1565,10 +1701,16 @@ fn mutate_inner(
     plan.notes.extend(notes);
     plan.notes.extend(crate::infra_cli::plan_notes());
     // Only a plan that stops a running machine is quiesced; what will end is read (never changed) before the plan shows.
+    // A box whose agent is older needs its checkpoint chosen by name; refused after the plan is shown (never on a dry run).
+    let mut older_refusal = None;
     let stopping = match (&quiesce, p.get(plan.operation.box_name()).ok().flatten()) {
-        (Some((agent, _)), Some(rec)) if crate::quiesce::needed(&plan, &rec) => {
-            plan.notes
-                .extend(crate::quiesce::preview(*agent, &rec).notes(rec.spec.name.as_str()));
+        (Some((agent, mode)), Some(rec)) if crate::quiesce::needed(&plan, &rec) => {
+            let preview = crate::quiesce::preview(*agent, &rec);
+            plan.notes.extend(preview.notes(rec.spec.name.as_str()));
+            match crate::quiesce::older_choice(&preview.service, *mode, rec.spec.name.as_str()) {
+                Ok(note) => plan.notes.extend(note),
+                Err(refusal) => older_refusal = Some(refusal),
+            }
             Some(rec)
         }
         _ => None,
@@ -1584,6 +1726,9 @@ fn mutate_inner(
             println!("Dry run: nothing was changed.");
         }
         return finish(f, &plan, false, None);
+    }
+    if let Some(refusal) = older_refusal {
+        return Err(CliError::Msg(refusal));
     }
     confirm(&plan, f)?;
     // The box is asked to end its runs and save its work. From here until the change is applied, the hold on new runs is
@@ -2220,5 +2365,87 @@ mod snapshot_wait_tests {
         // a zero interval is looked at every second, and a wait is at least one look
         assert_eq!(snapshot_wait_polls(1, Duration::ZERO), 60);
         assert_eq!(snapshot_wait_polls(1, Duration::from_secs(600)), 1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod create_ssh_tests {
+    use super::{create_ssh_note, write_ssh_after_create};
+    use crate::sshconfig::{self, RouteInputs};
+    use ozbox_core::{BoxName, BoxRecord, BoxSpec, BoxState, Size};
+
+    fn record(provider_id: Option<&str>) -> BoxRecord {
+        let mut r = BoxRecord {
+            spec: BoxSpec::new(BoxName::new("dev").unwrap(), Size::S),
+            state: BoxState::Running,
+            provider: "aws".into(),
+            provider_id: provider_id.map(str::to_string),
+            machine_type: None,
+            snapshots: vec![],
+            created_at: None,
+            last_activity_at: None,
+        };
+        r.spec.region = Some("us-east-1".into());
+        r
+    }
+
+    /// B4-11: the plan says the SSH entry will be written, and how to skip it, before anything is changed.
+    #[test]
+    fn the_create_plan_says_the_ssh_entry_is_written_and_how_to_skip_it() {
+        let n = create_ssh_note("dev");
+        assert!(
+            n.contains("~/.ssh/ozbox/config")
+                && n.contains("ssh ozbox-dev")
+                && n.contains("--no-ssh-entry")
+                && n.contains("Nothing on the box changes"),
+            "{n}"
+        );
+    }
+
+    /// B4-11: after create the box's SSH entry is written, exactly as `connect --ssh --write` writes it.
+    #[test]
+    fn after_create_the_ssh_entry_is_written_and_a_box_without_a_route_says_how_to_write_it_later()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        // the keys already exist, so nothing is generated
+        for k in [sshconfig::KEY_NAME, sshconfig::INGRESS_KEY_NAME] {
+            std::fs::write(dir.path().join(k), "k").unwrap();
+            std::fs::write(dir.path().join(format!("{k}.pub")), "ssh-ed25519 AAAA").unwrap();
+        }
+        let inputs = RouteInputs {
+            aws_region: Some("us-east-1".into()),
+            ..RouteInputs::default()
+        };
+        let runner = ozbox_core::RecordingRunner::new();
+        let rec = record(Some("i-0bbbbbbbbbbbbbbbb"));
+        let line = write_ssh_after_create(&runner, dir.path(), &rec, &inputs, 1);
+        assert!(
+            line.contains("wrote the entry for dev") && line.contains("ssh ozbox-dev"),
+            "{line}"
+        );
+        assert!(
+            line.contains("Include"),
+            "a first entry adds the Include line: {line}"
+        );
+        let conf = std::fs::read_to_string(dir.path().join("ozbox/config")).unwrap();
+        let want = sshconfig::block(
+            "dev",
+            &sshconfig::routes(&rec, &inputs).into_iter().next().unwrap(),
+        );
+        assert!(conf.contains(want.trim()), "{conf}");
+        assert!(runner.calls().is_empty(), "no key was generated");
+
+        // no machine id yet: no route, nothing written, and the line says how to write it later
+        let empty = tempfile::tempdir().unwrap();
+        let line = write_ssh_after_create(
+            &runner,
+            empty.path(),
+            &record(None),
+            &RouteInputs::default(),
+            1,
+        );
+        assert!(line.contains("ozbox connect dev --ssh --write"), "{line}");
+        assert!(!empty.path().join("ozbox").exists());
     }
 }

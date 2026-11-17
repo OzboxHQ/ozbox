@@ -119,6 +119,19 @@ pub trait AgentHost {
     ) -> Result<Option<ModelAssignment>, String> {
         Ok(None)
     }
+    /// Files this run alone is handed (ADR 0055): a sign-in the engine reads itself, only where the person opted that engine
+    /// in. Called after [`AgentHost::resolve_model`], just before the start; `Err` says why the run waits (a run that holds
+    /// a sign-in runs alone on its box). Whatever it hands over is the host's to forget in [`AgentHost::end_run`].
+    ///
+    /// `others` are the runs going now (each holding a place on its box), this one left out, as (id, box, engine).
+    fn run_files(
+        &mut self,
+        _task_id: &str,
+        _spec: &RunSpec,
+        _others: &[(String, String, String)],
+    ) -> Result<Vec<crate::agent_engine::RunFile>, String> {
+        Ok(Vec::new())
+    }
     /// The run is over for now (finished, paused, stopped, failed or switching model): whatever token it held stops
     /// working.
     fn end_run(&mut self, _task_id: &str) {}
@@ -1253,6 +1266,22 @@ fn admit(book: &mut Book, host: &mut dyn AgentHost, now_ms: u64, fx: &mut Vec<Al
                 continue;
             }
         }
+        let others: Vec<(String, String, String)> = book
+            .tasks
+            .iter()
+            .filter(|o| o.id != id && holds_slot(o))
+            .map(|o| (o.id.clone(), o.spec.box_name.clone(), o.spec.engine.clone()))
+            .collect();
+        let run_files = match host.run_files(&id, &spec, &others) {
+            Ok(f) => f,
+            Err(why) => {
+                host.end_run(&id);
+                if let Some(t) = book.task_mut(&id) {
+                    t.queue_reason = Some(why);
+                }
+                continue;
+            }
+        };
         let Some(t) = book.task(&id) else { continue };
         let mut secret_env = host.secret_env(&t.spec);
         let (tid, tspec) = (t.id.clone(), t.spec.clone());
@@ -1276,6 +1305,7 @@ fn admit(book: &mut Book, host: &mut dyn AgentHost, now_ms: u64, fx: &mut Vec<Al
             interactive: t.spec.interactive,
             resume_session: t.session_id.clone(),
             ask_for_edits: t.spec.origin == crate::run::RunOrigin::Chat,
+            run_files,
         };
         let started = match engine_of(host, &engine) {
             Some(e) => e.start(&req).map_err(|e| e.to_string()),
@@ -1579,6 +1609,9 @@ pub struct SimHost {
     /// Usage a broker would report, drained once per run.
     pub broker_usage: Vec<BrokeredUsage>,
     pub via_broker: bool,
+    /// The files a run whose prompt holds `sim:files` is handed (ADR 0055). A run whose prompt holds `sim:alone` waits
+    /// while anything else runs on its box.
+    pub run_files: Vec<crate::agent_engine::RunFile>,
 }
 
 impl SimHost {
@@ -1599,6 +1632,7 @@ impl SimHost {
             ended: Vec::new(),
             broker_usage: Vec::new(),
             via_broker: false,
+            run_files: Vec::new(),
         }
     }
     pub fn with_box(mut self, name: &str, size: Size, production: bool) -> Self {
@@ -1676,6 +1710,21 @@ impl AgentHost for SimHost {
             provider_id,
             model,
         }))
+    }
+    fn run_files(
+        &mut self,
+        _: &str,
+        spec: &RunSpec,
+        others: &[(String, String, String)],
+    ) -> Result<Vec<crate::agent_engine::RunFile>, String> {
+        if spec.prompt.contains("sim:alone") && others.iter().any(|o| o.1 == spec.box_name) {
+            return Err("waiting: this run holds a sign-in and runs alone on its box".into());
+        }
+        Ok(if spec.prompt.contains("sim:files") {
+            self.run_files.clone()
+        } else {
+            Vec::new()
+        })
     }
     fn end_run(&mut self, task_id: &str) {
         self.ended.push(task_id.to_string());
@@ -1821,6 +1870,40 @@ mod tests {
         host.boxes.get_mut("alpha").unwrap().running = true;
         run_ticks(&mut sup, &mut book, &mut host, 7000, 1);
         assert_eq!(state(&book, &a), TaskState::Running);
+    }
+
+    /// ADR 0055: only the run the host names gets its files, and a run that must run alone waits for its box to empty.
+    #[test]
+    fn only_the_named_run_is_handed_files_and_a_run_that_runs_alone_waits() {
+        let mut book = Book::default();
+        let mut host = SimHost::new().with_box("alpha", Size::L, false);
+        host.run_files = vec![crate::agent_engine::RunFile {
+            dir_env: "CODEX_HOME".into(),
+            path: "auth.json".into(),
+            contents: "SENTINEL-login".into(),
+        }];
+        let mut sup = Supervisor::new();
+        let plain = add(&mut book, "sim:steps=50 plain", "alpha");
+        run_ticks(&mut sup, &mut book, &mut host, 2000, 2);
+        assert_eq!(state(&book, &plain), TaskState::Running);
+        let alone = add(&mut book, "sim:files sim:alone", "alpha");
+        run_ticks(&mut sup, &mut book, &mut host, 4000, 2);
+        assert_eq!(state(&book, &alone), TaskState::Queued);
+        assert!(book
+            .task(&alone)
+            .unwrap()
+            .queue_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("runs alone")));
+        assert!(!format!("{:?}", book.task(&alone).unwrap()).contains("SENTINEL"));
+        // the plain run was handed nothing
+        assert_eq!(host.engine.files.len(), 1);
+        assert!(host.engine.files[0].is_empty());
+        cancel(&mut book, &plain, "owner", 8000).unwrap();
+        run_ticks(&mut sup, &mut book, &mut host, 9000, 3);
+        assert_eq!(state(&book, &alone), TaskState::Running);
+        assert_eq!(host.engine.files.len(), 2);
+        assert_eq!(host.engine.files[1][0].contents, "SENTINEL-login");
     }
 
     #[test]

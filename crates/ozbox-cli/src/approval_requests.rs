@@ -701,6 +701,10 @@ impl RequestService {
                 "version": 1,
                 "ids": {"box_id": self.ids.box_id, "store_id": self.ids.store_id},
                 "scopes": RULES.iter().filter(|r| r.journal).map(|r| r.key).collect::<Vec<_>>(),
+                // B4-27 (additive): a declaration is filed with its text, and the root helper's gate spends an approved
+                // request (`req-<id>`) for these scopes
+                "policy_requests": true,
+                "gate_requests": ["tunnel-token", "box-secrets"],
                 "pending_ms": ozbox_core::approval::PENDING_MS,
                 "approved_ms": ozbox_core::approval::APPROVED_MS,
                 "await_max_ms": AWAIT_MAX_MS,
@@ -933,22 +937,30 @@ impl RequestService {
         now: u64,
     ) -> Result<Value, String> {
         let mut raw = v["subject"].clone();
-        match raw["scope"].as_str() {
-            // the matches of a guard override are the service's own scan of the text, never the filer's list
-            Some("guard-override") => {
-                derive_guard_fields(store, gates, &mut raw, v["scanned_text"].as_str(), now)?
-            }
-            // a policy's sensitivity is worked out from the two parsed policies, which nothing in this release hands the
-            // service: until the policy operation exists, a policy change is not filed here
-            Some("policy") => {
-                return Err(
-                    "a policy change is not filed through this operation in this release".into(),
-                )
-            }
-            _ => {}
+        // the matches of a guard override are the service's own scan of the text, never the filer's list
+        if raw["scope"].as_str() == Some("guard-override") {
+            derive_guard_fields(store, gates, &mut raw, v["scanned_text"].as_str(), now)?;
         }
-        let mut subject: Subject = serde_json::from_value(raw)
-            .map_err(|_| "that request's subject is not valid".to_string())?;
+        // A declaration change (B4-27) is filed with the declaration itself, never a subject: the service parses it, checks it
+        // as the `policy` operation would, and works out the digests and the sensitivity from it and the declaration it holds.
+        // A filer's own fields are not read.
+        let mut policy_reason = None;
+        let mut subject: Subject = if raw["scope"].as_str() == Some("policy") {
+            let project = v["project"].as_str().unwrap_or("");
+            crate::workload_policy::secret_name(project)
+                .map_err(|_| "that request's subject is not valid".to_string())?;
+            let p = crate::workload_policy::Policy::parse(v["policy_text"].as_str().unwrap_or(""))
+                .and_then(|p| p.check_before_write().map(|_| p))
+                .map_err(|e| e.0)?;
+            policy_reason = Some(format!(
+                "declaration for project {project} ({} command(s))",
+                p.commands.len()
+            ));
+            crate::secrets_service::declaration_subject(store, project, &p)?
+        } else {
+            serde_json::from_value(raw)
+                .map_err(|_| "that request's subject is not valid".to_string())?
+        };
         // a key's attestation is verified now and the verdict kept: the challenge it was made over does not live as long as the
         // approval's wait
         let staged = match &subject {
@@ -967,7 +979,7 @@ impl RequestService {
             .as_str()
             .map(|c| sanitize_display(c, 64))
             .filter(|c| !c.is_empty());
-        let reason = v["reason"].as_str().map(str::to_string);
+        let reason = policy_reason.or_else(|| v["reason"].as_str().map(str::to_string));
         // facts the service derives itself, from the one read of the store's names above: a replacement is a value already
         // stored (a name that cannot be looked up counts as stored, which is the stricter reading)
         let derived = match &subject {
@@ -976,6 +988,11 @@ impl RequestService {
                     crate::secrets_enc::workload_name(&i.project, &i.environment, &n.name)
                         .map_or(true, |w| names.contains(&w))
                 }),
+                ..Derived::default()
+            },
+            // the service's own reading (`declaration_subject`), never a filer's label
+            Subject::Policy(p) => Derived {
+                policy_sensitivity: Some(p.sensitivity),
                 ..Derived::default()
             },
             _ => Derived::default(),
@@ -1134,6 +1151,34 @@ impl RequestService {
         }
     }
 
+    /// Check a dashboard person's authenticator-app code against their own authenticator secret in this store (the one the
+    /// dashboard set up for them), allowing one step of clock drift, and refusing a step this person already used to decide.
+    /// Returns the step, which the book keeps as the person's counter. The code is never logged and no error carries it.
+    fn check_authenticator(
+        &self,
+        store: &EncryptedSecrets,
+        person: &str,
+        code: &str,
+        now: u64,
+    ) -> Result<ozbox_core::approval::AuthenticatorEvidence, String> {
+        let refused = || crate::messages::t("approval.authenticator_refused", &[]);
+        let secret = store
+            .get(&crate::serve::auth::totp::secret_name(person))
+            .map_err(|_| refused())?
+            .map(zeroize::Zeroizing::new)
+            .ok_or_else(|| crate::messages::t("approval.authenticator_none", &[]))?;
+        let last = {
+            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.book
+                .counters
+                .get(&format!("totp:{person}"))
+                .map(|s| u64::from(*s))
+        };
+        let step = crate::serve::auth::totp::verify(&secret, code, now / 1000, last)
+            .ok_or_else(refused)?;
+        Ok(ozbox_core::approval::AuthenticatorEvidence { step })
+    }
+
     fn decide(
         &self,
         store: &EncryptedSecrets,
@@ -1158,6 +1203,10 @@ impl RequestService {
             /// The relying party the supervisor verified the passkey assertion against.
             #[serde(default)]
             rp: Option<ozbox_core::approval_verify::ExpectedRp>,
+            /// An authenticator-app code (`factor: authenticator`): checked here, against the person's own secret in this
+            /// store, and never kept, logged or echoed.
+            #[serde(default)]
+            code: String,
         }
         let id = v["id"].as_str().unwrap_or("");
         let outcome = match v["outcome"].as_str().unwrap_or("") {
@@ -1169,8 +1218,10 @@ impl RequestService {
             }
             _ => return Err("that request is not valid".into()),
         };
-        let w: Wire = serde_json::from_value(v.clone())
+        let mut w: Wire = serde_json::from_value(v.clone())
             .map_err(|_| "that decision is not valid".to_string())?;
+        // the code is a credential for a minute: held where it is wiped when this decision is done
+        let code = zeroize::Zeroizing::new(std::mem::take(&mut w.code));
         if let Some(p) = &w.evidence.passkey {
             for f in [
                 &p.credential_id,
@@ -1211,6 +1262,7 @@ impl RequestService {
                 };
                 let factor = match w.factor.as_str() {
                     "passkey" => Factor::Passkey,
+                    "authenticator" if outcome == Outcome::Approve => Factor::Authenticator,
                     "chat-deny" => Factor::ChatDeny,
                     // a signed-in session may stop things (deny, revoke), never approve
                     "session" if outcome != Outcome::Approve => Factor::Session,
@@ -1225,6 +1277,13 @@ impl RequestService {
                 if person.is_empty() || w.role.is_none() {
                     return Err("that decision is not valid".into());
                 }
+                // the code is checked by this service, never taken on the supervisor's word, and the evidence it keeps is the
+                // step it checked; whatever the wire said about an authenticator is ignored
+                let authenticator = if factor == Factor::Authenticator {
+                    Some(self.check_authenticator(store, &person, &code, now)?)
+                } else {
+                    None
+                };
                 DecideInput {
                     class,
                     outcome,
@@ -1233,8 +1292,13 @@ impl RequestService {
                     decider: person,
                     role: w.role,
                     evidence: Evidence {
-                        passkey: w.evidence.passkey,
+                        passkey: if factor == Factor::Passkey {
+                            w.evidence.passkey
+                        } else {
+                            None
+                        },
                         laptop: None,
+                        authenticator,
                     },
                     key: None,
                     passkey_rp: w.rp,
@@ -1264,6 +1328,7 @@ impl RequestService {
                     evidence: Evidence {
                         passkey: None,
                         laptop: w.evidence.laptop,
+                        authenticator: None,
                     },
                     key: Some(key),
                     passkey_rp: None,

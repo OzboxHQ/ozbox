@@ -40,6 +40,8 @@ export const enBrowser = {
   'browser.live_heading': 'Live view',
   'browser.live_picture': 'The page in the browser',
   'browser.live_waiting': 'Waiting for the first picture',
+  'browser.live_blank_short': 'No page open yet',
+  'browser.live_blank': 'No page is open in this browser yet, so there is nothing to show. A browser starts empty; the picture appears once an agent using it goes to a page.',
   'browser.input_failed': 'The browser did not take it.',
   'browser.input_not_sent': 'Your click or key did not reach the browser: {why} Nothing more is sent until you dismiss this.',
   'browser.input_dismiss': 'Dismiss and try again',

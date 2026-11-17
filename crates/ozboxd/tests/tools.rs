@@ -23,6 +23,12 @@ struct FakeSys {
     urls: BTreeMap<String, Vec<u8>>,
     calls: Mutex<Vec<Vec<String>>>,
     gpg: Mutex<String>,
+    /// The exit code the fake `gpg` gives.
+    gpg_code: Mutex<i32>,
+    /// Every short command run through `capture`.
+    captured: Mutex<Vec<Vec<String>>>,
+    /// `capture` runs the real program (the real `gpg`), with the step's own environment.
+    real_capture: bool,
     present: Mutex<BTreeSet<PathBuf>>,
     fail_on: Mutex<Option<String>>,
     /// An `apt-get` that does not carry `APT::Sandbox::User=root` says apt could not change to its download user, and fails.
@@ -35,6 +41,9 @@ impl FakeSys {
             urls: BTreeMap::new(),
             calls: Mutex::new(vec![]),
             gpg: Mutex::new(String::new()),
+            gpg_code: Mutex::new(0),
+            captured: Mutex::new(vec![]),
+            real_capture: false,
             present: Mutex::new(BTreeSet::new()),
             fail_on: Mutex::new(None),
             apt_refuses_user_switch: Mutex::new(false),
@@ -84,12 +93,15 @@ impl Sys for FakeSys {
             _ => Ok(0),
         }
     }
-    fn capture(
-        &self,
-        _argv: &[String],
-        _env: &[(String, String)],
-    ) -> Result<(i32, String), String> {
-        Ok((0, self.gpg.lock().unwrap().clone()))
+    fn capture(&self, argv: &[String], env: &[(String, String)]) -> Result<(i32, String), String> {
+        self.captured.lock().unwrap().push(argv.to_vec());
+        if self.real_capture {
+            return RealSys.capture(argv, env);
+        }
+        Ok((
+            *self.gpg_code.lock().unwrap(),
+            self.gpg.lock().unwrap().clone(),
+        ))
     }
     fn read_file(&self, p: &Path) -> std::io::Result<Vec<u8>> {
         RealSys.read_file(p)
@@ -276,6 +288,110 @@ fn a_package_source_is_added_only_for_the_published_key() {
     assert!(e.contains("not the one its vendor publishes"));
     assert!(!dir2.path().join("sources").exists());
     assert!(other.calls().iter().all(|a| a[0] != "apt-get"));
+}
+
+/// The catalog's own step that adds HashiCorp's package source (for packer).
+fn hashicorp_repo_action() -> Action {
+    let c = embedded().unwrap();
+    let p = ozbox_catalog::plan::build_plan(
+        &c,
+        Arch::Amd64,
+        &BTreeSet::new(),
+        &PlanRequest {
+            install: vec!["packer".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    p.steps
+        .into_iter()
+        .map(|s| s.action)
+        .find(|a| matches!(a, Action::AptRepo { .. }))
+        .unwrap()
+}
+
+#[test]
+fn a_key_gpg_cannot_read_is_not_called_the_wrong_key() {
+    // gpg that stops before it reads the key (the root helper's hidden home folder did this) is said as that, not as a
+    // vendor key that does not match its pin.
+    let dir = tempfile::tempdir().unwrap();
+    let mut sys = FakeSys::new();
+    sys.urls.insert(
+        "https://cli.github.com/packages/key.gpg".into(),
+        b"BINARYKEY".to_vec(),
+    );
+    *sys.gpg_code.lock().unwrap() = 2;
+    let log = Log::open(&dir.path().join("log"), 1 << 20).unwrap();
+    let c = ctx(&sys, &log, dir.path());
+    let e = run_root_action(&c, &repo_action()).unwrap_err();
+    assert!(e.contains("could not be read"), "{e}");
+    assert!(!e.contains("not the one its vendor publishes"), "{e}");
+    assert!(!dir.path().join("sources").exists());
+    // gpg was given a home folder of its own, inside the step's scratch directory
+    let gpg = sys.captured.lock().unwrap()[0].clone();
+    let i = gpg.iter().position(|a| a == "--homedir").unwrap();
+    assert!(Path::new(&gpg[i + 1]).starts_with(dir.path().join("tmp")));
+    assert!(Path::new(&gpg[i + 1]).is_dir());
+}
+
+#[test]
+fn a_mismatched_key_names_what_it_holds_and_what_is_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sys = FakeSys::new();
+    sys.urls.insert(
+        "https://cli.github.com/packages/key.gpg".into(),
+        b"EVIL".to_vec(),
+    );
+    *sys.gpg.lock().unwrap() = "pub:-:4096:1:AA:1:::-:::scESC::::::23::0:\nfpr:::::::::0000000000000000000000000000000000000000:\n".into();
+    let log = Log::open(&dir.path().join("log"), 1 << 20).unwrap();
+    let c = ctx(&sys, &log, dir.path());
+    let e = run_root_action(&c, &repo_action()).unwrap_err();
+    assert!(e.contains("not the one its vendor publishes"), "{e}");
+    assert!(
+        e.contains("0000000000000000000000000000000000000000"),
+        "{e}"
+    );
+    assert!(
+        e.contains("2C6106201985B60E6C7AC87323F3D4EA75716059"),
+        "{e}"
+    );
+}
+
+/// The real `gpg`, with no home folder it can use (as under the root helper's `ProtectHome=true`), accepts HashiCorp's
+/// published package key against the catalog's pin. The fixture is the key served at https://apt.releases.hashicorp.com/gpg
+/// (read 2026-11-17; primary key D55C0D1AC78A8D8126CB631CFC9CA96ACA026560, made 2026-09-09, expires 2031-09-08).
+#[test]
+fn the_real_gpg_accepts_hashicorps_published_key_with_no_usable_home() {
+    if RealSys
+        .capture(&["gpg".to_string(), "--version".to_string()], &[])
+        .map(|(c, _)| c != 0)
+        .unwrap_or(true)
+    {
+        eprintln!("gpg is not installed here; skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let action = hashicorp_repo_action();
+    let Action::AptRepo { key_url, .. } = &action else {
+        unreachable!()
+    };
+    let mut sys = FakeSys::new();
+    sys.real_capture = true;
+    sys.urls.insert(
+        key_url.clone(),
+        std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hashicorp-apt-key.asc"
+        ))
+        .unwrap(),
+    );
+    let log = Log::open(&dir.path().join("log"), 1 << 20).unwrap();
+    // the home folder named in the step's environment does not exist and cannot be made
+    let mut c = ctx(&sys, &log, dir.path());
+    c.home = PathBuf::from("/nonexistent/ozbox-test-home");
+    run_root_action(&c, &action).unwrap();
+    assert!(dir.path().join("keyrings/ozbox-hashicorp.asc").is_file());
+    assert!(!Path::new("/nonexistent/ozbox-test-home").exists());
 }
 
 #[test]
@@ -498,7 +614,7 @@ fn a_job_runs_root_steps_through_the_helper_then_verifies_and_audits() {
     assert_eq!(st2.state, JobState::Failed);
     assert!(st2.error.unwrap().contains("nvim"));
 
-    // A failing step stops the job; later steps never run, and the status names the step.
+    // A failing step stops its tool; its later steps never run, and the status names the step.
     let root3 = tempfile::tempdir().unwrap();
     let dir3 = write_job(root3.path(), &spec);
     let bad = Bridge {
@@ -520,6 +636,108 @@ fn a_job_runs_root_steps_through_the_helper_then_verifies_and_audits() {
     let status: JobStatus =
         serde_json::from_slice(&std::fs::read(dir3.join("status.json")).unwrap()).unwrap();
     assert_eq!(status.steps.len(), spec.plan.steps.len());
+}
+
+/// A helper that refuses the steps it is told to refuse.
+struct PickyBridge {
+    steps: Mutex<Vec<usize>>,
+    refuse: Vec<usize>,
+}
+impl RootBridge for PickyBridge {
+    fn run_step(&self, _s: &JobSpec, i: usize, _l: &Log) -> Result<(), String> {
+        self.steps.lock().unwrap().push(i);
+        if self.refuse.contains(&i) {
+            Err("the signing key for hashicorp could not be read".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn one_failing_tool_does_not_stop_the_others_and_each_failure_is_reported() {
+    use ozboxd::tools::job::{OutcomeState, StepState};
+    let c = embedded().unwrap();
+    // packer first (its package source fails), then ripgrep, which does not need it
+    let spec = job_spec(&["packer", "ripgrep"]);
+    let repo_step = spec
+        .plan
+        .steps
+        .iter()
+        .find(|s| s.tool == "packer" && matches!(s.action, Action::AptRepo { .. }))
+        .unwrap()
+        .index;
+    let root = tempfile::tempdir().unwrap();
+    let dir = write_job(root.path(), &spec);
+    let sys = FakeSys::new();
+    sys.present
+        .lock()
+        .unwrap()
+        .insert(PathBuf::from("/usr/bin/rg"));
+    let bridge = PickyBridge {
+        steps: Mutex::new(vec![]),
+        refuse: vec![repo_step],
+    };
+    let st = run_job(&dir, &c, &sys, &bridge, &root.path().join("home"), &|| 7).unwrap();
+    assert_eq!(st.state, JobState::Failed);
+    for s in &spec.plan.steps {
+        let want = if s.index == repo_step {
+            StepState::Failed
+        } else if s.tool == "packer" {
+            StepState::Skipped
+        } else {
+            StepState::Ok
+        };
+        assert_eq!(st.steps[s.index].state, want, "{}", s.title);
+    }
+    // ripgrep's steps ran through the helper; packer's install after the failed source did not
+    let ran = bridge.steps.lock().unwrap().clone();
+    assert!(spec
+        .plan
+        .steps
+        .iter()
+        .filter(|s| s.tool == "ripgrep")
+        .all(|s| ran.contains(&s.index)));
+    let outcome = |id: &str| st.outcomes.iter().find(|o| o.id == id).unwrap().clone();
+    assert_eq!(outcome("packer").state, OutcomeState::Failed);
+    assert_eq!(outcome("ripgrep").state, OutcomeState::Ok);
+    let err = st.error.clone().unwrap();
+    assert!(err.contains("Packer") && err.contains("hashicorp"), "{err}");
+    assert!(!err.contains("ripgrep"), "{err}");
+    let log = std::fs::read_to_string(dir.join("log")).unwrap();
+    assert!(log.contains("verified ripgrep") && log.contains("skipped: packer failed"));
+    let audit = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+    assert!(audit.contains("\"failed\""));
+
+    // A tool that needs a failed one is skipped and says why; a tool that does not need it still installs.
+    let spec2 = job_spec(&["codex", "ripgrep"]);
+    let root2 = tempfile::tempdir().unwrap();
+    let dir2 = write_job(root2.path(), &spec2);
+    let sys2 = FakeSys::new(); // no download is answered, so node cannot be fetched
+    sys2.present
+        .lock()
+        .unwrap()
+        .insert(PathBuf::from("/usr/bin/rg"));
+    let ok_bridge = PickyBridge {
+        steps: Mutex::new(vec![]),
+        refuse: vec![],
+    };
+    let st2 = run_job(
+        &dir2,
+        &c,
+        &sys2,
+        &ok_bridge,
+        &root2.path().join("home"),
+        &|| 7,
+    )
+    .unwrap();
+    assert_eq!(st2.state, JobState::Failed);
+    let o2 = |id: &str| st2.outcomes.iter().find(|o| o.id == id).unwrap().clone();
+    assert_eq!(o2("node").state, OutcomeState::Failed);
+    assert_eq!(o2("codex").state, OutcomeState::Skipped);
+    assert!(o2("codex").error.unwrap().contains("node"));
+    assert_eq!(o2("ripgrep").state, OutcomeState::Ok);
+    assert!(sys2.calls().iter().all(|a| a[0] != "npm"));
 }
 
 #[test]

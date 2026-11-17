@@ -52,10 +52,11 @@ on:
         required: false
         default: ""
       retire_old:
-        description: After publishing, retire images older than the last 3 versions (false = only list them)
+        description: "After publishing, what happens to versions older than the window (the last 3, plus the newest of the last 3 minors): private = make them private and keep them (the default); list = only list them; delete = deregister them and delete their snapshots (cannot be undone)"
         required: false
-        type: boolean
-        default: true
+        type: choice
+        default: private
+        options: [private, list, delete]
       arch:
         description: Architectures to build
         required: false
@@ -107,7 +108,17 @@ jobs:
           # release carries that number (tag image-v<version>); the build date is only recorded in the manifest.
           product="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           version="$IN_VERSION"
-          if [ "$REF_TYPE" = "tag" ]; then version="${REF_NAME#image-v}"; fi
+          # The signed manifest's identity names this workflow at `main` or at an `image-v*` tag, and nothing else: a box refuses
+          # any other. So a run from a program tag (`v*`) or another branch would sign a manifest no box trusts; refuse it here.
+          if [ "$REF_TYPE" = "tag" ]; then
+            case "$REF_NAME" in
+              image-v*) version="${REF_NAME#image-v}" ;;
+              *) echo "this workflow runs from an image-v<version> tag, or by hand from main (Run workflow, branch main, the version as input); $REF_NAME is not one of them, and a manifest signed from it would be refused by every box" >&2; exit 1 ;;
+            esac
+          elif [ "$REF_NAME" != "main" ]; then
+            echo "run this workflow from main (or push an image-v<version> tag): a manifest signed from the branch $REF_NAME would be refused by every box" >&2
+            exit 1
+          fi
           if [ -z "$version" ]; then version="$product"; fi
           if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$'; then
             echo "the version must look like 0.3.0 or 0.3.0-rc.1" >&2
@@ -325,16 +336,30 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # The release program carries the native KMS and Parameter Store clients. The behaviour (a signed round trip against loopback fakes of the key service and the metadata service, whose
-          # signatures a separate verifier recomputes from the raw request) is tested in this same run's unit tests
-          # (aws_native / secrets_enc). It cannot be run from the SHIPPED program here without putting a test hook into it:
-          # the program's client only calls https://kms.<region>.amazonaws.com and the metadata address, and the release
-          # build refuses debug hooks (see "The release programs carry none of the debug-only test sockets"). So this checks
-          # that the program that is shipped is the one that has the native client and no longer builds the aws command line.
-          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'AmazonSSM.GetParametersByPath' 'x-amz-json-1.1' 'AWS4-HMAC-SHA256'; do
-            LC_ALL=C grep -aqF "$needle" "out/ozbox-linux-$ARCH" \
-              || { echo "::error title=No native AWS client::the $ARCH ozbox program does not carry $needle, so a box set up for KMS could not open its secrets store, or a box with secrets of its own could not load them"; exit 1; }
-          done
+          # A real round trip through the SHIPPED program (ADR 0029 Amendment 18): `ozbox secrets native-check` runs the same
+          # key-service and parameter-store clients the store and the loader use against loopback stand-ins it starts itself,
+          # each request signed with SigV4 and each signature recomputed by the stand-in from the bytes that arrived. It runs
+          # with an empty PATH and environment, so a program that started the `aws` command (or any command) fails. Nothing
+          # leaves 127.0.0.1 and no key is used: the credentials are random words made for the run.
+          case "$ARCH" in
+            amd64) run=() ;;
+            arm64)
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+                q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              fi
+              [ -n "$q" ] || { echo "::error title=No native AWS check::no qemu-aarch64 is available, so the arm64 program cannot be run"; exit 1; }
+              run=("$q")
+              ;;
+            *) echo "::error title=No native AWS check::there is no way to run the $ARCH program here"; exit 1 ;;
+          esac
+          empty="$(mktemp -d)"
+          got="$(env -i PATH="$empty" HOME="$empty" OZBOX_CONFIG=/dev/null "${run[@]}" "./out/ozbox-linux-$ARCH" secrets native-check --json)" \
+            || { echo "::error title=No native AWS client::the $ARCH ozbox program could not make a signed round trip with its own key-service and parameter-store clients, so a box set up for KMS could not open its secrets store, or a box with secrets of its own could not load them"; exit 1; }
+          jq -e '.ok == true and .kms_requests == 2 and .ssm_requests == 2 and .parameters == 2' <<<"$got" >/dev/null \
+            || { echo "::error title=No native AWS client::the $ARCH program's round trip did not say what was expected: $got"; exit 1; }
           # the old way piped the key to `aws kms` as fileb:///dev/stdin: a program still carrying that argument is not the fix
           ! LC_ALL=C grep -aqF 'fileb:///dev/stdin' "out/ozbox-linux-$ARCH" \
             || { echo "::error title=aws command still used::the $ARCH ozbox program still builds an aws kms command line, which the image cannot run (no aws command)"; exit 1; }
@@ -597,7 +622,7 @@ jobs:
           # in ADR 0038 hold, so a release without it never offers a live update. The `/work` format comes from the
           # tracked policy file, and only those two keys of it.
           policy="infra/packer/ozbox-image/upgrade-policy.json"
-          jq -e '(.work_format | type == "number") and (.work_format_reads | type == "array") and (.work_format as $f | .work_format_reads | index($f) != null)' "$policy" >/dev/null
+          jq -e '(.work_format | type == "number") and (.work_format_reads | type == "array") and (.work_format as $f | .work_format_reads | index($f) != null) and (.secrets_keys | type == "array" and all(type == "string"))' "$policy" >/dev/null
           upgrade="$(jq -n --arg first_boot "$first_boot" --arg build "$build" --slurpfile policy "$policy" \
             --slurpfile parts <(cat out/part-*.json) -f infra/packer/ozbox-image/upgrade-record.jq)"
           jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -735,7 +760,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
         run: bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
-      - name: Retire images outside the retention window
+      - name: Old versions outside the retention window (private by default; deleted only when asked)
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
@@ -743,7 +768,11 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(aws sts get-caller-identity --query Account --output text)"
-          apply=--apply
-          # a tag push or a manual run retires; a manual run may ask for the list only
-          if [ "$RETIRE" = "false" ]; then apply=; fi
-          bash scripts/image/retention.sh --released "$VERSION" --regions "$REGIONS" --owner "$owner" --keep 3 $apply
+          # A tag push (no input) makes old versions private and keeps them; a manual run may ask for the list only, or to delete.
+          case "${RETIRE:-private}" in
+            private) mode=(--apply) ;;
+            list) mode=() ;;
+            delete) mode=(--delete --apply) ;;
+            *) echo "retire_old must be private, list or delete" >&2; exit 1 ;;
+          esac
+          bash scripts/image/retention.sh --released "$VERSION" --regions "$REGIONS" --owner "$owner" --keep 3 "${mode[@]}"

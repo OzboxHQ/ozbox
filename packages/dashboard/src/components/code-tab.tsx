@@ -14,17 +14,14 @@ import type { BoxRecord } from '../api/types';
 import { useApp } from '../App';
 import { addressProblem, addressSwitch, canRemove, guideKey, openWay, stateKey, waiting } from '../lib/code';
 import { t } from '../lib/i18n';
+import { copyAndSay } from '../lib/copy-and-say';
+import { isMacPlatform } from '../lib/terminal-clipboard';
 import { useAsync } from '../lib/use-async';
 import { fmtRelative } from '../lib/format';
 import { EmptyState } from './page';
 
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.success(t('code.copied'));
-  } catch {
-    toast.error(t('openin.copy_failed', { what: text }));
-  }
+function copy(text: string) {
+  return copyAndSay(text, { done: t('code.copied'), failed: t('openin.copy_failed', { what: text }) });
 }
 
 const serviceName = (s: CodeService) => t(s === 'ide' ? 'code.svc_ide' : 'code.svc_desktop');
@@ -523,8 +520,12 @@ export function CodeTab({ box, onOpenTerminal }: { box: BoxRecord; onOpenTermina
         <h2 id="code-browser" className="text-base font-semibold">
           {t('code.browser_title')}
         </h2>
+        <p className="text-sm" data-testid="code-browser-keys">{t(isMacPlatform(typeof navigator === 'undefined' ? undefined : navigator) ? 'code.browser_keys_mac' : 'code.browser_keys_other')}</p>
+        <p className="text-sm">{t('code.browser_tmux')}</p>
         <p className="text-sm">{t('code.browser_chromium')}</p>
         <p className="text-sm">{t('code.browser_firefox')}</p>
+        <p className="text-sm">{t('code.browser_safari')}</p>
+        <p className="text-sm">{t('code.browser_desktop')}</p>
       </section>
       <RunningPanel box={name} onStop={stopPlan} onAttach={attach} />
       <section aria-labelledby="code-editors" className="space-y-3">

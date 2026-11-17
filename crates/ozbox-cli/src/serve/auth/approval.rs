@@ -117,6 +117,56 @@ impl Auth {
         Ok(webauthn::assertion_options(&self.cfg.rp, challenge, &ids))
     }
 
+    /// The signed-in person approving a request with an authenticator-app code (ADR 0041, amendment of 2026-11-17): only a
+    /// person with no passkey (whoever has one approves with it, as a step-up does), and only with an authenticator set up.
+    /// The code is checked here as at sign-in, so it cannot be used again for a sign-in or a step-up; the secrets service
+    /// then checks it again itself, against the same secret, before it records the decision. Returns the person and role.
+    pub fn approval_authenticator(
+        &self,
+        req: &Req,
+        code: &str,
+    ) -> Result<(String, ozbox_core::roles::Role), Refusal> {
+        let (person, role) = self.who_and_role(req).ok_or((
+            403,
+            "no_sign_in",
+            "sign in to decide a request".to_string(),
+        ))?;
+        let mut inner = self.lock();
+        if !inner
+            .limiter
+            .hit_n(&format!("approve:{person}"), self.now(), 30)
+        {
+            return Err((
+                429,
+                "too_many_attempts",
+                "too many attempts; wait a few minutes and try again".to_string(),
+            ));
+        }
+        let user = inner.state.users.get(&person);
+        if user.is_some_and(|u| !u.passkeys.is_empty()) {
+            return Err((
+                409,
+                "passkey_required",
+                "this account has a passkey: approve with it".to_string(),
+            ));
+        }
+        if !user.is_some_and(|u| u.totp) {
+            return Err((
+                409,
+                "no_authenticator",
+                crate::messages::t("approval.authenticator_none", &[]),
+            ));
+        }
+        self.check_totp(&mut inner, &person, code).map_err(|_| {
+            (
+                401,
+                "code_refused",
+                crate::messages::t("approval.authenticator_refused", &[]),
+            )
+        })?;
+        Ok((person, role))
+    }
+
     /// Check an assertion over `challenge` by the signed-in person. `assertion` is the browser's JSON as the dashboard
     /// forwards it (`id`, `response.{clientDataJSON, authenticatorData, signature}`).
     pub fn approval_assertion(

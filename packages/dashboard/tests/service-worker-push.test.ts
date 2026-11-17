@@ -90,6 +90,19 @@ describe('service worker push', () => {
     expect(sw.focusCount()).toBe(1);
   });
 
+  it('a notification about one item opens that item, and only a path in this dashboard', async () => {
+    const sw = load();
+    const token = '0'.repeat(48);
+    await push(sw, { title: 'Approve or deny', body: 'x', url: `/go#${token}` });
+    await push(sw, { title: 'x', url: 'https://evil.example/' });
+    await push(sw, { title: 'x', url: '//evil.example/' });
+    expect(sw.shown.map((s) => (s.options['data'] as { url: string }).url)).toEqual([`/go#${token}`, '/activity', '/activity']);
+    const waits: Promise<unknown>[] = [];
+    sw.handlers['notificationclick']?.({ notification: { close: () => undefined, data: { url: `/go#${token}` } }, waitUntil: (p: Promise<unknown>) => waits.push(p) });
+    await Promise.all(waits);
+    expect(sw.opened).toEqual([`/go#${token}`]);
+  });
+
   it('never answers or stores a request for live data', () => {
     expect(SOURCE).toContain("url.pathname.startsWith('/v1/')");
     const sw = load();

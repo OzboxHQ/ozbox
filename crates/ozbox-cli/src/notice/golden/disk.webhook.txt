@@ -1,0 +1,13 @@
+{
+  "box": "main",
+  "environment": null,
+  "expires_ms": null,
+  "kind": "alert",
+  "path": "/boxes/main",
+  "production": false,
+  "project": null,
+  "reference": null,
+  "summary": "Grow the work disk, or clear space, before it fills.",
+  "title": "Box main: the work disk is 96% full",
+  "url": null
+}

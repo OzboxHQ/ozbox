@@ -69,7 +69,8 @@ Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects
   Tagging follows from that: the role can put the `ozbox-managed` tag on a resource only as the resource is created, so a disk made
   before the module tagged it (a `0.1.x` box's system disk) can be given its first tag only by an account administrator, never by
   this role or the setup identity (IAM cannot tell "a disk of one of our machines" from any other volume). The module never asks
-  for it (the system disk is tagged at creation and its tags are ignored afterwards), and a plan that would is refused before
+  for it (the system disk is tagged by the launch itself, through the machine's `volume_tags`, and those tags are ignored
+  afterwards: a block's own tags would be applied after the disk exists, which the role cannot do; ADR 0053, amendment 3), and a plan that would is refused before
   anything is applied, with the command to run: see ADR 0053, amendment 1.
 
 - **The real bill** (`ozbox cost bill`, the dashboard's Bill page): read from Cost Explorer, filtered to spend tagged
@@ -104,8 +105,13 @@ release use the role and sign its manifest, so the trust deliberately names noth
    for an organization that has the immutable-id subject claim on. If yours still uses the plain form, the subject is
    `repo:<org>/<repo>:environment:image`; the ids make it survive a rename and a re-created repository name.
 4. Attach it as the role's trust relationship. The role's permissions (create and delete only resources tagged
-   `ozbox-managed=true`, and, to publish, copy images to the copy regions, change an image's launch permission, and deregister an
-   image and delete its snapshot) are separate.
+   `ozbox-managed=true`, and, to publish, copy images to the copy regions, read and change an image's launch permission
+   (`ec2:DescribeImageAttribute`, `ec2:ModifyImageAttribute`), deregister an image and delete its snapshot, and read the
+   public-image quota with `servicequotas:ListServiceQuotas`) are separate. Without the quota read the scripts assume AWS's
+   default of 5 and say so.
+
+Run the workflow from `main` or an `image-v*` tag: those are the only refs the signed manifest's identity names, so any other
+(the program's `v*` tag included) is refused before anything is built.
 
 If AWS still refuses the sign-in, the workflow stops with a message that names the subject it presented and what the role has to
 trust, instead of failing deep inside the build.
@@ -127,11 +133,12 @@ the repository variable `OZBOX_IMAGE_PUBLIC` to `true`; then, in order ([ADR 005
 2. the release manifest is built and signed, recording every image id per region and architecture; it is refused if any region is
    missing;
 3. only then are the manifest's images tagged as ours and made public (`scripts/image/publish.sh`), and read back to check they are;
-4. images outside the retention window are retired in every region (`scripts/image/retention.sh`): the AMI is
-   deregistered, then its snapshot deleted. The window is the last three versions plus the newest version of each of the last
+4. images outside the retention window are taken out of use in every region (`scripts/image/retention.sh`): by default each
+   one that is still public is made **private** (the image and its snapshot are kept); only a manual run with
+   `retire_old: delete` retires them (the AMI is deregistered, then its snapshot deleted, which cannot be undone). The window is the last three versions plus the newest version of each of the last
    three minors; pre-releases do not count toward it and go only after their release has shipped and 14 days have passed. A pre-release is built private and encrypted unless the run's `publish_prerelease_version` equals the version and ends in `-beta.N` (one beta may be public; never rc, alpha or dev). Nothing is scheduled. It only touches images owned by the account that carry our tags and an Oz Box name,
-   never the release just made or anything newer, and does nothing if that release is not among the images. Run it without
-   `--apply` for a list.
+   never the release just made or anything newer, and does nothing if that release is not among the images. Without
+   `--apply` it prints the plan and changes nothing. See [releasing](../docs/releasing.md) for the switch.
 
 Check the first public image once by hand: launch it (or attach its snapshot's volume to a throwaway instance) and confirm the SSM
 agent's state, both `authorized_keys` files and the journal are empty.
@@ -170,6 +177,11 @@ stays known; a module keeps `ignore_changes` on `image` and `user_data` so that 
 
 The browser's own Unix user (`ozbox-browser`, ADR 0037 amendment 4) is made by the image and, for a machine from stock Ubuntu, by
 first boot, which runs `ozbox browser-setup` (the script is carried in the program: Hetzner's user data is nearly at its limit).
+
+The first-boot user data is limited by the provider (16 KB compressed on AWS, 32 KB on Hetzner), and the module tests hold it under
+11 KB on AWS. So the larger scripts (the root helper, the secrets setup, the box-user services script) are carried in the program and
+written by `ozbox first-boot install-scripts`, which first boot runs once after the program is installed (ADR 0036, last
+amendment). Put a new first-boot script of more than a few lines in the program the same way, not in `box.yaml.tftpl`.
 
 ## The box-wide egress list (ADR 0034)
 
@@ -218,9 +230,13 @@ before anything is created. Keeping state in the encrypted bucket needs 1.10 or 
 Identity Center a sign-in profile is exactly one permission set, so everything init applies has to be in it: a person given the key,
 adopt and box-policy sets separately could not run init end to end without full administrator rights. `OzBoxSetup` holds:
 
-- the reads init's checks make (`ec2:Describe*`, the signed-in role's own policy simulation) and the tagged-create checks it probes;
+- the reads init's checks make (`ec2:Describe*`, `servicequotas:GetServiceQuota` for the network's Elastic IP and NAT gateway
+  quotas, the signed-in role's own policy simulation) and the tagged-create checks it probes. Without the quota read the plan says
+  the quota could not be checked and goes on; it never guesses;
 - the state bucket `ozbox-state-<account>-<region>`: make it, version it, encrypt it, block public access, add the TLS-only policy and
-  tags, and read and write the state objects and the lock (only this account's `ozbox-state-*` buckets);
+  tags, and read and write the state objects and the lock (only this account's `ozbox-state-*` buckets). It may also delete such a
+  bucket, which init does only to undo one it made in the same run and left half set up: S3 deletes only an empty bucket, so a bucket
+  that holds any state (or any old version of it) cannot be removed this way;
 - the network (`modules/aws-network`): the VPC, subnets, internet and NAT gateways, address and route tables, every one only when
   tagged `ozbox-managed=true`, as the operator policy conditions them;
 - the statements of `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin`, with the same resource scoping (a test holds the
@@ -236,6 +252,12 @@ It is **not** the security baseline (`ozbox harden`, which has `infra/aws/securi
 
 The separate `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin` files remain for an administrator who wants to give one of
 them alone; `OzBoxSetup` is the one a person runs init with.
+
+**One provider version for every step.** Each root `ozbox init` generates pins the AWS provider to one exact version (6.73.0 in
+this release), and every step shares one lock file: init makes it once in its working folder (`provider/.terraform.lock.hcl`) and
+copies it into each step's folder, and into the box and network modules, before they are initialised. So every step, and every
+box created afterwards, runs the same provider. The modules themselves still accept `>= 5.60.0, < 7.0.0` for anyone using them
+directly.
 
 ### Give a person `OzBoxSetup` (IAM Identity Center)
 
@@ -280,7 +302,9 @@ module, whose `OzBoxKeyAdmin` set is KMS-only. Setup checks that permission befo
 the rest of setup. When it is applied, setup writes the policy for whoever runs `ozbox adopt-fleet-key` to
 `operator-adopt-policy.json` in the step's working folder. Those three statements (`SendOnlyTheAdoptDocument`, `ToBoxesOzBoxManages`,
 `ReadACommandThatWasSent`) are also part of the daily operator policy, and **setup writes that whole policy on every run**, applied
-document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. Setup never applies it: it has
+document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. When the
+adopt step has been applied in that region, its own output is merged into that file (a statement with the same `Sid` is replaced
+where it stands, a new one is added at the end, nothing appears twice), so there is one file to apply and no JSON to merge by hand. Setup never applies it: it has
 no right over the operator's permissions, on purpose (an identity that could rewrite them could widen them). An account administrator
 replaces the daily role's policy with the file (Identity Center: Permission sets, the daily set, Inline policy). At about 8,500 characters it
 is longer than a managed policy may be (6,144), so it is an inline policy. If the config records the daily `profile`, setup also reads, as
@@ -295,7 +319,7 @@ A box's role carries only customer-managed policies made once per account (`tofu
 and never AWS's broader one: `ozbox-box-session-manager` (what the Session Manager agent needs, no read of any parameter, secret
 or key), and, when a box uses them, `ozbox-box-parameters` (its own Parameter Store path, read from the role's tags, under
 `/ozbox`), `ozbox-box-fleet-key-<fleet>` (the fleet key, for this box's own secrets only), `ozbox-box-parameters-key` and
-`ozbox-box-session-logs`. `ozbox init` makes them (it needs the fleet key and, for session logs, `ozbox harden`, done first; run it
+`ozbox-box-session-logs`, and `ozbox-box-notify` (see "Alerts from a box through SES and SNS" below). `ozbox init` makes them (it needs the fleet key and, for session logs, `ozbox harden`, done first; run it
 again to add one), once, with
 the **setup identity** (`OzBoxSetup`, which includes `OzBoxPolicyAdmin`, `infra/aws/box-policy-admin-policy.json`). Your **daily operator role** (`infra/aws/operator-policy.json`) may attach that one policy by ARN and
 cannot create or change a policy, so it cannot widen what a box's role may do. A box cannot be created or upgraded before the
@@ -359,6 +383,21 @@ role can decrypt with, and an invoke-only policy for a box's role. Its tests pin
 box and nothing until you apply it, and the function's package is yours to build (the `ozbox-issuer` crate is its logic); the
 `ozbox init --issuer-package <zip> --issuer-package-sha256 <hash>` plans it (the hash is from the signed release or a reproducible build; the module refuses a file that does not match) (shown, approved, recorded in your config).
 
+## A box's dashboard and the fleet (`aws-fleet-manager`, ADR 0040: Preview, not applied anywhere)
+
+`modules/aws-fleet-manager` makes the two roles a box's dashboard would manage the fleet through, in the reserved namespace
+(`/obx/`), which the daily operator role is denied: **`obx-fleet-read`** (the fleet inventory and prices, and the bill only with
+`read_costs = true` in an account that holds nothing but Oz Box), assumed only by `main`'s own role `obx-main`; and
+**`obx-fleet-change`** (create, resize, pause, resume, snapshot, clone and destroy `ozbox-managed` resources in your regions,
+machine types and images), assumed only by your own sign-in on your computer, through the Identity Center permission set named
+by `window_permission_set`, one plan at a time. `main`'s role is never in the change role's trust. The change role is denied
+anything tagged `ozbox-fleet-manager` (the box module's `fleet_manager = true` puts that tag on `main` and its disks) or carrying
+`main`'s box name (`fleet_manager_box`, which also covers `main`'s snapshots), IAM, direct KMS, secrets, shells, copying data out
+and swapping a role or network. A launch's network interface, new or existing, must be in one of `subnet_ids`. The documents are the module's own `fleet-*.json` (the program carries them with it); the module and the
+program fill them the same way, and the tests evaluate the filled documents. An administrator applies the module once; the
+operator role cannot. **Nothing uses it yet**: the part on the box that would hold the credentials, the window command on your
+computer, the pool of box roles and the managed state bucket are not built (see the ADR's Amendment 1).
+
 ## Opt-in AWS security services (ADR 0035)
 
 ```bash
@@ -382,6 +421,25 @@ same options plans no change. `ozbox box-patch <box> --rule when-idle --from 2 -
 only inside that window of the day (UTC) once nothing has used it for a while; the default is never. Any `when-idle` rule needs
 a fresh approval (`--approval CODE`, scope `host-guard`, project `patch`); `never` does not. On Hetzner there is no equivalent of these services: the
 image's unattended upgrades are the patch policy, and `ozbox box-patch` works the same.
+
+## Alerts from a box through SES and SNS (opt-in)
+
+A box's dashboard sends Amazon SES email and Amazon SNS texts with the box's own role, which by default may do neither. To let
+it, for one sender identity and one topic only ([ADR 0035](../docs/adr/0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use.md), Amendment 2):
+
+1. Add both ARNs under `[aws]` in your config file, then run `ozbox init` with the setup identity. It makes `ozbox-box-notify`,
+   which allows `ses:SendEmail` on that identity and `sns:Publish` on that topic, nothing else:
+   ```toml
+   [aws]
+   notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+   notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+   ```
+2. Add `notify_send_grants = true` under `[aws]`. Boxes created afterwards, and boxes you `ozbox upgrade`, attach the policy (the
+   module variables `notify_send_grants`, `notify_ses_identity_arn`, `notify_sns_topic_arn`; output `notify_grants`).
+
+The plan refuses `notify_send_grants` without both ARNs, an ARN with a wildcard, and an account policy that allows anything but
+those two actions on those two ARNs. Any process on such a box, an agent included, can send from that identity and publish to
+that topic, so leave it off unless the box's dashboard needs it.
 
 ## Tests (no credentials)
 

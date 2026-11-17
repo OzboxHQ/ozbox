@@ -34,6 +34,27 @@ if ! id ozbox-supervisor >/dev/null 2>&1; then
   passwd --lock ozbox-supervisor >/dev/null 2>&1 || true
 fi
 
+# >>> ping-range
+# cloudflared runs as the secrets user and opens an ICMP (ping) socket at every start; when that user's group is outside
+# net.ipv4.ping_group_range it warns on every start and turns its ICMP proxy off. The range is widened to take in this one
+# group (an empty range becomes this group alone), never narrowed, so nothing that could ping before loses it. An ICMP echo
+# socket is all the range grants: no raw sockets, no capability. Paths and the group id can be overridden for a test.
+ping_range_file="${OZBOX_PING_RANGE_FILE:-/proc/sys/net/ipv4/ping_group_range}"
+ping_dropin="${OZBOX_SYSCTL_D:-/etc/sysctl.d}/60-ozbox-cloudflared-ping.conf"
+ping_gid="${OZBOX_PING_GID:-$(id -g ozbox-secrets 2>/dev/null || true)}"
+if [ -n "$ping_gid" ] && read -r ping_lo ping_hi <"$ping_range_file" 2>/dev/null \
+  && [ -n "$ping_lo" ] && [ -n "$ping_hi" ] && ! printf '%s%s%s' "$ping_gid" "$ping_lo" "$ping_hi" | grep -q '[^0-9]'; then
+  if [ "$ping_lo" -gt "$ping_hi" ]; then
+    ping_lo=$ping_gid; ping_hi=$ping_gid
+  else
+    [ "$ping_gid" -ge "$ping_lo" ] || ping_lo=$ping_gid
+    [ "$ping_gid" -le "$ping_hi" ] || ping_hi=$ping_gid
+  fi
+  printf '# cloudflared (as the secrets user) may open an ICMP echo socket; see ozbox-secrets-setup.sh\nnet.ipv4.ping_group_range = %s %s\n' \
+    "$ping_lo" "$ping_hi" >"$ping_dropin"
+fi
+# <<< ping-range
+
 cat >/etc/sysctl.d/10-ozbox-yama.conf <<'EOF_SYSCTL'
 # the box user cannot attach to processes it did not start
 kernel.yama.ptrace_scope = 1

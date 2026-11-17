@@ -201,7 +201,7 @@ impl KmsProvider {
         Self::build(crate::aws_native::AwsJson::new(), key_id, region, None)
     }
 
-    fn build(
+    pub(crate) fn build(
         client: crate::aws_native::AwsJson,
         key_id: &str,
         region: Option<&str>,

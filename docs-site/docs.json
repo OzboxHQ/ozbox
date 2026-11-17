@@ -44,6 +44,7 @@
               "use-cases/coding-from-anywhere",
               "use-cases/fleets",
               "use-cases/agentic-fleet",
+              "use-cases/task-channel",
               "use-cases/skills",
               "use-cases/orchestrating-a-fleet",
               "use-cases/secure-agent-workspace",
@@ -138,13 +139,17 @@
               "adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box",
               "adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own",
               "adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on",
+              "adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main",
               "adr/0043-coding-agents-on-a-box-reach-the-oz-box-tools-through-a-socket-of-their-own",
+              "adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant",
               "adr/0045-box-memory-guard",
               "adr/0049-sessions-come-back-after-a-stop-the-session-not-the-process",
               "adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver",
               "adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again",
               "adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest",
-              "adr/0053-init-adopts-what-already-exists-only-what-oz-box-made-never-replaced"
+              "adr/0053-init-adopts-what-already-exists-only-what-oz-box-made-never-replaced",
+              "adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach",
+              "adr/0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone"
             ]
           },
           {

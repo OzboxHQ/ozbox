@@ -5,7 +5,7 @@
 //! Provider documentation:
 //! * Twilio: <https://www.twilio.com/docs/messaging/api/message-resource#create-a-message-resource>
 //! * Vonage SMS API: <https://developer.vonage.com/en/api/sms>
-//! * AWS SNS: <https://docs.aws.amazon.com/cli/latest/reference/sns/publish.html>
+//! * AWS SNS (`Publish`, natively; the CLI where an AWS profile is named): <https://docs.aws.amazon.com/sns/latest/api/API_Publish.html>
 //! * Africa's Talking: <https://developers.africastalking.com/docs/sms/sending/bulk>
 //! * Telnyx: <https://developers.telnyx.com/api/messaging/send-message>
 //!
@@ -15,36 +15,20 @@
 use ozbox_core::CommandSpec;
 use serde_json::{json, Value};
 
-use super::{b64_std, clip, e164_ok, http_detail, Ctx, SendResult};
+use super::{b64_std, e164_ok, http_detail, Ctx, SendResult};
 use crate::netguard::{Guard, HttpRequest};
 use crate::notify_config::{SmsConfig, SmsProviderKind};
 
 /// Characters in one text: seven-bit text carries 160, and long texts are split into parts of 153, so this caps the
-/// cost of one alert at three parts. Anything outside plain ASCII switches the phone to a 70-character encoding, so
-/// such a text is cut shorter.
+/// cost of one alert at three parts. A text is folded to plain ASCII before it is sent (`notice::render::Sms`), so the
+/// phone never switches to the 70-character encoding.
 pub const MAX_ASCII: usize = 459;
-pub const MAX_UNICODE: usize = 201;
 
 /// What one person may receive in an hour, across every alert.
 pub const PER_RECIPIENT_PER_HOUR: usize = 6;
 
 pub trait SmsProvider {
     fn send(&self, ctx: &Ctx, cfg: &SmsConfig, to: &str, text: &str) -> SendResult;
-}
-
-/// The text of one message: short, one line of headline then the detail, cut to what the phone can carry.
-pub fn fit(title: &str, body: &str) -> String {
-    let full = format!(
-        "[Oz Box] {}\n{}",
-        super::one_line(title),
-        super::one_line(body)
-    );
-    let max = if full.is_ascii() {
-        MAX_ASCII
-    } else {
-        MAX_UNICODE
-    };
-    clip(&full, max)
 }
 
 pub fn provider(kind: SmsProviderKind) -> Box<dyn SmsProvider> {
@@ -58,11 +42,12 @@ pub fn provider(kind: SmsProviderKind) -> Box<dyn SmsProvider> {
 }
 
 /// Send one text through the provider that is set up.
-pub fn send(ctx: &Ctx, cfg: &SmsConfig, to: &str, title: &str, body: &str) -> SendResult {
+pub fn send(ctx: &Ctx, cfg: &SmsConfig, to: &str, notice: &crate::notice::Notice) -> SendResult {
+    use crate::notice::render::{Renderer, Sms};
     if !e164_ok(to) {
         return Err("the phone number is not in international format".into());
     }
-    provider(cfg.provider).send(ctx, cfg, to, &fit(title, body))
+    provider(cfg.provider).send(ctx, cfg, to, &Sms::render(notice))
 }
 
 fn json_of(body: &str) -> Value {
@@ -323,8 +308,19 @@ impl Sns {
     }
 }
 
+/// What a person is told when neither a native send nor the `aws` command had credentials to use.
+pub const NO_AWS_CREDENTIALS: &str = "the AWS credentials on this computer are missing or expired (on a box: its role; elsewhere: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or a profile under [aws] with the aws command installed)";
+
 impl SmsProvider for Sns {
     fn send(&self, ctx: &Ctx, cfg: &SmsConfig, to: &str, text: &str) -> SendResult {
+        // natively, unless this computer names an AWS profile (only the aws command reads profiles), or has no credentials
+        // of its own to sign with (a laptop on its default profile)
+        if ctx.aws_profile.is_none() {
+            match super::aws::sns(ctx, cfg.region.as_deref(), &cfg.from, to, text)? {
+                super::aws::Native::Sent(r) => return r,
+                super::aws::Native::NoCredentials => {}
+            }
+        }
         let cmd = Self::command(
             ctx.aws_profile.as_deref(),
             cfg.region.as_deref(),
@@ -335,7 +331,7 @@ impl SmsProvider for Sns {
         match ctx.runner.run(&cmd) {
             Ok(o) if o.status == Some(0) => Self::interpret(&o.stdout),
             Ok(o) => Err(aws_failure(&o.stderr)),
-            Err(_) => Err("the aws command could not be run".into()),
+            Err(_) => Err(NO_AWS_CREDENTIALS.into()),
         }
     }
 }
@@ -385,18 +381,32 @@ mod tests {
         }
     }
 
+    fn tb() -> crate::notice::Notice {
+        crate::notice::Notice::new(crate::notice::NoticeKind::Alert, "T", "b")
+    }
+
     fn body(r: &HttpRequest) -> String {
         String::from_utf8(r.body.clone().unwrap()).unwrap()
     }
 
     #[test]
     fn long_and_unicode_texts_are_cut_to_what_a_phone_carries() {
-        let t = fit("Disk full", &"x".repeat(2000));
-        assert_eq!(t.chars().count(), MAX_ASCII);
-        assert!(t.starts_with("[Oz Box] Disk full\n"));
-        let u = fit("Disque", &"\u{e9}".repeat(2000));
-        assert_eq!(u.chars().count(), MAX_UNICODE);
-        assert!(!fit("a\r\nb", "c\nd").contains("\r"));
+        use crate::notice::render::{Renderer, Sms};
+        use crate::notice::{Notice, NoticeKind};
+        let t = Sms::render(&Notice::new(
+            NoticeKind::Alert,
+            "Disk full",
+            "x".repeat(2000),
+        ));
+        assert!(t.chars().count() <= MAX_ASCII && t.is_ascii(), "{t}");
+        assert!(t.starts_with("Oz Box: Disk full"), "{t}");
+        let u = Sms::render(&Notice::new(
+            NoticeKind::Alert,
+            "Disque \u{e9}".repeat(40),
+            "",
+        ));
+        assert!(u.is_ascii() && u.chars().count() <= 160, "{u}");
+        assert!(!Sms::render(&Notice::new(NoticeKind::Alert, "a\r\nb", "c\nd")).contains('\r'));
     }
 
     #[test]
@@ -528,10 +538,7 @@ mod tests {
         let mut c = cfg(SmsProviderKind::Sns);
         c.from = "OzBox".into();
         c.region = Some("us-east-1".into());
-        assert_eq!(
-            send(&g.ctx, &c, "+15005550009", "T", "b"),
-            Ok("sent".into())
-        );
+        assert_eq!(send(&g.ctx, &c, "+15005550009", &tb()), Ok("sent".into()));
         let call = &g.runner.calls()[0];
         assert_eq!(call.program, "aws");
         assert_eq!(
@@ -545,7 +552,7 @@ mod tests {
             stdout: String::new(),
             stderr: "Unable to locate credentials for +15005550009".into(),
         });
-        let e = send(&g.ctx, &c, "+15005550009", "T", "b").unwrap_err();
+        let e = send(&g.ctx, &c, "+15005550009", &tb()).unwrap_err();
         assert!(e.contains("credentials") && !e.contains("+1500"));
     }
 
@@ -562,7 +569,7 @@ mod tests {
             g.secrets.set("sms-secret", "SENTINELSECRET").unwrap();
             g.http
                 .reply(500, r#"{"echo":"SENTINELSECRET +15005550009"}"#);
-            let e = send(&g.ctx, &cfg(kind), "+15005550009", "T", "b").unwrap_err();
+            let e = send(&g.ctx, &cfg(kind), "+15005550009", &tb()).unwrap_err();
             assert!(
                 !e.contains("SENTINEL") && !e.contains("+1500"),
                 "{kind:?}: {e}"
@@ -576,27 +583,21 @@ mod tests {
     #[test]
     fn a_missing_credential_a_missing_sender_and_a_bad_number_say_so_without_sending() {
         let g = rig();
-        assert!(send(
-            &g.ctx,
-            &cfg(SmsProviderKind::Twilio),
-            "+15005550009",
-            "T",
-            "b"
-        )
-        .unwrap_err()
-        .contains("no Twilio"));
+        assert!(
+            send(&g.ctx, &cfg(SmsProviderKind::Twilio), "+15005550009", &tb())
+                .unwrap_err()
+                .contains("no Twilio")
+        );
         g.secrets.set("sms-account", "AC1").unwrap();
         g.secrets.set("sms-secret", "s").unwrap();
         let mut c = cfg(SmsProviderKind::Twilio);
         c.from.clear();
-        assert!(send(&g.ctx, &c, "+15005550009", "T", "b")
+        assert!(send(&g.ctx, &c, "+15005550009", &tb())
             .unwrap_err()
             .contains("sender"));
-        assert!(
-            send(&g.ctx, &cfg(SmsProviderKind::Twilio), "0801", "T", "b")
-                .unwrap_err()
-                .contains("international")
-        );
+        assert!(send(&g.ctx, &cfg(SmsProviderKind::Twilio), "0801", &tb())
+            .unwrap_err()
+            .contains("international"));
         assert!(g.http.requests().is_empty());
     }
 }

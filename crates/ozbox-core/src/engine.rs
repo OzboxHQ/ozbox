@@ -145,6 +145,16 @@ pub trait Backend: Send + Sync {
         Err(self.upgrade_unsupported("find the latest image"))
     }
 
+    /// The newest Oz image for a machine of `machine_type` (its CPU architecture). The default ignores the type.
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        let _ = machine_type;
+        self.latest_image(region)
+    }
+
     /// What is known about one image, for `upgrade --image <id>`. Read-only.
     fn image_info(&self, _image: &str, _region: Option<&str>) -> Result<ImageInfo> {
         Err(self.upgrade_unsupported("inspect an image"))
@@ -982,9 +992,9 @@ impl<B: Backend> Engine<B> {
                     } else {
                         notes.push(
                             if missing {
-                                "No final snapshot: the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
                             } else {
-                                "No final snapshot: the /work disk and everything on it will be lost."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost."
                             }
                             .into(),
                         );
@@ -1024,8 +1034,10 @@ impl<B: Backend> Engine<B> {
                         Risk::High,
                     ));
                     if !rec.snapshots.is_empty() {
+                        // kept snapshots are billed: say so, and how to keep nothing (a throwaway box), since once the box
+                        // is gone they can no longer be listed through it
                         notes.push(format!(
-                            "{} existing snapshot(s) are kept.",
+                            "{} existing snapshot(s) of {name} are kept, and billed until deleted. To keep nothing, delete them first: `ozbox backup list {name}`, then `ozbox backup delete {name} <id>`.",
                             rec.snapshots.len()
                         ));
                     }
@@ -1274,6 +1286,14 @@ impl<B: Backend> Provider for Engine<B> {
 
     fn latest_image(&self, region: Option<&str>) -> Result<ImageInfo> {
         self.backend.latest_image(region)
+    }
+
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        self.backend.latest_image_for(region, machine_type)
     }
 
     fn check_reprovision(&self, rec: &BoxRecord) -> Result<Vec<String>> {

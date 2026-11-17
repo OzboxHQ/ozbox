@@ -68,9 +68,10 @@ older than 14 days are removed; the result says what was left out. **To get a sn
 the repository: `mkdir ../recovered && git archive <ref> | tar -x -C ../recovered` copies everything it held into a separate
 folder; `git diff HEAD <ref>` shows what differs; `git show <ref>:<file>` prints one file. Do not run
 `git restore --source=<ref> --worktree -- .` over a folder you kept working in: it replaces every file the snapshot holds and removes
-files it does not. A box whose agent is older cannot do any of this: the plan says so, uncommitted work is **not** snapshotted, and
-you are asked again before the box is stopped (`--legacy-checkpoint` uses that agent's own checkpoint, which writes a visible branch
-and pushes it if the box has a push remote). A snapshot that fails is reported and you are asked again, since `/work` is kept;
+files it does not. A box whose agent is older cannot do any of this: the plan says so, and the command is refused before anything
+changes (even with `--yes`) until you choose: `--legacy-checkpoint` uses that agent's own checkpoint, which writes a visible branch
+and **pushes it** if the box has a push remote; `--no-checkpoint` goes on with no checkpoint (uncommitted work is **not**
+snapshotted; `/work` is kept). `--dry-run` shows the plan without choosing. A snapshot that fails is reported and you are asked again, since `/work` is kept;
 `--strict-checkpoint` refuses to stop the box unless it was fully ready. **Status:** Preview (**not yet proven on a real box**).
 
 ## 4. See and stop what you left running
@@ -131,7 +132,11 @@ Open the address, enter the one-time setup code the server prints, and register 
 Google (your own OAuth app) plus an authenticator code, or your identity-aware proxy's signed token
 ([ADR 0010](../adr/0010-bring-your-own-tunnels.md)).
 
-**More than one person:** give each person on the list a role with `--person` (`role=owner`, `role=member` or `role=viewer`). The
+**More than one person:** give each person on the list a role with `--person` (`role=owner`, `role=member` or `role=viewer`). Each
+`--person` starts with an id you choose for them (lowercase letters, digits and dashes, up to 32, such as `jane`), not their
+email: the email goes after it, for the way they sign in (`--person jane,google=jane@example.com` or
+`--person jane,access=jane@example.com`). An email given as the id is refused, with the id to use instead. For someone
+already on a dashboard, the id is the first word of the `--person` it was installed with. The
 first person is the owner and the rest are members unless their entry says otherwise. An **owner** can do everything,
 including the settings, permissions, secrets, costs and roles. A **member** does the work: starts runs, approves, watches
 and takes over a browser, and uses a box's terminal, files and IDE. A **viewer** only looks: boxes, runs, costs and the audit
@@ -176,7 +181,10 @@ reports success only once the dashboard runs that way; it never runs as the box 
 old way (the one the box's image carries when its hash is in the image release's signed manifest, otherwise the release's
 signed program) is kept only as a fallback. Read the first-time setup code on your own computer with `ozbox secrets ingress setup-code --box ops`
 (it is handed to the box's secrets service and sent back through the sealed route, so it is not in a log the box user can read; on a
-box made before the ingress account, `ozbox upgrade` it first) and sign in at once. A box made before this release does not know the helper's new check
+box made before the ingress account, `ozbox upgrade` it first) and sign in at once. It works with no approval only on a box with no approver yet, for its first 24 hours, and until someone enrols a
+passkey or an authenticator in the dashboard (from then on it is refused for good; a box with a pinned laptop key needs that key's touch), and you sign in with what you enrolled. No process
+on the box can read the code this way: the route is a separate account only your computer's ingress key opens (on AWS, through your
+AWS sign-in too). A box made before this release does not know the helper's new check
 and the install stops there, with the dashboard staged but not running: upgrade the box first (an upgrade on Hetzner now replaces the
 server, so it brings the current helper too). Upgrading or pausing that box takes the dashboard down, so do that from another computer; an upgrade then puts it back from what this computer kept (below).
 **Status:** Preview.
@@ -191,7 +199,12 @@ them with `ozbox` on your computer. (Made-up demo boxes appear only when you ask
 browser or a stand-in server on the box itself: it says "This is demo data, and a box has no demo terminal" rather than hand
 you a shell on the box that is not the box user's.) Every page says plainly what is not connected, not built or not
 permitted in the same way, and none shows demo data on a box. A dashboard that manages the fleet from a box is
-designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md) and is not built.
+designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md). Its first part is
+built and tested with stand-ins, never on a real account (**Preview**): the cloud roles it would use (it may change only Oz Box's
+own boxes, never itself, and never who may do what), and the step where each change is planned, shown, and applied only inside
+a change window opened from your own computer and after you confirm that exact plan with your passkey. Nothing turns it on
+yet, because the part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the
+fleet is not connected.
 
 **The terminal, Files and Tools say what they are.** The terminal names its box before it connects ("Connecting to main…"),
 and once the shell is up it says "Connected to main, as the box user". That shell is started by the box's own agent, never by
@@ -226,6 +239,20 @@ back from those, after the web IDE, and its report has a **Dashboard** line that
 (different people, say) add `--token-from-keychain` instead of `--token-stdin`; without either flag an install leaves the box's token
 as it is. `ozbox dashboard forget <box>` removes what this computer kept; nothing on the box changes.
 
+**After an upgrade the dashboard comes back by itself.** An upgrade replaces the box's system disk, which held the dashboard's
+service; its settings stay on the box's own disk, and the box keeps the dashboard's address in a place only root can write. The box
+makes the service again when it starts (or when you run `ozbox admin <box> -- ensure-supervisor`), with the settings it already
+had, and the self-test fails a **dashboard** check if one was installed and none runs. A **dashboard_folder** check fails when the
+dashboard cannot write in its own folder (its user was made again with a new id and the files kept the old one: the Memory and Skills
+pages then say "Permission denied" and name the folder). `ozbox admin <box> -- ensure-supervisor` puts the folder back under the
+dashboard's user. If you run `ozbox dashboard install` again
+with settings that differ from the ones the dashboard has, it keeps its own, starts if it was stopped, and tells you so. To replace
+them (they decide who may approve), add `--replace-sign-in` and `--settings-approval CODE`
+(a code from the dashboard's **Secret approvals**, for the approval binding the command prints). A box with no passkey or
+authenticator code enrolled refuses the replacement. The self-test also fails a **legacy_tunnel** check when an older setup left a
+tunnel running as the box user with a token file it can read: run `ozbox dashboard retire-legacy-tunnel <box>`, then rotate the
+token in your Cloudflare account.
+
 **A new tunnel token later.** Run the same command again with the new token. The dashboard's program and sign-in settings
 stay as they are, and so does its public address; only the token changes. What happens next depends on the box:
 
@@ -245,15 +272,97 @@ cannot store a different token. Carrying the code to the box's root helper (the 
 goes through the box user's shell, which an agent on the box can in principle wrap; a forced command in the box's SSH daemon, in a
 later image, closes that.
 
+**Rotate the token, with a way back.** Running the install again replaces the token with nothing to fall back on: a wrong
+token takes the dashboard down. To rotate it safely, use the admin command, which keeps the old token until the new tunnel is
+healthy:
+
+```
+printf '%s\n' "$NEW_TOKEN" | ozbox admin ops --yes -- replace-tunnel-token cloudflare --token-stdin --approve-with-laptop-key
+ozbox admin ops --dry-run -- replace-tunnel-token cloudflare --token-from-store NAME   # the plan only
+```
+
+It shows the plan first. The new token goes to the box's root helper, which stores it and restarts the tunnel. After about 12
+seconds the command asks the box whether the tunnel is still running without having been restarted. If so, this computer keeps
+the new token in place of the old one. If not, the old token (kept on this computer since you installed) is put back, the same
+way, and the report says whether that tunnel is healthy again. The token is never an argument: it comes from standard input or
+from an entry in this computer's secret store (`--token-from-store NAME`). `--token-stdin` needs `--yes`, because standard input
+carries the token. With no old token kept here there is nothing to put back: the plan says so and asks you to type the box's
+name, which needs `--token-from-store`. `--approve-with-laptop-key` makes the approval a box with a second factor asks for, as
+`dashboard restore` does. Use `ide` for the web IDE's connector and `ngrok` for an ngrok tunnel.
+
+**On Cloudflare's side**, the order matters: get the new token, let the command switch to it, and retire the old one last.
+
+1. In the Cloudflare dashboard, open **Zero Trust → Networks → Tunnels** and pick the tunnel that serves `ozbox.example.com`.
+2. Get a new token for it from the tunnel's settings, where Cloudflare offers to refresh (rotate) it. Cloudflare's own
+   documentation says whether the old token keeps working after that, and for how long. If it stops at once, the command's
+   way back cannot bring the old tunnel up, and it says so (the tunnel is then down until a working token is sent).
+3. Run `replace-tunnel-token` with the new token, as above, and wait for it to say the new tunnel is healthy.
+4. Only then retire the old token in Cloudflare, if it is still valid there. If the command put the old token back, leave it
+   alone and check the new one first.
+
+**Status:** Preview (tested with a recorded box in CI; not yet run against a real tunnel).
+
 ## 10. Copy and paste that just works
 
-**You want:** normal copy and paste in the browser IDE's editor and terminal.
+**You want:** to copy and paste the way you do on your own computer, in the browser IDE's editor and terminal, in the
+dashboard's terminal and on the box's desktop.
 
-Chrome, Edge and Brave ask once for clipboard access — allow it. In Firefox, use Cmd/Ctrl+V; to select text in a tmux
-terminal, hold Option (macOS) or Shift while dragging. Chromium browsers can also install the IDE as an app with its own
-window.
+**The keys.** One set per computer, the same in the browser IDE's terminal and the dashboard's terminal:
 
-**Underneath:** Oz Box ships editor settings and terminal key bindings that let the browser's own paste reach the
-terminal, and tmux defaults that pass copies to your clipboard. It merges them into your settings and never overwrites
-your own keys.
-**Status:** Works (Firefox and Chromium on a real box).
+| | Mac | Windows and Linux |
+|---|---|---|
+| Copy | Cmd+C | Ctrl+C while text is selected, or Ctrl+Shift+C |
+| Stop the running command | Ctrl+C | Ctrl+C with nothing selected |
+| Paste | Cmd+V | Ctrl+V, Ctrl+Shift+V or Shift+Insert |
+
+In the editor itself the keys are your browser's own and need nothing from Oz Box.
+
+**Copying out of tmux.** The terminals run in tmux, which takes the mouse. Drag to select (or double-click a word): when
+you let go, tmux copies it and it lands on your clipboard, in both the browser IDE and the dashboard's terminal. After
+setting up or updating the IDE, reload its tab once. Or hold Shift while you drag (Option on a Mac) to select with the
+terminal's own selection, then copy with the keys above. In the dashboard's terminal, **Copy** with nothing selected
+opens the text on the screen in a box you can select from, which is also the way to copy on a phone or a tablet (press
+and hold).
+
+**Your browser.**
+- **Chrome, Edge and Brave** ask once to see the clipboard: choose **Allow**. After that every paste works.
+- **Firefox:** Ctrl+Shift+V (Cmd+V on a Mac) pastes straight away. Ctrl+V and right-click **Paste** in the browser IDE
+  may first show a small **Paste** button to click. In the dashboard's terminal, a tmux selection reaches your clipboard
+  only if you let go within about five seconds of starting the drag; after that it offers a **Copy** button instead.
+- **Safari:** Cmd+C and Cmd+V work; right-click **Paste** may first show a small **Paste** button to click.
+- **Firefox and Safari** may refuse a copy made by dragging in tmux in the browser IDE; if it does not arrive, hold Shift
+  (Option on a Mac) while you drag.
+- **The dashboard's terminal** never pastes without you: its **Paste** button reads the clipboard only when pressed, and
+  when the browser will not hand it over, a box opens where you paste with the keyboard.
+- **The desktop** shares your clipboard both ways, up to 1 MB per copy. Chrome, Edge and Brave do it by themselves once
+  you allow clipboard access. In Firefox and Safari, open the desktop's side panel and use its **Clipboard** box to move
+  text in and out.
+
+**What a program on the box can and cannot do.** A program on the box can put text on your clipboard, never read it.
+- In the dashboard's terminal, a program's copy (OSC 52, which is how tmux copies there) is written only right after
+  you pressed a key or clicked; otherwise you are asked first. A copy larger than about a million characters is refused.
+- In the browser IDE, a tmux copy reaches the IDE window through a small Oz Box extension that listens on a socket only
+  the box user can open. It writes only while that IDE window is in front with a terminal open, says "Copied N
+  characters from the terminal" in the status bar every time, and refuses more than a million characters. Anything that
+  runs as the box user (your coding agents included) can reach that socket, just as it can already make tmux copy; that
+  is the boundary. A program's own OSC 52 copy does not reach your clipboard in the browser IDE.
+- Neither terminal, nor tmux, ever answers a program's request to read your clipboard.
+- Copy buttons for secrets (a webhook secret, a one-time code, a share link) copy only when you press them, and say that
+  the secret is now on your clipboard.
+
+**Underneath:** Oz Box ships terminal key bindings for the browser IDE, tmux settings that send copies to your
+clipboard (tmux's `copy-command`, only when you have not set your own), and the small IDE extension above. It merges the
+settings into your own and never overwrites your keys; it only takes back an entry an earlier Oz Box added that stopped
+Ctrl+V pasting on Windows and Linux. A box set up by an earlier version is offered the update the next time you run
+`ozbox ide <box>`. A keybindings file with comments other than at the top is left alone: there, remove the `ctrl+v`
+line that says `-workbench.action.terminal.paste` yourself.
+
+**Status:**
+- Browser IDE terminal with the Linux keys in Chrome: **Works** (Ctrl+V, Ctrl+Shift+V, Ctrl+C to copy a selection and
+  Ctrl+C to stop a command, run on a real box against its own IDE). Mac and Windows keys, Firefox and Safari:
+  **Preview**. The earlier "Works" here was wrong for Windows and Linux: Ctrl+V typed `^V` instead of pasting.
+- Browser IDE terminal, drag or double-click in tmux to copy: **Works** in Chrome (run on a real box with the shipped
+  extension and tmux settings); Firefox and Safari: **Preview**.
+- Dashboard terminal (the keys, multi-line paste, copies from tmux and other programs, the Copy box): **Preview**
+  (tested in Chrome against a real shell in CI; not yet run on a real box, or in Firefox or Safari).
+- The desktop's clipboard: **Preview**.

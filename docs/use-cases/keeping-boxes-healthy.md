@@ -43,9 +43,11 @@ what `ozbox clone` or a restore picks). It holds the old store's key file, so ke
 snapshot, and nothing deletes it for you while the box exists. Once your keys are entered again and `ozbox adopt-fleet-key main` has moved the store to the fleet's key,
 delete it with `ozbox backup delete main <snapshot id>`. To reopen the old store from it, see 1c. Each upgrade you run takes its own copy: one that is retried after a failure, or run again, takes another, so `ozbox backup list main` may show several (the report names the one this upgrade took). `ozbox upgrade` takes the copy first, before it asks the box to end its runs and save its work (the hold it puts on new runs lasts only ten minutes from then), and waits up to thirty minutes for it (`snapshot_wait_minutes` under `[aws]` changes that). The dashboard takes it as part of the upgrade, after that preparation, so it waits five minutes only. A copy not complete in time stops the upgrade before anything is stopped, names the snapshot and says it will finish by itself and can be used; run the upgrade again when it has (the dashboard's upgrade, if it timed out, is best run with the command). **Destroying the box deletes its copies** (the plan lists them, and they are the one thing ozbox could not list afterwards): add `--keep-old-system-disks` to `ozbox destroy` to keep them, and then delete them yourself in the AWS console or with `aws ec2 delete-snapshot`, since ozbox can no longer list them once the box is gone. `--no-pre-upgrade-snapshot` turns
 the copy off: the key is then destroyed with the old disk and the old store can never be opened again. A refused plan (the disk is not
-encrypted, or this program's AWS permissions cannot snapshot it) says so and names that flag. No copy is taken when the store is kept
+encrypted, or this program's AWS permissions cannot snapshot it) says so and names that flag. A system disk made by an older version has no tags and only an account administrator can tag a disk that exists, so for such a box the refusal gives the one command an account administrator runs to tag it (then run the upgrade again), or you can pass that flag to go on without a copy. The system disk this upgrade makes is tagged from the start, so the next upgrade of the box takes its own copy. No copy is taken when the store is kept
 (KMS, escrow, this computer's keychain), is already lost, or is known to be empty (`--use-fleet-key`). On Hetzner no copy is kept, and
 the plan says so.
+
+When an upgrade started a new secrets store (you accepted it with `--accept-new-secrets-store`), the box's secrets service has a new key and this computer still pins the old one, so `ozbox secrets import --box` would refuse. The report says so and gives the new fingerprint. At a terminal it offers to pin the new key: it shows both fingerprints and you type the box name, as `ozbox secrets ingress pin --box main --replace` does. With `--yes`, `--json` or no terminal it changes nothing and prints that command. A pin is never replaced without your typed confirmation.
 
 On AWS, a box made without a pinned approver gets this computer's key in its new machine's first-boot configuration. After
 the upgrade, laptop keys the box trusts with no record of how they were enrolled are listed, with the command that revokes
@@ -63,6 +65,12 @@ as `instance missing`, and running the same `ozbox upgrade` again finishes the j
 **Status:** Works on AWS (two real upgrades). The Hetzner replacement is Preview (tested in CI against a simulated Hetzner API
 and a simulated OpenTofu, never run against Hetzner). The secrets-store check and recovery are Preview (tested in CI, not yet
 on a real box).
+
+**An image that cannot open a store on the fleet's key is refused.** A box whose store is on your fleet's KMS key can only be
+upgraded to an image whose secrets service reaches that key by itself: 0.2.0-beta.3 or later (from now on, the image's signed
+release says which keys it opens). Going back to an older image would leave the store unopenable, so the plan refuses it before
+anything changes and no flag lifts it; pick a newer image (`ozbox upgrade main` picks the newest). An image whose release cannot
+be told is refused the same way. A box whose store is kept in a file is not affected. **Status:** Preview.
 
 ## 1b. Move an existing AWS box's secrets store to your fleet's KMS key
 
@@ -140,7 +148,9 @@ then mark any disk in the account as its own.
 **A box with secrets of its own** (kept in AWS Parameter Store) loads them with the box's role too: no `aws` command is needed on
 the box. If it could not (the role may not read its path, or Parameter Store is not reachable), the box's self-test fails
 `box_secrets_loaded`, and `ozbox admin <box> -- collect-logs` shows the loader's reason (never a value). The box tries again every
-fifteen minutes. A box whose secrets are in OpenBao still needs the `bao` program on it.
+fifteen minutes. A box whose secrets are in OpenBao reads them, and escrows its store's key there, the same way: straight from the
+vault with the token you placed, no `bao` program needed (Preview: tested against a simulated vault). The vault must be reachable
+at its `https://` address with a certificate from a public authority; a vault behind a private certificate authority is not reached yet.
 
 **A box set up for the fleet's KMS key** keeps its store's key in KMS and reaches it with the box's own role: no `aws` command is
 needed on the box. If the role cannot use the key, the secrets service stays down and the box's self-test fails `secrets_key_usable`
@@ -354,7 +364,15 @@ that already ran and finished, or that had nothing to do because its start condi
 session when there is nothing to resume), counts as healthy while it is stopped; a service that should keep running, or one
 that failed, does not.
 
-**Status:** Preview (runs on real boxes; one check is being corrected in the next image).
+It also checks the steps a box's first boot runs on its own: adding the Oz Box tools to the coding agents' settings, letting
+the box user's services keep running (linger), and starting the box user's service manager. Each of these waits a bounded
+time and tries again a few times, with a growing pause, when the system is not ready yet, and never waits for ever. If one
+still did not finish, the self-test fails `first_boot_steps`, names the step, and gives the command that runs it again
+(`ozbox admin <box> -- ensure-supervisor` for the coding agents' tools, `ozbox admin <box> -- enable-linger` for the other
+two); running it clears the failure. A box made before this check has no record and is not asked.
+
+**Status:** Preview (runs on real boxes; one check is being corrected in the next image; the first-boot steps check is
+tested in CI and not yet seen on a real upgrade).
 
 ## 9. Fix a box without root
 

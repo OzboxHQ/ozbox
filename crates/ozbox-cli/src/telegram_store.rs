@@ -125,6 +125,44 @@ pub struct Marks {
     pub production: Vec<String>,
     /// The box whose dashboard owns the fleet (it runs the bridge): off for chat unless a delegation says its owner was warned.
     pub hub: Option<String>,
+    /// Named groups of boxes a chat may address as `@<group>` (a group never shares a box's name).
+    pub groups: std::collections::BTreeMap<String, Vec<String>>,
+    /// How much of what an agent writes reaches a chat, per box: `full` (the default), `summary` or `metadata`. A Production
+    /// box is always `metadata`, whatever is written here.
+    pub detail: std::collections::BTreeMap<String, String>,
+}
+
+/// What box power from chat has used (ADR 0050 §3), so the caps hold across a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PowerLedger {
+    /// The UTC day the counters are for; a new day starts them again.
+    pub day: u64,
+    /// person -> what they used today.
+    pub used: std::collections::BTreeMap<String, PowerUsed>,
+    /// box -> what chat did to it.
+    pub boxes: std::collections::BTreeMap<String, BoxPower>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PowerUsed {
+    pub resumes: u32,
+    pub creates: u32,
+    pub spent_cents: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BoxPower {
+    /// The last power act on the box from chat.
+    pub last_ms: u64,
+    /// A box started from chat is paused again at this moment, unless extended once.
+    pub deadline_ms: Option<u64>,
+    pub extended: bool,
+    /// Who started it from chat (the deadline's notice goes to that link).
+    pub by_person: Option<String>,
+    pub chat_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,6 +181,7 @@ pub struct TgData {
     pub halted: Option<Halt>,
     pub counters: Counters,
     pub marks: Marks,
+    pub power: PowerLedger,
     /// Times (ms) of the refusals written to the audit chain in the last hour, by link, so a loop cannot fill the chain.
     pub refusal_audit: std::collections::BTreeMap<String, Vec<u64>>,
 }

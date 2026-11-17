@@ -61,8 +61,8 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    ozbox models add work --kind anthropic --key-stdin
    ```
 2. Import the project's **non-production** `.env` keys into the box's encrypted store. Run it first without `--yes` to see
-   the names and fingerprints (never values); add `--yes` to store them. If the box's dashboard has a second factor, it also
-   needs the one-time `--approval` code the dashboard gives you after your passkey. The file is read the way a `.env` file is normally read (like python-dotenv and Docker Compose): quotes around a value are removed, `export` is accepted, a trailing ` # comment` is ignored, and a quoted value may run over several lines (a PEM key, a JSON document). **Any value can be stored: spaces, quotes, backslashes, JSON, several lines, non-English text.** `ozbox env run` hands the program exactly what the file said. A value the plain format cannot hold is stored encoded (the preview marks it `stored encoded`); a value that is plain stays as it was, so nothing already stored changes. Only a blank value, one with a NUL byte, one over 96 KB, or a quote that is never closed is skipped, and listed with the reason by name only; a name that is not a valid variable name is shown as `line N`. Every key is checked before any is stored, so a skipped key never leaves the others half imported; if the disk itself refuses part-way, run the import again (the same names are simply written again). A box made from an older image cannot take encoded values: the import says which keys need `ozbox upgrade` first. A `--dry-run` shows the preview and sends or stores nothing, even with `--yes`.
+   the names and fingerprints (never values); add `--yes` to store them. If the box's dashboard has a second factor, the
+   import asks for its own approval (see **Approving an import** below): nothing to copy. The file is read the way a `.env` file is normally read (like python-dotenv and Docker Compose): quotes around a value are removed, `export` is accepted, a trailing ` # comment` is ignored, Windows line endings and a byte-order mark at the start are read as nothing, and a quoted value may run over several lines (a PEM key, a JSON document). **Any value can be stored: spaces, quotes, backslashes, JSON, several lines, non-English text.** `ozbox env run` hands the program exactly what the file said. A value the plain format cannot hold is stored encoded (the preview marks it `stored encoded`); a value that is plain stays as it was, so nothing already stored changes. Only a blank value, one with a NUL byte, one over 96 KB, or a quote that is never closed is skipped, and listed with the reason by name only; a name that is not a valid variable name is shown as `line N`. Every key is checked before any is stored, so a skipped key never leaves the others half imported; if the disk itself refuses part-way, run the import again (the same names are simply written again). A box made from an older image cannot take encoded values: the import says which keys need `ozbox upgrade` first. A `--dry-run` shows the preview and sends or stores nothing, even with `--yes`.
    ```
    ozbox secrets import .env.staging --project shop --env staging --box main
    ```
@@ -71,7 +71,9 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    (production-looking and not allowed), *skipped* (with the reason beside the name: a blank value, a name that is not a variable
    name and why, a line that is not `NAME=value`, a value the store cannot hold), *duplicate* (a name that appears again: the
    **last** line is kept, as a shell and Docker Compose do, and the lines ignored are named) and *unchanged* (already stored with
-   the same value, flag and mark; reported for an import to this computer's store, not for `--box`, which does not say). `--json`
+   the same value, flag and mark; reported for an import to this computer's store, not for `--box`, which does not say). A key the
+   box itself did not store is named with the box's own reason; a box from an older image says only what it stored, and the
+   result then says that it gave no reason, rather than leaving the key out. `--json`
    carries the same account in `summary`, `duplicates` and `rejected_lines`, and an `outcome` on every key. Values are never
    printed; a line that is not a valid name is shown only as its line number.
 
@@ -80,6 +82,45 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    with `--allow-live-all` (the two cannot be used together). Either way the keys are listed first, a person at a terminal
    types the project's name to confirm, and a script is refused with the exact command to run yourself. The keys stay flagged and
    no agent's command is ever given them.
+
+   **Approving an import (Preview).** On a box whose dashboard has a second factor, `ozbox secrets import --box ... --yes`
+   does not need a code. It files an approval request on the box for exactly these keys (names and salted digests, never the
+   values), prints `Waiting for approval in your dashboard: ...`, and waits:
+   1. Open **Approvals** in the box's dashboard (a push or chat message says a request is waiting, if you set one up; a chat
+      app never approves). The card lists the project, the environment and every key name.
+   2. Tap **Approve with passkey**, or, if your account has no passkey, **Use an authenticator code** and type the six digits.
+      An authenticator code may approve any request, Production included (owner, 2026-11-17), but a passkey is offered first
+      and an account with a passkey must use it. A code is weaker: it is not tied to the request the way a passkey is, so
+      type it only into your own dashboard's address.
+   3. The waiting command goes on by itself and stores exactly what was approved. A key changed after the approval is refused.
+
+   For a **non-Production** environment (`dev`, `development`, `staging`, `test` or `e2e`) the command also asks
+   `Approve it now? [y/N]` when this computer holds an approval key: answer `y` and the key approves it here instead. A
+   **Production** import (any other environment, or a key whose name says production) is approved **only on the dashboard**,
+   with your passkey or authenticator code: the command does not offer this computer's key, and the box refuses that key if
+   it is tried anyway. The same holds for a declaration whose commands take secrets from a Production environment.
+   An import into `staging` whose key names say production or live, or whose values are live-mode keys (`sk_live_…`) or production
+   addresses, is a Production import too. This computer's key also never approves a declaration or the box's own settings (its
+   store key's escrow, its tunnel token, who may approve): use a laptop key that needs a touch, root on the box, or the dashboard
+   where it offers the change. The dashboard's first-time code needs no approval only on a box with no approver, for its first 24 hours and until someone
+   enrols in the dashboard (`ozbox secrets ingress setup-code`); a box with a pinned touch key needs that key's approval.
+   `--wait MINUTES` (1 to 30, default 30) limits the wait. Ctrl-C or running out of time stores nothing and changes nothing;
+   the request expires by itself, and running the command again files a new one.
+
+   **The fallback: an approval code.** `--approval CODE` still works: ask the dashboard for a code (**Settings**, **Secrets**,
+   after your passkey or authenticator) and pass it. A code made with this computer's own key (`ozbox secrets approve`) never
+   approves Production: the box refuses to make one, and refuses one at import, and says where to approve instead. A box from
+   before approval requests answers the import with that same sentence; `ozbox upgrade` it to get the flow above.
+   **The other approved changes work the same way (Preview).** With no `--approval`, `ozbox env policy set FILE --project
+   <p> --box <name>` (a declaration), `ozbox dashboard install <name> --token-stdin` (a new tunnel token for the box's
+   dashboard) and `ozbox box-secrets <name>` on Hetzner (the box's own secrets declaration) each file a request for exactly
+   that change, say `Waiting for approval in your dashboard: ...`, and go on once you approve it there. These are approved
+   **only on the dashboard** (passkey or authenticator code); this computer's key is never offered for them. The box binds
+   each request to what it approves: the declaration's own text and its project, the token's digest (never the token), the declaration's
+   vault address. `env policy set` takes `--wait MINUTES`; the other two wait up to 30 minutes. A guard override filed on the
+   box already waits for the dashboard ([ADR 0041](../adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on.md)).
+   **Not yet:** the dashboard does not take a `.env` file itself (importing from the browser is planned); `ozbox tunnel setup`
+   run on the box itself, removing a tunnel token, placing a vault token and a host guard change still use a code.
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used
@@ -107,6 +148,16 @@ reaches them only through sockets that cannot read a value back. A secret in a c
 brokered yet, so a run that needs one waits with that reason. A laptop has no second operating-system user, so the
 separation there is weaker than on a box.
 **Status:** Preview.
+
+**When the box's secrets service is down.** The box's git hooks compare a commit with the secrets the box stores, and that
+needs the service. While it is not running, a commit is still read for key shapes, file names and `.env` files, and a clean
+one goes through with a note that says what was not checked. The commit is noted on the box, and once the service is back the
+next commit or push adds it to the box's audit trail, marked as made in the outage window (a line such as
+`guard.commit-unscanned … outage-window window=not-listening`). **A push stays stopped for the whole outage**, and no approval
+opens it, not even one signed on your own computer; once the service is back the push reads every commit the remote lacks.
+**Limits:** the note is in a file the box user owns, so an agent that means harm can delete it before it is sent: it records
+accidents. A commit that is never followed by another commit or push on the box is not sent. **Status:** Preview (tested with
+the service stopped in tests, not yet on a real box).
 
 ## 3. A network that only reaches what you declared
 
@@ -250,9 +301,23 @@ What each part does:
   use its key; a service that holds a key reaches only the hosts the project declares (`egress`), through a proxy
   that is its own unit and lives exactly as long as the service, and only that service's user may connect to it (a kernel rule on the
   user, and the proxy checks the same for itself); with nothing declared, or no secret, it reaches this machine's loopback and nothing
-  else (a program must honour `HTTPS_PROXY`). A project that declares `tcp` destinations cannot start a service that holds a key yet: a
+  else (a program must honour `HTTPS_PROXY`; see **Which programs use the route** below). A project that declares `tcp` destinations cannot start a service that holds a key yet: a
   raw tunnel is held back until the box has proven its ports cannot be taken by another user; what the server prints goes to the journal, and only `--status` is scrubbed of stored
   values; and `npm run start` cannot receive a secret, because a package script is not covered by a pin.
+- **Which programs use the route.** A command or service whose project declares `egress` is given `HTTPS_PROXY` (and
+  `https_proxy`, `NO_PROXY`), and also `NODE_USE_ENV_PROXY=1`, because Node's built-in `fetch` (and so most JavaScript SDKs) ignores
+  `HTTPS_PROXY` without it. None of these names can be set by a declaration. What reads them:
+
+  | Runtime or tool | Uses the route | Note |
+  |---|---|---|
+  | Node 22.21+ or 24.5+ (`fetch`, `http`, `https`) | Yes | through `NODE_USE_ENV_PROXY=1`, which Oz Box sets |
+  | Node older than that | No | its calls go direct and are refused; upgrade Node, or give the program a proxy agent yourself |
+  | curl, Python (`requests`, `httpx`, `urllib`), Go `net/http`, Deno, Bun, Rust `reqwest` | Yes | they read `HTTPS_PROXY` on their own |
+  | Python `aiohttp` | Only with `trust_env=True` | its default ignores the proxy variables |
+  | Java | No | it reads `-Dhttps.proxyHost` / `-Dhttps.proxyPort`, not the environment |
+
+  A program that does not use the route fails to connect (the closed network refuses it); it never reaches a host the project did not
+  declare. Raw `tcp` destinations are tunnels, not the proxy, so they work from every runtime.
 - **`public`** names stored values that you marked public when you imported them (`ozbox secrets import .env.staging --project shop
   --env staging --public NEXT_PUBLIC_ANON_KEY --public NEXT_PUBLIC_APP_URL --box main`): a public URL, or a hosted backend's anonymous
   key, which looks like a secret and is public by design. A command or service that lists the name (and an `envs` list) receives it as

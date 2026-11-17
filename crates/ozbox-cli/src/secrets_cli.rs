@@ -21,6 +21,21 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
     }
     let yes = effective_yes(yes, dry_run);
     match command {
+        SecretsCommand::NativeCheck => {
+            let c = crate::native_check::run().map_err(CliError::Msg)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({"ok": true, "kms_requests": c.kms_requests, "ssm_requests": c.ssm_requests, "parameters": c.parameters})
+                );
+            } else {
+                println!(
+                    "native-check: ok ({} signed key-service requests, {} signed parameter-store requests, {} parameters read)",
+                    c.kms_requests, c.ssm_requests, c.parameters
+                );
+            }
+            Ok(())
+        }
         SecretsCommand::Status => {
             let s = match open_from_env() {
                 Ok(s) => s,
@@ -114,6 +129,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
             public,
             on_box,
             approval,
+            wait,
         } => crate::workload_cli::import(
             &crate::workload_cli::ImportArgs {
                 file,
@@ -124,6 +140,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
                 public,
                 on_box: on_box.as_ref().map(|b| b.as_str()),
                 approval: approval.as_deref(),
+                wait_minutes: *wait,
             },
             &ozbox_core::SystemRunner,
             &mut std::io::stdin().lock(),
@@ -301,7 +318,10 @@ fn dry_run_of(command: &SecretsCommand, json: bool) -> Option<Result<(), CliErro
         Some(Ok(()))
     };
     match command {
-        SecretsCommand::Status | SecretsCommand::Import { .. } | SecretsCommand::Approve { .. } => {
+        SecretsCommand::Status
+        | SecretsCommand::NativeCheck
+        | SecretsCommand::Import { .. }
+        | SecretsCommand::Approve { .. } => {
             None
         }
         SecretsCommand::ApprovalKey { command: K::List { .. } } => None,
@@ -666,13 +686,11 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
         return Ok(());
     }
     let root = root_for(&prefix, &role).map_err(CliError::Msg)?;
-    let runner = ozbox_core::SystemRunner;
     let params = match backend.as_str() {
         "aws-ssm" => AwsSsm::new(&env("OZBOX_BOX_SECRETS_REGION")).fetch(&root),
-        "openbao" => OpenBao {
-            runner: &runner,
-            mount: std::env::var("OZBOX_BOX_SECRETS_MOUNT").unwrap_or_else(|_| "secret".into()),
-        }
+        "openbao" => OpenBao::from_env(
+            std::env::var("OZBOX_BOX_SECRETS_MOUNT").unwrap_or_else(|_| "secret".into()),
+        )
         .fetch(&root),
         _ => {
             return Err(CliError::Msg(
@@ -685,7 +703,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
     let from = match backend.as_str() {
         "aws-ssm" => AwsSsm::new("").label(),
         _ => OpenBao {
-            runner: &runner,
+            vault: None,
             mount: String::new(),
         }
         .label(),
@@ -706,7 +724,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
         skipped.malformed,
         skipped.production_looking
     );
-    escrow_key(&runner);
+    escrow_key();
     Ok(())
 }
 
@@ -760,7 +778,7 @@ fn running_as_root() -> bool {
 
 /// A box that keeps its store's key in a file escrows it in its vault, so a replaced system disk can open the store again
 /// (see `secrets_escrow`). Run by the loader, which holds the vault token. Says what it did; never the key.
-fn escrow_key(runner: &dyn ozbox_core::CommandRunner) {
+fn escrow_key() {
     if !crate::secrets_file::file_kek_selected() {
         return;
     }
@@ -777,7 +795,7 @@ fn escrow_key(runner: &dyn ozbox_core::CommandRunner) {
     let Ok(kek) = std::fs::read_to_string(&file).map(zeroize::Zeroizing::new) else {
         return;
     };
-    match escrow.place(runner, &kek) {
+    match escrow.place(&kek) {
         Ok(true) => println!("the store's key was escrowed in the vault"),
         Ok(false) => {}
         Err(e) => eprintln!("{e}"),
@@ -801,6 +819,8 @@ fn gate(
     // (A token the box user can swap in a file after the check is not a risk this way: the helper hands over the bytes it
     // already holds.)
     let bound;
+    // the token's full digest, which an approved `tunnel-token` request is bound to (B4-27); the code path ignores it
+    let mut token_sha256 = String::new();
     let env = if bind_token_stdin {
         let mut tok = zeroize::Zeroizing::new(String::new());
         let _ = std::io::stdin().read_line(&mut tok);
@@ -808,6 +828,7 @@ fn gate(
             return Err(CliError::Msg(t("approval_key.token_stdin_empty", &[])));
         }
         bound = crate::secrets_approval::tunnel_token_binding(&tok);
+        token_sha256 = ozbox_core::approval_subject::tunnel_token_sha256(&tok);
         bound.as_str()
     } else {
         env
@@ -815,7 +836,7 @@ fn gate(
     let v = crate::secrets_service::SocketSecrets::new(path)
         .call(
             json!({"op": "gate", "scope": scope, "project": project, "env": env,
-            "approval": line.trim()}),
+            "approval": line.trim(), "token_sha256": token_sha256}),
         )
         .map_err(fail)?;
     println!("{}", v["value"].as_str().unwrap_or("allowed"));
@@ -965,6 +986,7 @@ fn serve(
             .ok()
             .and_then(|t| crate::secrets_state::previous_failing_since(&t)),
     );
+    use ozbox_core::secrets_phase::Phase;
     let not_ready = |m: &str, code: &str| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -995,14 +1017,17 @@ fn serve(
             // Not configured is a state, not a crash: say why where the box user can read it, and exit with a code the
             // unit does not restart on (a restart every few seconds changes nothing and hides the reason).
             StartFailure::Config(m) => {
-                write_state(&state, &not_ready(&m, "config"));
+                write_state(&state, &not_ready(&m, "config").with_phase(Phase::Stopped));
                 eprintln!("the secrets service is not ready: {m}");
                 std::process::exit(NOT_READY_EXIT);
             }
             // The store is there and its key is gone with no copy anywhere: the one state in which the store may be set
             // aside (`ozbox admin <box> -- recover-secrets`), so it has a code of its own.
             StartFailure::NoEscrow(m) => {
-                write_state(&state, &not_ready(&m, crate::secrets_state::NO_ESCROW_CODE));
+                write_state(
+                    &state,
+                    &not_ready(&m, crate::secrets_state::NO_ESCROW_CODE).with_phase(Phase::Stopped),
+                );
                 eprintln!("the secrets service is not ready: {m}");
                 std::process::exit(NOT_READY_EXIT);
             }
@@ -1011,7 +1036,8 @@ fn serve(
             // store can be set aside for a new one.
             StartFailure::KindMismatch { message, stored } => {
                 let st = not_ready(&message, crate::secrets_state::KIND_MISMATCH_CODE)
-                    .with_store_kek(&stored);
+                    .with_store_kek(&stored)
+                    .with_phase(Phase::Stopped);
                 write_state(&state, &st);
                 eprintln!("the secrets service is not ready: {message}");
                 std::process::exit(NOT_READY_EXIT);
@@ -1021,9 +1047,14 @@ fn serve(
             // vault token placed in the meantime is seen).
             StartFailure::Transient(m) => {
                 if attempt == attempts {
+                    // the sentence keeps its words for a person; the self-test reads the typed `phase` line
                     write_state(
                         &state,
-                        &not_ready(&format!("{m} (starting again)"), "transient"),
+                        &not_ready(
+                            &format!("{m} {}", ozbox_core::secrets_phase::LEGACY_GAVE_UP),
+                            "transient",
+                        )
+                        .with_phase(Phase::GaveUp),
                     );
                     eprintln!("the secrets service could not start: {m}");
                     std::process::exit(1);
@@ -1033,7 +1064,8 @@ fn serve(
                     &not_ready(
                         &format!("{m} (trying again in {} s)", delay.as_secs()),
                         "transient",
-                    ),
+                    )
+                    .with_phase(Phase::Retrying),
                 );
                 eprintln!("the secrets service could not start, trying again: {m}");
                 std::thread::sleep(delay);
@@ -1125,7 +1157,7 @@ fn store_kind_gate(
     }
     let copy = (stored == "file" && !key_file.exists()).then(|| {
         let declared = crate::secrets_escrow::Escrow::declared(&|k| std::env::var(k).ok());
-        crate::secrets_escrow::recover_key(escrow, declared, &ozbox_core::SystemRunner, key_file)
+        crate::secrets_escrow::recover_key(escrow, declared, key_file)
     });
     Err(classify_kind_mismatch(
         &stored,
@@ -1202,12 +1234,7 @@ fn serve_inner(
     if file_kek && path.exists() && !key_file.exists() {
         use crate::secrets_escrow::{recover_key, Missing};
         let declared = crate::secrets_escrow::Escrow::declared(&|k| std::env::var(k).ok());
-        match recover_key(
-            escrow.as_ref(),
-            declared,
-            &ozbox_core::SystemRunner,
-            &key_file,
-        ) {
+        match recover_key(escrow.as_ref(), declared, &key_file) {
             Missing::Recovered => eprintln!("the store's key came back from the vault's escrow"),
             Missing::NoEscrow(m) => return Err(StartFailure::NoEscrow(m)),
             Missing::Unavailable(m) => return Err(Transient(m)),

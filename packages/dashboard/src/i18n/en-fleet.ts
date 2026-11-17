@@ -5,6 +5,8 @@ export const enFleet = {
   'fleetnote.nc_title': 'Fleet not connected',
   'fleetnote.nc_body': 'This dashboard sees only this box. Creating, resizing, pausing, cloning and destroying boxes, and what boxes cost, are done from your own computer with the ozbox command line.',
   'fleetnote.nc_docs': 'To manage the fleet from a dashboard, see "Run the dashboard on a box, always on" in the use-cases guide ({docs}).',
+  'fleetnote.managed_title': 'Managed from this box',
+  'fleetnote.managed_body': 'Each change is planned here and shown before anything happens. To apply it, open a change window for that plan from your own computer, then confirm the plan with your passkey. This box itself is changed only from your own computer.',
   'fleetnote.unavailable': 'Not available from this box',
   'fleetnote.sheet_title': 'Not available from this dashboard',
   'fleetnote.sheet_desc': 'Fleet not connected: this dashboard sees only this box.',

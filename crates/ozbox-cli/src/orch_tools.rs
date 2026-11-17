@@ -14,6 +14,7 @@
 //! holds it. Box operations are plan-then-apply (ADR 0002) through [`BoxOps`] and only ever inside the limits: a plan whose
 //! risk is high is refused here and left to the person.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ozbox_core::orch::{
@@ -173,7 +174,7 @@ pub fn tool_defs(role: &Role) -> Vec<Value> {
             "box_create" => def("box_create", "Make a new worker box from scratch, when the policy allows new boxes.", vec![orch_prop(), ("name", prop("string", "The new box's name.")), ("size", prop("string", "XS, S, M, L, XL, XXL, GPU-S or GPU-L.")), ("dry_run", prop("boolean", "Show the plan and change nothing."))], &["name"]),
             "box_pause" => def("box_pause", "Pause one of this orchestration's worker boxes. Never the conductor's box.", vec![orch_prop(), ("box", prop("string", "The worker box.")), ("dry_run", prop("boolean", "Show the plan and change nothing."))], &["box"]),
             "orchestration_start" => def("orchestration_start", "Start an orchestration: a goal, the conductor box and the limits. Limits can only be tighter than the person's settings.", vec![("goal", prop("string", "What the whole job is.")), ("conductor_box", prop("string", "The box holding the main branch.")), ("rules", prop("string", "The text of an ozbox.orchestration.md file, if there is one.")), ("max_workers", prop("integer", "Worker boxes at once.")), ("max_sub_agents", prop("integer", "Sub-agents per worker.")), ("max_spend_usd", prop("number", "One spend cap for the whole orchestration.")), ("start_conductor", prop("boolean", "Also start a conductor run on that box."))], &["goal", "conductor_box"]),
-            "task_start" => def("task_start", "Give a feature to a worker box: its brief, the files it owns and the contracts it builds against. Set dry_run to check it first.", vec![orch_prop(), ("title", prop("string", "A short name for the feature.")), ("brief", prop("string", "What to build.")), ("box", prop("string", "The worker box (one made with box_clone).")), ("claims", json!({"type":"array","items":{"type":"string"},"description":"Files, directories or globs the worker owns."})), ("contracts", json!({"type":"array","items":{"type":"string"},"description":"Contracts to build against."})), ("engine", prop("string", "The agent engine; default the orchestration's.")), ("model", prop("string", "provider/model for this worker.")), ("sub_agents", prop("integer", "Sub-agents the worker may use at once.")), ("max_spend_usd", prop("number", "A cap for this worker.")), ("max_minutes", prop("integer", "A time cap for this worker.")), ("branch", prop("string", "The feature branch.")), ("repo", prop("string", "The repository under /work/repos.")), ("keep", prop("boolean", "Keep the worker box after the merge.")), ("dry_run", prop("boolean", "Check and show, change nothing."))], &["title", "brief"]),
+            "task_start" => def("task_start", "Give a feature to a worker box: its brief, the files it owns and the contracts it builds against. Set dry_run to check it first.", vec![orch_prop(), ("title", prop("string", "A short name for the feature.")), ("brief", prop("string", "What to build.")), ("box", prop("string", "The worker box (one made with box_clone).")), ("claims", json!({"type":"array","items":{"type":"string"},"description":"Files, directories or globs the worker owns."})), ("contracts", json!({"type":"array","items":{"type":"string"},"description":"Contracts to build against."})), ("engine", prop("string", "The agent engine; default the orchestration's.")), ("model", prop("string", "provider/model for this worker.")), ("sub_agents", prop("integer", "Sub-agents the worker may use at once.")), ("max_spend_usd", prop("number", "A cap for this worker.")), ("max_minutes", prop("integer", "A time cap for this worker.")), ("branch", prop("string", "The feature branch.")), ("repo", prop("string", "The repository under /work/repos.")), ("keep", prop("boolean", "Keep the worker box after the merge.")), ("transport", prop("string", "ssh (default) or hub. Hub hands the task over the worker channel and is refused on a box that has none.")), ("dry_run", prop("boolean", "Check and show, change nothing."))], &["title", "brief"]),
             "task_status" => def("task_status", "See a feature (or all of them), the open questions and the conductor's new messages.", vec![orch_prop(), ("feature", prop("string", "A feature id; leave out for all.")), ("since", prop("integer", "Only messages after this number."))], &[]),
             "task_message" => def("task_message", "Send a worker an instruction, or answer its question. A question marked for the person cannot be answered here.", vec![orch_prop(), ("feature", prop("string", "The feature id.")), ("text", prop("string", "The message.")), ("answer_to", prop("integer", "The question's number, to answer it.")), ("escalate", prop("boolean", "Pass the question up to the person instead of answering."))], &["text"]),
             "task_stop" => def("task_stop", "Stop or pause a feature's worker. Its work is saved to its branch first.", vec![orch_prop(), ("feature", prop("string", "The feature id.")), ("mode", prop("string", "stop or pause."))], &["feature"]),
@@ -234,6 +235,67 @@ pub struct Tools {
     pub ops: Arc<dyn BoxOps>,
     /// Memory and skills, when the dashboard has them (the five tools of `crate::memory_tools`).
     pub memory: Option<Arc<crate::memory_tools::MemoryHost>>,
+    /// The hub (ADR 0042), when this box has a channel to workers. None on every box today: `transport: hub` is then refused
+    /// by name, and `ssh` (the laptop-driven route) is the only one.
+    pub hub: Option<Arc<ozbox_core::hub::engine::HubService>>,
+}
+
+/// Copy hub-channel events into the book by (source epoch, number): the high-water mark moves in the same change as the records,
+/// so a repeat records nothing.
+fn record_hub_events(b: &mut Book, actor: &str, events: &[ozbox_core::audit::NewEvent]) {
+    for ev in events {
+        if let (Some((ep, n)), Some((lep, ln))) = (&ev.src, &b.hub_channel_src) {
+            if ep == lep && n <= ln {
+                continue;
+            }
+        }
+        b.record(ev.ts_ms, actor, &ev.action, None, &ev.detail);
+        if ev.src.is_some() {
+            b.hub_channel_src = ev.src.clone();
+        }
+    }
+}
+
+/// The task book as the hub channel's audit sink, through the store (for a caller that does not hold the store's lock).
+struct BookSink<'a> {
+    store: &'a TaskStore,
+    actor: String,
+}
+
+impl ozbox_core::channel::audit::AuditSink for BookSink<'_> {
+    fn record_many(&self, events: Vec<ozbox_core::audit::NewEvent>) -> std::io::Result<()> {
+        self.store
+            .update(|b| record_hub_events(b, &self.actor, &events))
+    }
+
+    fn last_src(&self) -> std::io::Result<Option<(String, u64)>> {
+        Ok(self.store.load()?.hub_channel_src)
+    }
+}
+
+/// The same, over a book the caller already holds under the store's lock (the store cannot be taken again).
+struct HeldBookSink<'a, 'b> {
+    book: std::sync::Mutex<&'a mut Book>,
+    actor: &'b str,
+}
+
+impl ozbox_core::channel::audit::AuditSink for HeldBookSink<'_, '_> {
+    fn record_many(&self, events: Vec<ozbox_core::audit::NewEvent>) -> std::io::Result<()> {
+        let mut b = self
+            .book
+            .lock()
+            .map_err(|_| std::io::Error::other("the book is not usable"))?;
+        record_hub_events(&mut b, self.actor, &events);
+        Ok(())
+    }
+
+    fn last_src(&self) -> std::io::Result<Option<(String, u64)>> {
+        let b = self
+            .book
+            .lock()
+            .map_err(|_| std::io::Error::other("the book is not usable"))?;
+        Ok(b.hub_channel_src.clone())
+    }
 }
 
 fn store_err(e: std::io::Error) -> ToolError {
@@ -246,7 +308,15 @@ impl Tools {
             store,
             ops,
             memory: None,
+            hub: None,
         }
+    }
+
+    // the server attaches a hub once a worker channel exists (ADR 0042); until then only the tests do
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_hub(mut self, hub: Option<Arc<ozbox_core::hub::engine::HubService>>) -> Self {
+        self.hub = hub;
+        self
     }
 
     pub fn with_memory(mut self, memory: Option<Arc<crate::memory_tools::MemoryHost>>) -> Self {
@@ -327,7 +397,7 @@ impl Tools {
             "box_clone" | "box_create" | "box_pause" => self.box_tool(s, name, a, now),
             "orchestration_start" => self.orchestration_start(s, a, now),
             "task_start" => self.task_start(s, a, now),
-            "task_status" => self.task_status(s, a),
+            "task_status" => self.task_status(s, a, now),
             "task_message" => self.task_message(s, a, now),
             "task_stop" => self.task_stop(s, a, now),
             "claims_declare" => self.claims_declare(s, a, now),
@@ -676,6 +746,52 @@ impl Tools {
             return Err(ToolError::Refused("a worker cannot start features".into()));
         }
         let dry = flag(a, "dry_run");
+        let transport = self::s(a, "transport").unwrap_or("ssh");
+        if !matches!(transport, "ssh" | "hub") {
+            return Err(ToolError::Invalid("transport is ssh or hub".into()));
+        }
+        // ADR 0042 section 5: no tool takes a key name. A worker's keys come from the project's declared commands, approved by
+        // the owner and checked by the worker. The arguments are an ALLOWLIST taken from the tool's own schema: any argument it
+        // does not declare (`keys`, `credentials`, a nested object, anything) is refused and the attempt is recorded.
+        let declared: Vec<String> = tool_defs(&s.role)
+            .iter()
+            .find(|d| d["name"] == "task_start")
+            .and_then(|d| d["inputSchema"]["properties"].as_object().cloned())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        if a.as_object()
+            .is_some_and(|m| m.keys().any(|k| !declared.contains(k)))
+        {
+            // only a valid box name goes into the audit line: a conductor cannot forge fields or store a value in it
+            let who = self::s(a, "box")
+                .and_then(|b| ozbox_core::name::BoxName::new(b.to_string()).ok())
+                .map_or_else(|| "-".to_string(), |b| b.to_string());
+            let detail = format!("side=conductor worker={who} task=- code=conductor-named-keys");
+            self.store
+                .update(|b| {
+                    b.record(
+                        now,
+                        &actor_of(s),
+                        ozbox_core::hub::refusal::AUDIT_REFUSED,
+                        None,
+                        &detail,
+                    )
+                })
+                .map_err(store_err)?;
+            return Err(ToolError::Refused(
+                "A task never names keys, and takes no argument it does not declare. A worker's keys come from the project's declared commands, which the owner approves.".into(),
+            ));
+        }
+        let decl = ozbox_core::hub::refusal::KeyDeclaration::default();
+        let hub = if transport == "hub" {
+            Some(self.hub.clone().ok_or_else(|| {
+                ToolError::Refused(
+                    "this box has no worker channel yet, so a task cannot be handed over it: leave transport at ssh".into(),
+                )
+            })?)
+        } else {
+            None
+        };
         let fleet = self.ops.list().map_err(ToolError::Failed)?;
         let boxes: Vec<String> = fleet
             .iter()
@@ -750,9 +866,75 @@ impl Tools {
                     ..f.worker.clone()
                 };
             }
+            if hub.is_some() {
+                if let Some(fm) = o.feature_mut(&fid) {
+                    fm.transport = ozbox_core::orch::Transport::Hub;
+                }
+            }
             let waits = !f.after.is_empty();
+            // A feature that must wait for another cannot go over the hub yet: it would stay Planned, and the server's tick starts
+            // every Planned feature whose predecessors merged, by the laptop route. A hub-route feature is therefore never left
+            // Planned: it is handed over now (Starting), or refused and Failed (owner decision, 2026-11-14; no persisted transport).
+            if hub.is_some() && waits && !dry {
+                if let Some(fm) = book.orchestration_mut(id).and_then(|o| o.feature_mut(&fid)) {
+                    fm.state = ozbox_core::orch::FeatureState::Failed;
+                }
+                return Err(ToolError::Refused(
+                    "A task that must wait for another cannot be handed over the hub yet. Start it after the other merges, or use the ssh route.".into(),
+                ));
+            }
+            // over the hub the worker is handed the task now, never by the laptop route
+            if let (Some(h), false, false) = (&hub, waits, dry) {
+                let assign = ozbox_core::hub::engine::Assign {
+                    orchestration: id.to_string(),
+                    feature: fid.clone(),
+                    title: f.title.clone(),
+                    brief: f.brief.clone(),
+                    branch: f.branch.clone(),
+                    repo: f.repo.clone(),
+                    claims: f.claims.iter().map(|c| c.pattern.clone()).collect(),
+                    contracts: f.contracts.iter().map(|c| c.id.clone()).collect(),
+                    keys: decl.clone(),
+                    lease_expiry_ms: now
+                        .saturating_add(f.caps.max_runtime_s.unwrap_or(4 * 3600) * 1000),
+                };
+                let sent = h.with(now, |hub, st| hub.assign(st, &f.box_name, &assign, now));
+                let Some(r) = sent else {
+                    return Err(ToolError::Failed(
+                        "the hub's state could not be used".into(),
+                    ));
+                };
+                {
+                    let actor = actor_of(s);
+                    let held = HeldBookSink {
+                        book: std::sync::Mutex::new(&mut *book),
+                        actor: &actor,
+                    };
+                    h.drain_audit(&held).map_err(|e| {
+                        ToolError::Failed(format!("the hub's events could not be recorded: {e}"))
+                    })?;
+                }
+                if let Err(e) = r {
+                    if let Some(fm) = book.orchestration_mut(id).and_then(|o| o.feature_mut(&fid)) {
+                        fm.state = ozbox_core::orch::FeatureState::Failed;
+                    }
+                    return Err(match e {
+                        ozbox_core::hub::engine::HubError::Refused(r) => {
+                            ToolError::Refused(r.message)
+                        }
+                        other => {
+                            ToolError::Failed(format!("the task was not handed over: {other}"))
+                        }
+                    });
+                }
+                if let Some(fm) = book.orchestration_mut(id).and_then(|o| o.feature_mut(&fid)) {
+                    fm.state = ozbox_core::orch::FeatureState::Starting;
+                }
+            }
             // a feature whose box is already running starts at once; any other waits for the server's tick
-            let started = if !waits && !dry && running.contains(&f.box_name) {
+            let started = if hub.is_some() {
+                !waits && !dry
+            } else if !waits && !dry && running.contains(&f.box_name) {
                 book.start_feature(id, &fid, now).is_ok()
             } else {
                 false
@@ -776,15 +958,61 @@ impl Tools {
         self.with_orch(s, a, now, Some("task_start"), run)
     }
 
-    fn task_status(&self, s: &Session, a: &Value) -> R {
+    fn task_status(&self, s: &Session, a: &Value, now: u64) -> R {
         let since = int(a, "since").unwrap_or(0);
         let want = self::s(a, "feature").map(str::to_string);
+        // what the workers reported over the hub: taken in first, and what that turned up (a rejected message, a quarantine) is recorded
+        let reports = match &self.hub {
+            Some(h) => {
+                let map = h
+                    .with(now, |hub, st| {
+                        hub.poll(st, now);
+                        let mut m: BTreeMap<(String, String), Value> = BTreeMap::new();
+                        for (worker, p) in &st.peers {
+                            for (o, f) in &p.assigned {
+                                m.insert(
+                                    (o.clone(), f.clone()),
+                                    json!({
+                                        "worker": worker,
+                                        "last_seen_ms": p.report.last_seen_ms,
+                                        "quarantined": p.quarantined,
+                                        "status": p.report.status.get(o).and_then(|m| m.get(f)),
+                                        "result": p.report.results.get(o).and_then(|m| m.get(f)),
+                                        "keys": {"delivered": 0, "note": "key delivery to workers is not built in this release"},
+                                    }),
+                                );
+                            }
+                        }
+                        m
+                    })
+                    .unwrap_or_default();
+                h.drain_audit(&BookSink {
+                    store: &self.store,
+                    actor: actor_of(s),
+                })
+                .map_err(store_err)?;
+                map
+            }
+            None => BTreeMap::new(),
+        };
         self.read_orch(s, a, |book, o| {
             let feats: Vec<Value> = o
                 .features
                 .iter()
                 .filter(|f| want.as_deref().is_none_or(|w| w == f.id))
-                .map(|f| feature_json(book, f))
+                .map(|f| {
+                    let mut j = feature_json(book, f);
+                    // keyed by orchestration and feature, and only the worker that holds the feature now
+                    if let (Some(r), Some(obj)) = (
+                        reports
+                            .get(&(o.id.clone(), f.id.clone()))
+                            .filter(|r| r["worker"] == f.box_name.as_str()),
+                        j.as_object_mut(),
+                    ) {
+                        obj.insert("hub".to_string(), r.clone());
+                    }
+                    j
+                })
                 .collect();
             if want.is_some() && feats.is_empty() {
                 return Err(ToolError::NotFound("there is no such feature".into()));

@@ -77,6 +77,10 @@ pub struct Report {
     /// When the person accepted a new store: the old one set aside on the new machine and a new one started. Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets_recovery: Option<Step>,
+    /// When a new secrets store was started in this run: whether this computer's pinned key for the box's secrets service still
+    /// matches, and the one command that fixes it (or that it was fixed, at the person's typed confirmation). Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets_pin: Option<Step>,
     /// Laptop keys the box trusts that may have been enrolled by the box user under older rules (see
     /// [`review_signers`]). Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1170,6 +1174,102 @@ pub fn kind_report(
     }
 }
 
+/// The first release whose secrets service opens a store on the fleet's KMS key by itself (ADR 0029 Amendment 13). An older
+/// image's service reached KMS through the `aws` command, which no image carries, so it cannot open such a store at all.
+pub const KMS_NATIVE_SINCE: &str = "0.2.0-beta.3";
+
+/// Whether the target image's secrets service can open a store sealed by the fleet's KMS key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KmsSupport {
+    /// It can; the words say how that is known.
+    Yes(String),
+    /// It cannot; the words say how that is known.
+    No(String),
+    /// It cannot be told (the provider does not say which release the image carries, or the release is not a version).
+    Unknown(String),
+}
+
+/// What the target image's SIGNED manifest says about the store keys its secrets service opens (`upgrade.secrets_keys`), else
+/// what its release version says: every release from [`KMS_NATIVE_SINCE`] on can, every one before it cannot. Pure.
+pub fn target_opens_kms(info: Option<&ImageInfo>) -> KmsSupport {
+    use ozbox_core::upgrade_kind::Version;
+    let Some(info) = info else {
+        return KmsSupport::Unknown(t("upgrade.kms_target_unknown_image", &[]));
+    };
+    // only a verified manifest is read into `upgrade`, so a list here is the release's signed word
+    if let Some(ozbox_core::UpgradeRecord::Present(b)) = &info.upgrade {
+        if !b.secrets_keys.is_empty() {
+            let has = b.secrets_keys.iter().any(|k| k == "kms");
+            let why = t(
+                "upgrade.kms_target_manifest",
+                &[("keys", &b.secrets_keys.join(", "))],
+            );
+            return if has {
+                KmsSupport::Yes(why)
+            } else {
+                KmsSupport::No(why)
+            };
+        }
+    }
+    let release = info.release.as_deref().map(str::trim).unwrap_or("");
+    let (Some(v), Some(since)) = (Version::parse(release), Version::parse(KMS_NATIVE_SINCE)) else {
+        return KmsSupport::Unknown(t(
+            "upgrade.kms_target_unknown_release",
+            &[("release", release)],
+        ));
+    };
+    // a dated release (2026.11.0) is not on the same line as 0.x: nothing is assumed about it
+    if v.major >= 1000 {
+        return KmsSupport::Unknown(t(
+            "upgrade.kms_target_unknown_release",
+            &[("release", release)],
+        ));
+    }
+    let args = [("release", release), ("since", KMS_NATIVE_SINCE)];
+    if v >= since {
+        KmsSupport::Yes(t("upgrade.kms_target_version_yes", &args))
+    } else {
+        KmsSupport::No(t("upgrade.kms_target_version_no", &args))
+    }
+}
+
+/// A box whose new machine is given the fleet's KMS key (its record names the key, or `--use-fleet-key`) may only be upgraded to an
+/// image whose secrets service can open a store on it. A downgrade onto an older image would leave the store unopenable on a
+/// box whose system disk is already gone, so it is refused in the plan, before anything is confirmed, and no flag lifts it:
+/// `--accept-new-secrets-store` would not help (the new store would be on the same key). An image that cannot be told is
+/// refused too, naming what to pass instead. `Ok` carries the plan's note; `Err` the refusal. Pure.
+pub fn kms_target_gate(
+    name: &str,
+    image: &str,
+    uses_fleet_key: bool,
+    info: Option<&ImageInfo>,
+) -> std::result::Result<Option<String>, String> {
+    if !uses_fleet_key {
+        return Ok(None);
+    }
+    match target_opens_kms(info) {
+        KmsSupport::Yes(why) => Ok(Some(t("upgrade.kms_target_ok", &[("why", &why)]))),
+        KmsSupport::No(why) => Err(t(
+            "upgrade.err_kms_target_no",
+            &[
+                ("box", name),
+                ("image", image),
+                ("why", &why),
+                ("since", KMS_NATIVE_SINCE),
+            ],
+        )),
+        KmsSupport::Unknown(why) => Err(t(
+            "upgrade.err_kms_target_unknown",
+            &[
+                ("box", name),
+                ("image", image),
+                ("why", &why),
+                ("since", KMS_NATIVE_SINCE),
+            ],
+        )),
+    }
+}
+
 /// Decide whether an image may be upgraded to, from what is known about where it came from. `Ok` carries lines for the
 /// plan's notes (what was verified, or the warning when an unverified image is used on request); `Err` is a refusal in
 /// words a person reads. Only an image whose signature COULD be checked and was not is refused: a provider that has no
@@ -1375,6 +1475,7 @@ pub(super) fn command(
                 }
             },
             accept_new_store,
+            fleet_key: use_fleet_key,
             old_disk: OldDisk::choose(p.id(), no_old_disk_snapshot, use_fleet_key),
             place_escrow: &|ag, rec| Some(place_escrow_step(ag, rec, keys.as_ref(), waits)),
             recover: &|ag, rec| Some(recover_store_step(ag, rec, keys.as_ref(), waits)),
@@ -1403,6 +1504,21 @@ pub(super) fn command(
                 )
             },
             memory_guard: &memory_guard_step,
+            secrets_pin: &|rec| {
+                if simulated {
+                    return None;
+                }
+                let name = rec.spec.name.as_str();
+                crate::ingress_repin::after_new_store(
+                    &ozbox_core::SystemRunner,
+                    &crate::ingress_client::FilePins(
+                        crate::ingress_client::FilePins::default_path(),
+                    ),
+                    name,
+                    !f.json && !f.yes && crate::ingress_repin::at_a_terminal(),
+                    &mut crate::ingress_repin::confirm_on_terminal(name),
+                )
+            },
             refresh_ssh: &|previous, after| refresh_ssh_entry(&for_ssh, previous, after),
             review_signers: &|rec| {
                 if simulated {
@@ -1421,6 +1537,7 @@ pub(super) fn command(
             first_boot,
             strict_checkpoint: quiesce_mode.strict,
             legacy_checkpoint: quiesce_mode.legacy,
+            no_checkpoint: quiesce_mode.none,
         },
     )
 }
@@ -1432,6 +1549,8 @@ pub(super) struct Around<'a> {
     pub store_check: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> StoreCheck,
     /// The person accepted a new store (`--accept-new-secrets-store`).
     pub accept_new_store: bool,
+    /// `--use-fleet-key`: the new machine is given the fleet's KMS key even though the record does not name it yet.
+    pub fleet_key: bool,
     /// Whether a copy of the old system disk is kept when the store's key cannot be shown to survive.
     pub old_disk: OldDisk,
     /// After the reboot, for a store kept by this computer's keychain: put the key back through the ingress route.
@@ -1445,6 +1564,9 @@ pub(super) struct Around<'a> {
     /// Put the memory guard on the running box, live (`None`: nothing to say, as on a box that cannot be asked).
     pub memory_guard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub refresh_ssh: &'a dyn Fn(Option<&str>, &BoxRecord) -> Step,
+    /// After a new secrets store was started in this run: check, and with a person at a terminal offer to replace, this computer's
+    /// pin of the box's secrets service key (`None`: nothing to say).
+    pub secrets_pin: &'a dyn Fn(&BoxRecord) -> Option<Step>,
     /// After everything: laptop keys the box trusts with no record of how they were enrolled.
     pub review_signers: &'a dyn Fn(&BoxRecord) -> Option<Step>,
     /// What this program renders at first boot, and what the person asked about it.
@@ -1453,6 +1575,8 @@ pub(super) struct Around<'a> {
     pub strict_checkpoint: bool,
     /// `--legacy-checkpoint`: on a box whose agent is older, use its own checkpoint (a visible branch that may be pushed).
     pub legacy_checkpoint: bool,
+    /// `--no-checkpoint`: on a box whose agent is older, go on with no checkpoint (named, so it is never assumed).
+    pub no_checkpoint: bool,
 }
 
 /// The first-boot side of an upgrade: the hash this program renders (its own copy, or developer modules), `--reprovision`
@@ -2195,7 +2319,7 @@ pub(super) fn execute(
         );
     }
     let (target, info) = if requested == "latest" {
-        let info = p.latest_image(rec.spec.region.as_deref())?;
+        let info = p.latest_image_for(rec.spec.region.as_deref(), rec.machine_type.as_deref())?;
         if !f.json {
             let release = info
                 .release
@@ -2312,6 +2436,17 @@ pub(super) fn execute(
             Ok(notes) => plan.notes.extend(notes),
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
+        // A store on the fleet's KMS key opens only under an image whose secrets service can reach the key by itself: a
+        // downgrade onto an older one is refused here, before anything is confirmed (ADR 0029 Amendment 18).
+        let uses_fleet_key = around.fleet_key
+            || rec
+                .spec
+                .labels
+                .contains_key(ozbox_provider_aws::SECRETS_KEY_LABEL);
+        match kms_target_gate(name.as_str(), &target, uses_fleet_key, info.as_ref()) {
+            Ok(note) => plan.notes.extend(note),
+            Err(refusal) => return Err(CliError::Msg(refusal)),
+        }
         // The image and this program must render the same first boot (one version, ADR 0036).
         match first_boot_gate(
             info.as_ref(),
@@ -2353,9 +2488,20 @@ pub(super) fn execute(
     });
     // what will end when the box stops, read (never changed) before the plan shows
     let stopping = crate::quiesce::needed(&plan, &rec);
+    let mode = crate::quiesce::Mode {
+        strict: around.strict_checkpoint,
+        legacy: around.legacy_checkpoint,
+        none: around.no_checkpoint,
+    };
+    // a box whose agent is older needs the person to choose its checkpoint by name; refused after the plan is shown
+    let mut older_refusal = None;
     if stopping {
-        plan.notes
-            .extend(crate::quiesce::preview(agent, &rec).notes(name.as_str()));
+        let preview = crate::quiesce::preview(agent, &rec);
+        plan.notes.extend(preview.notes(name.as_str()));
+        match crate::quiesce::older_choice(&preview.service, mode, name.as_str()) {
+            Ok(note) => plan.notes.extend(note),
+            Err(refusal) => older_refusal = Some(refusal),
+        }
     }
     if !f.json {
         print!("{plan}");
@@ -2405,6 +2551,9 @@ pub(super) fn execute(
             },
         );
     }
+    if let Some(refusal) = older_refusal {
+        return Err(CliError::Msg(refusal));
+    }
     confirm(&plan, f)?;
 
     // The copy of the old system disk is taken NOW, before the box is made ready for its stop: the hold the box puts on new runs
@@ -2433,10 +2582,7 @@ pub(super) fn execute(
             let q = crate::quiesce::perform(
                 agent,
                 &rec,
-                &crate::quiesce::Opts::command(crate::quiesce::Mode {
-                    strict: around.strict_checkpoint,
-                    legacy: around.legacy_checkpoint,
-                }),
+                &crate::quiesce::Opts::command(mode),
                 &crate::quiesce::RealPace::new(),
             );
             hold = Some(crate::quiesce::Hold::new(agent, &rec));
@@ -2551,6 +2697,12 @@ pub(super) fn execute(
         settled.backup,
         settled.recovery,
     );
+    // a new store means a new service key: this computer's pin of the old one would refuse the next import
+    let secrets_pin = (accepted && report_ready(&ready))
+        .then(|| p.get(&name).ok().flatten())
+        .flatten()
+        .and_then(|after| (around.secrets_pin)(&after));
+    // (before the services and the dashboard are put back: what they send to the box's secrets service is sealed to the pinned key)
     // Only when the box answered: a box that did not cannot be asked what is running.
     let services = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(&name).ok().flatten())
@@ -2600,6 +2752,7 @@ pub(super) fn execute(
         memory_guard,
         secrets_store: store,
         secrets_recovery,
+        secrets_pin,
         approvers,
         old_system_disk,
         old_system_disk_snapshot,
@@ -2611,6 +2764,9 @@ pub(super) fn execute(
         println!("{}", report.ready.detail);
         if let Some(r) = &report.secrets_recovery {
             println!("{}", r.detail);
+        }
+        if let Some(p) = &report.secrets_pin {
+            println!("{}", p.detail);
         }
         if let Some(a) = &report.approvers {
             println!("{}", a.detail);
@@ -2786,6 +2942,7 @@ mod tests {
             &Around {
                 store_check: &store,
                 accept_new_store: false,
+                fleet_key: false,
                 old_disk: OldDisk::NotOffered,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
@@ -2793,6 +2950,7 @@ mod tests {
                 restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
                 review_signers: &|_| None,
                 place_escrow: &|_, _| None,
                 first_boot: FirstBootOpts {
@@ -2803,6 +2961,7 @@ mod tests {
                 },
                 strict_checkpoint: false,
                 legacy_checkpoint: false,
+                no_checkpoint: false,
             },
         );
         (r, asked.load(Ordering::SeqCst))
@@ -2886,6 +3045,7 @@ mod tests {
                     detail: "the store's key is in a file on the system disk".into(),
                 },
                 accept_new_store: accept,
+                fleet_key: false,
                 old_disk,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
@@ -2893,11 +3053,13 @@ mod tests {
                 restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
                 review_signers: &|_| None,
                 place_escrow: &|_, _| None,
                 first_boot: FirstBootOpts::default(),
                 strict_checkpoint: false,
                 legacy_checkpoint: false,
+                no_checkpoint: false,
             },
         )
     }
@@ -2927,6 +3089,68 @@ mod tests {
             .into_iter()
             .filter(|s| s.labels.contains_key(ozbox_provider_aws::PURPOSE_TAG))
             .collect())
+    }
+
+    /// A new secrets store means a new service key, and the laptop's pin of the old one refuses the next import. The upgrade checks
+    /// the pin exactly when it started a new store (the person accepted one), and not when the store was kept or nothing was
+    /// accepted.
+    #[test]
+    fn the_pin_is_checked_exactly_when_a_new_secrets_store_was_started() -> TestResult {
+        for (fate, accept, expect) in [
+            (StoreFate::Lost, true, true),
+            (StoreFate::AlreadyLost, true, true),
+            (StoreFate::KeyHeld, true, true),
+            (StoreFate::Kept, true, false),
+            (StoreFate::Kept, false, false),
+            (StoreFate::KeptByLaptop, true, false),
+        ] {
+            let d = tempfile::tempdir()?;
+            let (p, n) = fresh_box(d.path())?;
+            let asked = std::cell::Cell::new(0u32);
+            execute(
+                &p,
+                &FirstBootBox {
+                    record: Err("no route".into()),
+                },
+                n.clone(),
+                Some("fake-image-2".into()),
+                false,
+                &Flags {
+                    yes: true,
+                    dry_run: false,
+                    json: true,
+                },
+                Waits::default(),
+                &Around {
+                    store_check: &|_, _| StoreCheck {
+                        fate,
+                        detail: "the store's key is in a file on the system disk".into(),
+                    },
+                    accept_new_store: accept,
+                    fleet_key: false,
+                    old_disk: OldDisk::NotOffered,
+                    recover: &|_, _| None,
+                    restore_backups: &|_, _| None,
+                    restore_services: &|_, _| None,
+                    restore_dashboard: &|_, _| None,
+                    memory_guard: &|_, _| None,
+                    refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                    secrets_pin: &|_| {
+                        asked.set(asked.get() + 1);
+                        None
+                    },
+                    review_signers: &|_| None,
+                    place_escrow: &|_, _| None,
+                    first_boot: FirstBootOpts::default(),
+                    strict_checkpoint: false,
+                    legacy_checkpoint: false,
+                    no_checkpoint: false,
+                },
+            )
+            .map_err(|e| format!("{fate:?} accept={accept}: {e}"))?;
+            assert_eq!(asked.get(), u32::from(expect), "{fate:?} accept={accept}");
+        }
+        Ok(())
     }
 
     /// The incident: a store whose key is a file on the system disk (or that cannot be told) was lost with the disk, and the
@@ -3079,6 +3303,182 @@ mod tests {
             }
             Err(AgentError::Unsupported("none".into()))
         }
+    }
+
+    /// A box whose agent predates the quiesce service (it answers 404), and counts what it was asked.
+    struct OlderAgent {
+        inner: FirstBootBox,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl BoxAgent for OlderAgent {
+        fn metrics_now(
+            &self,
+            r: &BoxRecord,
+            t: u64,
+        ) -> std::result::Result<MetricsSample, AgentError> {
+            self.inner.metrics_now(r, t)
+        }
+        fn metrics_series(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+            c: u64,
+        ) -> std::result::Result<Vec<MetricsSample>, AgentError> {
+            self.inner.metrics_series(r, a, b, c)
+        }
+        fn selftest(&self, r: &BoxRecord, t: u64) -> std::result::Result<SelfTest, AgentError> {
+            self.inner.selftest(r, t)
+        }
+        fn incidents(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+        ) -> std::result::Result<Vec<Incident>, AgentError> {
+            self.inner.incidents(r, a, b)
+        }
+        fn quiesce_call(
+            &self,
+            _: &BoxRecord,
+            method: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, serde_json::Value), AgentError> {
+            if let Ok(mut g) = self.calls.lock() {
+                g.push(format!("quiesce {method}"));
+            }
+            Ok((404, serde_json::json!({})))
+        }
+        fn checkpoint(
+            &self,
+            _: &BoxRecord,
+        ) -> std::result::Result<crate::serve::agent::CheckpointOutcome, AgentError> {
+            if let Ok(mut g) = self.calls.lock() {
+                g.push("checkpoint".into());
+            }
+            Err(AgentError::Unsupported("none".into()))
+        }
+    }
+
+    fn upgrade_older(
+        agent: &OlderAgent,
+        p: &dyn Provider,
+        name: &BoxName,
+        legacy: bool,
+        none: bool,
+        dry_run: bool,
+    ) -> Result<()> {
+        execute(
+            p,
+            agent,
+            name.clone(),
+            Some("fake-image-2".into()),
+            false,
+            &Flags {
+                yes: true,
+                dry_run,
+                json: true,
+            },
+            Waits {
+                timeout: Duration::from_millis(1),
+                poll: Duration::from_millis(1),
+            },
+            &Around {
+                store_check: &|_, _| StoreCheck {
+                    fate: StoreFate::Kept,
+                    detail: "kept".into(),
+                },
+                accept_new_store: false,
+                fleet_key: false,
+                old_disk: OldDisk::NotOffered,
+                recover: &|_, _| None,
+                restore_backups: &|_, _| None,
+                restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
+                memory_guard: &|_, _| None,
+                refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
+                review_signers: &|_| None,
+                place_escrow: &|_, _| None,
+                first_boot: FirstBootOpts::default(),
+                strict_checkpoint: false,
+                legacy_checkpoint: legacy,
+                no_checkpoint: none,
+            },
+        )
+    }
+
+    /// B4-18 item 7: on a box whose agent is older, neither checkpoint is chosen for the person, not even with --yes. The
+    /// command is refused before anything changes until --legacy-checkpoint or --no-checkpoint is named; a dry run shows
+    /// the plan and is never refused.
+    #[test]
+    fn an_older_agent_needs_its_checkpoint_chosen_by_name_even_with_yes() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let older = || OlderAgent {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let image = |p: &dyn Provider| -> std::result::Result<Option<String>, String> {
+            Ok(p.get(&n)
+                .map_err(|e| e.to_string())?
+                .ok_or("gone")?
+                .spec
+                .image)
+        };
+        let before = image(&p)?;
+
+        // a dry run is not refused
+        let a = older();
+        upgrade_older(&a, &p, &n, false, false, true).map_err(|e| e.to_string())?;
+        assert_eq!(image(&p)?, before);
+
+        // --yes alone: refused, nothing changed, the box was never asked to get ready or to checkpoint
+        let a = older();
+        let e = upgrade_older(&a, &p, &n, false, false, false)
+            .err()
+            .ok_or("an older agent with no choice went on")?
+            .to_string();
+        assert!(
+            e.contains("--legacy-checkpoint")
+                && e.contains("--no-checkpoint")
+                && e.contains("Nothing was changed"),
+            "{e}"
+        );
+        assert_eq!(image(&p)?, before, "nothing changed");
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(
+            calls,
+            vec!["quiesce GET".to_string()],
+            "only the read-only preview"
+        );
+
+        // --no-checkpoint: goes on, with no checkpoint and no POST
+        let a = older();
+        upgrade_older(&a, &p, &n, false, true, false).map_err(|e| e.to_string())?;
+        assert_eq!(image(&p)?.as_deref(), Some("fake-image-2"));
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert!(!calls.contains(&"checkpoint".to_string()), "{calls:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_older_agent_with_legacy_checkpoint_uses_its_checkpoint() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let a = OlderAgent {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        upgrade_older(&a, &p, &n, true, false, false).map_err(|e| e.to_string())?;
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert!(calls.contains(&"checkpoint".to_string()), "{calls:?}");
+        Ok(())
     }
 
     /// The hold the box puts on new runs lasts ten minutes from the start of its preparation for the stop, and a first copy of a
@@ -3679,6 +4079,102 @@ mod tests {
         }
     }
 
+    /// A signed manifest as the image workflow writes it, with or without the `secrets_keys` it learnt in ADR 0029 Amendment 18.
+    fn fixture_manifest(keys: Option<&str>) -> String {
+        let gen = "a".repeat(64);
+        let keys = keys
+            .map(|k| format!(r#", "secrets_keys": {k}"#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"version": "x", "images": [], "upgrade": {{"disk_generation": {{"amd64": "{gen}"}}, "work_format": 1, "work_format_reads": [1]{keys}}}}}"#
+        )
+    }
+
+    fn signed_image(release: &str, keys: Option<&str>) -> ImageInfo {
+        ImageInfo {
+            upgrade: Some(ozbox_core::upgrade_kind::upgrade_record(
+                &fixture_manifest(keys),
+                Some("amd64"),
+            )),
+            ..with_release(release)
+        }
+    }
+
+    /// B4-15: the plan reads the TARGET image, never only the box. A box on the fleet's KMS key cannot be moved onto an image whose
+    /// secrets service cannot open such a store (a release before native KMS, or a manifest that leaves KMS out): refused in the
+    /// plan, before anything is confirmed, whatever else was said.
+    #[test]
+    fn a_downgrade_onto_an_image_that_cannot_open_a_kms_store_is_refused_in_the_plan() {
+        // the releases that shipped before this field: decided by their version
+        for (release, ok) in [
+            ("0.2.0-beta.1", false),
+            ("0.2.0-beta.2", false),
+            ("0.1.4", false),
+            ("0.2.0-beta.3", true),
+            ("0.2.0", true),
+            ("0.3.1", true),
+        ] {
+            let info = signed_image(release, None);
+            let got = kms_target_gate("dev", "ami-1", true, Some(&info));
+            assert_eq!(got.is_ok(), ok, "{release}: {got:?}");
+            if let Err(m) = got {
+                assert!(
+                    m.contains("Refused") && m.contains("Nothing was changed"),
+                    "{m}"
+                );
+                assert!(
+                    m.contains(KMS_NATIVE_SINCE) && m.contains("no flag lifts this"),
+                    "{m}"
+                );
+            }
+        }
+        // a manifest that says: its word wins over the version, both ways
+        let says_no = signed_image("0.3.0", Some(r#"["file"]"#));
+        assert!(matches!(
+            target_opens_kms(Some(&says_no)),
+            KmsSupport::No(_)
+        ));
+        assert!(kms_target_gate("dev", "ami-1", true, Some(&says_no)).is_err());
+        let says_yes = signed_image("0.3.0", Some(r#"["file", "kms"]"#));
+        let note = kms_target_gate("dev", "ami-1", true, Some(&says_yes))
+            .unwrap()
+            .unwrap();
+        assert!(
+            note.contains("signed manifest") && note.contains("kms"),
+            "{note}"
+        );
+        // an image that cannot be told is refused too, never guessed
+        for info in [
+            None,
+            Some(with_release("not-a-version")),
+            Some(with_release("2026.11.0")),
+        ] {
+            let e = kms_target_gate("dev", "ami-1", true, info.as_ref()).unwrap_err();
+            assert!(e.contains("could not be told"), "{e}");
+        }
+        // a box that is not on the fleet's key is not affected: a file-kept store opens on every image
+        assert_eq!(
+            kms_target_gate(
+                "dev",
+                "ami-1",
+                false,
+                Some(&signed_image("0.2.0-beta.1", None))
+            ),
+            Ok(None)
+        );
+    }
+
+    /// The tracked policy file the image workflow signs into every manifest says the release opens KMS stores, so a future
+    /// downgrade check reads the manifest, not the version.
+    #[test]
+    fn the_release_policy_declares_the_store_keys_this_release_opens() {
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../infra/packer/ozbox-image/upgrade-policy.json"
+        ))
+        .unwrap();
+        assert_eq!(policy["secrets_keys"], serde_json::json!(["file", "kms"]));
+    }
+
     #[test]
     fn an_image_from_a_different_minor_version_is_refused_and_a_different_patch_is_not() {
         let me = env!("CARGO_PKG_VERSION");
@@ -3784,6 +4280,7 @@ mod tests {
                     live_from: live_from.map(str::to_string),
                     work_format: Some(1),
                     work_format_reads: vec![1],
+                    secrets_keys: vec![],
                 },
             )),
             ..with_release(release)
@@ -4429,6 +4926,7 @@ mod tests {
                         detail: String::new(),
                     },
                     accept_new_store: false,
+                    fleet_key: false,
                     old_disk: OldDisk::NotOffered,
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,
@@ -4439,6 +4937,7 @@ mod tests {
                         Some(Step::new(StepOutcome::Done, "in place"))
                     },
                     refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                    secrets_pin: &|_| None,
                     review_signers: &|_| None,
                     place_escrow: &|_, _| None,
                     first_boot: FirstBootOpts {
@@ -4449,6 +4948,7 @@ mod tests {
                     },
                     strict_checkpoint: false,
                     legacy_checkpoint: false,
+                    no_checkpoint: false,
                 },
             )
         };

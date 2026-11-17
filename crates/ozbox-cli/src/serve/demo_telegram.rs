@@ -36,6 +36,8 @@ pub struct State {
     next_id: i64,
     /// (chat, the first words, the data of the buttons under it).
     sent: Vec<(i64, String, Vec<String>)>,
+    /// The addresses of the URL buttons under each sent message (a button that only opens the dashboard), in step with `sent`.
+    opens: Vec<Vec<String>>,
     /// How many of the next `sendMessage` calls still answer 503.
     fail_sends: u32,
     /// The pause between tries of a failed delivery, in milliseconds (0: the default below).
@@ -168,10 +170,24 @@ impl HttpClient for DemoTelegram {
                             .collect()
                     })
                     .unwrap_or_default();
+                let opens: Vec<String> = body
+                    .pointer("/reply_markup/inline_keyboard/0")
+                    .and_then(Value::as_array)
+                    .map(|row| {
+                        row.iter()
+                            .filter_map(|b| {
+                                b.get("url").and_then(Value::as_str).map(str::to_string)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 st.sent
                     .push((chat, text.chars().take(400).collect(), buttons));
+                st.opens.push(opens);
                 let over = st.sent.len().saturating_sub(KEEP);
                 st.sent.drain(..over);
+                let over = st.opens.len().saturating_sub(KEEP);
+                st.opens.drain(..over);
                 st.next_message_id += 1;
                 json_ok(&json!({ "ok": true, "result": { "message_id": st.next_message_id } }))
             }
@@ -276,6 +292,8 @@ impl App {
         };
         let now = super::unix_ms();
         let alert = crate::notify::Alert {
+            notice: None,
+            reach: Default::default(),
             key: format!("demo:{now}:{}", b.title.len()),
             kind: "demo".into(),
             severity: if b.urgent {
@@ -430,7 +448,8 @@ impl App {
             .map(|s| {
                 s.sent
                     .iter()
-                    .map(|(c, t, b)| json!({ "chat_id": c, "text": t, "buttons": b }))
+                    .zip(s.opens.iter().chain(std::iter::repeat(&Vec::new())))
+                    .map(|((c, t, b), o)| json!({ "chat_id": c, "text": t, "buttons": b, "opens": o }))
                     .collect()
             })
             .unwrap_or_default();

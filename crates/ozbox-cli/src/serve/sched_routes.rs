@@ -625,6 +625,8 @@ impl App {
 
     fn sched_alert(&mut self, n: Notice, now: u64) {
         let a = Alert {
+            notice: None,
+            reach: Default::default(),
             key: n.key,
             kind: "schedule".into(),
             severity: Severity::Normal,

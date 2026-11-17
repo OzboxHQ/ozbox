@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import type { BoxRecord, EngineInfo, ModelPrice, ModelProvider, UsageRow } from '../api/types';
+import type { BoxRecord, EngineInfo, ModelPrice, ModelProvider, SubscriptionInfo, UsageRow } from '../api/types';
 import { en } from '../i18n/en';
-import { barPercent, fieldsFor, GUIDE_STEPS, gpuBoxes, KIND_LABEL, KINDS, MODEL_RE, perMtok, priceIsStale, providersFor, REGION_RE, RESOURCE_RE, tokens, usd } from './models';
+import { barPercent, fieldsFor, optInConfirmed, signInFailedKey, vendorLink, GUIDE_STEPS, gpuBoxes, KIND_LABEL, KINDS, MODEL_RE, perMtok, priceIsStale, providersFor, REGION_RE, RESOURCE_RE, SUB_SIGNIN_LABEL, SUB_STATUS_LABEL, subscriptionRows, tokens, usd } from './models';
 
 const price = (o: Partial<ModelPrice>): ModelPrice => ({ input_per_mtok_usd: 1, output_per_mtok_usd: 2, origin: 'built_in', source: 'https://example.com', as_of: '2025-06', estimate: true, age_months: 17, ...o });
 const prov = (id: string, kind: ModelProvider['kind']): ModelProvider => ({ id, kind, label: id, base_url: null, local_endpoint: false, monthly_cap_usd: null, region: null, resource: null, hosted_on: null });
@@ -78,5 +78,57 @@ describe('prices and usage', () => {
   it('GPU boxes are the ones with a GPU size', () => {
     const box = (name: string, size: BoxRecord['spec']['size']): BoxRecord => ({ spec: { name, size, work_disk_gb: 100, image: null, region: null, from_snapshot: null, labels: {} }, state: 'running', provider: 'fake', provider_id: null, machine_type: null, snapshots: [], created_at: null, last_activity_at: null });
     expect(gpuBoxes([box('a', 'M'), box('g', { Gpu: 'Small' })]).map((b) => b.spec.name)).toEqual(['g']);
+  });
+});
+
+describe('subscription sign-ins (ADR 0054)', () => {
+  const has = (k: string) => k in en;
+  const sub = (o: Partial<SubscriptionInfo>): SubscriptionInfo => ({ id: 'codex-chatgpt', engine: 'codex', engine_label: 'Codex CLI', kind: 'subscription', status: 'opt_in', sign_in: 'device_code', reason: 'opt_in_engine_reads_login', sources: ['https://example.com/terms'], checked_on: '2026-11-17', ...o });
+  // the server's ids and reason codes (crates/ozbox-cli/src/model_subscriptions.rs); each must have words here
+  const ids = ['claude-code-claude', 'codex-chatgpt', 'gemini-cli-google', 'opencode-claude', 'opencode-chatgpt', 'opencode-copilot', 'opencode-google', 'aider-none'];
+  const reasons = ['terms_forbid_storing', 'opt_in_engine_reads_login', 'no_remote_sign_in', 'terms_forbid_other_tools', 'login_location_not_documented', 'no_subscription'];
+
+  it('every server id, reason, status and sign-in kind has words in the catalogue', () => {
+    for (const id of ids) expect(has(`models.sub_plan_${id.replace(/-/g, "_")}`), id).toBe(true);
+    for (const r of reasons) expect(has(`models.sub_reason_${r}`), r).toBe(true);
+    for (const k of Object.values(SUB_STATUS_LABEL)) expect(en[k]).toBeTruthy();
+    for (const k of Object.values(SUB_SIGNIN_LABEL)) expect(en[k]).toBeTruthy();
+  });
+
+  it('a row without words is left out, an older server shows nothing, and only https links are kept', () => {
+    expect(subscriptionRows(undefined, has)).toEqual([]);
+    expect(subscriptionRows([sub({ reason: 'something_new' })], has)).toEqual([]);
+    expect(subscriptionRows([sub({ id: 'new-engine-plan' })], has)).toEqual([]);
+    const [row] = subscriptionRows([sub({ sources: ['https://example.com/a', 'javascript:alert(1)', 'http://example.com/b', 'not a url'] })], has);
+    expect(row?.links).toEqual(['https://example.com/a']);
+    expect(row?.plan).toBe('models.sub_plan_codex_chatgpt');
+  });
+
+  it('the words name the one opt-in and say what an agent could read', () => {
+    expect(en['models.sub_intro']).toContain('Only Codex with a ChatGPT plan');
+    expect(en['models.optin_warning']).toMatch(/refresh token/);
+    expect(en['models.optin_warning']).toMatch(/agent in the run/);
+    expect(en['models.optin_warning']).toMatch(/cannot take a copy back/);
+    expect(en['models.revoke_body']).toMatch(/revoke it at OpenAI/);
+    for (const r of reasons) expect(en[`models.sub_reason_${r}` as keyof typeof en]).not.toMatch(/\byou can connect\b/i);
+  });
+});
+
+describe('subscription opt-in (ADR 0055)', () => {
+  const has = (k: string) => k in en;
+  it('turns on only with the word typed exactly', () => {
+    expect(optInConfirmed('codex-chatgpt', 'codex-chatgpt')).toBe(true);
+    for (const typed of ['', 'codex', 'CODEX-CHATGPT', ' codex-chatgpt', 'codex-chatgpt ']) expect(optInConfirmed(typed, 'codex-chatgpt'), typed).toBe(false);
+    expect(optInConfirmed('', '')).toBe(false);
+  });
+  it('every failure the server names has words, and an unknown one falls back', () => {
+    for (const r of ['not_installed', 'vendor_refused', 'expired', 'no_login_file', 'no_private_folder', 'store_refused', 'failed']) expect(signInFailedKey(r, has)).toBe(`models.signin_failed_${r}`);
+    expect(signInFailedKey('something_new', has)).toBe('models.signin_failed_failed');
+    expect(signInFailedKey(undefined, has)).toBe('models.signin_failed_failed');
+  });
+  it('the sign-in link is shown only on the vendor host, https only', () => {
+    const hosts = ['openai.com', 'chatgpt.com'];
+    expect(vendorLink('https://auth.openai.com/codex/device', hosts)).toBe('https://auth.openai.com/codex/device');
+    for (const bad of ['http://auth.openai.com/x', 'https://auth.openai.com.evil.example/x', 'javascript:alert(1)', 'https://evil.example/openai.com', undefined]) expect(vendorLink(bad, hosts), String(bad)).toBeNull();
   });
 });

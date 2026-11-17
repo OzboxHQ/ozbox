@@ -1,0 +1,45 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "emoji": true,
+        "text": "💸 Budget: 80% of the monthly budget is estimated spent",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "About 80 USD of 100 USD this month.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Open it on dash.example.com → Usage (sign in first).",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "action_id": "open_dashboard",
+          "style": "primary",
+          "text": {
+            "emoji": true,
+            "text": "Open in dashboard",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://dash.example.com/usage"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "Budget: 80% of the monthly budget is estimated spent"
+}

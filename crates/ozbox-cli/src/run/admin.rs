@@ -10,6 +10,8 @@
 //! * `enable-linger`: let the box user's own services start at boot and keep running after logout.
 //! * `ensure-supervisor [finish|rollback]`: give the dashboard a user of its own (ADR 0023).
 //! * `configure-box-secrets`: read the box's secrets declaration again.
+//! * `replace-tunnel-token`: a flow of this computer's rather than one request (see `tunnel_rotate`): a new tunnel token is handed
+//!   over, watched, and the old one put back if the new tunnel is not healthy.
 //!
 //! There is no way through here to a shell, a path or a command. It is a change to a machine, so it is shown first and
 //! confirmed like every other change (`--dry-run` stops after the description, `--yes` skips the question).
@@ -423,6 +425,7 @@ pub const HELPER_ACTIONS: &[(&str, HelperGate)] = &[
     ("ensure-runner", HelperGate::Ungated),
     ("migrate-legacy-tunnel", HelperGate::Ungated),
     ("ensure-supervisor", HelperGate::Ungated),
+    ("replace-dashboard-auth", HelperGate::Gated),
     ("configure-box-secrets", HelperGate::Ungated),
     ("recover-secrets", HelperGate::Gated),
     ("host-guard", HelperGate::Gated),
@@ -687,6 +690,18 @@ pub(super) fn command(
         println!("{out}");
     }
     finish(f, &name, &action, true, false, Some(ok), Some(&out), &notes)?;
+    // a new store has a new service key: say how to pin it (never changed without the typed confirmation)
+    if ok && action == AdminAction::RecoverSecrets && !f.json {
+        if let Some(step) = crate::ingress_repin::after_new_store(
+            &ozbox_core::SystemRunner,
+            &crate::ingress_client::FilePins(crate::ingress_client::FilePins::default_path()),
+            name.as_str(),
+            !f.yes && crate::ingress_repin::at_a_terminal(),
+            &mut crate::ingress_repin::confirm_on_terminal(name.as_str()),
+        ) {
+            println!("{}", step.detail);
+        }
+    }
     if ok {
         Ok(())
     } else {

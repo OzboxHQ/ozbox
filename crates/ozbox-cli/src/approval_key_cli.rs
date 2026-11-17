@@ -201,6 +201,14 @@ pub fn approve(
     json: bool,
     dry_run: bool,
 ) -> Result<(), CliError> {
+    // A key kept on a computer never decides Production (ADR 0041 section 3): say so now, before a code is made that the box would
+    // refuse as "not valid". A dry run says it too, since it tells what a real run would do.
+    if crate::secrets_approval::laptop_key_never_covers(scope, env) {
+        return Err(CliError::Msg(t(
+            "approval_key.production_needs_dashboard",
+            &[("box", box_name.as_str()), ("env", env)],
+        )));
+    }
     if dry_run {
         let id = id_of(id)?;
         // a dry run reads no key (only whether it exists: the private half may prompt for the keychain), asks the box
@@ -283,6 +291,54 @@ mod tests {
         // and a dry run without the key is still refused, so it tells the truth about what a real run would do
         let none = MemorySecrets::default();
         assert!(approve(&r, &none, &b, "laptop", "import", "", "", true, true).is_err());
+    }
+
+    /// `secrets approve` for a Production import is refused up front with the rule, even as a dry run, and asks the box nothing.
+    /// Every other environment, and every other scope, goes on as before.
+    #[test]
+    fn approving_a_production_import_with_this_computers_key_is_refused_before_anything_is_asked() {
+        let keys = MemorySecrets::default();
+        keys.set(&keychain_name("laptop"), "x").unwrap();
+        let r = RecordingRunner::new();
+        let b = BoxName::new("dev").unwrap();
+        for env in ["production", "prod", "live", "qa"] {
+            for dry in [true, false] {
+                let e = approve(&r, &keys, &b, "laptop", "import", "app", env, true, dry)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    e.contains(crate::secrets_approval::PRODUCTION_IMPORT_RULE) && e.contains(env),
+                    "{env} dry={dry}: {e}"
+                );
+            }
+        }
+        assert!(r.calls().is_empty(), "nothing was asked of the box");
+        // staging still works (dry run: it reads no key and asks nothing), and so does a Production-named policy scope
+        approve(
+            &r, &keys, &b, "laptop", "import", "app", "staging", true, true,
+        )
+        .unwrap();
+        approve(
+            &r,
+            &keys,
+            &b,
+            "laptop",
+            "policy",
+            "app",
+            "production",
+            true,
+            true,
+        )
+        .unwrap();
+        // the catalogue sentence and the service's sentence are the same words
+        let said = crate::messages::t(
+            "approval_key.production_needs_dashboard",
+            &[("box", "dev"), ("env", "production")],
+        );
+        assert!(
+            said.starts_with(crate::secrets_approval::PRODUCTION_IMPORT_RULE),
+            "{said}"
+        );
     }
 
     fn answer(r: &RecordingRunner, v: Value) {

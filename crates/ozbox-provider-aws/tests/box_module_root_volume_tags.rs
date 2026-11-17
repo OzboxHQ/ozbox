@@ -41,10 +41,40 @@ fn without_comments(text: &str) -> String {
 #[test]
 fn the_system_disk_is_tagged_as_ours_when_it_is_created() {
     let code = without_comments(&main_tf());
-    let root = block(&code, "root_block_device {");
+    let instance = block(&code, "resource \"aws_instance\" \"box\"");
+    let root = block(instance, "root_block_device {");
+    // The provider refuses a block's own `tags` together with `volume_tags` and applies them with a later call that the operator's
+    // role cannot make for a disk that exists, so the launch's tag specification is the one that works.
     assert!(
-        root.contains("tags") && root.contains("local.tags"),
-        "the system disk must be created with the box's tags (ozbox-managed first): {root}"
+        !root.contains("tags"),
+        "root_block_device must not carry tags (they conflict with volume_tags and are applied too late): {root}"
+    );
+    assert!(
+        instance.contains("volume_tags") && instance.contains("local.root_volume_tags"),
+        "the system disk must be created with the box's tags (ozbox-managed first) as the launch's volume_tags"
+    );
+}
+
+/// A block's own `tags` are applied by the provider after the machine runs, which the operator's role cannot do for a volume
+/// that exists; the launch's own volume tag specification (`volume_tags`) is what AWS applies while it creates the disk, so a box
+/// made or replaced by an upgrade has a system disk its pre-upgrade snapshot can be taken of. It is for creation only.
+#[test]
+fn the_launch_tags_the_volumes_it_creates_and_never_relabels_them_afterwards() {
+    let code = without_comments(&main_tf());
+    let instance = block(&code, "resource \"aws_instance\" \"box\"");
+    assert!(
+        instance.contains("volume_tags") && instance.contains("local.root_volume_tags"),
+        "the launch must carry volume_tags, so the disk is ozbox-managed when AWS creates it"
+    );
+    let lifecycle = block(instance, "lifecycle {");
+    assert!(
+        lifecycle.contains("volume_tags"),
+        "volume_tags is for creation only: it must be in ignore_changes, or a plan relabels the attached /work volume"
+    );
+    assert!(
+        code.contains("root_volume_tags = merge(local.tags, {")
+            && code.contains("\"ozbox-managed\""),
+        "the tags a disk is created with start from the box's own (ozbox-managed first)"
     );
 }
 

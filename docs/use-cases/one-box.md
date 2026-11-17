@@ -20,6 +20,13 @@ See [how to read the status](README.md#how-to-read-the-status).
 A budget is required before any box can be created on a real cloud.
 **Status:** Works (AWS). Hetzner: Preview.
 
+To see every step before anything is made, run it with `--dry-run` first: each step is planned, even before the state
+bucket exists. A script picks its steps with `--only` or `--skip` (for example `--skip issuer`) and `--yes`, never by
+answering prompts. If the account has no room for the network's address or NAT gateway, the plan says so with the numbers
+and the request that raises the quota, before anything is made; and a step that fails part way removes what it had made.
+If AWS itself is down or throttling, setup says that, not that you need to sign in again.
+**Status:** Preview (built and tested with fakes; not yet run against a real account).
+
 ## 2. Create your first box
 
 **You want:** a workstation with a big persistent disk.
@@ -29,12 +36,13 @@ ozbox sizes                         # XS, S, M, L, XL, XXL, GPU-S, GPU-L and wha
 ozbox create main --size M --disk 200
 ```
 
-The plan names the machine type, the disk and the monthly estimate. After it is up, `ozbox show main` prints its state,
-image, size and disk.
+The plan names the machine type, the disk and the monthly estimate, and that this computer gets the box's SSH entry once
+it exists, so `ssh ozbox-main` works with no extra step (`--no-ssh-entry` skips it). After it is up, `ozbox show main` prints
+its state, image, size and disk.
 
 **Underneath:** the box boots the signed Oz image; first boot mounts `/work`, creates the box user and starts the box
 daemon (`ozboxd`), which runs with no root powers.
-**Status:** Works.
+**Status:** Works (the SSH entry written by `create` is Preview: tested in CI, not yet run on a real box).
 
 ## 3. Start from a profile of tools
 
@@ -55,7 +63,7 @@ ozbox create api --profile web-dev
 **You want:** a shell, an editor or a desktop.
 
 ```
-ozbox connect main --ssh --write    # writes an SSH entry `ozbox-main` that tunnels through the provider
+ozbox connect main --ssh --write    # (re)writes the SSH entry `ozbox-main` that tunnels through the provider; create writes it too
 ssh ozbox-main
 ozbox ide main                      # VS Code in your browser on http://localhost
 ozbox open main --in vscode         # your desktop editor on /work/repos
@@ -141,7 +149,10 @@ recorded on the box ([ADR 0011](../adr/0011-no-sudo-one-audited-root-path.md)).
 ```
 ozbox destroy main --dry-run        # says it deletes the machine and /work, and keeps a final snapshot
 ozbox destroy main                  # asks you to type the name
+ozbox destroy scratch --no-final-snapshot   # a throwaway box: the plan says no copy of /work is kept; still type the name
 ```
 
 **Underneath:** a final snapshot is kept unless you pass `--no-final-snapshot`; the SSH entry and the stored host key are removed from this computer.
-**Status:** Works.
+Snapshots the box already has are kept and billed after it is gone; the plan says how many, and that `ozbox backup list
+<name>` and `ozbox backup delete <name> <id>` remove them first.
+**Status:** Works (the plan's wording about kept snapshots is Preview: tested in CI, not yet run on a real box).

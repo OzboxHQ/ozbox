@@ -65,7 +65,7 @@ pub enum StateCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Create a box.
+    /// Create a box. Its SSH entry is written on this computer afterwards (`ssh ozbox-<name>`), as the plan says.
     Create {
         #[arg(value_parser = parse_name)]
         name: BoxName,
@@ -93,6 +93,10 @@ pub enum Command {
         /// renders. The plan prints a warning. Without this, such an image is refused.
         #[arg(long)]
         allow_first_boot_mismatch: bool,
+        /// Do not write the box's SSH entry on this computer afterwards (by default `~/.ssh/ozbox/config` gets it, as
+        /// `ozbox connect <name> --ssh --write` would).
+        #[arg(long)]
+        no_ssh_entry: bool,
     },
     /// List boxes.
     List,
@@ -186,6 +190,11 @@ pub enum Command {
         /// remote. Runs are not asked to end. Not with --strict-checkpoint.
         #[arg(long, conflicts_with = "strict_checkpoint")]
         legacy_checkpoint: bool,
+        /// On a box whose agent is older than this program, go on with no checkpoint at all: uncommitted work is not
+        /// snapshotted and runs are not asked to end (/work itself is kept). On such a box the command is refused until
+        /// --legacy-checkpoint or --no-checkpoint is given; neither is assumed, not even with --yes.
+        #[arg(long, conflicts_with_all = ["strict_checkpoint", "legacy_checkpoint"])]
+        no_checkpoint: bool,
     },
     /// Move an AWS box's secrets store from a key kept in a file on its system disk to the fleet's KMS key, in place, so an
     /// upgrade keeps the store. Needs secrets_key_arn and fleet under [aws]. The box's role is allowed to use the key (for the
@@ -203,7 +212,9 @@ pub enum Command {
     /// Run one allow-listed action as root on a box: reown, reinstall-ozboxd, restart-services, collect-logs, enable-linger,
     /// ensure-supervisor, configure-box-secrets, recover-secrets or host-guard. There is no shell: the box user has no sudo, and
     /// this is the only root path, recorded on the box. recover-secrets is approved by the key this computer pinned when it
-    /// made the box.
+    /// made the box. `replace-tunnel-token cloudflare|ngrok|ide --token-stdin|--token-from-store NAME
+    /// [--approve-with-laptop-key]` puts a new tunnel token on the box, keeps the old one until the new tunnel is healthy and
+    /// puts it back if it is not; the token is never an argument.
     Admin {
         #[arg(value_parser = parse_name)]
         name: BoxName,
@@ -236,8 +247,9 @@ pub enum Command {
         /// Hetzner: the OpenBao KV mount (default secret).
         #[arg(long)]
         mount: Option<String>,
-        /// Hetzner: a fresh approval code, for a box whose dashboard has a second factor (from the dashboard, or
-        /// `ozbox secrets approve --scope box-secrets --project declaration`).
+        /// Hetzner, the fallback: a fresh approval code from the dashboard (Settings, Secrets). Without it, a box whose
+        /// dashboard has a second factor is sent an approval request for exactly this declaration, and the command waits
+        /// (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or authenticator code.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
     },
@@ -311,6 +323,12 @@ pub enum Command {
     Capped {
         #[arg(num_args = 1.., allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Run on a box as root, by first-boot configuration: write the box's root scripts from this program. Not for typing by hand.
+    #[command(hide = true)]
+    FirstBoot {
+        #[arg(num_args = 1.., allow_hyphen_values = true)]
+        words: Vec<String>,
     },
     /// Run on a box by its root helper: the box's own guards. Not for typing by hand.
     #[command(hide = true)]
@@ -389,6 +407,11 @@ pub enum Command {
         /// remote. Runs are not asked to end. Not with --strict-checkpoint.
         #[arg(long, conflicts_with = "strict_checkpoint")]
         legacy_checkpoint: bool,
+        /// On a box whose agent is older than this program, go on with no checkpoint at all: uncommitted work is not
+        /// snapshotted and runs are not asked to end (/work itself is kept). On such a box the command is refused until
+        /// --legacy-checkpoint or --no-checkpoint is given; neither is assumed, not even with --yes.
+        #[arg(long, conflicts_with_all = ["strict_checkpoint", "legacy_checkpoint"])]
+        no_checkpoint: bool,
     },
     /// Snapshot a box's /work disk.
     Snapshot {
@@ -449,7 +472,8 @@ pub enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    /// Guided first-run setup: provider, sign-in check, region, state bucket, network, budget, alerts, security.
+    /// Guided first-run setup: provider, sign-in check, region, state bucket, network, budget, alerts, security. Every step is
+    /// planned and shown first; --dry-run previews every step (even before the state bucket exists) and changes nothing.
     Init {
         /// The sign-in profile of your cloud CLI (AWS: a named profile).
         #[arg(long)]
@@ -479,6 +503,17 @@ pub enum Command {
         /// --issuer-package: a hash made from the file itself would prove nothing about it.
         #[arg(long, value_name = "HEX", requires = "issuer_package")]
         issuer_package_sha256: Option<String>,
+        /// Run only these setup steps (repeat, or separate with commas): state-bucket, network, secrets-key, adopt-command,
+        /// operator-policy, box-policy, issuer. The checks (sign-in, permissions, guard rail, security) always run. A step that
+        /// is left out is said and nothing about it is planned or changed. With --yes, a script chooses its steps this way.
+        #[arg(long, value_name = "STEP", value_delimiter = ',', conflicts_with = "skip",
+              value_parser = ["state-bucket", "network", "secrets-key", "adopt-command", "operator-policy", "box-policy", "issuer"])]
+        only: Vec<String>,
+        /// Leave these setup steps out (repeat, or separate with commas); the same names as --only. The state bucket cannot be
+        /// left out: every other step keeps its state there.
+        #[arg(long, value_name = "STEP", value_delimiter = ',',
+              value_parser = ["network", "secrets-key", "adopt-command", "operator-policy", "box-policy", "issuer"])]
+        skip: Vec<String>,
     },
     /// Turn on the opt-in AWS security services: GuardDuty Runtime Monitoring, a locked bucket for Session Manager logs, and
     /// Patch Manager. What you name is the whole set: leaving one out turns it off. Plan, then apply; costs are stated.
@@ -547,6 +582,12 @@ pub enum Command {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    /// Telegram links on the dashboard of this machine: lock one so it can only read, or cut it. Both only make a chat less
+    /// able, so they need no passkey; the plan is shown first.
+    Chat {
+        #[command(subcommand)]
+        command: ChatCommand,
+    },
     /// Optional, anonymous usage counts. Off until you turn it on, and sent only to an address you choose.
     Telemetry {
         #[command(subcommand)]
@@ -576,6 +617,11 @@ pub enum Command {
     Run {
         #[command(subcommand)]
         command: RunCommand,
+    },
+    /// Tasks between two endpoints (a laptop and a box, or two boxes): typed, signed, ordered, with a state and an audit record.
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
     },
     /// Orchestrations: one agent hands features to worker boxes. Start, follow, answer, merge.
     Orch {
@@ -807,6 +853,10 @@ pub struct CodeFlags {
 pub enum SecretsCommand {
     /// Names and ages of the stored secrets. Never a value.
     Status,
+    /// Run this program's own key-service and parameter-store clients through a signed round trip against loopback stand-ins
+    /// it starts itself (no network, no keys; the image build runs it). Not for typing by hand.
+    #[command(hide = true)]
+    NativeCheck,
     /// Move the store to a new key-encryption key: kms, tpm2 or keychain.
     RotateKek {
         #[arg(long, value_name = "KIND")]
@@ -863,7 +913,8 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
+    /// nothing is stored without --yes. With --box, a box that needs an approval gets a request and this command waits
+    /// for you to approve it in the dashboard. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -889,10 +940,18 @@ pub enum SecretsCommand {
         /// this computer; the values travel on the SSH connection only, never in a file on the box or an argument.
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code the dashboard gave you after your passkey or authenticator code (Settings, Secrets). A box
-        /// whose dashboard has a second factor refuses the keys without one.
+        /// The fallback: an approval code the dashboard gave you (Settings, Secrets). Without it, a box whose dashboard has
+        /// a second factor is sent an approval request for exactly these keys, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy. For a non-Production
+        /// import it also offers to approve with this computer's key. A code this computer's key made (`ozbox secrets
+        /// approve`) never approves Production.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// stored and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// The box end of `ozbox secrets import --box` and `ozbox env policy set --box`: reads one request line on standard
     /// input and hands it to the import socket. A person never runs it.
@@ -948,7 +1007,10 @@ pub enum SecretsCommand {
         #[command(subcommand)]
         command: IngressCommand,
     },
-    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes).
+    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes). This
+    /// computer's key never approves Production: an import into a Production environment (anything but dev, development,
+    /// staging, test or e2e), a declaration with a command that takes Production secrets, and a guard override that is not for
+    /// one change are refused by the box. Approve those on the dashboard with your passkey or authenticator.
     Approve {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
@@ -1121,6 +1183,40 @@ pub enum PluginCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ChatCommand {
+    /// Lock a Telegram link (or every one): it can only read until a passkey in the dashboard lifts the lock.
+    Lock {
+        /// The link's id, as the dashboard's Account page shows it.
+        #[arg(long, conflicts_with = "all")]
+        link: Option<String>,
+        /// Every active link.
+        #[arg(long)]
+        all: bool,
+        /// The folder the dashboard keeps its state in. Default: beside the settings file.
+        #[arg(long, conflicts_with = "on_box")]
+        state_dir: Option<std::path::PathBuf>,
+        /// The box whose dashboard holds the link, reached from this computer over the sealed ingress route.
+        #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
+        on_box: Option<BoxName>,
+    },
+    /// Cut a Telegram link (or every one): the chat is not answered any more and everything delegated to it ends.
+    Unlink {
+        /// The link's id, as the dashboard's Account page shows it.
+        #[arg(long, conflicts_with = "all")]
+        link: Option<String>,
+        /// Every link that is not already cut.
+        #[arg(long)]
+        all: bool,
+        /// The folder the dashboard keeps its state in. Default: beside the settings file.
+        #[arg(long, conflicts_with = "on_box")]
+        state_dir: Option<std::path::PathBuf>,
+        /// The box whose dashboard holds the link, reached from this computer over the sealed ingress route.
+        #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
+        on_box: Option<BoxName>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum TelemetryCommand {
     /// Whether it is on, and where it would send.
     Status,
@@ -1230,12 +1326,15 @@ pub enum IngressCommand {
     /// Keep a copy of a box's file-kept store key in this computer's keychain, so `ozbox upgrade` can put it back through
     /// the ingress route when the system disk is replaced. The key is never printed. WARNING: that copy opens every value on the
     /// box (every project key, the box's own tokens and credentials), and any program running as you on this computer can read
-    /// your keychain. Once the box has a second factor the copy needs an approval from your approval key; the box records it.
+    /// your keychain. Once the box has a second factor the copy needs an approval that is not this computer's software key (a
+    /// software key never approves it): a laptop key that proves a touch, or root on the box. The box records it.
     Escrow {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
     },
-    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read.
+    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read. It is handed out with no
+    /// approval only until someone enrols a passkey or an authenticator in the dashboard; after that it is refused for good, and
+    /// you sign in with what you enrolled.
     SetupCode {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
@@ -1395,7 +1494,7 @@ pub enum DashboardCommand {
         /// to the box. Default: the project's own repository.
         #[arg(long)]
         release_repo: Option<String>,
-        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
+        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The id is a short name you choose (lowercase letters, digits and dashes, up to 32), not an email: an email goes after it, like `jane,google=jane@example.com`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
         #[arg(long = "person", required = true)]
         people: Vec<String>,
         /// Cloudflare Access team domain, like myteam.cloudflareaccess.com (needs --access-audience).
@@ -1419,9 +1518,12 @@ pub enum DashboardCommand {
         /// Caddy: the loopback port on your server that Caddy forwards to.
         #[arg(long, default_value_t = 7878)]
         remote_port: u16,
-        /// On a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's token, from
-        /// `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this computer
-        /// (the same token piped in; a box from an older image takes a code made without --token-stdin).
+        /// The fallback, on a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's
+        /// token, from `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this
+        /// computer (the same token piped in; a box from an older image takes a code made without --token-stdin). Without it
+        /// (and without --approve-with-laptop-key), the box is sent an approval request for exactly this token and the
+        /// command waits (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or
+        /// authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
         /// Read the approval code from the line after the token on standard input (needs --token-stdin), so it is not in
@@ -1435,8 +1537,17 @@ pub enum DashboardCommand {
         /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
         /// token, as `ozbox secrets approve --scope tunnel-token --token-stdin` would, and send it. Needs a token
         /// (--token-stdin or --token-from-keychain).
-        #[arg(long, conflicts_with_all = ["approval", "approval_stdin"])]
+        #[arg(long, conflicts_with_all = ["approval", "approval_stdin", "replace_sign_in"])]
         approve_with_laptop_key: bool,
+        /// Replace the sign-in settings the dashboard already has (they decide who may approve on the box) with the ones given
+        /// here. Without this the dashboard keeps its own, and says so. Needs an approval made in the dashboard (Secret
+        /// approvals): pass its code with --settings-approval. This computer's key never approves it.
+        #[arg(long)]
+        replace_sign_in: bool,
+        /// A single-use approval code for replacing the sign-in settings, made in the dashboard (Secret approvals, "Replacing the
+        /// dashboard's sign-in settings", with the approval binding this command prints). Needs --replace-sign-in.
+        #[arg(long, value_name = "CODE", requires = "replace_sign_in")]
+        settings_approval: Option<String>,
     },
     /// Put a dashboard back on a box from what this computer kept when it was installed: the address, the people, the tunnel
     /// and its token (in the keychain, never in a file). One command after an upgrade that started a new secrets store.
@@ -1450,6 +1561,12 @@ pub enum DashboardCommand {
         /// token (the same step as `ozbox secrets approve --scope tunnel-token --token-stdin`), and send it.
         #[arg(long)]
         approve_with_laptop_key: bool,
+    },
+    /// Remove a tunnel an older setup left running as the box user, with a token file the box user (and every coding agent) can
+    /// read. Only once the box's own tunnel is seen working; the token is destroyed, not moved, so rotate it in Cloudflare after.
+    RetireLegacyTunnel {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
     },
     /// Forget what this computer kept for a box's dashboard (its token and install settings). Nothing on the box changes.
     Forget {
@@ -1465,7 +1582,7 @@ pub enum AuthCommand {
         /// The exact address people open, like https://box.example.com (https; plain http only for localhost).
         #[arg(long)]
         origin: String,
-        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
+        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The id is a short name you choose (lowercase letters, digits and dashes, up to 32), not an email: an email goes after it, like `jane,google=jane@example.com`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
         #[arg(long = "person", required = true)]
         people: Vec<String>,
         /// Your own GitHub OAuth app's client ID (device flow enabled; no secret needed).
@@ -2054,7 +2171,8 @@ pub enum GuardCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
-    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route.
+    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route; a box that needs an
+    /// approval gets a request for exactly this declaration, and this command waits for you to approve it in the dashboard.
     Set {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -2062,9 +2180,16 @@ pub enum PolicyCommand {
         project: String,
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code from the dashboard (see `ozbox secrets import --approval`).
+        /// The fallback: an approval code from the dashboard (Settings, Secrets). Without it, a box whose dashboard has a
+        /// second factor is sent an approval request for exactly this declaration, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// saved and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// Print what to pin, to paste into a declaration. Run it on YOUR computer, against your own checkout at the commit the box
     /// has (`--commit`): a digest computed on the box only freezes what an agent may already have changed. It reads files and
@@ -2116,6 +2241,137 @@ pub enum PolicyCommand {
     Show {
         #[arg(long)]
         project: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TasksCommand {
+    /// Create this endpoint's keys and name. Run once on each side.
+    Init {
+        #[arg(long)]
+        name: String,
+    },
+    /// Print this endpoint's public identity, to hand to the other side by a way you trust.
+    Identity,
+    /// Pin the other side's identity (shows fingerprints first). `--via-arg` is one word of the command that reaches its `ozbox`;
+    /// repeat it for each word (for example `--via-arg ssh --via-arg my-box --via-arg /usr/local/bin/ozbox`, naming the program by
+    /// its absolute path so nothing on the other side's `PATH` can stand in for it). It is run as an argument list, never through a shell.
+    Pin {
+        /// A file from `ozbox tasks identity`, or `-` for standard input.
+        file: std::path::PathBuf,
+        #[arg(long = "via-arg", allow_hyphen_values = true)]
+        via_arg: Vec<String>,
+        /// Change an existing pin (a new epoch after a restore, or new keys). Compare the fingerprints first.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Start a task for a pinned peer. It is held here and delivered on the next sync.
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// Read the text from standard input.
+        #[arg(long)]
+        stdin: bool,
+        /// A note: nothing is asked, nothing is expected back.
+        #[arg(long)]
+        note: bool,
+        /// Give up after this many minutes (default 1440).
+        #[arg(long)]
+        minutes: Option<u64>,
+    },
+    /// Ask the peer to push one commit to one branch. Acts that need an approval are refused until the passkey approval path
+    /// exists, and a Production act is refused outright.
+    PushRef {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        remote: String,
+        #[arg(long = "ref")]
+        r#ref: String,
+        #[arg(long)]
+        sha: String,
+        /// The environment the push is for (for example staging). Anything not known to be non-Production counts as Production.
+        #[arg(long)]
+        env: String,
+    },
+    /// What is waiting for you: tasks you received that are not finished, and anything with news.
+    Inbox {
+        #[arg(long)]
+        all: bool,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// One task with its messages, or (with no id) the pinned peers and what waits to be sent.
+    Status {
+        id: Option<String>,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// Answer a task, and optionally move its state (only the side that received it may).
+    Reply {
+        id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        /// working, input-required, completed, failed or canceled (the last also answers a cancel the other side asked for).
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Ask for a task to stop. A cancel is a request: the other side decides.
+    Cancel { id: String },
+    /// Why a task is where it is, and who acts next.
+    Why { id: String },
+    /// Send what is waiting and take what the peer has, once.
+    Sync {
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Keep syncing every few seconds and print what is new. It runs only while you keep it open.
+    Watch {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        every: u64,
+        #[arg(long, hide = true)]
+        rounds: Option<u64>,
+    },
+    /// The answering side of a sync (run by the other side through its `--via` command). Not for people.
+    #[command(hide = true)]
+    Exchange {
+        #[arg(long)]
+        peer: String,
+    },
+    /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
+    /// accepted; every peer must pin the new epoch. On a box this needs root.
+    Restored,
+    /// Set up the box's task router as root: a system user of its own, its socket directories and the unit that runs `tasks serve`
+    /// as that user. First-boot configuration runs it; safe to run again. The setup is carried in this program, not in user-data.
+    #[command(hide = true)]
+    RouterSetup,
+    /// Run the box's task router as a service of its own (a system user that agents cannot read as). Not for people: the unit that
+    /// `ozbox tasks router-setup` writes runs it.
+    #[command(hide = true)]
+    Serve {
+        /// The directory that holds the key, the state and the mesh audit log. Only the service user may enter it.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        agent_socket: std::path::PathBuf,
+        #[arg(long)]
+        relay_socket: std::path::PathBuf,
+        #[arg(long)]
+        admin_socket: std::path::PathBuf,
     },
 }
 

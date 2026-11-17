@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod adopt;
+mod robust;
+
+use robust::{classify_sign_in_failure, SignInFailure, AWS_PROVIDER_VERSION};
 
 use crate::messages::t;
 use crate::netguard::{Guard, HttpClient, HttpRequest};
@@ -298,6 +301,14 @@ pub struct OperatorPolicyReport {
     /// Those statements as rendered for this account, region and fleet.
     pub adopt_statements: Vec<Value>,
     pub operator_check: OperatorCheck,
+    /// How many statements the written policy has.
+    pub statement_count: usize,
+    /// What merging the adopt step's own output into the template did; `None` when that output is not there (the step was
+    /// not applied in this region), and the template's statements stand.
+    pub merge: Option<operator_policy::MergeReport>,
+    /// Why the adopt step's output could not be merged, when it was there but unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_note: Option<String>,
 }
 
 /// The meaning of the one read the operator check makes.
@@ -598,8 +609,16 @@ pub struct Prepared {
     /// Monthly cost in US dollars, when it can be said; `None` is shown as an em dash.
     pub estimate_usd_month: Option<f64>,
     pub noop: bool,
+    /// A preview made by a dry run before the state bucket exists: it shows what the step would make and cannot be applied.
+    pub preview: bool,
     #[serde(skip)]
     run: Vec<CommandSpec>,
+    /// Run when a command of `run` at index `rollback_from` or later fails: it removes what this apply had made, so a step
+    /// never stays half-applied. Empty when undoing could touch something older.
+    #[serde(skip)]
+    rollback: Vec<CommandSpec>,
+    #[serde(skip)]
+    rollback_from: usize,
     #[serde(skip)]
     after: After,
 }
@@ -661,7 +680,10 @@ impl Prepared {
             notes: Vec::new(),
             estimate_usd_month: Some(0.0),
             noop: false,
+            preview: false,
             run: Vec::new(),
+            rollback: Vec::new(),
+            rollback_from: 0,
             after: After::Nothing,
         }
     }
@@ -1040,6 +1062,9 @@ pub struct Init<'a> {
     pub paths: InitPaths,
     /// Pause between attempts to download plugins (GitHub's release downloads fail now and then).
     pub retry_delay: Duration,
+    /// A dry run: when the state bucket does not exist yet, each later step is planned against an empty local state (a
+    /// preview that cannot be applied) instead of being refused.
+    pub preview_without_state: bool,
 }
 
 const NAT_USD_MONTH: f64 = 32.85;
@@ -1100,6 +1125,21 @@ impl Init<'_> {
     fn aws_sign_in(&self, target: &Target) -> Res<Identity> {
         let out = self.exec(&self.aws(target, &["sts", "get-caller-identity"]))?;
         if out.status != Some(0) {
+            let profile = target.profile.clone().unwrap_or_else(|| "default".into());
+            let region = target
+                .region
+                .clone()
+                .unwrap_or_else(|| "your region".into());
+            let kind = classify_sign_in_failure(&out.stderr);
+            // an outage, throttling or no network is never "sign in again": the login was not the problem
+            if let Some(
+                k @ (SignInFailure::Unavailable
+                | SignInFailure::Throttled
+                | SignInFailure::Unreachable),
+            ) = kind
+            {
+                return Err(robust::sign_in_finding(k, &out.stderr, &profile, &region));
+            }
             // a version 1 CLI fails here for a reason that has nothing to do with signing in: say so first
             if let Some((v, at)) =
                 crate::awscli::v1_in_the_way(self.runner, std::env::var("PATH").ok().as_deref())
@@ -1109,9 +1149,12 @@ impl Init<'_> {
                     crate::awscli::v1_message(&v, at.as_ref()),
                 ));
             }
-            let profile = target.profile.clone().unwrap_or_else(|| "default".into());
-            return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[]))
-                .with_fix(t("init.sign_in_fix", &[("profile", &profile)])));
+            return Err(robust::sign_in_finding(
+                kind.unwrap_or(SignInFailure::NotSignedIn),
+                &out.stderr,
+                &profile,
+                &region,
+            ));
         }
         let id = parse_identity(&out.stdout)?;
         match id.kind {
@@ -1203,10 +1246,11 @@ impl Init<'_> {
         let mut probes = Vec::new();
         // The account names the state bucket. No answer, no bucket probe.
         let who = self.exec(&self.aws(target, &["sts", "get-caller-identity"]))?;
-        if who.stderr.contains("ExpiredToken")
-            || who.stderr.contains("Unable to locate credentials")
-        {
-            return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
+        let profile = target.profile.clone().unwrap_or_else(|| "default".into());
+        if who.status != Some(0) {
+            if let Some(k) = classify_sign_in_failure(&who.stderr) {
+                return Err(robust::sign_in_finding(k, &who.stderr, &profile, &region));
+            }
         }
         let account = parse_identity(&who.stdout)
             .ok()
@@ -1215,10 +1259,13 @@ impl Init<'_> {
         for def in probe_defs(&region, account.as_deref()) {
             let argv: Vec<&str> = def.args.iter().map(String::as_str).collect();
             let out = self.exec(&self.aws(target, &argv))?;
-            if out.stderr.contains("ExpiredToken")
-                || out.stderr.contains("Unable to locate credentials")
+            // a login that lapses part way is a sign-in problem, not a denied permission; an outage on one probe is left to
+            // that probe's own "unknown"
+            if let Some(
+                k @ (SignInFailure::Expired | SignInFailure::NotSignedIn | SignInFailure::BadKeys),
+            ) = classify_sign_in_failure(&out.stderr)
             {
-                return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
+                return Err(robust::sign_in_finding(k, &out.stderr, &profile, &region));
             }
             let (mut state, mut detail) = classify_probe(def.dry, &out);
             if state == ProbeState::Denied {
@@ -1546,14 +1593,27 @@ impl Init<'_> {
             );
         }
         let noop = changes.is_empty();
+        let mut notes = vec![t("init.note_bucket_cost", &[])];
+        // a bucket made by this run and then left half set up (no encryption, no TLS-only policy) is removed again: it is empty,
+        // so nothing is lost, and the next run makes it whole
+        let rollback = if exists {
+            Vec::new()
+        } else {
+            notes.push(t("init.note_rollback", &[]));
+            vec![self.aws(target, &["s3api", "delete-bucket", "--bucket", b])]
+        };
         Ok(Prepared {
             step: "state_bucket".into(),
             summary: t("init.sum_bucket", &[("bucket", &bucket)]),
             changes,
-            notes: vec![t("init.note_bucket_cost", &[])],
+            notes,
             estimate_usd_month: Some(0.0),
             noop,
+            preview: false,
             run,
+            rollback,
+            // only after the bucket itself was made
+            rollback_from: 1,
             after: After::Bucket(bucket),
         })
     }
@@ -1621,6 +1681,7 @@ impl Init<'_> {
     /// Download the AWS plugin once into the cache and record its checksum beside the box module and the network
     /// module. Local files only.
     pub fn seed_plugins(&self, target: &Target) -> Res<()> {
+        self.ensure_provider_lock(target)?;
         for dir in [self.paths.box_dir(), self.paths.network_dir()] {
             if !dir.is_dir() {
                 return Err(Finding::new(
@@ -1631,6 +1692,7 @@ impl Init<'_> {
                     ),
                 ));
             }
+            self.use_shared_lock(&dir)?;
             let cmd = CommandSpec::new("tofu").args([
                 format!("-chdir={}", dir.display()),
                 "init".into(),
@@ -1662,8 +1724,9 @@ impl Init<'_> {
         if module_s.contains(['"', '\\', '$', '%', '\n', '\r']) {
             return Err(Finding::new("bad_path", t("init.bad_path", &[])));
         }
+        let pin = robust::pinned_providers_block();
         let main = format!(
-            "terraform {{\n  required_version = \">= 1.10.0\"\n  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\nmodule \"network\" {{\n  source = \"{module_s}\"\n  name   = \"ozbox\"\n  region = \"{region}\"\n}}\n\noutput \"private_subnet_id\" {{\n  value = module.network.private_subnet_id\n}}\n\noutput \"vpc_id\" {{\n  value = module.network.vpc_id\n}}\n"
+            "terraform {{\n  required_version = \">= 1.10.0\"\n{pin}  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\nmodule \"network\" {{\n  source = \"{module_s}\"\n  name   = \"ozbox\"\n  region = \"{region}\"\n}}\n\noutput \"private_subnet_id\" {{\n  value = module.network.private_subnet_id\n}}\n\noutput \"vpc_id\" {{\n  value = module.network.vpc_id\n}}\n"
         );
         let _ = bucket;
         let dir = self.network_workdir(region);
@@ -1722,7 +1785,8 @@ impl Init<'_> {
         target.validate()?;
         let region = target.region_or_err()?.to_string();
         let bucket = Self::bucket_name(account, &region);
-        if !self.bucket_probe(target, &bucket)? {
+        let have_bucket = self.bucket_probe(target, &bucket)?;
+        if !have_bucket && !self.preview_without_state {
             return Err(Finding::new(
                 "bucket_missing",
                 t("init.bucket_missing", &[]),
@@ -1730,21 +1794,37 @@ impl Init<'_> {
         }
         self.version_ok(target)?;
         self.seed_plugins(target)?;
-        let dir = self.write_network_files(&bucket, &region)?;
+        let root = self.write_network_files(&bucket, &region)?;
+        self.use_shared_lock(&root)?;
+        // a dry run before the bucket exists plans a copy of the root against an empty local state
+        let dir = if have_bucket {
+            root
+        } else {
+            self.preview_root(&root)?
+        };
         let chdir = format!("-chdir={}", dir.display());
         let key = format!("ozbox/network/{region}.tfstate");
-        let init = CommandSpec::new("tofu").args([
-            chdir.clone(),
-            "init".into(),
-            "-input=false".into(),
-            "-no-color".into(),
-            "-reconfigure".into(),
-            format!("-backend-config=bucket={bucket}"),
-            format!("-backend-config=key={key}"),
-            format!("-backend-config=region={region}"),
-            "-backend-config=encrypt=true".into(),
-            "-backend-config=use_lockfile=true".into(),
-        ]);
+        let init = if have_bucket {
+            CommandSpec::new("tofu").args([
+                chdir.clone(),
+                "init".into(),
+                "-input=false".into(),
+                "-no-color".into(),
+                "-reconfigure".into(),
+                format!("-backend-config=bucket={bucket}"),
+                format!("-backend-config=key={key}"),
+                format!("-backend-config=region={region}"),
+                "-backend-config=encrypt=true".into(),
+                "-backend-config=use_lockfile=true".into(),
+            ])
+        } else {
+            CommandSpec::new("tofu").args([
+                chdir.clone(),
+                "init".into(),
+                "-input=false".into(),
+                "-no-color".into(),
+            ])
+        };
         self.init_with_retry(target, &init)?;
         let plan_cmd = CommandSpec::new("tofu").args([
             chdir.clone(),
@@ -1752,12 +1832,16 @@ impl Init<'_> {
             "-input=false".into(),
             "-no-color".into(),
             "-detailed-exitcode".into(),
-            "-out=ozbox.tfplan".into(),
+            if have_bucket {
+                "-out=ozbox.tfplan".into()
+            } else {
+                "-lock=false".into()
+            },
         ]);
         let out = self.exec(&self.tofu_env(target, plan_cmd))?;
-        let changes = match out.status {
+        let entries = match out.status {
             Some(0) => Vec::new(),
-            Some(2) => parse_tofu_plan(&out.stdout),
+            Some(2) => plan_entries(&out.stdout),
             _ => {
                 let why: String = out
                     .stderr
@@ -1774,7 +1858,43 @@ impl Init<'_> {
                 ));
             }
         };
+        let changes = if out.status == Some(2) {
+            parse_tofu_plan(&out.stdout)
+        } else {
+            Vec::new()
+        };
+        let mut notes = vec![
+            t("init.note_network_cost", &[]),
+            t("init.note_plugins", &[]),
+            t(
+                "init.note_provider_pin",
+                &[("version", AWS_PROVIDER_VERSION)],
+            ),
+        ];
+        // an address and a NAT gateway the account has no room for is refused here, in the plan, with the numbers
+        let (eips, nats) = robust::network_needs(&entries);
+        notes.extend(self.network_quota_preflight(target, eips, nats)?);
         let noop = changes.is_empty();
+        if !have_bucket {
+            notes.push(t("init.note_preview", &[]));
+            return Ok(Prepared {
+                step: "network".into(),
+                summary: t("init.sum_network", &[("region", &region)]),
+                changes,
+                notes,
+                estimate_usd_month: Some(NAT_USD_MONTH),
+                noop,
+                preview: true,
+                run: Vec::new(),
+                rollback: Vec::new(),
+                rollback_from: 0,
+                after: After::Nothing,
+            });
+        }
+        let rollback = robust::destroy_created(|c| self.tofu_env(target, c), &chdir, &entries);
+        if !rollback.is_empty() {
+            notes.push(t("init.note_rollback", &[]));
+        }
         let apply = self.tofu_env(
             target,
             CommandSpec::new("tofu").args([
@@ -1789,13 +1909,13 @@ impl Init<'_> {
             step: "network".into(),
             summary: t("init.sum_network", &[("region", &region)]),
             changes,
-            notes: vec![
-                t("init.note_network_cost", &[]),
-                t("init.note_plugins", &[]),
-            ],
+            notes,
             estimate_usd_month: Some(NAT_USD_MONTH),
             noop,
+            preview: false,
             run: if noop { Vec::new() } else { vec![apply] },
+            rollback,
+            rollback_from: 0,
             after: After::Network(dir),
         })
     }
@@ -1837,8 +1957,38 @@ impl Init<'_> {
     pub fn operator_policy(&self, target: &Target, account: &str) -> Res<OperatorPolicyReport> {
         let region = target.region_or_err()?.to_string();
         let fleet = self.fleet_name();
-        let policy = operator_policy::render(account, &region, &fleet)
+        let template = operator_policy::render(account, &region, &fleet)
             .map_err(|e| Finding::new("operator_policy", e))?;
+        // the adopt step's own output, when it was applied in this region, is merged in: one file, never a second to merge by hand
+        let adopt_file = self
+            .paths
+            .work
+            .join("adopt-command")
+            .join(&region)
+            .join("operator-adopt-policy.json");
+        let mut merge_note = None;
+        let (policy, merge) = match std::fs::read_to_string(&adopt_file) {
+            Err(_) => (template, None),
+            Ok(text) => match serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("Statement").and_then(Value::as_array).cloned())
+            {
+                Some(stmts) => {
+                    let (p, r) = operator_policy::merge_statements(&template, &stmts);
+                    (p, Some(r))
+                }
+                None => {
+                    merge_note = Some(t(
+                        "init.merge_bad",
+                        &[
+                            ("path", &adopt_file.display().to_string()),
+                            ("why", "not a policy with a Statement list"),
+                        ],
+                    ));
+                    (template, None)
+                }
+            },
+        };
         let dir = self.paths.work.join("operator-policy").join(&region);
         std::fs::create_dir_all(&dir).map_err(|e| Finding::new("command_failed", e.to_string()))?;
         let file = dir.join("operator-policy.json");
@@ -1883,6 +2033,9 @@ impl Init<'_> {
                 .collect(),
             adopt_statements: adopt,
             operator_check,
+            statement_count: policy["Statement"].as_array().map_or(0, Vec::len),
+            merge,
+            merge_note,
         })
     }
 
@@ -1990,8 +2143,9 @@ impl Init<'_> {
             return Err(Finding::new("bad_path", t("init.bad_path", &[])));
         }
         let region = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let pin = robust::pinned_providers_block();
         let text = format!(
-            "terraform {{\n  required_version = \">= 1.10.0\"\n  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\n{}",
+            "terraform {{\n  required_version = \">= 1.10.0\"\n{pin}  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\n{}",
             body.replace("@MODULE@", &module_s)
         );
         std::fs::create_dir_all(dir).map_err(|e| Finding::new("command_failed", e.to_string()))?;
@@ -2016,32 +2170,55 @@ impl Init<'_> {
     ) -> Res<Prepared> {
         let region = target.region_or_err()?.to_string();
         let bucket = Self::bucket_name(account, &region);
-        if !self.bucket_probe(target, &bucket)? {
+        let have_bucket = self.bucket_probe(target, &bucket)?;
+        if !have_bucket && !self.preview_without_state {
             return Err(Finding::new(
                 "bucket_missing",
                 t("init.bucket_missing", &[]),
             ));
         }
         self.version_ok(target)?;
+        self.ensure_provider_lock(target)?;
+        self.use_shared_lock(&dir)?;
+        // a dry run before the bucket exists plans a copy of the root against an empty local state
+        let dir = if have_bucket {
+            dir
+        } else {
+            self.preview_root(&dir)?
+        };
         let chdir = format!("-chdir={}", dir.display());
-        let init = CommandSpec::new("tofu").args([
-            chdir.clone(),
-            "init".into(),
-            "-input=false".into(),
-            "-no-color".into(),
-            "-reconfigure".into(),
-            format!("-backend-config=bucket={bucket}"),
-            format!("-backend-config=key={state_key}"),
-            format!("-backend-config=region={region}"),
-            "-backend-config=encrypt=true".into(),
-            "-backend-config=use_lockfile=true".into(),
-        ]);
+        let init = if have_bucket {
+            CommandSpec::new("tofu").args([
+                chdir.clone(),
+                "init".into(),
+                "-input=false".into(),
+                "-no-color".into(),
+                "-reconfigure".into(),
+                format!("-backend-config=bucket={bucket}"),
+                format!("-backend-config=key={state_key}"),
+                format!("-backend-config=region={region}"),
+                "-backend-config=encrypt=true".into(),
+                "-backend-config=use_lockfile=true".into(),
+            ])
+        } else {
+            CommandSpec::new("tofu").args([
+                chdir.clone(),
+                "init".into(),
+                "-input=false".into(),
+                "-no-color".into(),
+            ])
+        };
         self.init_with_retry(target, &init)?;
-        // What already exists in the account and is not in this step's state is adopted, not re-created (ADR 0053).
+        // What already exists in the account and is not in this step's state is adopted, not re-created (ADR 0053). A preview
+        // has no state yet, so everything found is adopted.
         let adopted = if adoptables.is_empty() {
             Vec::new()
         } else {
-            let in_state = self.state_addresses(target, &chdir)?;
+            let in_state = if have_bucket {
+                self.state_addresses(target, &chdir)?
+            } else {
+                std::collections::BTreeSet::new()
+            };
             self.find_adoptions(target, account, &adoptables, &in_state)?
         };
         adopt::write_imports(&dir, &adopted)?;
@@ -2051,14 +2228,20 @@ impl Init<'_> {
             "-input=false".into(),
             "-no-color".into(),
             "-detailed-exitcode".into(),
-            "-out=ozbox.tfplan".into(),
+            if have_bucket {
+                "-out=ozbox.tfplan".into()
+            } else {
+                "-lock=false".into()
+            },
         ]);
         let out = self.exec(&self.tofu_env(target, plan_cmd))?;
         let mut changes: Vec<Change> = adopted.iter().map(adopt::Adopted::change).collect();
+        let mut entries = Vec::new();
         match out.status {
             Some(0) => {}
             Some(2) => {
-                adopt::refuse_replacing(&adopted, &plan_entries(&out.stdout))?;
+                entries = plan_entries(&out.stdout);
+                adopt::refuse_replacing(&adopted, &entries)?;
                 changes.extend(parse_tofu_plan(&out.stdout));
             }
             _ => {
@@ -2080,8 +2263,37 @@ impl Init<'_> {
         if !adopted.is_empty() {
             notes.push(t("init.note_adopted", &[]));
         }
+        notes.push(t(
+            "init.note_provider_pin",
+            &[("version", AWS_PROVIDER_VERSION)],
+        ));
         // an import is a change even when nothing else differs: applying is what records the resource in the state
         let noop = changes.is_empty();
+        if !have_bucket {
+            notes.push(t("init.note_preview", &[]));
+            return Ok(Prepared {
+                step: step.into(),
+                summary,
+                changes,
+                notes,
+                estimate_usd_month: Some(1.0),
+                noop,
+                preview: true,
+                run: Vec::new(),
+                rollback: Vec::new(),
+                rollback_from: 0,
+                after: After::Nothing,
+            });
+        }
+        // only a step that creates everything it plans (nothing adopted, changed or replaced) is undone on a failed apply
+        let rollback = if adopted.is_empty() {
+            robust::destroy_created(|c| self.tofu_env(target, c), &chdir, &entries)
+        } else {
+            Vec::new()
+        };
+        if !rollback.is_empty() {
+            notes.push(t("init.note_rollback", &[]));
+        }
         let apply = self.tofu_env(
             target,
             CommandSpec::new("tofu").args([
@@ -2099,7 +2311,10 @@ impl Init<'_> {
             notes,
             estimate_usd_month: Some(1.0),
             noop,
+            preview: false,
             run: if noop { Vec::new() } else { vec![apply] },
+            rollback,
+            rollback_from: 0,
             after,
         })
     }
@@ -2155,6 +2370,23 @@ impl Init<'_> {
                 what: "IAM policy",
                 find: adopt::Find::IamPolicy {
                     name: "ozbox-box-session-logs".into(),
+                },
+            });
+        }
+        // alerts sent from a box (B4-9): one SES sender identity and one SNS topic, both or neither, from `[aws]`. A box attaches
+        // the policy only when it is made with `notify_send_grants` on and the same two ARNs.
+        if let (Some(ses), Some(sns)) = (
+            rec.get("notify_ses_identity_arn").filter(|v| ok_word(v)),
+            rec.get("notify_sns_topic_arn").filter(|v| ok_word(v)),
+        ) {
+            extra.push_str(&format!(
+                "  notify_ses_identity_arn = \"{ses}\"\n  notify_sns_topic_arn    = \"{sns}\"\n"
+            ));
+            adoptables.push(adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.notify[0]".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-notify".into(),
                 },
             });
         }
@@ -2435,8 +2667,9 @@ impl Init<'_> {
                 String::new()
             }
         });
+        let pin = robust::pinned_providers_block();
         let main = format!(
-            "terraform {{\n  required_version = \">= 1.10.0\"\n  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\nmodule \"security\" {{\n  source = \"{module_s}\"\n  account_id = \"{account}\"\n  region = \"{region}\"\n  enable_guardduty_runtime = {gd}\n{detector_line}  enable_session_logs = {sl}\n  session_log_retention_days = {days}\n  session_log_retention_mode = \"{mode}\"\n  manage_session_preferences = {prefs}\n  enable_patching = {pt}\n}}\n\noutput \"session_log_bucket\" {{\n  value = module.security.session_log_bucket\n}}\n\noutput \"patch_group\" {{\n  value = module.security.patch_group\n}}\n",
+            "terraform {{\n  required_version = \">= 1.10.0\"\n{pin}  backend \"s3\" {{}}\n}}\n\nprovider \"aws\" {{\n  region = \"{region}\"\n}}\n\nmodule \"security\" {{\n  source = \"{module_s}\"\n  account_id = \"{account}\"\n  region = \"{region}\"\n  enable_guardduty_runtime = {gd}\n{detector_line}  enable_session_logs = {sl}\n  session_log_retention_days = {days}\n  session_log_retention_mode = \"{mode}\"\n  manage_session_preferences = {prefs}\n  enable_patching = {pt}\n}}\n\noutput \"session_log_bucket\" {{\n  value = module.security.session_log_bucket\n}}\n\noutput \"patch_group\" {{\n  value = module.security.patch_group\n}}\n",
             gd = o.guardduty_runtime,
             sl = o.session_logs,
             days = o.retention_days,
@@ -2475,6 +2708,8 @@ impl Init<'_> {
                 ),
             ));
         }
+        self.ensure_provider_lock(target)?;
+        self.use_shared_lock(&seed)?;
         self.init_with_retry(
             target,
             &CommandSpec::new("tofu").args([
@@ -2490,6 +2725,7 @@ impl Init<'_> {
         // run plan to destroy what the first created (its detector looked like "an existing one", its preferences like
         // "someone else's").
         let dir = self.write_security_files(&region, account, o, None, true)?;
+        self.use_shared_lock(&dir)?;
         let chdir = format!("-chdir={}", dir.display());
         let init = CommandSpec::new("tofu").args([
             chdir.clone(),
@@ -2594,7 +2830,11 @@ impl Init<'_> {
             // GuardDuty bills per vCPU of monitored machines and the bucket by what is stored: neither is a fixed figure
             estimate_usd_month: None,
             noop,
+            preview: false,
             run: if noop { Vec::new() } else { vec![apply] },
+            // the security services are changed in place as often as made, so a failed apply is reported, never undone
+            rollback: Vec::new(),
+            rollback_from: 0,
             after: After::Security(dir),
         })
     }
@@ -2604,18 +2844,21 @@ impl Init<'_> {
     /// Run exactly what the plan listed, then record the result in the configuration.
     pub fn apply(&self, target: &Target, prepared: &Prepared) -> Res<Applied> {
         target.validate()?;
+        if prepared.preview {
+            return Err(Finding::new("preview_only", t("init.preview_only", &[])));
+        }
         let mut applied = Applied {
             step: prepared.step.clone(),
             ..Applied::default()
         };
-        for cmd in &prepared.run {
-            let out = self.exec(cmd)?;
-            if out.status != Some(0) {
-                let why: String = out.stderr.trim().chars().take(300).collect();
-                return Err(Finding::new(
-                    "apply_failed",
-                    t("init.apply_failed", &[("why", &why)]),
-                ));
+        for (i, cmd) in prepared.run.iter().enumerate() {
+            let failed = match self.exec(cmd) {
+                Ok(out) if out.status == Some(0) => None,
+                Ok(out) => Some(out.stderr.trim().chars().take(300).collect::<String>()),
+                Err(f) => Some(f.message),
+            };
+            if let Some(why) = failed {
+                return Err(self.roll_back(prepared, i, &why));
             }
         }
         match &prepared.after {
@@ -2737,6 +2980,28 @@ impl Init<'_> {
             }
         }
         Ok(applied)
+    }
+
+    /// The finding for a step whose command `failed_at` failed: when the plan made something this run that would be left half
+    /// set up, it is removed first, and the finding says whether that worked.
+    fn roll_back(&self, prepared: &Prepared, failed_at: usize, why: &str) -> Finding {
+        if prepared.rollback.is_empty() || failed_at < prepared.rollback_from {
+            return Finding::new("apply_failed", t("init.apply_failed", &[("why", why)]));
+        }
+        for cmd in &prepared.rollback {
+            let undo = match self.exec(cmd) {
+                Ok(out) if out.status == Some(0) => None,
+                Ok(out) => Some(robust::short_why(&out.stderr)),
+                Err(f) => Some(f.message),
+            };
+            if let Some(undo) = undo {
+                return Finding::new(
+                    "apply_failed",
+                    t("init.rollback_failed", &[("why", why), ("rollback", &undo)]),
+                );
+            }
+        }
+        Finding::new("apply_failed", t("init.rolled_back", &[("why", why)]))
     }
 
     // ----- the configuration file -----
@@ -2910,6 +3175,9 @@ pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
 }
 
 #[cfg(test)]
+pub(crate) use robust::write_test_lock;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -2955,6 +3223,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(dir.path().join("modules/aws-box")).unwrap();
             std::fs::create_dir_all(dir.path().join("modules/aws-network")).unwrap();
+            write_test_lock(&dir.path().join("work"));
             Env {
                 dir,
                 runner: RecordingRunner::new(),
@@ -2975,6 +3244,7 @@ mod tests {
                     modules: self.dir.path().join("modules"),
                 },
                 retry_delay: Duration::ZERO,
+                preview_without_state: false,
             }
         }
     }
@@ -3678,8 +3948,9 @@ mod tests {
         let main =
             std::fs::read_to_string(e.dir.path().join("work/network/us-east-1/main.tf")).unwrap();
         assert!(main.contains("backend \"s3\" {}") && main.contains("source = \""));
+        // the plan runs as the chosen profile (the quota reads after it name it with --profile)
         assert_eq!(
-            calls.last().map(|c| c.env.get("AWS_PROFILE").cloned()),
+            tofu.last().map(|c| c.env.get("AWS_PROFILE").cloned()),
             Some(Some("work".into()))
         );
     }
@@ -5220,6 +5491,53 @@ mod tests {
         assert!(tf.contains("policy/ozbox-box-fleet-key-ozbox"));
     }
 
+    /// B4-9: the account's notify policy is made only when `[aws]` names both the SES identity and the SNS topic, and both
+    /// reach the module.
+    #[test]
+    fn the_notify_policy_is_made_only_with_both_arns_and_passes_them_to_the_module() {
+        let ses = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com";
+        let sns = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts";
+        let e = policy_env();
+        e.init()
+            .persist(&target(), &[("notify_ses_identity_arn", ses)])
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..2 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 2, "one ARN alone makes no notify policy");
+        let e = policy_env();
+        e.init()
+            .persist(
+                &target(),
+                &[
+                    ("notify_ses_identity_arn", ses),
+                    ("notify_sns_topic_arn", sns),
+                ],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..3 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 3);
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.notify[0]"));
+        assert!(tf.contains("policy/ozbox-box-notify"));
+        let root = std::fs::read_dir(e.dir.path().join("work/box-policy/us-east-1"))
+            .unwrap()
+            .filter_map(|f| std::fs::read_to_string(f.unwrap().path()).ok())
+            .collect::<String>();
+        assert!(root.contains(&format!("notify_ses_identity_arn = \"{ses}\"")));
+        assert!(root.contains(&format!("notify_sns_topic_arn    = \"{sns}\"")));
+    }
+
     #[test]
     fn a_look_alike_without_the_ozbox_tag_is_refused_and_says_why() {
         // a document
@@ -5353,5 +5671,528 @@ mod tests {
         assert!(!d.path().join(adopt::ADOPT_FILE).exists());
         // removing what is not there is not an error
         adopt::write_imports(d.path(), &[]).unwrap();
+    }
+
+    // ----- robustness: sign-in, quotas, rollback, the provider pin, previews, the merged operator policy -----
+
+    #[test]
+    fn an_aws_outage_at_sign_in_is_never_reported_as_a_missing_login() {
+        for (stderr, code, fix) in [
+            (
+                "An error occurred (ServiceUnavailable) when calling the GetCallerIdentity operation (reached max retries: 4): Service Unavailable",
+                "aws_unavailable",
+                "health.aws.amazon.com",
+            ),
+            (
+                "An error occurred (InternalFailure) when calling the GetCallerIdentity operation",
+                "aws_unavailable",
+                "You do not need to sign in again",
+            ),
+            (
+                "An error occurred (Throttling) when calling the GetCallerIdentity operation: Rate exceeded",
+                "aws_throttled",
+                "Wait a minute",
+            ),
+            (
+                "Could not connect to the endpoint URL: \"https://sts.us-east-1.amazonaws.com/\"",
+                "aws_unreachable",
+                "network connection",
+            ),
+        ] {
+            let e = Env::new();
+            e.runner.reply(out(255, "", stderr));
+            let err = e.init().sign_in(&target()).unwrap_err();
+            assert_eq!(err.code, code, "{stderr}");
+            assert!(!err.message.contains("not signed in"), "{}", err.message);
+            assert!(err.fix.as_deref().unwrap_or("").contains(fix), "{err:?}");
+            // an outage asks nothing more (no version check of the CLI): one call
+            assert_eq!(e.runner.calls().len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_expired_login_a_missing_profile_and_refused_keys_each_name_their_next_step() {
+        for (stderr, says, fix) in [
+            (
+                "Error when retrieving token from sso: Token has expired and refresh failed",
+                "has expired",
+                "aws sso login --profile work",
+            ),
+            (
+                "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: The security token included in the request is expired",
+                "has expired",
+                "aws sso login --profile work",
+            ),
+            (
+                "The config profile (work) could not be found",
+                "no AWS profile named work",
+                "aws configure sso --profile work",
+            ),
+            (
+                "An error occurred (InvalidClientTokenId) when calling the GetCallerIdentity operation: The security token included in the request is invalid.",
+                "did not accept the credentials",
+                "aws sso login --profile work",
+            ),
+        ] {
+            let e = Env::new();
+            e.runner.reply(out(255, "", stderr));
+            let err = e.init().sign_in(&target()).unwrap_err();
+            // the code stays the one callers know; the words say which kind and what to do
+            assert_eq!(err.code, "not_signed_in", "{stderr}");
+            assert!(err.message.contains(says), "{stderr}: {}", err.message);
+            assert!(err.fix.as_deref().unwrap_or("").contains(fix), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn the_permission_probes_stop_on_an_outage_with_its_own_code() {
+        let e = Env::new();
+        e.runner.reply(out(
+            255,
+            "",
+            "An error occurred (ServiceUnavailable) when calling the GetCallerIdentity operation: Service Unavailable",
+        ));
+        let err = e.init().permissions(&target()).unwrap_err();
+        assert_eq!(err.code, "aws_unavailable");
+        assert_eq!(e.runner.calls().len(), 1, "no probe ran after the outage");
+    }
+
+    #[test]
+    fn the_sign_in_classifier_reads_outages_before_logins() {
+        use robust::{classify_sign_in_failure as c, SignInFailure as K};
+        assert_eq!(
+            c("(ServiceUnavailable) ... token has expired"),
+            Some(K::Unavailable)
+        );
+        assert_eq!(c("status code: 503, request id: x"), Some(K::Unavailable));
+        assert_eq!(c("RequestLimitExceeded"), Some(K::Throttled));
+        assert_eq!(c("Unable to locate credentials"), Some(K::NotSignedIn));
+        assert_eq!(c("AccessDenied"), None);
+        assert_eq!(c(""), None);
+    }
+
+    #[test]
+    fn a_quota_verdict_counts_what_is_free() {
+        use robust::{quota_verdict, QuotaVerdict};
+        assert_eq!(quota_verdict(1, 5.0, 4), QuotaVerdict::Enough { free: 1 });
+        assert_eq!(
+            quota_verdict(1, 5.0, 5),
+            QuotaVerdict::Short { free: 0, want: 6 }
+        );
+        assert_eq!(
+            quota_verdict(1, 5.0, 9),
+            QuotaVerdict::Short { free: 0, want: 10 }
+        );
+        assert_eq!(
+            quota_verdict(2, 2.9, 1),
+            QuotaVerdict::Short { free: 1, want: 3 }
+        );
+        assert_eq!(
+            quota_verdict(1, f64::NAN, 0),
+            QuotaVerdict::Short { free: 0, want: 1 }
+        );
+    }
+
+    const NET_PLAN: &str = "\n  # module.network.aws_vpc.this will be created\n  # module.network.aws_eip.nat will be created\n  # module.network.aws_nat_gateway.this will be created\nPlan: 3 to add, 0 to change, 0 to destroy.\n";
+
+    /// head-bucket, version, the two seeds and the backend init, then `plan` answers `plan`.
+    fn network_script(e: &Env, plan: Output) {
+        e.runner.reply(out(0, "", "")); // head-bucket
+        e.runner
+            .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        e.runner.reply(out(0, "", "")); // seed aws-box
+        e.runner.reply(out(0, "", "")); // seed aws-network
+        e.runner.reply(out(0, "", "")); // init with backend
+        e.runner.reply(plan);
+    }
+
+    #[test]
+    fn a_network_with_no_free_elastic_ip_is_refused_in_the_plan_with_the_numbers() {
+        let e = Env::new();
+        network_script(&e, out(2, NET_PLAN, ""));
+        e.runner.reply(out(
+            0,
+            r#"{"Quota":{"QuotaCode":"L-0263D0A3","Value":5.0}}"#,
+            "",
+        ));
+        e.runner.reply(out(
+            0,
+            r#"{"Addresses":[{"AllocationId":"a1"},{"AllocationId":"a2"},{"AllocationId":"a3"},{"AllocationId":"a4"},{"AllocationId":"a5"}]}"#,
+            "",
+        ));
+        let err = e
+            .init()
+            .plan_network(&target(), "123456789012")
+            .unwrap_err();
+        assert_eq!(err.code, "quota_short");
+        assert!(
+            err.message.contains("quota is 5") && err.message.contains("5 are in use"),
+            "{}",
+            err.message
+        );
+        let fix = err.fix.unwrap();
+        assert!(
+            fix.contains("--quota-code L-0263D0A3") && fix.contains("--desired-value 6"),
+            "{fix}"
+        );
+        let calls = e.runner.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "get-service-quota")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "apply")));
+    }
+
+    #[test]
+    fn a_network_with_room_says_so_and_counts_nat_gateways_in_its_own_zone_only() {
+        let e = Env::new();
+        network_script(&e, out(2, NET_PLAN, ""));
+        e.runner.reply(out(0, r#"{"Quota":{"Value":5.0}}"#, "")); // EIP quota
+        e.runner
+            .reply(out(0, r#"{"Addresses":[{"AllocationId":"a1"}]}"#, ""));
+        e.runner.reply(out(
+            0,
+            r#"{"AvailabilityZones":[{"ZoneName":"us-east-1b","ZoneType":"availability-zone"},{"ZoneName":"us-east-1a","ZoneType":"availability-zone"},{"ZoneName":"us-east-1-bos-1a","ZoneType":"local-zone"}]}"#,
+            "",
+        ));
+        e.runner.reply(out(0, r#"{"Quota":{"Value":5.0}}"#, "")); // NAT quota
+        e.runner.reply(out(
+            0,
+            r#"{"NatGateways":[{"SubnetId":"subnet-1"},{"SubnetId":"subnet-2"},{"SubnetId":"subnet-1"}]}"#,
+            "",
+        ));
+        e.runner.reply(out(
+            0,
+            r#"{"Subnets":[{"SubnetId":"subnet-1","AvailabilityZone":"us-east-1a"},{"SubnetId":"subnet-2","AvailabilityZone":"us-east-1c"}]}"#,
+            "",
+        ));
+        let p = e.init().plan_network(&target(), "123456789012").unwrap();
+        let notes = p.notes.join("\n");
+        assert!(
+            notes.contains("Elastic IP addresses\" in us-east-1: 1 needed, 4 free of 5"),
+            "{notes}"
+        );
+        // two gateways in us-east-1a (the module's zone), one elsewhere that does not count
+        assert!(
+            notes.contains("NAT gateways in us-east-1a\" in us-east-1: 1 needed, 3 free of 5"),
+            "{notes}"
+        );
+    }
+
+    #[test]
+    fn a_quota_that_cannot_be_read_is_said_and_never_taken_as_short() {
+        let e = Env::new();
+        network_script(&e, out(2, NET_PLAN, ""));
+        e.runner.reply(out(
+            254,
+            "",
+            "An error occurred (AccessDeniedException) when calling the GetServiceQuota operation",
+        ));
+        let p = e.init().plan_network(&target(), "123456789012").unwrap();
+        let notes = p.notes.join("\n");
+        assert!(
+            notes.contains("could not be read") && notes.contains("AccessDeniedException"),
+            "{notes}"
+        );
+        assert!(!p.run.is_empty(), "the plan can still be applied");
+    }
+
+    #[test]
+    fn a_network_apply_that_fails_part_way_removes_exactly_what_it_was_making() {
+        let e = Env::new();
+        network_script(&e, out(2, NET_PLAN, ""));
+        let init = e.init();
+        let p = init.plan_network(&target(), "123456789012").unwrap();
+        assert!(p.notes.iter().any(|n| n.contains("removed again")));
+        let before = e.runner.calls().len();
+        e.runner.reply(out(
+            1,
+            "",
+            "Error: creating EC2 NAT Gateway: NatGatewayLimitExceeded",
+        ));
+        e.runner.reply(out(0, "", "")); // destroy
+        let err = init.apply(&target(), &p).unwrap_err();
+        assert_eq!(err.code, "apply_failed");
+        assert!(err.message.contains("was removed again"), "{}", err.message);
+        let calls = e.runner.calls();
+        let destroy = &calls[before + 1];
+        assert_eq!(destroy.program, "tofu");
+        assert!(destroy.args.iter().any(|a| a == "destroy"));
+        assert!(destroy.args.iter().any(|a| a == "-auto-approve"));
+        let targets: Vec<&String> = destroy
+            .args
+            .iter()
+            .filter(|a| a.starts_with("-target="))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                "-target=module.network.aws_vpc.this",
+                "-target=module.network.aws_eip.nat",
+                "-target=module.network.aws_nat_gateway.this"
+            ]
+        );
+        // nothing was recorded: the subnet was never read
+        assert!(!init.recorded("aws").contains_key("subnet_id"));
+    }
+
+    #[test]
+    fn a_rollback_that_fails_says_what_may_be_left() {
+        let e = Env::new();
+        network_script(&e, out(2, NET_PLAN, ""));
+        let init = e.init();
+        let p = init.plan_network(&target(), "123456789012").unwrap();
+        e.runner.reply(out(1, "", "Error: boom"));
+        e.runner.reply(out(1, "", "Error: still there"));
+        let err = init.apply(&target(), &p).unwrap_err();
+        assert!(
+            err.message.contains("may still exist") && err.message.contains("still there"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_plan_that_changes_something_older_is_never_undone() {
+        let e = Env::new();
+        network_script(
+            &e,
+            out(
+                2,
+                "  # module.network.aws_vpc.this will be updated in-place\n  # module.network.aws_eip.nat will be created\n",
+                "",
+            ),
+        );
+        let init = e.init();
+        let p = init.plan_network(&target(), "123456789012").unwrap();
+        assert!(!p.notes.iter().any(|n| n.contains("removed again")));
+        let before = e.runner.calls().len();
+        e.runner.reply(out(1, "", "Error: boom"));
+        let err = init.apply(&target(), &p).unwrap_err();
+        assert!(
+            err.message.contains("setup stopped there"),
+            "{}",
+            err.message
+        );
+        assert_eq!(e.runner.calls().len(), before + 1, "no destroy ran");
+    }
+
+    #[test]
+    fn a_bucket_left_half_set_up_is_deleted_again_but_one_that_failed_to_be_made_is_not() {
+        let e = Env::new();
+        e.runner.reply(out(254, "", "404"));
+        let init = e.init();
+        let p = init.plan_bucket(&target(), "123456789012").unwrap();
+        e.runner.reply(out(0, "", "")); // create-bucket
+        e.runner
+            .reply(out(255, "", "An error occurred (AccessDenied)")); // versioning
+        e.runner.reply(out(0, "", "")); // delete-bucket
+        let err = init.apply(&target(), &p).unwrap_err();
+        assert!(err.message.contains("removed again"), "{}", err.message);
+        let calls = e.runner.calls();
+        let last = calls.last().unwrap();
+        assert_eq!(
+            &last.args[..4],
+            [
+                "s3api",
+                "delete-bucket",
+                "--bucket",
+                "ozbox-state-123456789012-us-east-1"
+            ]
+        );
+        assert!(init.recorded("aws").is_empty());
+        // the bucket itself was refused: nothing to delete
+        let e = Env::new();
+        e.runner.reply(out(254, "", "404"));
+        let init = e.init();
+        let p = init.plan_bucket(&target(), "123456789012").unwrap();
+        e.runner.reply(out(255, "", "BucketAlreadyExists"));
+        init.apply(&target(), &p).unwrap_err();
+        assert!(!e
+            .runner
+            .calls()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "delete-bucket")));
+    }
+
+    #[test]
+    fn every_root_pins_one_provider_version_and_every_folder_gets_the_one_lock() {
+        let e = key_env();
+        network_script(&e, out(0, "", ""));
+        let init = e.init();
+        init.plan_network(&target(), "123456789012").unwrap();
+        let pin = format!("version = \"= {AWS_PROVIDER_VERSION}\"");
+        let net =
+            std::fs::read_to_string(e.dir.path().join("work/network/us-east-1/main.tf")).unwrap();
+        assert!(
+            net.contains(&pin) && net.contains("source  = \"hashicorp/aws\""),
+            "{net}"
+        );
+        let lock = std::fs::read_to_string(e.dir.path().join("work/provider/.terraform.lock.hcl"))
+            .unwrap();
+        for dir in [
+            "modules/aws-box",
+            "modules/aws-network",
+            "work/network/us-east-1",
+        ] {
+            let copy = std::fs::read_to_string(e.dir.path().join(dir).join(".terraform.lock.hcl"))
+                .unwrap_or_default();
+            assert_eq!(copy, lock, "{dir} has the shared lock");
+        }
+        // a module step's root carries the same pin and the same lock
+        e.runner.reply(out(0, "", "")); // head-bucket
+        e.runner
+            .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        e.runner.reply(out(0, "", "")); // init
+        e.runner.reply(out(0, "", "")); // state list
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, ""));
+        e.runner.reply(out(0, "", "")); // plan
+        init.plan_key(&target(), "123456789012").unwrap();
+        let key = std::fs::read_to_string(e.dir.path().join("work/secrets-key/us-east-1/main.tf"))
+            .unwrap();
+        assert!(key.contains(&pin), "{key}");
+        assert_eq!(
+            std::fs::read_to_string(
+                e.dir
+                    .path()
+                    .join("work/secrets-key/us-east-1/.terraform.lock.hcl")
+            )
+            .unwrap(),
+            lock
+        );
+    }
+
+    #[test]
+    fn the_shared_lock_is_made_once_from_a_root_with_only_the_pinned_provider() {
+        let e = Env::new();
+        std::fs::remove_dir_all(e.dir.path().join("work/provider")).unwrap();
+        let init = e.init();
+        init.seed_plugins(&target()).unwrap();
+        let calls = e.runner.calls();
+        assert_eq!(calls.len(), 3, "the lock's init, then the two seeds");
+        assert!(
+            calls[0].args[0].ends_with("work/provider")
+                && calls[0].args.iter().any(|a| a == "-backend=false")
+        );
+        let main = std::fs::read_to_string(e.dir.path().join("work/provider/main.tf")).unwrap();
+        assert!(main.contains(&format!("= {AWS_PROVIDER_VERSION}")));
+        // a lock for another version is made again; one for the pinned version is kept
+        assert!(robust::lock_pins(&format!(
+            "provider \"registry.opentofu.org/hashicorp/aws\" {{\n  version     = \"{AWS_PROVIDER_VERSION}\"\n}}\n"
+        )));
+        assert!(!robust::lock_pins(
+            "provider \"registry.opentofu.org/hashicorp/aws\" {\n  version     = \"6.0.0\"\n}\n"
+        ));
+        assert!(!robust::lock_pins(&format!(
+            "provider \"registry.opentofu.org/hashicorp/random\" {{\n  version     = \"{AWS_PROVIDER_VERSION}\"\n}}\n"
+        )));
+    }
+
+    #[test]
+    fn a_dry_run_before_the_bucket_exists_previews_the_network_against_an_empty_local_state() {
+        let e = Env::new();
+        e.runner.reply(out(254, "", "404")); // head-bucket: not there yet
+        e.runner
+            .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        e.runner.reply(out(0, "", "")); // seed aws-box
+        e.runner.reply(out(0, "", "")); // seed aws-network
+        e.runner.reply(out(0, "", "")); // preview init
+        e.runner.reply(out(2, NET_PLAN, ""));
+        let init = e.init();
+        // without the dry run's preview, the bucket is still required
+        assert_eq!(
+            init.plan_network(&target(), "123456789012")
+                .unwrap_err()
+                .code,
+            "bucket_missing"
+        );
+        let e2 = Env::new();
+        for r in [
+            out(254, "", "404"),
+            out(0, r#"{"terraform_version":"1.10.3"}"#, ""),
+            out(0, "", ""),
+            out(0, "", ""),
+            out(0, "", ""),
+            out(2, NET_PLAN, ""),
+        ] {
+            e2.runner.reply(r);
+        }
+        let mut init = e2.init();
+        init.preview_without_state = true;
+        let p = init.plan_network(&target(), "123456789012").unwrap();
+        assert!(p.preview && !p.noop && p.run.is_empty());
+        assert_eq!(p.changes.len(), 3);
+        assert!(p.notes.iter().any(|n| n.contains("Preview only")));
+        let calls = e2.runner.calls();
+        assert!(!calls
+            .iter()
+            .any(|c| c.args.iter().any(|a| a.starts_with("-backend-config"))));
+        assert!(calls
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "-lock=false")));
+        assert!(calls.iter().any(|c| c
+            .args
+            .iter()
+            .any(|a| a.ends_with("work/preview/network/us-east-1"))));
+        let preview =
+            std::fs::read_to_string(e2.dir.path().join("work/preview/network/us-east-1/main.tf"))
+                .unwrap();
+        assert!(!preview.contains("backend \"s3\""), "{preview}");
+        // a preview cannot be applied
+        assert_eq!(init.apply(&target(), &p).unwrap_err().code, "preview_only");
+    }
+
+    #[test]
+    fn the_adopt_steps_own_statements_are_merged_into_the_one_operator_policy() {
+        let e = Env::new();
+        let init = e.init();
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert!(
+            r.merge.is_none(),
+            "no adopt output yet: the template stands"
+        );
+        let dir = e.dir.path().join("work/adopt-command/us-east-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // the module's output: list-valued fields, and one statement the template does not have
+        std::fs::write(
+            dir.join("operator-adopt-policy.json"),
+            r#"{"Version":"2012-10-17","Statement":[
+              {"Sid":"SendOnlyTheAdoptDocument","Effect":"Allow","Action":["ssm:SendCommand"],"Resource":["arn:aws:ssm:us-east-1:123456789012:document/ozbox-adopt-ozbox"]},
+              {"Sid":"ReadACommandThatWasSent","Effect":"Allow","Action":["ssm:GetCommandInvocation"],"Resource":["*"]},
+              {"Sid":"ListTheAdoptDocument","Effect":"Allow","Action":["ssm:DescribeDocument"],"Resource":["arn:aws:ssm:us-east-1:123456789012:document/ozbox-adopt-ozbox"]}
+            ]}"#,
+        )
+        .unwrap();
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        let m = r.merge.clone().unwrap();
+        assert_eq!(m.added, ["ListTheAdoptDocument"]);
+        assert_eq!(
+            m.unchanged,
+            ["SendOnlyTheAdoptDocument", "ReadACommandThatWasSent"]
+        );
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&r.file).unwrap()).unwrap();
+        let sids: Vec<&str> = doc["Statement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["Sid"].as_str())
+            .collect();
+        assert_eq!(sids.last(), Some(&"ListTheAdoptDocument"));
+        assert_eq!(
+            sids.iter()
+                .filter(|s| **s == "SendOnlyTheAdoptDocument")
+                .count(),
+            1
+        );
+        assert_eq!(r.statement_count, sids.len());
+        // a second run writes the same file
+        let again = init.operator_policy(&target(), "123456789012").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&again.file).unwrap(),
+            std::fs::read_to_string(&r.file).unwrap()
+        );
+        // an unreadable output is said, and the template stands
+        std::fs::write(dir.join("operator-adopt-policy.json"), "not json").unwrap();
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert!(r.merge.is_none() && r.merge_note.is_some());
     }
 }
