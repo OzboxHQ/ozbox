@@ -1,0 +1,59 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "embeds": [
+    {
+      "color": 3108816,
+      "description": "A change was filed on a box and waits for a person with the right role.\n\n*This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.*\n\n[Open in dashboard](https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef)\nOpen it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Approvals.",
+      "fields": [
+        {
+          "inline": true,
+          "name": "Box",
+          "value": "main"
+        },
+        {
+          "inline": true,
+          "name": "Project",
+          "value": "shop"
+        },
+        {
+          "inline": true,
+          "name": "Environment",
+          "value": "staging"
+        },
+        {
+          "inline": false,
+          "name": "Hook",
+          "value": "commit \\(pre\\-commit\\)"
+        },
+        {
+          "inline": false,
+          "name": "Repository",
+          "value": "/work/shop"
+        },
+        {
+          "inline": false,
+          "name": "Asked by",
+          "value": "box\\-user \\(uid 1000\\)"
+        },
+        {
+          "inline": false,
+          "name": "Risk",
+          "value": "Skips the secret scan for one commit."
+        },
+        {
+          "inline": false,
+          "name": "⏳",
+          "value": "Expires in 2 h 5 min"
+        }
+      ],
+      "footer": {
+        "text": "Ref R1a2b3c4"
+      },
+      "title": "🔐 Approve or deny: guard override",
+      "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "username": "Oz Box"
+}

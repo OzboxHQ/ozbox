@@ -1,0 +1,44 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "embeds": [
+    {
+      "color": 13643824,
+      "description": "Task t\\-42 stopped and is waiting for your answer.\n\n*This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.*\n\n[Open in dashboard](https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef)\nOpen it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.",
+      "fields": [
+        {
+          "inline": true,
+          "name": "Box",
+          "value": "api"
+        },
+        {
+          "inline": true,
+          "name": "Environment",
+          "value": "production"
+        },
+        {
+          "inline": false,
+          "name": "Asked by",
+          "value": "Claude Code"
+        },
+        {
+          "inline": false,
+          "name": "Why",
+          "value": "open a pull request"
+        },
+        {
+          "inline": false,
+          "name": "Risk",
+          "value": "Production, or a step that cannot be undone: the dashboard asks for your passkey again."
+        }
+      ],
+      "footer": {
+        "text": "Ref a-7"
+      },
+      "title": "🤖 Approve or deny: push to main 🔴 PRODUCTION",
+      "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "username": "Oz Box"
+}

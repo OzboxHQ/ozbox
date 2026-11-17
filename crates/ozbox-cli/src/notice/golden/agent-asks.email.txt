@@ -1,0 +1,16 @@
+Subject: [Oz Box] Approve or deny: push to main [PRODUCTION]
+---
+Approve or deny: push to main [PRODUCTION]
+Task t-42 stopped and is waiting for your answer.
+
+Box: api · Environment: production
+Asked by: Claude Code
+Why: open a pull request
+Risk: Production, or a step that cannot be undone: the dashboard asks for your passkey again.
+
+This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.
+https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef
+Ref a-7
+---
+<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#111;max-width:600px"><h2 style="font-size:18px;margin:0 0 8px">Approve or deny: push to main <span style="background:#b00020;color:#fff;border-radius:4px;padding:1px 6px;font-size:12px">PRODUCTION</span></h2><p style="margin:0 0 12px">Task t-42 stopped and is waiting for your answer.</p><table role="presentation" style="border-collapse:collapse;margin:0 0 12px"><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Box</td><td style="padding:2px 0">api</td></tr><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Environment</td><td style="padding:2px 0">production</td></tr><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Asked by</td><td style="padding:2px 0">Claude Code</td></tr><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Why</td><td style="padding:2px 0">open a pull request</td></tr><tr><td style="padding:2px 12px 2px 0;color:#555;vertical-align:top">Risk</td><td style="padding:2px 0">Production, or a step that cannot be undone: the dashboard asks for your passkey again.</td></tr></table><p style="margin:16px 0"><a href="https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef" style="background:#1f4fd0;color:#fff;text-decoration:none;border-radius:6px;padding:10px 16px;display:inline-block">Open in dashboard</a></p><p style="margin:0 0 12px;color:#333">Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.</p><p style="margin:0 0 12px;color:#555"><em>This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.</em></p><p style="margin:0;color:#777;font-size:13px">Ref a-7</p></div>

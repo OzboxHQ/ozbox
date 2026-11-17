@@ -1,0 +1,19 @@
+{
+  "disable_web_page_preview": true,
+  "link_preview_options": {
+    "is_disabled": true
+  },
+  "parse_mode": "HTML",
+  "protect_content": true,
+  "reply_markup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "Open in dashboard",
+          "url": "https://dash.example.com/usage"
+        }
+      ]
+    ]
+  },
+  "text": "💸 <b>Budget: 80% of the monthly budget is estimated spent</b>\nAbout 80 USD of 100 USD this month.\n\nOpen it on dash.example.com → Usage (sign in first)."
+}

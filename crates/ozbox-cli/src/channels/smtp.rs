@@ -255,6 +255,8 @@ pub struct Message<'a> {
     pub to: &'a [String],
     pub subject: &'a str,
     pub text: &'a str,
+    /// An HTML alternative: the message is then `multipart/alternative`, plain text first.
+    pub html: Option<&'a str>,
     pub now_secs: u64,
     pub id_seed: &'a str,
     pub domain: &'a str,
@@ -275,16 +277,35 @@ pub fn build_message(m: &Message<'_>) -> String {
         format!("Message-ID: <{}@{}>", m.id_seed, m.domain),
         "Auto-Submitted: auto-generated".to_string(),
         "MIME-Version: 1.0".to_string(),
-        "Content-Type: text/plain; charset=utf-8".to_string(),
-        "Content-Transfer-Encoding: base64".to_string(),
     ];
     if !m.reply_to.is_empty() {
         h.insert(1, format!("Reply-To: <{}>", m.reply_to));
     }
+    let Some(html) = m.html else {
+        h.push("Content-Type: text/plain; charset=utf-8".to_string());
+        h.push("Content-Transfer-Encoding: base64".to_string());
+        return format!(
+            "{}\r\n\r\n{}",
+            h.join("\r\n"),
+            wrap76(&b64_std(m.text.as_bytes()))
+        );
+    };
+    // base64 parts never contain the boundary, which holds characters base64 does not use
+    let boundary = format!("=_ozbox_{}", m.id_seed);
+    h.push(format!(
+        "Content-Type: multipart/alternative; boundary=\"{boundary}\""
+    ));
+    let part = |kind: &str, body: &str| {
+        format!(
+            "--{boundary}\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            wrap76(&b64_std(body.as_bytes()))
+        )
+    };
     format!(
-        "{}\r\n\r\n{}",
+        "{}\r\n\r\n{}{}--{boundary}--",
         h.join("\r\n"),
-        wrap76(&b64_std(m.text.as_bytes()))
+        part("text/plain", m.text),
+        part("text/html", html)
     )
 }
 
@@ -571,6 +592,7 @@ mod tests {
             to: &to,
             subject: "[Oz Box] Disk\r\nBcc: evil@example.com",
             text: "line one\n.\nline \u{e9}",
+            html: None,
             now_secs: 1_136_214_245,
             id_seed: "abc123",
             domain: "ozbox.example.com",
@@ -587,6 +609,7 @@ mod tests {
             to: &to,
             subject: "\u{e9}",
             text: "x",
+            html: None,
             now_secs: 0,
             id_seed: "i",
             domain: "d.example",

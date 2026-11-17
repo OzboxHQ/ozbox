@@ -280,16 +280,18 @@ impl<'a> Bot<'a> {
         }))
     }
 
-    /// A plain-text message with no buttons, no preview and nothing to forward or copy. Returns its id, so a message that
-    /// carried a link can be deleted when the link is used.
+    /// A plain-text message (a reply) with no buttons, no preview and nothing to forward or copy. Returns its id, so a
+    /// message that carried a link can be deleted when the link is used.
     pub fn send(&self, chat_id: i64, text: &str) -> Result<i64, ApiError> {
-        let body = json!({
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": true,
-            "link_preview_options": { "is_disabled": true },
-            "protect_content": true,
-        });
+        self.send_notice(chat_id, &crate::notice::Notice::reply(text))
+    }
+
+    /// A notice as Telegram shows it (`notice::render::Telegram`): HTML with every value escaped, previews off, content
+    /// protected, and at most one URL button that only opens the dashboard.
+    pub fn send_notice(&self, chat_id: i64, n: &crate::notice::Notice) -> Result<i64, ApiError> {
+        use crate::notice::render::{Renderer, Telegram};
+        let mut body = Telegram::render(n);
+        body["chat_id"] = json!(chat_id);
         let v = self.call("sendMessage", "", Some(&body), Duration::from_secs(10))?;
         Ok(v.get("message_id").and_then(Value::as_i64).unwrap_or(0))
     }
@@ -301,6 +303,21 @@ impl<'a> Bot<'a> {
         self.call("deleteMessage", "", Some(&body), Duration::from_secs(10))
             .map(|_| ())
     }
+}
+
+/// A notice (a reply, or a structured message with its link button), for the places that only need "did it go". The error
+/// never carries the token.
+pub fn send_notice(
+    http: &dyn HttpClient,
+    token: &str,
+    chat_id: i64,
+    n: &crate::notice::Notice,
+) -> Result<(), String> {
+    let base = ApiBase::from_env(std::env::var("OZBOX_TELEGRAM_API_BASE").ok().as_deref());
+    Bot::new(http, token, &base)
+        .send_notice(chat_id, n)
+        .map(|_| ())
+        .map_err(|e| redact(&e.to_string(), token))
 }
 
 /// A plain message, for the places that only need "did it go". The error never carries the token.

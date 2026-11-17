@@ -273,6 +273,8 @@ impl App {
 
     fn backup_alert(&mut self, name: &str, title: &str, body: &str, now_ms: u64) {
         let alert = Alert {
+            notice: None,
+            reach: Default::default(),
             key: format!("backup:{name}:{now_ms}"),
             kind: "backup".into(),
             severity: Severity::Normal,

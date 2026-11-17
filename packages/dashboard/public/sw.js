@@ -17,7 +17,8 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
-// Push: the server sends an encrypted payload {title, body, tag, urgent}; the browser decrypts it. A notification must be
+// Push: the server sends an encrypted payload {title, body, url, tag, urgent}; the browser decrypts it. `url` is a path in this
+// dashboard (a one-time link `/go#<token>` or the item's page); anything else opens Activity. A notification must be
 // shown for every push, so a payload that cannot be read still shows a plain one. Nothing here caches or reads /v1.
 self.addEventListener('push', (event) => {
   const read = () => {
@@ -30,7 +31,8 @@ self.addEventListener('push', (event) => {
   const d = read();
   const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
   const title = text(d.title, 120) || 'Oz Box';
-  const options = { body: text(d.body, 400), icon: '/icon.svg', badge: '/icon.svg', data: { url: '/activity' } };
+  const url = typeof d.url === 'string' && /^\/(?!\/)[A-Za-z0-9/_?=#-]{0,200}$/.test(d.url) ? d.url : '/activity';
+  const options = { body: text(d.body, 400), icon: '/icon.svg', badge: '/icon.svg', data: { url } };
   if (typeof d.tag === 'string' && d.tag) options.tag = d.tag.slice(0, 100);
   if (d.urgent === true) options.requireInteraction = true;
   event.waitUntil(self.registration.showNotification(title, options));
@@ -38,6 +40,13 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const data = event.notification.data || {};
+  const url = typeof data.url === 'string' && data.url.startsWith('/') && !data.url.startsWith('//') ? data.url : null;
+  // a notification about one item opens that item (its one-time link, or its page) in a window of its own
+  if (url) {
+    event.waitUntil(self.clients.openWindow(url));
+    return;
+  }
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
       for (const c of list) if ('focus' in c) return c.focus();

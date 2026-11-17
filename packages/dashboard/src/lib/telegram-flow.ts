@@ -52,7 +52,10 @@ export function pointerToken(hash: string): string | null {
   return m ? (m[1] ?? null) : null;
 }
 
-/** A path the server named for a pointer link is a path inside this dashboard and nothing else. */
+/**
+ * A path the server named for a pointer link is a path inside this dashboard and nothing else. The one query allowed is the
+ * request a message is about (`/approvals?request=<id>`), so a link lands on exactly that item.
+ */
 export function safeInternalPath(p: string): string | null {
-  return /^\/[A-Za-z0-9/_-]*$/.test(p) && !p.startsWith('//') ? p : null;
+  return /^\/[A-Za-z0-9/_-]*(\?request=[A-Za-z0-9_-]{1,128})?$/.test(p) && !p.startsWith('//') ? p : null;
 }

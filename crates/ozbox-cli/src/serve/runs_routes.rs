@@ -669,6 +669,8 @@ impl App {
         let alerts = fx
             .into_iter()
             .map(|e| Alert {
+                notice: None,
+                reach: Default::default(),
                 key: e.key,
                 kind: e.kind.to_string(),
                 severity: if e.urgent {

@@ -1,0 +1,15 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "embeds": [
+    {
+      "color": 3108816,
+      "description": "About 80 USD of 100 USD this month.\n\n[Open in dashboard](https://dash.example.com/usage)\nOpen it on dash.example.com → Usage \\(sign in first\\).",
+      "fields": [],
+      "title": "💸 Budget: 80% of the monthly budget is estimated spent",
+      "url": "https://dash.example.com/usage"
+    }
+  ],
+  "username": "Oz Box"
+}

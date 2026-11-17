@@ -1,0 +1,55 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "emoji": true,
+        "text": "🚨 Box main: the work disk is 96% full",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Grow the work disk, or clear space, before it fills.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "fields": [
+        {
+          "emoji": true,
+          "text": "Box: main",
+          "type": "plain_text"
+        }
+      ],
+      "type": "section"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "action_id": "open_dashboard",
+          "style": "primary",
+          "text": {
+            "emoji": true,
+            "text": "Open in dashboard",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "Box main: the work disk is 96% full"
+}

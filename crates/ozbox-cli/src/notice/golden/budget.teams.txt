@@ -1,0 +1,43 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in dashboard",
+            "type": "Action.OpenUrl",
+            "url": "https://dash.example.com/usage"
+          }
+        ],
+        "body": [
+          {
+            "color": "Default",
+            "size": "Medium",
+            "text": "Budget: 80% of the monthly budget is estimated spent",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "text": "About 80 USD of 100 USD this month.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Open it on dash.example.com → Usage \\(sign in first\\).",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

@@ -88,6 +88,7 @@ export const enTelegram = {
   'tg.go_title': 'Opening the dashboard from Telegram',
   'tg.go_help': 'This link came from a chat. Opening it changes nothing; anything that needs approval still asks for your passkey here.',
   'tg.go_failed': 'That link did not work. It lapses after ten minutes and only opens for the person it was made for.',
+  'tg.go_used': 'This link was used: the request it names has been decided. Open Approvals to see the decision.',
   'tg.marks_title': 'Production boxes and the hub',
   'tg.marks_help': 'A Production box shows its state in a chat and nothing else. The hub runs this dashboard and the bridge: chat is off for it unless a delegation was made knowing why. Changing this asks for a passkey.',
   'tg.marks_production': 'Production boxes (one name per line)',

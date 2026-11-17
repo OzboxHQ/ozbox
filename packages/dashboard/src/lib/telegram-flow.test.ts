@@ -23,7 +23,8 @@ describe('the Telegram flow helpers', () => {
   it('the page a pointer names is a path inside this dashboard and nothing that leaves it', () => {
     expect(safeInternalPath('/chat')).toBe('/chat');
     expect(safeInternalPath('/settings/apps')).toBe('/settings/apps');
-    for (const bad of ['//evil.example', 'https://evil.example', 'javascript:alert(1)', '/a?b=c', '/a#b', 'chat', '', '/\\evil']) expect(safeInternalPath(bad), bad).toBeNull();
+    expect(safeInternalPath('/approvals?request=R1a-2_b')).toBe('/approvals?request=R1a-2_b');
+    for (const bad of ['//evil.example', 'https://evil.example', 'javascript:alert(1)', '/a?b=c', '/a#b', 'chat', '', '/\\evil', '/approvals?request=a&next=//evil.example', '/approvals?request=', '/approvals?request=a/b']) expect(safeInternalPath(bad), bad).toBeNull();
   });
 
   it('every state a link or a delegation can be in has words', () => {

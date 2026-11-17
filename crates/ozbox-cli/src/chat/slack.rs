@@ -164,6 +164,41 @@ pub fn post(
     }
 }
 
+/// Post a notice to a channel or a person: its Block Kit rendering (`notice::render::Slack`), links never unfurled.
+pub fn post_notice(
+    http: &dyn HttpClient,
+    bot_token: &str,
+    channel: &str,
+    n: &crate::notice::Notice,
+) -> Result<(), String> {
+    use crate::notice::render::{Renderer, Slack};
+    let mut body = Slack::render(n);
+    body["channel"] = json!(channel);
+    body["unfurl_links"] = json!(false);
+    body["unfurl_media"] = json!(false);
+    let r = http
+        .send(
+            &HttpRequest::new(
+                "POST",
+                "https://slack.com/api/chat.postMessage",
+                Guard::Public,
+            )
+            .header("Authorization", format!("Bearer {bot_token}"))
+            .json(&body),
+        )
+        .map_err(|e| e.to_string())?;
+    let ok = r.ok()
+        && serde_json::from_str::<Value>(&r.body)
+            .ok()
+            .and_then(|v| v["ok"].as_bool())
+            .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Slack answered HTTP {}", r.status))
+    }
+}
+
 /// Ask Slack for a websocket address. `apps.connections.open` takes the app-level token.
 pub fn open_url(http: &dyn HttpClient, app_token: &str) -> Result<String, String> {
     let r = http

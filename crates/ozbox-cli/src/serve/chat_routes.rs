@@ -75,6 +75,18 @@ pub struct Out {
     pub buttons: Vec<(String, String)>,
     /// The "said once" flag this message answers for: a failed delivery clears it so the notice is tried again.
     pub announce: Option<String>,
+    /// The structured message, when this is one (an approval an agent asked for): each channel renders it its own way,
+    /// and `text` is its plain-text form. A reply has none and is sent as plain text through `Notice::reply`.
+    pub notice: Option<crate::notice::Notice>,
+}
+
+impl Out {
+    /// What every channel renders: the notice, or the words as a reply.
+    pub fn notice(&self) -> crate::notice::Notice {
+        self.notice
+            .clone()
+            .unwrap_or_else(|| crate::notice::Notice::reply(&self.text))
+    }
 }
 
 #[derive(Default)]
@@ -362,9 +374,9 @@ impl App {
                 (
                     "Telegram",
                     Some(Box::new(move || {
-                        // a Telegram message never carries a button: nothing is decided there
-                        let ok =
-                            telegram::send_text(http.as_ref(), &token, chat_id, &o.text).is_ok();
+                        // at most a URL button that opens the dashboard: nothing is decided there
+                        let ok = telegram::send_notice(http.as_ref(), &token, chat_id, &o.notice())
+                            .is_ok();
                         Done::ChatSent {
                             flag: f,
                             to: "Telegram",
@@ -381,8 +393,11 @@ impl App {
                 (
                     "Slack",
                     Some(Box::new(move || {
-                        let ok =
-                            slack::post(http.as_ref(), &token, &o.id, &o.text, &o.buttons).is_ok();
+                        let ok = if o.buttons.is_empty() {
+                            slack::post_notice(http.as_ref(), &token, &o.id, &o.notice()).is_ok()
+                        } else {
+                            slack::post(http.as_ref(), &token, &o.id, &o.text, &o.buttons).is_ok()
+                        };
                         Done::ChatSent {
                             flag: f,
                             to: "Slack",
@@ -402,7 +417,8 @@ impl App {
                 };
                 let open = whatsapp::in_window(self.state.chat.wa_inbound.get(&o.id).copied(), now);
                 let body = if open {
-                    whatsapp::text_body(&o.id, &o.text, &o.buttons)
+                    use crate::notice::render::{Renderer, Text};
+                    whatsapp::text_body(&o.id, &Text::render(&o.notice()), &o.buttons)
                 } else if !template.is_empty() {
                     whatsapp::template_body(&o.id, &template)
                 } else {
@@ -458,6 +474,7 @@ impl App {
         let key = conv_key(channel, id);
         let reply = |s: String| Out {
             announce: None,
+            notice: None,
             channel,
             id: id.to_string(),
             text: s,
@@ -522,6 +539,7 @@ impl App {
         let say = |outs: &mut Vec<Out>, s: String| {
             outs.push(Out {
                 announce: None,
+                notice: None,
                 channel,
                 id: id.to_string(),
                 text: s,
@@ -1188,11 +1206,16 @@ impl App {
         }
     }
 
-    /// As `dashboard_where`, with a one-time link to the dashboard's chat page that names an approval. No link is made
-    /// (and no token issued) when there is no public address.
-    fn chat_link(&mut self, approval_id: &str, person: &str, now: u64) -> String {
+    /// A one-time link to the dashboard's chat page that names an agent's approval, for one person: the page redeems it once
+    /// and shows that request. With no public address, words that name the page (and no token is made).
+    pub(super) fn chat_link_action(
+        &mut self,
+        approval_id: &str,
+        person: &str,
+        now: u64,
+    ) -> crate::notice::Action {
         let Some(base) = self.chat_public_base() else {
-            return t("chat.where_none", &[]);
+            return crate::notice::Action::Words;
         };
         if self.chat.links.is_none() {
             self.chat.links = Links::new().ok();
@@ -1203,10 +1226,10 @@ impl App {
             .as_mut()
             .and_then(|l| l.issue(approval_id, person, now).ok())
             .unwrap_or_default();
-        t(
-            "chat.where_link",
-            &[("url", &format!("{base}/chat?link={token}"))],
-        )
+        crate::notice::Action::OneTime {
+            host: crate::notice::host_of(&base),
+            url: format!("{base}/chat?link={token}"),
+        }
     }
 
     /// Whether a said-once notice is due now, marking it said. A notice whose delivery failed waits out its backoff first.
@@ -1318,6 +1341,7 @@ impl App {
             let Some(task) = book.task(tid) else { continue };
             let mk = |text: String, buttons: Vec<(String, String)>| Out {
                 announce: None,
+                notice: None,
                 channel,
                 id: cid.to_string(),
                 text,
@@ -1366,19 +1390,31 @@ impl App {
                         // one-time link to the dashboard's approval page, never a button, and nothing said back in a chat
                         // approves, denies or cancels anything
                         let person = task.spec.requested_by.clone();
-                        let place = self.chat_link(approval_id, &person, now);
-                        let key_text = if is_risky(a.kind, a.production, a.needs_step_up) {
-                            "chat.approval_risky"
-                        } else {
-                            "chat.approval"
-                        };
-                        let mut m = mk(
-                            t(
-                                key_text,
-                                &[("task", tid), ("action", &a.action), ("where", &place)],
-                            ),
-                            Vec::new(),
+                        let action = self.chat_link_action(approval_id, &person, now);
+                        let mut n = crate::notice::Notice::new(
+                            crate::notice::NoticeKind::AgentAsks,
+                            t("notice.agent_title", &[("action", &a.action)]),
+                            t("notice.agent_summary", &[("task", tid)]),
                         );
+                        n.box_name = Some(a.box_name.clone()).filter(|b| !b.is_empty());
+                        n.production = a.production;
+                        n.asked_by = Some(a.asked_by.clone()).filter(|b| !b.is_empty());
+                        if is_risky(a.kind, a.production, a.needs_step_up) {
+                            n.risk = Some(t("notice.agent_risky", &[]));
+                        }
+                        n.created_ms = now;
+                        n.expires_ms = Some(a.expires_ms.max(now));
+                        n.reference = Some(crate::notice::reference(approval_id));
+                        n.only_tells = true;
+                        let n = n
+                            .opens("/chat", t("notice.place_chat", &[]))
+                            .with_action(Some(action));
+                        let text = {
+                            use crate::notice::render::{Renderer, Text};
+                            Text::render(&n)
+                        };
+                        let mut m = mk(text, Vec::new());
+                        m.notice = Some(n);
                         m.announce = Some(flag);
                         outs.push((key.clone(), m));
                     }
@@ -1469,6 +1505,7 @@ impl App {
                         key.clone(),
                         Out {
                             announce: None,
+                            notice: None,
                             channel,
                             id: cid.to_string(),
                             text: t(
@@ -1508,6 +1545,7 @@ impl App {
                         };
                         ready.push(Out {
                             announce: None,
+                            notice: None,
                             channel,
                             id: cid.to_string(),
                             text,
@@ -1624,6 +1662,7 @@ impl App {
             self.chat_say(
                 vec![Out {
                     announce: None,
+                    notice: None,
                     channel,
                     id: id.to_string(),
                     text: t("chat.paired", &[]),
@@ -1708,6 +1747,7 @@ impl App {
                         self.chat_say(
                             vec![Out {
                                 announce: None,
+                                notice: None,
                                 channel: Channel::Whatsapp,
                                 id: m.from.clone(),
                                 text: t("chat.window_closed", &[]),
@@ -1863,8 +1903,12 @@ impl App {
                 };
                 // opening a pointer link changes nothing and spends nothing; a wrong person or a lapsed link is one answer
                 match self.tg_open_pointer(&b.token, &who, now) {
-                    Some(path) => Resp::json(200, &json!({ "path": path })),
-                    None => Resp::error(
+                    Ok(path) => Resp::json(200, &json!({ "path": path })),
+                    // said only to the person the link was made for: a stranger gets the answer below
+                    Err(crate::chat::links::LinkError::Used) => {
+                        Resp::error(410, "link_used", &t("notice.link_used", &[]))
+                    }
+                    Err(_) => Resp::error(
                         404,
                         "not_found",
                         "that link did not work (it lapses after ten minutes)",
@@ -2152,6 +2196,18 @@ mod tests {
             self.now += 5_000;
             self.a.tick(self.now);
         }
+        /// The addresses of every URL button the server put under a message.
+        fn opens(&self) -> Vec<String> {
+            let v: Value = serde_json::from_slice(&self.a.demo_telegram_sent().body).unwrap();
+            v["sent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["opens"].as_array().cloned().unwrap_or_default())
+                .filter_map(|u| u.as_str().map(str::to_string))
+                .collect()
+        }
+
         fn sent(&self) -> Vec<(i64, String, Vec<String>)> {
             let r = self.a.demo_telegram_sent();
             let v: Value = serde_json::from_slice(&r.body).unwrap();
@@ -2365,14 +2421,29 @@ mod tests {
         let (_, text, buttons) = r
             .sent()
             .into_iter()
-            .find(|(_, t, _)| t.contains("Decide it in the dashboard"))
+            .find(|(_, t, _)| t.contains("Nothing in a chat approves"))
             .unwrap();
         assert!(text.contains("sudo"), "the exact action is shown: {text}");
         assert!(
             buttons.is_empty(),
             "no button decides anything from a chat: {buttons:?}"
         );
-        let token = text.split("link=").nth(1).unwrap().trim().to_string();
+        assert!(
+            text.contains("<b>Approve or deny: sudo</b>"),
+            "a verb first: {text}"
+        );
+        // the Telegram message carries the link as a URL button that only opens the dashboard
+        let opens = r.opens();
+        let url = opens
+            .iter()
+            .find(|u| u.contains("/chat?link="))
+            .unwrap_or_else(|| panic!("no link button: {opens:?}"))
+            .clone();
+        assert!(
+            url.starts_with("https://ozbox.example.com/chat?link="),
+            "{url}"
+        );
+        let token = url.split("link=").nth(1).unwrap().to_string();
         assert_eq!(token.len(), 48);
         fn pending(r: &Rig) -> Vec<String> {
             r.a.chat_book()
@@ -2402,10 +2473,14 @@ mod tests {
             .sent()
             .into_iter()
             .rev()
-            .find(|(_, t, _)| t.contains("passkey"))
+            .find(|(_, t, _)| t.contains("cannot be undone"))
             .unwrap();
         assert!(buttons.is_empty());
-        assert_eq!(risky.split("link=").nth(1).unwrap().trim().len(), 48);
+        assert!(risky.contains("<b>Risk</b>"), "{risky}");
+        assert!(r2
+            .opens()
+            .iter()
+            .any(|u| u.split("link=").nth(1).is_some_and(|t| t.len() == 48)));
         // the link opens the dashboard on that request once; a second use, and a made-up one, do nothing
         let (st, v) = r.call("POST", "/v1/chat/links/redeem", json!({ "token": token }));
         assert_eq!(st, 200, "{v}");
@@ -3685,8 +3760,10 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("Open it there:"), "{said}");
-        let w = r.a.chat_link("a1", "owner", r.now);
-        assert_eq!(w, "Open the dashboard on the computer that runs it.");
+        assert_eq!(
+            r.a.chat_link_action("a1", "owner", r.now),
+            crate::notice::Action::Words
+        );
         assert!(
             r.a.chat.links.is_none(),
             "a one-time link was made for nothing"
@@ -3696,10 +3773,16 @@ mod tests {
             r.a.dashboard_where("/tasks"),
             "Open it there: https://ozbox.example.com/tasks"
         );
-        assert!(r
-            .a
-            .chat_link("a1", "owner", r.now)
-            .starts_with("Open it there: https://ozbox.example.com/chat?link="),);
+        match r.a.chat_link_action("a1", "owner", r.now) {
+            crate::notice::Action::OneTime { url, host } => {
+                assert!(
+                    url.starts_with("https://ozbox.example.com/chat?link="),
+                    "{url}"
+                );
+                assert_eq!(host, "ozbox.example.com");
+            }
+            other => panic!("{other:?}"),
+        }
         let (_, v) = r.get("/v1/chat");
         assert_eq!(v["public_url_set"], true);
     }
