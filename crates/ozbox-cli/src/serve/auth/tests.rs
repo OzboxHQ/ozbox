@@ -2799,3 +2799,71 @@ fn a_box_change_is_decided_and_recorded_as_the_signed_in_person() {
     );
     assert_eq!(ok.0, 202, "{ok:?}");
 }
+
+/// B4-27: a person with no passkey approves a request with an authenticator code. The dashboard checks the code as at
+/// sign-in (so it is spent there too and cannot sign anyone in later), refuses a wrong or replayed one, and says nothing of
+/// the secret; a person with a passkey is sent to it.
+#[test]
+fn an_authenticator_code_is_checked_by_the_dashboard_before_it_approves_a_request() {
+    let r = rig();
+    let mut c = Client::new();
+    let flow = github_start(&r, &mut c).body["flow"].clone();
+    r.advance(5_100);
+    github_user_replies(&r, "owner-gh", 4242);
+    r.send(&mut c, "POST", "/auth/github/poll", json!({"flow": flow}));
+    let secret = r.send(&mut c, "POST", "/auth/totp/setup", Value::Null).body["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = super::b64::decode_base32(&secret).unwrap();
+    let code_now = || totp::hotp(&key, r.clock.load(Ordering::SeqCst) / 1000 / 30, 6);
+    let ok = r.send(
+        &mut c,
+        "POST",
+        "/auth/totp/confirm",
+        json!({"code": code_now()}),
+    );
+    assert_eq!(ok.state(), "signed_in");
+    r.advance(61_000);
+    let cookie = c
+        .cookie
+        .as_ref()
+        .map(|s| format!("__Host-ozbox_session={s}"));
+    let req = request(
+        "POST",
+        "/v1/approvals/requests/r1/approve-authenticator",
+        "",
+        &Value::Null,
+        cookie.as_deref(),
+        &c.csrf,
+        HOST,
+        Some(ORIGIN),
+    );
+    let wrong = r.auth.approval_authenticator(&req, "000000").unwrap_err();
+    assert_eq!((wrong.0, wrong.1), (401, "code_refused"));
+    assert!(!wrong.2.contains(&secret));
+    let code = code_now();
+    let (person, role) = r.auth.approval_authenticator(&req, &code).unwrap();
+    assert_eq!(person, "owner");
+    assert_eq!(role, Role::Owner);
+    // the same code is spent: neither a second approval nor a sign-in takes it again
+    assert_eq!(
+        r.auth.approval_authenticator(&req, &code).unwrap_err().0,
+        401
+    );
+    // nobody signed in decides nothing
+    let anon = request(
+        "POST",
+        "/v1/approvals/requests/r1/approve-authenticator",
+        "",
+        &Value::Null,
+        None,
+        "",
+        HOST,
+        Some(ORIGIN),
+    );
+    assert_eq!(
+        r.auth.approval_authenticator(&anon, &code).unwrap_err().1,
+        "no_sign_in"
+    );
+}

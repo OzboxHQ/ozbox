@@ -1540,6 +1540,7 @@ fn an_approval_a_laptop_key_gave_dies_at_spend_when_the_key_is_revoked() {
                 authenticator_data: None,
                 attestation_digest: None,
             }),
+            authenticator: None,
         };
         let input = |evidence: Evidence| DecideInput {
             class: SocketClass::Ingress,

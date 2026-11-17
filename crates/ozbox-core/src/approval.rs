@@ -260,6 +260,11 @@ pub enum Factor {
     /// A signed-in dashboard session with no passkey: it may only deny or revoke (both fail safe), never approve. The record
     /// says so, so it is never read as a passkey decision.
     Session,
+    /// An authenticator-app code (RFC 6238) of a signed-in dashboard person who has no passkey, checked by the secrets service
+    /// itself against that person's authenticator secret in its own store. Unlike a passkey it is not bound to the request
+    /// (a six-digit code cannot sign a digest), so the record says `authenticator` and never `passkey`. The service accepts
+    /// each time step once per person (the step is kept as the counter).
+    Authenticator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -372,12 +377,22 @@ pub struct LaptopEvidence {
     pub attestation_digest: Option<String>,
 }
 
+/// The evidence of an authenticator-app code, as the **service** verified it: the time step the code was for. Never the code
+/// itself, and never taken from the wire (the service builds it after its own check of the code).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticatorEvidence {
+    pub step: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Evidence {
     #[serde(default)]
     pub passkey: Option<PasskeyEvidence>,
     #[serde(default)]
     pub laptop: Option<LaptopEvidence>,
+    /// Set only by the secrets service after it checked the code itself (see [`Factor::Authenticator`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticator: Option<AuthenticatorEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,8 +452,8 @@ impl Decision {
         match (self.factor, self.presence, self.role) {
             (Factor::Root, _, _) => 5,
             (Factor::LaptopKey, PresenceClass::Proved, _) => 4,
-            (Factor::Passkey | Factor::Session, _, Some(Role::Owner)) => 3,
-            (Factor::Passkey | Factor::Session, _, Some(Role::Member)) => 2,
+            (Factor::Passkey | Factor::Authenticator | Factor::Session, _, Some(Role::Owner)) => 3,
+            (Factor::Passkey | Factor::Authenticator | Factor::Session, _, Some(Role::Member)) => 2,
             (Factor::LaptopKey, _, _) => 1,
             _ => 0,
         }
@@ -456,6 +471,7 @@ pub fn factor_label(factor: Factor, key: Option<&KeyView>) -> String {
         (Factor::Bootstrap, _) => "bootstrap".into(),
         (Factor::ChatDeny, _) => "chat-deny".into(),
         (Factor::Session, _) => "dashboard session (no passkey)".into(),
+        (Factor::Authenticator, _) => "authenticator".into(),
     }
 }
 
@@ -1784,6 +1800,47 @@ impl RequestBook {
                     proven: None,
                 })
             }
+            Factor::Authenticator => {
+                if input.class != SocketClass::Supervisor || input.surface != Surface::Dashboard {
+                    return Err(
+                        "an authenticator code decides on the dashboard, through the supervisor"
+                            .into(),
+                    );
+                }
+                let role = input.role.ok_or("the person's role is not known")?;
+                if role == Role::Viewer {
+                    return Err("a viewer cannot decide a request".into());
+                }
+                let a = input.evidence.authenticator.as_ref().ok_or(
+                    "a dashboard decision carries the service's check of the authenticator code",
+                )?;
+                dashboard_cell(req, role, ctx)?;
+                // one time step decides once per person: the step is the counter, and it must move forward
+                let step =
+                    u32::try_from(a.step).map_err(|_| "that code is not valid".to_string())?;
+                if step == 0 {
+                    return Err("that code is not valid".into());
+                }
+                let key = format!("totp:{}", input.decider);
+                if self.counters.get(&key).is_some_and(|last| step <= *last) {
+                    return Err(
+                        "that authenticator code was already used: wait for the next one".into(),
+                    );
+                }
+                Ok(Checked {
+                    counter: Some((key, step)),
+                    seen: assertion_hash(
+                        &format!("totp:{}", input.decider),
+                        &req.id,
+                        Outcome::Approve,
+                    ),
+                    proven: Some(Proven {
+                        up: true,
+                        uv: true,
+                        counter: Some(step),
+                    }),
+                })
+            }
             Factor::Bootstrap | Factor::ChatDeny | Factor::Session => {
                 Err("that is not a way to approve a request".into())
             }
@@ -1831,9 +1888,10 @@ impl RequestBook {
         let mut out = Vec::new();
         for r in &mut self.requests {
             if r.state == State::Approved
-                && r.decision
-                    .as_ref()
-                    .is_some_and(|d| d.factor == Factor::Passkey && d.decider == person)
+                && r.decision.as_ref().is_some_and(|d| {
+                    matches!(d.factor, Factor::Passkey | Factor::Authenticator)
+                        && d.decider == person
+                })
             {
                 r.state = State::Denied;
                 r.void_reason = Some("the person who approved it was removed or demoted".into());
@@ -2220,7 +2278,7 @@ pub fn dashboard_can_deny(req: &Request, role: Option<Role>) -> Result<(), Strin
 /// and there is no setting that turns that on.
 fn software_cell(req: &Request) -> Result<(), String> {
     if req.subject.production() {
-        return Err("a software key never decides Production: approve it on the dashboard with your passkey (an owner), with a laptop key that needs a touch, or as root".into());
+        return Err("a software key never decides Production: approve it in the dashboard (Approvals) with your passkey or authenticator code (an owner), with a laptop key that needs a touch, or as root".into());
     }
     match req.scope {
         Scope::GuardOverride => Ok(()),
@@ -2235,7 +2293,7 @@ fn software_cell(req: &Request) -> Result<(), String> {
         | Scope::SetupCode
         | Scope::KekExport
         | Scope::SecretUse => Err(
-            "a software key does not decide this: use a laptop key with presence, or root"
+            "a software key does not decide this: approve it in the dashboard (Approvals) with your passkey or authenticator code (an owner), with a laptop key that needs a touch, or as root"
                 .to_string(),
         ),
     }

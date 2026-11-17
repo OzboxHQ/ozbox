@@ -1134,6 +1134,34 @@ impl RequestService {
         }
     }
 
+    /// Check a dashboard person's authenticator-app code against their own authenticator secret in this store (the one the
+    /// dashboard set up for them), allowing one step of clock drift, and refusing a step this person already used to decide.
+    /// Returns the step, which the book keeps as the person's counter. The code is never logged and no error carries it.
+    fn check_authenticator(
+        &self,
+        store: &EncryptedSecrets,
+        person: &str,
+        code: &str,
+        now: u64,
+    ) -> Result<ozbox_core::approval::AuthenticatorEvidence, String> {
+        let refused = || crate::messages::t("approval.authenticator_refused", &[]);
+        let secret = store
+            .get(&crate::serve::auth::totp::secret_name(person))
+            .map_err(|_| refused())?
+            .map(zeroize::Zeroizing::new)
+            .ok_or_else(|| crate::messages::t("approval.authenticator_none", &[]))?;
+        let last = {
+            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.book
+                .counters
+                .get(&format!("totp:{person}"))
+                .map(|s| u64::from(*s))
+        };
+        let step = crate::serve::auth::totp::verify(&secret, code, now / 1000, last)
+            .ok_or_else(refused)?;
+        Ok(ozbox_core::approval::AuthenticatorEvidence { step })
+    }
+
     fn decide(
         &self,
         store: &EncryptedSecrets,
@@ -1158,6 +1186,10 @@ impl RequestService {
             /// The relying party the supervisor verified the passkey assertion against.
             #[serde(default)]
             rp: Option<ozbox_core::approval_verify::ExpectedRp>,
+            /// An authenticator-app code (`factor: authenticator`): checked here, against the person's own secret in this
+            /// store, and never kept, logged or echoed.
+            #[serde(default)]
+            code: String,
         }
         let id = v["id"].as_str().unwrap_or("");
         let outcome = match v["outcome"].as_str().unwrap_or("") {
@@ -1169,8 +1201,10 @@ impl RequestService {
             }
             _ => return Err("that request is not valid".into()),
         };
-        let w: Wire = serde_json::from_value(v.clone())
+        let mut w: Wire = serde_json::from_value(v.clone())
             .map_err(|_| "that decision is not valid".to_string())?;
+        // the code is a credential for a minute: held where it is wiped when this decision is done
+        let code = zeroize::Zeroizing::new(std::mem::take(&mut w.code));
         if let Some(p) = &w.evidence.passkey {
             for f in [
                 &p.credential_id,
@@ -1211,6 +1245,7 @@ impl RequestService {
                 };
                 let factor = match w.factor.as_str() {
                     "passkey" => Factor::Passkey,
+                    "authenticator" if outcome == Outcome::Approve => Factor::Authenticator,
                     "chat-deny" => Factor::ChatDeny,
                     // a signed-in session may stop things (deny, revoke), never approve
                     "session" if outcome != Outcome::Approve => Factor::Session,
@@ -1225,6 +1260,13 @@ impl RequestService {
                 if person.is_empty() || w.role.is_none() {
                     return Err("that decision is not valid".into());
                 }
+                // the code is checked by this service, never taken on the supervisor's word, and the evidence it keeps is the
+                // step it checked; whatever the wire said about an authenticator is ignored
+                let authenticator = if factor == Factor::Authenticator {
+                    Some(self.check_authenticator(store, &person, &code, now)?)
+                } else {
+                    None
+                };
                 DecideInput {
                     class,
                     outcome,
@@ -1233,8 +1275,13 @@ impl RequestService {
                     decider: person,
                     role: w.role,
                     evidence: Evidence {
-                        passkey: w.evidence.passkey,
+                        passkey: if factor == Factor::Passkey {
+                            w.evidence.passkey
+                        } else {
+                            None
+                        },
                         laptop: None,
+                        authenticator,
                     },
                     key: None,
                     passkey_rp: w.rp,
@@ -1264,6 +1311,7 @@ impl RequestService {
                     evidence: Evidence {
                         passkey: None,
                         laptop: w.evidence.laptop,
+                        authenticator: None,
                     },
                     key: Some(key),
                     passkey_rp: None,

@@ -175,6 +175,7 @@ fn passkey_decide(
                 &b.challenge_for(c, id, Outcome::Approve).unwrap(),
             )),
             laptop: None,
+            authenticator: None,
         },
         key: None,
         passkey_rp: Some(crate::approval_verify::tests::test_rp()),
@@ -241,6 +242,7 @@ fn laptop_decide_as(
         evidence: Evidence {
             passkey: None,
             laptop: Some(ev),
+            authenticator: None,
         },
         key: Some(k.clone()),
         passkey_rp: None,
@@ -2562,7 +2564,9 @@ fn a_software_key_never_decides_production_in_any_row_and_is_told_what_does() {
             )
             .unwrap_err();
         assert!(
-            e.contains("never decides Production") && e.contains("dashboard") && e.contains("passkey"),
+            e.contains("never decides Production")
+                && e.contains("dashboard")
+                && e.contains("passkey"),
             "{what}: {e}"
         );
     }
@@ -2571,7 +2575,11 @@ fn a_software_key_never_decides_production_in_any_row_and_is_told_what_does() {
     b.file(
         &c,
         T0,
-        filing("s", import("staging", Classification::Secret), laptop("lap")),
+        filing(
+            "s",
+            import("staging", Classification::Secret),
+            laptop("lap"),
+        ),
     )
     .unwrap();
     b.decide(
