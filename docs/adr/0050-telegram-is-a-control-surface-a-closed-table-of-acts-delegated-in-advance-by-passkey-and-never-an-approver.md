@@ -540,3 +540,32 @@ that follows it.
   does not read a real tunnel's log. Closing it needs the harness to start a loopback reverse proxy whose address is the passkey origin,
   with the server on another port, and to assert on that proxy's log; and, on a real box, the owner's tier C run reading the tunnel's
   actual log.
+
+## Amendment (0.3.0-beta): one message model, and a link in every actionable message
+
+Found from a real phone: an approval request's message reached Telegram with no link, and the text read as a block. The cause: a
+change request's message took the dashboard's address only from the tunnel's saved file, so a dashboard reached by its sign-in
+address sent words instead of a link; other alerts (disk, memory, budget, schedules) carried no link at all; and no link was made
+for the person who received it. What changes:
+
+- **One message model for every channel.** Every outgoing message is a structured notice: a title that starts with the verb, what is
+  asked in plain words, the box, project and environment (a Production badge), who or what asked and why, the risk, the expiry, one
+  primary action and a short reference. Each channel renders it with its own conventions and escaping (Telegram HTML, Slack Block
+  Kit, a Discord embed, a Teams Adaptive Card, WhatsApp text, email with an HTML and a plain-text part, one ASCII SMS part, push).
+  A chat reply is the same model with words only, sent as plain text. No channel adapter builds message text of its own; a test
+  fails if one does.
+- **Every actionable message carries a link to exactly its item**, made for each recipient at the moment of sending: a pointer link
+  (§2: 24 random bytes, keyed hash, ten minutes, that person only) for a person; the item's own address (which asks for sign-in) for
+  a shared place such as a Slack channel, an email list or a webhook; and words naming the page ("Open your dashboard → Approvals")
+  when there is no public address. The dashboard's address is the one the server was started with, else the tunnel's.
+- **A Telegram message may carry one inline-keyboard URL button**, "Open in dashboard". A URL button opens a web page and sends no
+  callback query to the bot, so §1's rule holds: nothing pressed in a chat decides anything, and the bridge still takes `message`
+  updates only. No callback or inline-query button is ever built (a test holds it).
+- **A decided request retires its links.** Opening a link after the request was decided answers "used" to the person it was made for
+  (and the same "did not work" as any made-up link to anyone else). The dashboard says so and points at Approvals.
+- **An alert message is not deleted when its link lapses** (unlike a handoff's): it is the person's record of what happened, and it
+  says where to go after ten minutes.
+
+What this does not cover: an agent's question in a chat still links to the dashboard's Chat page with its one-time token in the
+address's query (`/chat?link=`), as before this amendment, not in the fragment; moving it to a pointer link is left to the chat
+sessions work. A webhook never gets a link made for a person. The real-phone check of the new message is an owner run.
