@@ -109,6 +109,7 @@ pub fn box_may_write(name: &str) -> bool {
         && !crate::approval_key::is_reserved(name)
         && !crate::secrets_ingress::is_reserved(name)
         && !ozbox_hubd::keys::is_reserved(name)
+        && !crate::hub_cli::is_laptop_only(name)
 }
 
 /// The store's own keys and records: not something the owner or an agent put there.
@@ -120,6 +121,7 @@ pub fn is_system_name(name: &str) -> bool {
         || crate::approval_key::is_reserved(name)
         || crate::secrets_ingress::is_reserved(name)
         || ozbox_hubd::keys::is_reserved(name)
+        || crate::hub_cli::is_laptop_only(name)
         || name.starts_with("workload-policy.")
 }
 
@@ -876,7 +878,8 @@ pub fn handle_from(
                                         && n != crate::secrets_approval::ENROLLED_MARKER
                                         && !crate::audit_service::is_audit_secret(n)
                                         && !crate::approval_key::is_reserved(n)
-                                        && !ozbox_hubd::keys::is_reserved(n))
+                                        && !ozbox_hubd::keys::is_reserved(n)
+                                        && !crate::hub_cli::is_laptop_only(n))
                             })
                             .collect(),
                     ),

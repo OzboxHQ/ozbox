@@ -562,6 +562,11 @@ pub enum Command {
         #[command(subcommand)]
         command: MeshCommand,
     },
+    /// The registrars that vouch for a worker box's identity: pin them on `main`, or sign for a worker from your own computer.
+    Hub {
+        #[command(subcommand)]
+        command: HubCommand,
+    },
     /// The outbound tunnel that reaches the dashboard from outside (your own account, token and domain).
     Tunnel {
         #[command(subcommand)]
@@ -1144,6 +1149,37 @@ pub enum TelemetryCommand {
     Off,
     /// Send today's event now (it must be on).
     Send,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubCommand {
+    /// On `main`, as root: pin, rotate or remove the registrars the hub trusts to vouch for a worker. With no option it lists them.
+    /// A rotation is `--add KEY --provider P --remove FINGERPRINT` in one step.
+    Repin {
+        /// The Ed25519 public key (64 hex characters) of the registrar to trust.
+        #[arg(long, value_name = "PUBLIC-KEY")]
+        add: Option<String>,
+        /// Which workers it may vouch for: aws (the claim service), hetzner or own (your computer).
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// The fingerprint of a registrar to stop trusting.
+        #[arg(long, value_name = "FINGERPRINT")]
+        remove: Option<String>,
+        /// The registrars file (default /etc/ozbox/hub-registrars.json).
+        #[arg(long, value_name = "PATH")]
+        registrars: Option<std::path::PathBuf>,
+    },
+    /// On your own computer: make the registrar key that signs for Hetzner workers and machines you own, and print its public half to pin.
+    RegistrarKey,
+    /// On your own computer: read a worker's attestation request, show what you would sign, and sign it after you confirm. Refused on a box.
+    Attest {
+        /// The request `main` prepared (JSON).
+        #[arg(long, value_name = "FILE")]
+        request: std::path::PathBuf,
+        /// Write the signed attestation here (default: print it).
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -1,0 +1,28 @@
+//! The command line's messages for the hub's registrars (`ozbox hub`), English first. `messages::t` looks here too.
+
+pub const EN: &[(&str, &str)] = &[
+    ("hubreg.plan_head", "This will:"),
+    ("hubreg.dry_run", "Dry run: nothing was changed."),
+    ("hubreg.proceed", "Go ahead?"),
+    ("hubreg.aborted", "Stopped. Nothing was changed."),
+    ("hubreg.refuse_no_tty", "This needs you to confirm it. Run it in a terminal, or add --yes after reading the plan with --dry-run."),
+    ("hubreg.refused", "Refused ({code}): {why}"),
+    ("hubreg.bad_provider", "The provider must be aws, hetzner or own."),
+    ("hubreg.need_provider", "--add needs --provider aws, hetzner or own."),
+    ("hubreg.pins_head", "Registrars this hub trusts ({count}):"),
+    ("hubreg.pins_none", "No registrar is pinned: no worker can enrol."),
+    ("hubreg.pin_row", "  {provider}  {fingerprint}"),
+    ("hubreg.repinned", "Done. {count} registrar(s) are pinned. The hub reads the file on every enrolment, so this counts at once."),
+    ("hubreg.key_made", "Made your registrar key. Keep this computer's store: the key never leaves it."),
+    ("hubreg.key_exists", "You already have a registrar key."),
+    ("hubreg.key_plan", "make an Ed25519 registrar key in this computer's secret store; only its public half is ever shown"),
+    ("hubreg.key_public", "Public key: {public}\nFingerprint: {fingerprint}\nPin it on the hub with: ozbox hub repin --add {public} --provider hetzner   (or own), run as root on main."),
+    ("hubreg.no_key", "There is no registrar key on this computer. Make one with `ozbox hub registrar-key`."),
+    ("hubreg.on_a_box", "Attestations are signed on your own computer, never on a box."),
+    ("hubreg.request_unreadable", "The request file could not be read."),
+    ("hubreg.request_bad", "The request file is not a valid attestation request."),
+    ("hubreg.attested", "Signed. Give this attestation to the worker; the hub still checks it."),
+    ("hubreg.out_exists", "{path} already exists; choose another --out, or remove it first."),
+    ("hubreg.out_failed", "The attestation could not be written."),
+    ("hubreg.store_failed", "This computer's secret store could not be used."),
+];
