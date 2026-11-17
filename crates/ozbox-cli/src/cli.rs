@@ -1234,12 +1234,15 @@ pub enum IngressCommand {
     /// Keep a copy of a box's file-kept store key in this computer's keychain, so `ozbox upgrade` can put it back through
     /// the ingress route when the system disk is replaced. The key is never printed. WARNING: that copy opens every value on the
     /// box (every project key, the box's own tokens and credentials), and any program running as you on this computer can read
-    /// your keychain. Once the box has a second factor the copy needs an approval from your approval key; the box records it.
+    /// your keychain. Once the box has a second factor the copy needs an approval that is not this computer's software key (a
+    /// software key never approves it): a laptop key that proves a touch, or root on the box. The box records it.
     Escrow {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
     },
-    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read.
+    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read. Once the box has a second
+    /// factor, this computer's software key cannot fetch it (it would let a program on this computer enrol its own passkey): a
+    /// laptop key that proves a touch, or root on the box, approves it.
     SetupCode {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,

@@ -73,6 +73,7 @@ pub const EN: &[(&str, &str)] = &[
     ("approval_key.no_local", "This computer has no key named {id}. Enrol one with `ozbox secrets approval-key enroll`."),
     ("approval_key.bad_answer", "The box answered in a way this program does not understand."),
     ("approval_key.code", "Approval code for {scope} (use it once, within minutes): {code}"),
+    ("approval.software_key_never", "A key kept on a computer (a laptop's software key) never approves a {scope} change, Production or not: it would hand the box, its keys or who approves it to any program running as you on that computer. Decide it as a box approval request (`ozbox secrets ingress requests`) with a laptop key that proves a touch, or as root on the box; a change the dashboard offers can also be approved there with your passkey. Nothing was changed."),
     ("approval.software_key_production", "This {scope} change is in the Production tier, and a key kept on a computer (a laptop's software key) never approves Production. Approve it on the box's dashboard with your passkey or authenticator: ask for an approval there, then run the command again with --approval and that code. Nothing was changed."),
     ("approval_key.dry_run", "Dry run: no approval code was made. A real run would ask {box} for a challenge, sign it with this computer's key {key}, and print a single-use code for {scope}."),
     ("approval_key.pinned", "This computer's approval key ({id}) is pinned on the new box: it is the box's first approver, and the private half stays in this computer's keychain."),

@@ -590,6 +590,25 @@ impl Gates {
         self.require_typed_tiered(store, scope, project, env, approval, false, now_ms)
     }
 
+    /// [`Gates::require`] for an act the spender knows more about: `declared` says the thing being approved touches Production
+    /// (an import whose names or values say so), which only ever makes the signer rule stricter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn require_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, String> {
+        self.require_typed_tiered(store, scope, project, env, approval, declared, now_ms)
+            .map_err(|r| match r {
+                Refusal::NoApprover(m) | Refusal::Approval(m) => m,
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn require_typed_tiered(
         &self,
@@ -1024,7 +1043,12 @@ pub fn handle_from(
                 Resp::fail(&format!("{n} is already stored for this project and environment, and this box has no second factor enrolled, so it cannot be replaced from the box. Enrol a passkey in the dashboard (or make the box with `ozbox create` from a computer with a keychain), then import it with an approval"))
             } else {
                 let gate = if r.request_id.is_empty() {
-                    gates.require(store, "import", &r.project, &r.env, &r.approval, now)
+                    // a legacy code is judged by what the import carries as well as by its environment's name, with the
+                    // request path's own helpers: a key named live, or a live-mode value, makes it Production for a software key
+                    let declared = crate::secrets_signer::import_says_production(
+                        lines.iter().map(|l| (l.name.as_str(), l.value.as_str())),
+                    );
+                    gates.require_tiered(store, "import", &r.project, &r.env, &r.approval, declared, now)
                 } else {
                     spend_import_request(store, gates, &r.project, &r.env, &lines, &r.request_id, &r.salt, now)
                 };

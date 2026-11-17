@@ -2218,23 +2218,16 @@ pub fn dashboard_can_deny(req: &Request, role: Option<Role>) -> Result<(), Strin
 
 /// The software-key cell: what a key with no proved presence may decide. Owner decision B: **never** an owner-only scope,
 /// and there is no setting that turns that on.
+/// The software-key cell, read from the rule table's `software` column (the one place it is decided: the legacy code path's tier,
+/// `ozbox-cli`'s `secrets_signer`, reads the same column, so the two paths cannot drift). Production is refused first, always.
 fn software_cell(req: &Request) -> Result<(), String> {
     if req.subject.production() {
         return Err("a software key never decides Production: approve it on the dashboard with your passkey (an owner), with a laptop key that needs a touch, or as root".into());
     }
-    match req.scope {
-        Scope::GuardOverride => Ok(()),
-        Scope::Import if import_member_ok(req) => Ok(()),
-        Scope::Import
-        | Scope::Policy
-        | Scope::BoxSecrets
-        | Scope::WorkerKeys
-        | Scope::TunnelToken
-        | Scope::HostGuard
-        | Scope::SignerEnroll
-        | Scope::SetupCode
-        | Scope::KekExport
-        | Scope::SecretUse => Err(
+    match rule_for(req.scope.as_str()).map_or(Soft::Never, |r| r.software) {
+        Soft::MemberLevel => Ok(()),
+        Soft::NewNonProductionNames if import_member_ok(req) => Ok(()),
+        Soft::NewNonProductionNames | Soft::Never | Soft::NotApplicable => Err(
             "a software key does not decide this: use a laptop key with presence, or root"
                 .to_string(),
         ),

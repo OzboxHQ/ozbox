@@ -1171,7 +1171,7 @@ mod enrol {
     }
 
     #[test]
-    fn when_the_request_journal_did_not_open_the_dashboard_still_makes_no_enrolment_code_and_the_wait_still_holds(
+    fn when_the_request_journal_did_not_open_the_dashboard_still_makes_no_enrolment_code_and_a_software_key_enrols_nothing(
     ) {
         let dir = tempfile::tempdir().unwrap();
         let p: Arc<dyn KeyProvider> = Arc::new(LocalKekProvider::random("local").unwrap());
@@ -1210,24 +1210,23 @@ mod enrol {
         let e = handle(&store, &gates, Policy::Supervisor, &json!({"op":"approval_key_enroll","key_id":"evil","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap_err();
         assert!(e.contains("approved request"), "{e}");
-        // a code enrolment through the laptop's route serves the wait, read from the store alone
+        // nor does a software laptop key enrol another key any more (who may approve is never a software key's act, on any
+        // path: review H1 of 2026-11-17): no code is made for it, and one that somehow exists is refused and enrols nothing
+        let soft = crate::secrets_signer::Signer::SoftwareKey("first".into());
+        assert!(gates
+            .approvals
+            .mint("signer-enroll", "second", "", &soft, T, 60_000)
+            .is_err());
         let code = gates
             .approvals
-            .mint(
-                "signer-enroll",
-                "second",
-                "",
-                &crate::secrets_signer::Signer::SoftwareKey("first".into()),
-                T,
-                60_000,
-            )
+            .mint_unchecked_for_test("signer-enroll", "second", "", &soft)
             .unwrap();
-        handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
-            .unwrap();
-        let m = crate::approval_keystore::read_meta(&*store, "second")
+        let e = handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
+            .unwrap_err();
+        assert!(e.contains("passkey"), "{e}");
+        assert!(crate::approval_keystore::read_meta(&*store, "second")
             .unwrap()
-            .unwrap();
-        assert_eq!(m.active_from_ms, T + crate::approval_key::ENROL_WAIT_MS);
+            .is_none());
     }
 
     #[test]

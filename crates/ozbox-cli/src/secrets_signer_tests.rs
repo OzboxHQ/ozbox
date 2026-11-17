@@ -109,6 +109,14 @@ impl Rig {
         )
     }
 
+    fn import_value(&self, env: &str, name: &str, value: &str, code: &str) -> Value {
+        self.ask(
+            Policy::Unsealed,
+            json!({"op":"import","project":"app","env":env,"approval":code,"allowed":[name],
+                "lines":[{"name":name,"value":value}]}),
+        )
+    }
+
     fn policy(&self, envs: &[&str], code: &str) -> Value {
         let text = json!({"dir":"/work/projects/app","commands":{"t":{"allow":["API_KEY"],"env":["API_KEY"],
             "argv":["node","t.mjs"],"envs":envs,
@@ -199,30 +207,37 @@ fn the_gate_refuses_a_software_keys_production_code_even_when_one_exists() {
     assert!(!ok(&r.import("production", "API_KEY", &code)));
 }
 
-/// A declaration with a command that takes secrets from Production (or that removes one) is a Production change: a software
-/// key's policy code is refused for it and the dashboard's is not. A staging-only declaration still takes a software key's code.
+/// A declaration decides which commands receive a project's secrets. On the request path a software key never decides one
+/// (`software_cell`), and the legacy path now agrees (review H1): no policy code for a software key, and one that somehow exists is
+/// refused at the gate, for a staging-only declaration as for a Production one. The dashboard approves both.
 #[test]
-fn a_software_key_never_approves_a_declaration_that_touches_production() {
+fn a_software_key_never_approves_a_declaration() {
     let r = rig();
-    let code = r.laptop_code("policy", "app", "").unwrap();
-    let out = r.policy(&["production"], &code);
-    assert!(!ok(&out), "{out}");
-    assert!(err(&out).contains("dashboard"), "{out}");
+    let e = r.laptop_code("policy", "app", "").unwrap_err();
+    assert!(e.contains("policy") && e.contains("passkey"), "{e}");
+    let code = r
+        .gates
+        .approvals
+        .mint_unchecked_for_test(
+            "policy",
+            "app",
+            "",
+            &crate::secrets_signer::Signer::SoftwareKey("laptop".into()),
+        )
+        .unwrap();
+    for envs in [&["production"][..], &["staging"][..]] {
+        let out = r.policy(envs, &code);
+        assert!(!ok(&out), "{envs:?}: {out}");
+        assert!(err(&out).contains("dashboard"), "{out}");
+    }
     assert!(
         crate::workload_policy::load(r.store.as_ref(), "app")
             .unwrap()
             .is_none(),
         "nothing was declared"
     );
-    // the same code still approves a staging-only declaration: the refusal did not spend it
-    let out = r.policy(&["staging"], &code);
-    assert!(ok(&out), "{out}");
-    // the dashboard approves the Production one
     let dash = r.dashboard_code("policy", "app", "");
     assert!(ok(&r.policy(&["staging", "production"], &dash)));
-    // and now a software key can no longer replace it, not even with a staging-only one (that removes a Production command)
-    let code = r.laptop_code("policy", "app", "").unwrap();
-    assert!(!ok(&r.policy(&["staging"], &code)));
 }
 
 /// A guard override names one change by digest. A software key asking for an override "for production" (or for anything that
@@ -239,10 +254,13 @@ fn a_software_key_gets_a_guard_override_only_for_a_change_digest() {
         .is_ok());
 }
 
-/// The scopes that are the box's own settings (not a project environment) keep their laptop-key route: this change narrows
-/// Production only.
+/// Review H1 (B4-28): the box's own acts are Production-tier for a software key on EVERY path, as on the request path
+/// (`software_cell`): the store key's escrow (it decrypts every stored secret), the dashboard's first-time code (it enrols a
+/// passkey that then approves anything), who may approve, the tunnel token, the box's own vault and its guards. Laptop malware
+/// holding the software key must get none of them. Refused when the code is asked for, and refused at the gate for a code that
+/// somehow exists, without spending it.
 #[test]
-fn the_box_own_scopes_still_take_a_software_keys_code() {
+fn a_software_key_never_approves_the_boxs_own_acts_on_the_legacy_path() {
     let r = rig();
     for scope in [
         "tunnel-token",
@@ -252,6 +270,115 @@ fn the_box_own_scopes_still_take_a_software_keys_code() {
         "box-secrets",
         "host-guard",
     ] {
-        assert!(r.laptop_code(scope, "", "").is_ok(), "{scope}");
+        let Err(e) = r.laptop_code(scope, "", "") else {
+            panic!("{scope}: a software key got a code");
+        };
+        assert!(e.contains(scope) && e.contains("passkey"), "{scope}: {e}");
     }
+    for (op, scope) in [("kek_export", "kek-export"), ("setup_code", "setup-code")] {
+        let code = r
+            .gates
+            .approvals
+            .mint_unchecked_for_test(
+                scope,
+                "",
+                "",
+                &crate::secrets_signer::Signer::SoftwareKey("laptop".into()),
+            )
+            .unwrap();
+        let out = r.ask(Policy::Unsealed, json!({"op":op,"approval":code}));
+        assert!(!ok(&out), "{scope}: {out}");
+        assert!(err(&out).contains("passkey"), "{scope}: {out}");
+        assert!(!err(&out).contains(&code), "{out}");
+        // the refusal did not spend it, and it never becomes good
+        assert!(!ok(
+            &r.ask(Policy::Unsealed, json!({"op":op,"approval":code}))
+        ));
+    }
+    // the dashboard's code for the same acts is untouched
+    for scope in ["signer-enroll", "kek-export", "box-secrets", "host-guard"] {
+        let v = r.ask(
+            Policy::Supervisor,
+            json!({"op":"approve_mint","scope":scope,"project":"","env":""}),
+        );
+        assert!(ok(&v), "{scope}: {v}");
+    }
+}
+
+/// Review H1: the legacy path and the request path agree on what a software key may decide, scope by scope, because the legacy
+/// tier is read from the request path's rule table (`ozbox_core::approval::RULES`, the `software` column `software_cell` reads),
+/// not kept beside it. The scopes a software key may never decide are the same set on both paths.
+#[test]
+fn the_legacy_tier_and_the_request_paths_software_rule_are_one_table() {
+    use crate::secrets_signer::{allowed, Signer};
+    use ozbox_core::approval::{rule_for, Soft};
+    let soft = Signer::SoftwareKey("laptop".into());
+    let mut never_legacy = std::collections::BTreeSet::new();
+    let mut never_request = std::collections::BTreeSet::new();
+    for scope in crate::secrets_approval::SCOPES {
+        let rule = rule_for(scope)
+            .unwrap_or_else(|| panic!("{scope}: a legacy scope the request path does not know"))
+            .software;
+        if matches!(rule, Soft::Never | Soft::NotApplicable) {
+            never_request.insert(*scope);
+        }
+        // a non-Production act of the scope's own shape: a change digest for an override, a listed environment otherwise
+        let env = if rule == Soft::MemberLevel {
+            "0123456789abcdef"
+        } else {
+            "staging"
+        };
+        if !allowed(&soft, scope, env, false) {
+            never_legacy.insert(*scope);
+        }
+        assert!(!allowed(&soft, scope, "production", false), "{scope}");
+    }
+    assert_eq!(never_legacy, never_request);
+    for s in [
+        "policy",
+        "tunnel-token",
+        "signer-enroll",
+        "setup-code",
+        "kek-export",
+        "box-secrets",
+        "host-guard",
+    ] {
+        assert!(never_legacy.contains(s), "{s}");
+    }
+}
+
+/// Review M1 (B4-28): a legacy import is Production by what it carries, not by its environment's name alone, as on the request
+/// path (`Subject::production` reads the names, `check_import_values` the values). A software key's code for `staging` that
+/// carries a key named live, or a live-mode value, is refused, nothing is stored, and the code is not spent.
+#[test]
+fn a_software_key_code_for_staging_is_refused_for_an_import_whose_names_or_values_say_production() {
+    let r = rig();
+    let code = r.laptop_code("import", "app", "staging").unwrap();
+    let live_value = format!("sk_live_{SENTINEL}");
+    for (name, value) in [
+        ("STRIPE_LIVE_KEY", SENTINEL),
+        ("PROD_DB_PASSWORD", SENTINEL),
+        ("API_KEY", live_value.as_str()),
+        ("DATABASE_URL", "postgres://u@db.prod.example.com/app"),
+    ] {
+        let out = r.import_value("staging", name, value, &code);
+        assert!(
+            !ok(&out),
+            "{name}: a software key imported a Production value: {out}"
+        );
+        assert!(err(&out).contains("passkey"), "{name}: {out}");
+        assert!(!err(&out).contains(SENTINEL), "{out}");
+        assert!(!r.stored("staging", name), "{name}: nothing stored");
+    }
+    // the code was not spent by the refusals: it still approves the ordinary staging import it names
+    let out = r.import("staging", "API_KEY", &code);
+    assert!(ok(&out), "{out}");
+    // and the dashboard's code still imports a live value into staging
+    let dash = r.dashboard_code("import", "app", "staging");
+    assert!(ok(&r.import_value(
+        "staging",
+        "STRIPE_LIVE_KEY",
+        SENTINEL,
+        &dash
+    )));
 }
