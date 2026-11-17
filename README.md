@@ -193,6 +193,8 @@ ozbox serve --public-url https://dash.example.com --tunnel cloudflare
 Everyone who signs in has a role (`--person you,role=owner|member|viewer`; the first person is the owner, the rest are
 members): an owner changes settings, permissions, secrets and costs, a member does the work, a viewer only looks
 ([ADR 0039](docs/adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md)).
+A `--person` starts with an id you choose (lowercase letters, digits and dashes, up to 32), never an email; the email goes
+after it, for the way they sign in: `--person jane,google=jane@example.com` or `--person jane,access=jane@example.com`.
 
 `ozbox dashboard install` can instead run it as a service on a box, which then goes down whenever that box is paused or
 upgraded; a machine outside the fleet is the better home ([ADR 0010](docs/adr/0010-bring-your-own-tunnels.md)).

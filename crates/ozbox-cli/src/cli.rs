@@ -1395,7 +1395,7 @@ pub enum DashboardCommand {
         /// to the box. Default: the project's own repository.
         #[arg(long)]
         release_repo: Option<String>,
-        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
+        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The id is a short name you choose (lowercase letters, digits and dashes, up to 32), not an email: an email goes after it, like `jane,google=jane@example.com`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
         #[arg(long = "person", required = true)]
         people: Vec<String>,
         /// Cloudflare Access team domain, like myteam.cloudflareaccess.com (needs --access-audience).
@@ -1465,7 +1465,7 @@ pub enum AuthCommand {
         /// The exact address people open, like https://box.example.com (https; plain http only for localhost).
         #[arg(long)]
         origin: String,
-        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
+        /// Someone allowed to sign in: `id[,label=Name][,github=login][,google=email][,access=email][,role=owner|member|viewer]`. The id is a short name you choose (lowercase letters, digits and dashes, up to 32), not an email: an email goes after it, like `jane,google=jane@example.com`. The first person is the owner unless a role says otherwise; the rest are members. Repeat.
         #[arg(long = "person", required = true)]
         people: Vec<String>,
         /// Your own GitHub OAuth app's client ID (device flow enabled; no secret needed).

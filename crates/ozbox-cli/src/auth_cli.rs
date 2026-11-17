@@ -42,7 +42,39 @@ pub fn parse_person(spec: &str) -> Result<UserEntry, String> {
     if u.id.is_empty() {
         return Err(t("auth.bad_person", &[]));
     }
+    if !crate::serve::auth::config::valid_user_id(&u.id) {
+        // the dashboard would refuse it later; say so now, and say what an id is (an email is the usual mistake)
+        return Err(if u.id.contains('@') {
+            t(
+                "auth.person_is_email",
+                &[("given", &u.id), ("id", &id_from_email(&u.id))],
+            )
+        } else {
+            t("auth.bad_person_id", &[("given", &u.id)])
+        });
+    }
     Ok(u)
+}
+
+/// A suggested id for someone given by their email: the part before the `@`, in the letters an id may use.
+fn id_from_email(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or("");
+    let mut id = String::new();
+    for c in local.chars().flat_map(char::to_lowercase) {
+        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' };
+        if !(c == '-' && (id.is_empty() || id.ends_with('-'))) {
+            id.push(c);
+        }
+        if id.len() == 32 {
+            break;
+        }
+    }
+    let id = id.trim_end_matches('-').to_string();
+    if id.is_empty() {
+        "alice".into()
+    } else {
+        id
+    }
 }
 
 /// `ozbox auth role <id> <role>`: write a person's role into the dashboard's own state (the strongest place it can be
@@ -274,6 +306,8 @@ mod tests {
         for k in [
             "auth.exists",
             "auth.bad_person",
+            "auth.person_is_email",
+            "auth.bad_person_id",
             "auth.written",
             "auth.next",
             "auth.github_guide",
@@ -283,5 +317,27 @@ mod tests {
             assert!(keys.contains(&k), "{k}");
         }
         assert!(t("auth.github_guide", &[("origin", "https://o")]).contains("Enable Device Flow"));
+    }
+
+    /// B4-13: `--person` takes an id, not an email. An email is refused at once (not later, on the box), saying what an id
+    /// is and where the email goes instead; any other id the dashboard would refuse is refused here too.
+    #[test]
+    fn a_person_given_by_email_is_told_to_use_an_id_and_where_the_email_goes() {
+        let e = parse_person("Jane.Doe@example.com").unwrap_err();
+        assert!(
+            e.contains("looks like an email address")
+                && e.contains("--person jane-doe,google=Jane.Doe@example.com")
+                && e.contains("access=Jane.Doe@example.com")
+                && e.contains("Your id on the allow-list"),
+            "{e}"
+        );
+        let e = parse_person("Alice,github=alice-gh").unwrap_err();
+        assert!(e.contains("is not a person's id"), "{e}");
+        assert!(parse_person(&"a".repeat(33)).is_err());
+        // a valid id with the email where it belongs is fine
+        let u = parse_person("jane,google=jane@example.com,role=owner").unwrap();
+        assert_eq!(u.id, "jane");
+        assert_eq!(id_from_email("..@example.com"), "alice");
+        assert_eq!(id_from_email(&format!("{}@x", "b".repeat(40))).len(), 32);
     }
 }
