@@ -38,7 +38,7 @@ run "the_fleet_manager_is_marked_on_the_machine_and_every_disk" {
 
   assert {
     condition = alltrue([
-      for t in [aws_instance.box.tags, aws_ebs_volume.work.tags, aws_instance.box.root_block_device[0].tags] :
+      for t in [aws_instance.box.tags, aws_ebs_volume.work.tags, aws_instance.box.volume_tags] :
       t["ozbox-fleet-manager"] == "true"
     ])
     error_message = "main's machine, /work and system disk carry ozbox-fleet-manager"
