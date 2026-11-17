@@ -514,12 +514,15 @@ export interface SubscriptionInfo {
   engine: string;
   engine_label: string;
   kind: 'subscription';
-  status: 'available' | 'planned' | 'not_offered';
+  /** `opt_in`: the engine reads the sign-in itself, so it is handed to its runs only after the owner turns that on (ADR 0055). */
+  status: 'available' | 'opt_in' | 'planned' | 'not_offered';
   sign_in: 'device_code' | 'browser_only' | 'not_documented' | 'none';
   reason: string;
   /** The vendor's own documentation and terms the status rests on. */
   sources: string[];
   checked_on: string;
+  /** This row has an opt-in in Settings, Models (ADR 0055). An older server leaves it out. */
+  opt_in?: boolean;
 }
 
 export interface ModelsCatalog {

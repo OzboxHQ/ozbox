@@ -59,6 +59,7 @@ import { createBrowserApi, type BrowserApi } from './browser';
 import { createMemoryApi, type MemoryApi } from './memory';
 import { createApprovalRequestsApi, type ApprovalRequestsApi } from './approval-requests';
 import { createSecretsApi, type SecretsApi } from './secrets';
+import { createSubscriptionsApi, type SubscriptionsApi } from './subscriptions';
 import { createTasksApi, type TasksApi } from './tasks';
 import { createTelegramApi, type TelegramApi } from './telegram';
 import { createToolsApi, type ToolsApi } from './tools';
@@ -98,6 +99,8 @@ export interface ApiClient {
   browser: BrowserApi;
   /** Whether coding agents on this box may use the Oz Box tools. */
   agentMcp: AgentMcpApi;
+  /** A subscription sign-in an engine reads itself, on the owner's opt-in (ADR 0055). */
+  subscriptions: SubscriptionsApi;
   /** Agent memory (notes agents propose and people approve) and reviewed skills. */
   memory: MemoryApi;
   /** Chat with coding agents: the person's transcript, sessions, approvals and linked chats. */
@@ -298,6 +301,7 @@ export function createApiClient(opts: ClientOptions): ApiClient {
     people: createPeopleApi(request),
     browser: createBrowserApi(request),
     agentMcp: createAgentMcpApi(request),
+    subscriptions: createSubscriptionsApi(request),
     memory: createMemoryApi(request),
     chat: createChatApi(request),
     tools: createToolsApi(request),

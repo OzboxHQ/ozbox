@@ -91,6 +91,7 @@ export function gpuBoxes(boxes: BoxRecord[]): BoxRecord[] {
 /** The status of a subscription sign-in (ADR 0054), as catalogue keys. */
 export const SUB_STATUS_LABEL: Record<SubscriptionInfo['status'], MessageKey> = {
   available: 'models.sub_status_available',
+  opt_in: 'models.sub_status_opt_in',
   planned: 'models.sub_status_planned',
   not_offered: 'models.sub_status_not_offered',
 };
@@ -126,4 +127,27 @@ export function subscriptionRows(subs: SubscriptionInfo[] | undefined, has: (k: 
     out.push({ sub, plan, reason, links });
   }
   return out;
+}
+
+/** The typed confirmation for a subscription opt-in (ADR 0055): exactly the word shown, nothing else. */
+export function optInConfirmed(typed: string, word: string): boolean {
+  return word.length > 0 && typed === word;
+}
+
+/** The words for why a sign-in failed; an unknown reason falls back to the general one. */
+export function signInFailedKey(reason: string | undefined, has: (k: string) => boolean): MessageKey {
+  const k = `models.signin_failed_${reason ?? 'failed'}`;
+  return (has(k) ? k : 'models.signin_failed_failed') as MessageKey;
+}
+
+/** Only an https link on the vendor's own host is shown as the sign-in page. */
+export function vendorLink(link: string | undefined, hosts: readonly string[]): string | null {
+  if (!link) return null;
+  try {
+    const u = new URL(link);
+    const ok = u.protocol === 'https:' && hosts.some((h) => u.hostname === h || u.hostname.endsWith(`.${h}`));
+    return ok ? u.toString() : null;
+  } catch {
+    return null;
+  }
 }

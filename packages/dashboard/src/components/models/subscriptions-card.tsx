@@ -6,16 +6,21 @@ import { en } from '../../i18n/en';
 import { t } from '../../lib/i18n';
 import { SUB_SIGNIN_LABEL, SUB_STATUS_LABEL, subscriptionRows } from '../../lib/models';
 import { useAsync } from '../../lib/use-async';
+import { useCan } from '../../lib/use-can';
+import { SubscriptionOptIn } from './subscription-opt-in';
 
 const has = (k: string) => k in en;
 
 /**
- * Whether each engine can run on a person's own subscription instead of an API key, and why not (ADR 0054). Read only:
- * no sign-in adapter is built, so there is nothing to connect, and the card never offers a button that implies there is.
+ * Whether each engine can run on a person's own subscription instead of an API key, and why not (ADR 0054). Only a row the
+ * server marks `opt_in` (ADR 0055) gets controls, and only for the owner: the opt-in, the vendor's sign-in and revoking. Every
+ * other row is read only, so nothing implies a sign-in can be connected where it cannot.
  */
 export function SubscriptionsCard() {
   const { client } = useApp();
+  const { can } = useCan();
   const catalog = useAsync((s) => client.modelsCatalog(s), [client]);
+  const optIns = useAsync((s) => client.subscriptions.list(s), [client]);
   if (catalog.error && !catalog.data) return <p role="alert" className="text-sm text-destructive">{catalog.error.message}</p>;
   if (!catalog.data) return <Skeleton className="h-40 w-full" />;
   const rows = subscriptionRows(catalog.data.subscriptions, has);
@@ -35,6 +40,12 @@ export function SubscriptionsCard() {
             </div>
             <p className="text-xs text-muted-foreground">{t(SUB_SIGNIN_LABEL[sub.sign_in])}</p>
             <p className="break-words text-xs">{t(reason)}</p>
+            {sub.opt_in && can('change_settings')
+              ? (() => {
+                  const st = optIns.data?.subscriptions.find((o) => o.id === sub.id);
+                  return st ? <SubscriptionOptIn state={st} reload={optIns.reload} /> : null;
+                })()
+              : null}
             {links.length > 0 ? (
               <ul className="flex flex-wrap gap-x-4 gap-y-1">
                 {links.map((u, i) => (
