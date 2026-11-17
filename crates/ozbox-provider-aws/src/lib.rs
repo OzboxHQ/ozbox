@@ -253,9 +253,11 @@ pub fn is_capacity_error(message: &str) -> bool {
     SIGNS.iter().any(|s| message.contains(s))
 }
 
-/// The CPU architecture an EC2 instance type runs. Graviton families end in `g` after their generation digit
-/// (`m7g`, `c7gd`, `g5g`); everything this adapter maps to a size is x86.
-fn arch_of_instance_type(machine_type: &str) -> &'static str {
+/// The CPU architecture an EC2 instance type runs, as EC2 names it on an image. Graviton families have a `g` right after
+/// their generation digit (`m7g`, `c7gd`, `g5g`, `t4g`); everything else is x86. Every size this adapter maps today is x86
+/// (see [`machine_choice`]), so a box made from a size gets an x86 image; a box on a Graviton type (resized to one, or adopted)
+/// gets an arm64 image.
+pub fn arch_of_instance_type(machine_type: &str) -> &'static str {
     let family = machine_type.split('.').next().unwrap_or("");
     let chars: Vec<char> = family.chars().collect();
     let graviton = chars
@@ -1324,8 +1326,14 @@ impl AwsBackend {
 
     /// The newest public image of `publisher` that this program can use and the signed manifest vouches for. Never returns
     /// an image that is not verified: a public image is a stranger's machine until the signed manifest says otherwise.
-    fn latest_public(&self, publisher: &str, region: Option<&str>) -> Result<ImageInfo> {
+    fn latest_public(
+        &self,
+        publisher: &str,
+        region: Option<&str>,
+        arch: &str,
+    ) -> Result<ImageInfo> {
         let where_ = region.unwrap_or("the default region");
+        let arch_filter = format!("Name=architecture,Values={arch}");
         let found: Images = self.at(region).run_json(&[
             "ec2",
             "describe-images",
@@ -1333,7 +1341,7 @@ impl AwsBackend {
             publisher,
             "--filters",
             "Name=state,Values=available",
-            "Name=architecture,Values=x86_64",
+            &arch_filter,
             "Name=name,Values=ozbox-*",
         ])?;
         let candidates: Vec<public_images::PublicCandidate> = found
@@ -1898,6 +1906,19 @@ impl Backend for AwsBackend {
     }
 
     fn latest_image(&self, region: Option<&str>) -> Result<ImageInfo> {
+        self.latest_image_for(region, None)
+    }
+
+    /// The newest image for the machine's CPU architecture: arm64 for a Graviton type, x86_64 otherwise (and for no type,
+    /// since every size maps to an x86 type). Both lookups below ask for that architecture only, so an arm box walks back
+    /// through arm images and is never offered an x86 one (which its upgrade check would refuse).
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        let arch = machine_type.map_or("x86_64", arch_of_instance_type);
+        let arch_filter = format!("Name=architecture,Values={arch}");
         let region = region.or(self.cfg.region.as_deref());
         // 1. An Oz image in the caller's own account: one this account built (or copied and tagged), which is a deliberate
         //    choice, so it wins over anything public.
@@ -1910,7 +1931,7 @@ impl Backend for AwsBackend {
             "Name=tag-key,Values=ozbox-image",
             "Name=tag:ozbox-managed,Values=true",
             "Name=state,Values=available",
-            "Name=architecture,Values=x86_64",
+            &arch_filter,
         ])?;
         if !found.images.is_empty() {
             return Ok(self.pick_own(&found.images, region));
@@ -1922,7 +1943,7 @@ impl Backend for AwsBackend {
                 region.unwrap_or("the default region")
             )));
         };
-        self.latest_public(&publisher, region)
+        self.latest_public(&publisher, region, arch)
     }
 
     fn image_info(&self, image: &str, region: Option<&str>) -> Result<ImageInfo> {
@@ -5326,6 +5347,42 @@ Usage: ozbox secrets <COMMAND>",
         aws.publish_release_of(V, "us-east-1", &["ami-0fake"]);
         let info = provider_publisher(&aws, None).image_info("ami-0fake", None)?;
         assert!(!info.signature_verified && info.release.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_latest_image_is_for_the_machines_architecture_so_an_arm_box_walks_back_through_arm_images(
+    ) -> TestResult {
+        // (machine type, the architecture asked for, the image it gets): the fake account has x86 images up to
+        // NEW_IMAGE and one arm64 image, ami-0aaaaaaaaaaaaaaaa
+        for (machine, arch, want) in [
+            (None, "x86_64", NEW_IMAGE),
+            (Some("m7i.xlarge"), "x86_64", NEW_IMAGE),
+            (Some("c7i.xlarge"), "x86_64", NEW_IMAGE),
+            (Some("m7g.xlarge"), "arm64", "ami-0aaaaaaaaaaaaaaaa"),
+            (Some("c7gd.2xlarge"), "arm64", "ami-0aaaaaaaaaaaaaaaa"),
+            (Some("r7g.2xlarge"), "arm64", "ami-0aaaaaaaaaaaaaaaa"),
+        ] {
+            let aws = Arc::new(FakeAws::new());
+            let p = provider(&aws);
+            let latest = p.latest_image_for(None, machine)?;
+            assert_eq!(latest.id, want, "{machine:?}");
+            let call = aws
+                .calls()
+                .into_iter()
+                .find(|c| c.args.get(1).map(String::as_str) == Some("describe-images"))
+                .ok_or("no call")?;
+            assert!(
+                call.args
+                    .iter()
+                    .any(|a| *a == format!("Name=architecture,Values={arch}")),
+                "{machine:?}: {:?}",
+                call.args
+            );
+        }
+        // `latest_image` is the default machine's, x86_64
+        let aws = Arc::new(FakeAws::new());
+        assert_eq!(provider(&aws).latest_image(None)?.id, NEW_IMAGE);
         Ok(())
     }
 

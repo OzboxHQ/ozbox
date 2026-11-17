@@ -2195,7 +2195,7 @@ pub(super) fn execute(
         );
     }
     let (target, info) = if requested == "latest" {
-        let info = p.latest_image(rec.spec.region.as_deref())?;
+        let info = p.latest_image_for(rec.spec.region.as_deref(), rec.machine_type.as_deref())?;
         if !f.json {
             let release = info
                 .release
