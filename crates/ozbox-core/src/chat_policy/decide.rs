@@ -507,7 +507,12 @@ mod tests {
             ActId::Whoami => "/whoami",
             ActId::Usage => "/new",
             ActId::Link => "/link",
+            ActId::Who => "/who",
+            ActId::Boxes => "/boxes",
+            ActId::Fleets => "/fleets",
+            ActId::To => "/to @alpha",
             ActId::Converse => "run the tests",
+            ActId::Address => "@alpha run the tests",
             ActId::New => "/new alpha fix it",
             ActId::SessionPause => "/pause",
             ActId::SessionResume => "/resume",
@@ -780,16 +785,21 @@ mod tests {
     }
 
     #[test]
-    fn power_and_run_are_policy_allowed_but_resolve_to_a_handoff_until_their_executors_exist() {
+    fn power_is_allowed_inside_a_delegation_and_run_and_when_idle_stay_a_handoff_until_their_executors_exist() {
         let f = Fixture::new();
         for id in [
             ActId::BoxResume,
             ActId::BoxPause,
             ActId::BoxExtend,
-            ActId::Run,
             ActId::BoxCreate,
             ActId::BoxResize,
         ] {
+            let Decision::Allow(a) = f.decide(&sample(id)) else {
+                panic!("{} should be allowed with a power delegation", id.key())
+            };
+            assert_eq!(a.rule(), "power-delegated");
+        }
+        for id in [ActId::Run, ActId::BoxPauseWhenIdle, ActId::BoxPauseCancel] {
             assert_eq!(
                 f.decide(&sample(id)),
                 Decision::Handoff(HandoffReason::NotBuiltYet),
@@ -797,6 +807,13 @@ mod tests {
                 id.key()
             );
         }
+        // without a power delegation, power is a link to the dashboard
+        let mut f = Fixture::new();
+        f.delegations = vec![deleg(&[DelegatedAct::Converse], &["alpha"])];
+        assert_eq!(
+            f.decide(&sample(ActId::BoxResume)),
+            Decision::Handoff(HandoffReason::NoDelegation)
+        );
         for id in [ActId::BoxClone, ActId::BoxSnapshot, ActId::BoxDestroy] {
             assert_eq!(
                 f.decide(&sample(id)),

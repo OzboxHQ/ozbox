@@ -124,11 +124,21 @@ acts! {
         about: "Which person, role and delegations this chat is linked to." },
     Usage { key: "usage", cmd: "(a command with a missing or odd argument)", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
         about: "Says how the command is written; does nothing else." },
+    Who { key: "who", cmd: "/who", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
+        about: "Says which box, session or group your plain messages go to now." },
+    Boxes { key: "boxes", cmd: "/boxes", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
+        about: "The boxes you may talk to from this chat (never a Production box)." },
+    Fleets { key: "fleets", cmd: "/fleets", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
+        about: "The groups of boxes you may address, and how many of their boxes you may reach." },
+    To { key: "to", cmd: "/to <@box | @box/session | @group | @fleet>", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
+        about: "Sets where your plain messages go until you change it. Sending is still a converse act on each box." },
     Link { key: "link", cmd: "/link", tier: Read, needs: Nothing, safe: false, built: true, boxed: false,
         about: "Starts linking this Telegram account, only while a person has a pairing window open in the dashboard." },
     // ---- tier 1: converse ---------------------------------------------------------------------------------------
     Converse { key: "converse", cmd: "(plain text)", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
         about: "The next turn of the session this chat follows, under the chat profile." },
+    Address { key: "address", cmd: "@<box> · @<box>/<session> · @<group> · @fleet <message>", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
+        about: "A message to one session, a box's agent, a group or every box you may reach; each box is judged on its own." },
     New { key: "new", cmd: "/new <box> <what to do>", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
         about: "Starts a session on a running box." },
     SessionPause { key: "session.pause", cmd: "/pause · /session pause", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
@@ -143,20 +153,20 @@ acts! {
         about: "Types into a terminal session that is at or below the chat profile." },
     Adopt { key: "adopt", cmd: "/adopt <session>", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
         about: "Puts a terminal session on the board." },
-    // ---- tier 2: power (executors arrive with box power; until then a handoff in words) ---------------------------
-    BoxResume { key: "box.resume", cmd: "/box resume <box>", tier: Power, needs: Power, safe: false, built: false, boxed: true,
+    // ---- tier 2: power (a plan through the provider, applied only inside the delegation's caps) ---------------------
+    BoxResume { key: "box.resume", cmd: "/box resume <box>", tier: Power, needs: Power, safe: false, built: true, boxed: true,
         about: "Starts a box that is paused, inside the caps." },
-    BoxPause { key: "box.pause", cmd: "/box pause <box>", tier: Power, needs: Power, safe: false, built: false, boxed: true,
+    BoxPause { key: "box.pause", cmd: "/box pause <box>", tier: Power, needs: Power, safe: false, built: true, boxed: true,
         about: "Pauses a box, only when it is idle." },
     BoxPauseWhenIdle { key: "box.pause.when_idle", cmd: "/box pause <box> when-idle", tier: Power, needs: Power, safe: false, built: false, boxed: true,
         about: "Pauses a box the next time it is idle, for up to two hours." },
     BoxPauseCancel { key: "box.pause.cancel", cmd: "/box pause <box> cancel", tier: Power, needs: Power, safe: false, built: false, boxed: true,
         about: "Cancels a pause that waits for the box to be idle." },
-    BoxExtend { key: "box.extend", cmd: "/box extend <box> <hours>", tier: Power, needs: Power, safe: false, built: false, boxed: true,
+    BoxExtend { key: "box.extend", cmd: "/box extend <box> <hours>", tier: Power, needs: Power, safe: false, built: true, boxed: true,
         about: "Extends the auto-pause deadline of a chat-started box, once." },
-    BoxCreate { key: "box.create", cmd: "/box create <name> <size>", tier: Power, needs: Power, safe: false, built: false, boxed: false,
-        about: "Creates a box inside the caps (owner decision D14)." },
-    BoxResize { key: "box.resize", cmd: "/box resize <box> <size>", tier: Power, needs: Power, safe: false, built: false, boxed: true,
+    BoxCreate { key: "box.create", cmd: "/box create <name> <size or profile>", tier: Power, needs: Power, safe: false, built: true, boxed: false,
+        about: "Creates a box at a size or from a saved profile, inside the caps (owner decision D14)." },
+    BoxResize { key: "box.resize", cmd: "/box resize <box> <size>", tier: Power, needs: Power, safe: false, built: true, boxed: true,
         about: "Resizes a box inside the caps (owner decision D14)." },
     // ---- tier 3: run --------------------------------------------------------------------------------------------
     Run { key: "run", cmd: "/run <command from the catalogue>", tier: Run, needs: Run, safe: false, built: false, boxed: true,
@@ -250,7 +260,15 @@ pub enum ChatAct {
     /// A command with a missing or odd argument: the key of the sentence that says how it is written.
     Usage(&'static str),
     Link,
+    Who,
+    Boxes,
+    Fleets,
+    To(super::address::Address),
     Converse(String),
+    Address {
+        to: super::address::Address,
+        text: String,
+    },
     New {
         box_name: String,
         prompt: String,
@@ -272,7 +290,11 @@ pub enum ChatAct {
         box_name: String,
         hours: u8,
     },
-    BoxCreate,
+    BoxCreate {
+        box_name: String,
+        /// A size (`M`) or the name of a saved box profile, which carries a size.
+        size: String,
+    },
     BoxResize {
         box_name: String,
         size: String,
@@ -308,7 +330,12 @@ impl ChatAct {
             ChatAct::Whoami => ActId::Whoami,
             ChatAct::Usage(_) => ActId::Usage,
             ChatAct::Link => ActId::Link,
+            ChatAct::Who => ActId::Who,
+            ChatAct::Boxes => ActId::Boxes,
+            ChatAct::Fleets => ActId::Fleets,
+            ChatAct::To(_) => ActId::To,
             ChatAct::Converse(_) => ActId::Converse,
+            ChatAct::Address { .. } => ActId::Address,
             ChatAct::New { .. } => ActId::New,
             ChatAct::SessionPause => ActId::SessionPause,
             ChatAct::SessionResume => ActId::SessionResume,
@@ -321,7 +348,7 @@ impl ChatAct {
             ChatAct::BoxPauseWhenIdle(_) => ActId::BoxPauseWhenIdle,
             ChatAct::BoxPauseCancel(_) => ActId::BoxPauseCancel,
             ChatAct::BoxExtend { .. } => ActId::BoxExtend,
-            ChatAct::BoxCreate => ActId::BoxCreate,
+            ChatAct::BoxCreate { .. } => ActId::BoxCreate,
             ChatAct::BoxResize { .. } => ActId::BoxResize,
             ChatAct::Run(_) => ActId::Run,
             ChatAct::BoxClone => ActId::BoxClone,
@@ -354,7 +381,17 @@ impl ChatAct {
             | ChatAct::BoxPauseWhenIdle(box_name)
             | ChatAct::BoxPauseCancel(box_name)
             | ChatAct::BoxExtend { box_name, .. }
+            | ChatAct::BoxCreate { box_name, .. }
             | ChatAct::BoxResize { box_name, .. } => Some(box_name),
+            ChatAct::Address {
+                to: super::address::Address::Session { box_name, .. },
+                ..
+            } => Some(box_name),
+            // a name that is a group fans out: each box is judged on its own by the bridge
+            ChatAct::Address {
+                to: super::address::Address::Name(n),
+                ..
+            } => Some(n),
             _ => None,
         }
     }
@@ -406,6 +443,23 @@ pub fn parse_act(text: &str, own_bot: Option<&str>) -> ChatAct {
     {
         return ChatAct::Rejected(Reject::ControlCharacter);
     }
+    if let Some(rest) = text.strip_prefix('@') {
+        // an address, then the message: `@alpha fix it`, `@alpha/t1 and then?`, `@fleet git status please`
+        let (first, msg) = match rest.split_once(char::is_whitespace) {
+            Some((f, m)) => (f, m.trim()),
+            None => (rest, ""),
+        };
+        if first.chars().any(typographic) {
+            return ChatAct::Rejected(Reject::NonAsciiPunctuation);
+        }
+        return match super::address::Address::parse(first) {
+            Some(to) if !msg.is_empty() => ChatAct::Address {
+                to,
+                text: msg.chars().take(MAX_TEXT_CHARS).collect(),
+            },
+            _ => ChatAct::Usage("chat.usage_address"),
+        };
+    }
     if !text.starts_with('/') {
         return ChatAct::Converse(text.chars().take(MAX_TEXT_CHARS).collect());
     }
@@ -445,6 +499,13 @@ pub fn parse_act(text: &str, own_bot: Option<&str>) -> ChatAct {
             _ => ChatAct::Usage("chat.usage_sessions"),
         },
         "link" => ChatAct::Link,
+        "who" => ChatAct::Who,
+        "boxes" => ChatAct::Boxes,
+        "fleets" | "groups" => ChatAct::Fleets,
+        "to" => match args.as_slice() {
+            [a] => super::address::Address::parse(a).map_or(ChatAct::Usage("chat.usage_to"), ChatAct::To),
+            _ => ChatAct::Usage("chat.usage_to"),
+        },
         "lock" => ChatAct::Lock,
         "unlink" => ChatAct::Unlink,
         "detach" => ChatAct::Detach,
@@ -545,11 +606,14 @@ fn parse_box(args: &[&str]) -> ChatAct {
             _ => ChatAct::Usage("chat.usage_box_extend"),
         },
         "create" | "new" => match rest {
-            [n, sz] if box_name_ok(n) && word_ok(sz) => ChatAct::BoxCreate,
+            [n, sz] if box_name_ok(n) && word_ok(sz) && !sz.starts_with('-') => ChatAct::BoxCreate {
+                box_name: (*n).to_string(),
+                size: (*sz).to_string(),
+            },
             _ => ChatAct::Usage("chat.usage_box_create"),
         },
         "resize" => match rest {
-            [b, s] if box_name_ok(b) && word_ok(s) => ChatAct::BoxResize {
+            [b, s] if box_name_ok(b) && word_ok(s) && !s.starts_with('-') => ChatAct::BoxResize {
                 box_name: (*b).to_string(),
                 size: (*s).to_string(),
             },
@@ -648,9 +712,59 @@ mod tests {
                 assert!(matches!(r.tier, Tier::Power | Tier::Run), "{}", r.id);
             }
         }
-        for a in [ActId::Run, ActId::BoxCreate, ActId::BoxResume] {
+        for a in [ActId::Run, ActId::BoxPauseWhenIdle, ActId::BoxPauseCancel] {
             assert!(!a.row().built, "{}", a.key());
         }
+        for a in [
+            ActId::BoxResume,
+            ActId::BoxPause,
+            ActId::BoxExtend,
+            ActId::BoxCreate,
+            ActId::BoxResize,
+        ] {
+            assert!(a.row().built, "{}", a.key());
+        }
+    }
+
+    #[test]
+    fn an_address_then_words_is_a_message_to_that_target_and_to_and_who_set_and_show_it() {
+        use super::super::address::Address;
+        let own = Some("oz_bot");
+        assert_eq!(
+            parse_act("@alpha/t1 and then?", own),
+            ChatAct::Address {
+                to: Address::Session {
+                    box_name: "alpha".into(),
+                    session: "t1".into()
+                },
+                text: "and then?".into()
+            }
+        );
+        assert_eq!(
+            parse_act("@fleet git status please", own).id(),
+            ActId::Address
+        );
+        assert_eq!(parse_act("@alpha", own), ChatAct::Usage("chat.usage_address"));
+        assert_eq!(parse_act("@$(id) hi", own), ChatAct::Usage("chat.usage_address"));
+        assert_eq!(
+            parse_act("/to @web", own),
+            ChatAct::To(Address::Name("web".into()))
+        );
+        assert_eq!(parse_act("/to", own), ChatAct::Usage("chat.usage_to"));
+        assert_eq!(parse_act("/who", own), ChatAct::Who);
+        assert_eq!(parse_act("/boxes", own), ChatAct::Boxes);
+        assert_eq!(parse_act("/fleets", own), ChatAct::Fleets);
+        assert_eq!(
+            parse_act("/box create gamma m", own),
+            ChatAct::BoxCreate {
+                box_name: "gamma".into(),
+                size: "m".into()
+            }
+        );
+        assert_eq!(
+            parse_act("/box resize alpha -x", own),
+            ChatAct::Usage("chat.usage_box_resize")
+        );
     }
 
     #[test]
