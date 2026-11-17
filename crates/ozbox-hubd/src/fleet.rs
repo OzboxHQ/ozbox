@@ -10,6 +10,8 @@
 
 use std::sync::Arc;
 
+use ozbox_core::approval::SignedEnvelope;
+use ozbox_core::hub::approvals::{ApprovalService, DecisionBody, ServicePin};
 use ozbox_core::hub::keys::{
     issuer_guard, Attestations, AttestedKey, DeliveryStore, KeyDelivery, KeyIssuer, ReleaseRequest,
     Released, CODE_ISSUER, CODE_STORE,
@@ -109,4 +111,50 @@ impl DeliveryStore for ServiceDeliveryStore {
             .ops
             .call(json!({"op": "hub_delivery_delete", "all": true}));
     }
+}
+
+/// A worker's approval service as the hub agent reaches it: the worker's own secrets service on the supervisor's socket, where the
+/// request journal and the envelope key live (ADR 0041). The agent holds none of it.
+///
+/// * `pending` asks for the signed envelopes of the requests pending now; the agent announces them to `main`, which shows a card
+///   only if the envelope verifies against the key it pinned at enrolment.
+/// * `decide_from_fleet` hands the service a decision `main` relayed. **The service verifies it**, against an approver set only root
+///   can write, over a challenge computed from its own ids; the agent only carries it, and an answer it does not understand is a
+///   refusal. A service that does not answer (no request journal turned on) decides nothing and announces nothing.
+pub struct ServiceApprovals {
+    pub ops: Arc<dyn KeyOps>,
+}
+
+impl ApprovalService for ServiceApprovals {
+    fn pending(&self, _now: u64) -> Vec<SignedEnvelope> {
+        self.ops
+            .call(json!({"op": "areq_hub_pending"}))
+            .ok()
+            .and_then(|v| serde_json::from_value(v["envelopes"].clone()).ok())
+            .unwrap_or_default()
+    }
+
+    fn decide_from_fleet(
+        &mut self,
+        hub: &str,
+        d: &DecisionBody,
+        _now: u64,
+    ) -> Result<String, String> {
+        let v = self
+            .ops
+            .call(json!({"op": "areq_hub_decide", "hub": hub, "decision": d}))
+            .map_err(|e| e.0)?;
+        v["state"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "the approval service's answer is not valid".to_string())
+    }
+}
+
+/// The pin of this box's approval service (its ids and the public half of its envelope key), for enrolment to offer. `None` when
+/// the service keeps no request journal: the worker then enrols with no approval service, and nothing it asks is shown as a request.
+pub fn service_pin(ops: &dyn KeyOps) -> Option<ServicePin> {
+    ops.call(json!({"op": "areq_hub_pin"}))
+        .ok()
+        .and_then(|v| serde_json::from_value(v["pin"].clone()).ok())
 }

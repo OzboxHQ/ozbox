@@ -2755,3 +2755,261 @@ mod guard_hook {
         );
     }
 }
+
+// ---- the worker's approval service for the hub agent (ADR 0042 section 8) ------------------------------------------------
+
+mod hub_agent {
+    use super::*;
+    use ozbox_core::approval::Role;
+    use ozbox_core::approval_subject::decide_challenge;
+    use ozbox_core::hub::approvals::{Approver, ApproverSet, DecisionBody, ServicePin};
+    use ozbox_core::hub::testkit::{test_rp, Passkey};
+
+    fn set_for(p: &Passkey, seq: u64, expires_ms: u64) -> Value {
+        json!({"op":"areq_hub_set_approvers","approvers": ApproverSet {
+            seq, expires_ms, rp: test_rp(),
+            approvers: vec![Approver {
+                credential_id: p.id.clone(), public_key_hex: p.public_hex(),
+                person: "owner".into(), role: Role::Owner,
+            }],
+        }})
+    }
+
+    fn decision(r: &Rig, id: &str, outcome: &str, p: Option<&Passkey>, now: u64) -> Value {
+        let got = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                json!({"op":"areq_get","id":id}),
+            )
+            .unwrap();
+        let digest = got["request"]["subject_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let passkey = p.map(|p| {
+            let ch = decide_challenge(&r.svc().ids(), id, &unhex32(&digest), outcome);
+            p.assert(&test_rp(), &ch, 0x05, 1).unwrap()
+        });
+        json!({"op":"areq_hub_decide","hub":"main","decision": DecisionBody {
+            request_id: id.into(), subject_digest: digest,
+            outcome: if outcome == "deny" { Outcome::Deny } else { Outcome::Approve },
+            claimed_person: "owner".into(), passkey,
+        }})
+    }
+
+    #[test]
+    fn the_pin_is_the_envelope_key_and_the_ids_and_only_the_supervisor_and_root_read_it() {
+        let r = rig(true, false);
+        let p = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                T0,
+                json!({"op":"areq_hub_pin"}),
+            )
+            .unwrap();
+        let pin: ServicePin = serde_json::from_value(p["pin"].clone()).unwrap();
+        assert_eq!(pin.ids, r.svc().ids());
+        assert_eq!(
+            pin.envelope_key_hex,
+            r.svc().envelope_key(r.store.as_ref()).unwrap()
+        );
+        assert!(r
+            .at(SocketClass::Admin, None, T0, json!({"op":"areq_hub_pin"}))
+            .is_ok());
+        for c in [SocketClass::Box, SocketClass::Ingress] {
+            assert!(
+                r.at(c, Some(BOX_UID), T0, json!({"op":"areq_hub_pin"}))
+                    .is_err(),
+                "{c:?}"
+            );
+        }
+        // and the private key is nowhere in the answer
+        let seed = r.store.get(ENVELOPE_KEY).unwrap().unwrap();
+        assert!(!p.to_string().contains(&seed));
+    }
+
+    #[test]
+    fn pending_requests_are_signed_envelopes_and_only_the_supervisors() {
+        let r = rig(true, false);
+        let id = r.file_guard('a', BOX_UID, T0);
+        let got = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                T0 + 1,
+                json!({"op":"areq_hub_pending"}),
+            )
+            .unwrap();
+        let env = got["envelopes"].as_array().unwrap();
+        assert_eq!(env.len(), 1);
+        assert!(env[0]["canonical"].as_str().unwrap().contains(&id));
+        for c in [SocketClass::Box, SocketClass::Admin, SocketClass::Ingress] {
+            assert!(
+                r.at(c, Some(BOX_UID), T0, json!({"op":"areq_hub_pending"}))
+                    .is_err(),
+                "{c:?}"
+            );
+        }
+        // an expired request is not announced
+        let later = T0 + ozbox_core::approval::PENDING_MS + 10;
+        let got = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                later,
+                json!({"op":"areq_hub_pending"}),
+            )
+            .unwrap();
+        assert!(got["envelopes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_root_pins_the_approver_set_and_it_never_goes_back() {
+        let r = rig(true, false);
+        let owner = Passkey::new("cred-owner").unwrap();
+        // the supervisor socket (and so the hub agent) cannot write it
+        assert!(r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                T0,
+                set_for(&owner, 1, u64::MAX)
+            )
+            .is_err());
+        assert!(r
+            .at(
+                SocketClass::Box,
+                Some(BOX_UID),
+                T0,
+                set_for(&owner, 1, u64::MAX)
+            )
+            .is_err());
+        r.at(SocketClass::Admin, None, T0, set_for(&owner, 5, u64::MAX))
+            .unwrap();
+        // an older or equal sequence is refused
+        for seq in [5, 4] {
+            let e = r
+                .at(SocketClass::Admin, None, T0, set_for(&owner, seq, u64::MAX))
+                .unwrap_err();
+            assert!(e.contains("not newer"), "{e}");
+        }
+        r.at(SocketClass::Admin, None, T0, set_for(&owner, 6, u64::MAX))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_relayed_approval_needs_the_pinned_approver_sets_passkey_and_a_swapped_or_unpinned_one_is_refused(
+    ) {
+        let r = rig(true, false);
+        let owner = Passkey::new("cred-owner").unwrap();
+        let id = r.file_guard('b', BOX_UID, T0);
+        let now = T0 + 5;
+        // no approver set pinned: nothing is decided from main
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now),
+            )
+            .unwrap_err();
+        assert!(e.contains("no approver set pinned"), "{e}");
+        r.at(
+            SocketClass::Admin,
+            None,
+            now,
+            set_for(&owner, 1, now + 3_600_000),
+        )
+        .unwrap();
+        // a credential that is not in the set (a swapped one) is refused
+        let other = Passkey::new("cred-other").unwrap();
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&other), now),
+            )
+            .unwrap_err();
+        assert!(e.contains("not in this worker's approver set"), "{e}");
+        // an approval with no assertion is refused (a message cannot grant)
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", None, now),
+            )
+            .unwrap_err();
+        assert!(e.contains("passkey"), "{e}");
+        // the box socket cannot relay a decision at all
+        assert!(r
+            .at(
+                SocketClass::Box,
+                Some(BOX_UID),
+                now,
+                decision(&r, &id, "approve", Some(&owner), now)
+            )
+            .is_err());
+        assert_eq!(
+            r.at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                json!({"op":"areq_get","id":id})
+            )
+            .unwrap()["request"]["state"],
+            "pending"
+        );
+        // the pinned credential's own assertion approves, once
+        let ok = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now),
+            )
+            .unwrap();
+        assert_eq!(ok["state"], "approved");
+        assert!(r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now)
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn an_expired_approver_set_decides_nothing_and_a_deny_needs_no_credential() {
+        let r = rig(true, false);
+        let owner = Passkey::new("cred-owner").unwrap();
+        let id = r.file_guard('c', BOX_UID, T0);
+        r.at(SocketClass::Admin, None, T0, set_for(&owner, 1, T0 + 10))
+            .unwrap();
+        let now = T0 + 1_000;
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now),
+            )
+            .unwrap_err();
+        assert!(e.contains("expired"), "{e}");
+        // fail safe: main can deny by silence anyway
+        let d = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "deny", None, now),
+            )
+            .unwrap();
+        assert_eq!(d["state"], "denied");
+    }
+}

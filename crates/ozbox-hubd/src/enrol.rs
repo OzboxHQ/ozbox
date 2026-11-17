@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 
 use ozbox_core::approval_subject::{is_production_environment, to_hex, Encoder};
 use ozbox_core::channel::wire::{fingerprint, hex, unhex, word_ok, MAX_SKEW_MS};
+use ozbox_core::hub::approvals::ServicePin;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -228,6 +229,32 @@ pub fn proof_bytes(
     e.bytes().to_vec()
 }
 
+/// [`proof_bytes`] for a request that also offers the worker's approval-service pin: the same bytes, then the pin's fields under a
+/// marker, so the proof (signed by the attested channel key) covers the pin and the pin cannot be swapped on the way to the hub.
+/// With no pin it is exactly [`proof_bytes`].
+pub fn proof_bytes_pinned(
+    hub_identity_fp: &str,
+    worker: &str,
+    attestation_digest: &str,
+    proof_ms: u64,
+    nonce: &str,
+    pin: Option<&ServicePin>,
+) -> Vec<u8> {
+    let mut e = Encoder::new(ENROL_PROOF_TAG);
+    e.text(hub_identity_fp)
+        .text(worker)
+        .text(attestation_digest)
+        .u64(proof_ms)
+        .text(nonce);
+    if let Some(p) = pin {
+        e.text("service-pin")
+            .text(&p.ids.box_id)
+            .text(&p.ids.store_id)
+            .text(&p.envelope_key_hex);
+    }
+    e.bytes().to_vec()
+}
+
 /// What a worker presents. The token is a secret: it is never printed (see the `Debug` below) and never kept by the hub.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EnrolRequest {
@@ -240,6 +267,11 @@ pub struct EnrolRequest {
     pub proof_nonce: String,
     /// Hex.
     pub proof_sig: String,
+    /// The worker's approval service: the ids its digests are computed with and the public half of the key its request envelopes are
+    /// signed with. Public. It is covered by the proof, so only the attested key can offer it; the owner confirms it in the
+    /// enrolment plan, and `main` pins it from the roster, never from a message ([`ozbox_core::hub::approvals`]).
+    #[serde(default)]
+    pub service_pin: Option<ServicePin>,
 }
 
 impl std::fmt::Debug for EnrolRequest {
@@ -269,11 +301,31 @@ pub fn make_request(
     hub_identity_fp: &str,
     now: u64,
 ) -> Result<EnrolRequest, Refusal> {
+    make_request_with_pin(ops, worker, token, attestation, hub_identity_fp, now, None)
+}
+
+/// [`make_request`] that also offers the worker's approval service for the owner to pin.
+pub fn make_request_with_pin(
+    ops: &dyn KeyOps,
+    worker: &str,
+    token: &str,
+    attestation: Attestation,
+    hub_identity_fp: &str,
+    now: u64,
+    service_pin: Option<ServicePin>,
+) -> Result<EnrolRequest, Refusal> {
     let identity = ops
         .identity()
         .map_err(|_| no(CODE_SERVICE, "the worker's secrets service did not answer"))?;
     let nonce = random_hex(16)?;
-    let bytes = proof_bytes(hub_identity_fp, worker, &attestation.digest(), now, &nonce);
+    let bytes = proof_bytes_pinned(
+        hub_identity_fp,
+        worker,
+        &attestation.digest(),
+        now,
+        &nonce,
+        service_pin.as_ref(),
+    );
     let sig = ops.sign(SignPurpose::EnrolProof, &bytes).map_err(|_| {
         no(
             CODE_SERVICE,
@@ -288,6 +340,7 @@ pub fn make_request(
         proof_ms: now,
         proof_nonce: nonce,
         proof_sig: hex(&sig),
+        service_pin,
     })
 }
 
@@ -331,6 +384,9 @@ pub struct Pending {
     /// The MAC of the token that was presented (compared again at apply), hex.
     pub token_tag: String,
     pub received_ms: u64,
+    /// The approval service the worker offered (covered by its proof). Pinned on `main` only when the owner applies the enrolment.
+    #[serde(default)]
+    pub service_pin: Option<ServicePin>,
 }
 
 /// What an enrolment will record, before it is recorded.
@@ -361,6 +417,10 @@ pub struct RosterRecord {
     pub channel_fp: String,
     pub registrar_fp: String,
     pub enrolled_ms: u64,
+    /// The worker's approval service as its enrolment pinned it (the ids and the public envelope key), or none when the worker
+    /// offered none. `main` reads its pin from here and nowhere else.
+    #[serde(default)]
+    pub service_pin: Option<ServicePin>,
 }
 
 /// Everything enrolment keeps. Plain data; it persists inside the daemon's state.
@@ -673,12 +733,25 @@ impl EnrolState {
         if req.proof_ms.abs_diff(cx.now) > MAX_SKEW_MS {
             return Err(no(CODE_STALE, "the proof is too old, or from the future"));
         }
-        let bytes = proof_bytes(
+        if let Some(pin) = &req.service_pin {
+            if !word_ok(&pin.ids.box_id)
+                || !word_ok(&pin.ids.store_id)
+                || pin.envelope_key_hex.len() != 64
+                || unhex(&pin.envelope_key_hex).is_none()
+            {
+                return Err(no(
+                    CODE_MALFORMED,
+                    "the approval service's pin is not valid",
+                ));
+            }
+        }
+        let bytes = proof_bytes_pinned(
             cx.hub_identity_fp,
             &req.worker,
             &digest,
             req.proof_ms,
             &req.proof_nonce,
+            req.service_pin.as_ref(),
         );
         let psig = unhex(&req.proof_sig).unwrap_or_default();
         if !verify_ed25519(&id.sign_public, &bytes, &psig) {
@@ -719,6 +792,7 @@ impl EnrolState {
             proof_nonce: req.proof_nonce.clone(),
             token_tag: hex(&tag),
             received_ms: cx.now,
+            service_pin: req.service_pin.clone(),
         })
     }
 
@@ -748,6 +822,17 @@ impl EnrolState {
                     a.provider.word(),
                     a.registrar_fp
                 ),
+                match &p.service_pin {
+                    Some(pin) => format!(
+                        "pin {worker}'s approval service: box {} store {} envelope key {} (a request is shown only if it is signed by this key)",
+                        pin.ids.box_id,
+                        pin.ids.store_id,
+                        pin.envelope_key_hex.chars().take(16).collect::<String>()
+                    ),
+                    None => format!(
+                        "pin no approval service for {worker}: nothing it asks will be shown as a request"
+                    ),
+                },
                 format!("burn the enrolment token for {worker}"),
             ],
             based_on: self.based_on(),
@@ -813,6 +898,7 @@ impl EnrolState {
             identity: p.identity.clone(),
             registrar_fp: p.attestation.registrar_fp.clone(),
             enrolled_ms: cx.now,
+            service_pin: p.service_pin.clone(),
         };
         self.seen.insert(p.attestation.digest(), cx.now);
         self.seen.insert(p.proof_nonce.clone(), cx.now);

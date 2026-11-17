@@ -1204,3 +1204,144 @@ fn no_private_key_token_or_mac_leaves_the_store_in_any_output() {
     // the token's MAC is not kept once the token is burnt
     assert!(st.enrol.invites.is_empty());
 }
+
+// ---- the worker's approval service is pinned by enrolment ------------------------------------------------------------------
+
+fn svc_pin(box_id: &str, key: char) -> ozbox_core::hub::approvals::ServicePin {
+    ozbox_core::hub::approvals::ServicePin {
+        ids: ozbox_core::approval_subject::Ids {
+            box_id: box_id.into(),
+            store_id: "store-1".into(),
+        },
+        envelope_key_hex: key.to_string().repeat(64),
+    }
+}
+
+impl World {
+    fn request_pinned(
+        &self,
+        w: &End,
+        worker: &str,
+        token: &str,
+        a: Attestation,
+        p: Option<ozbox_core::hub::approvals::ServicePin>,
+    ) -> EnrolRequest {
+        make_request_with_pin(
+            w.ops(Caller::Supervisor).as_ref(),
+            worker,
+            token,
+            a,
+            &self.hub.id().identity_fp(),
+            NOW,
+            p,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn the_workers_approval_service_is_pinned_by_the_owners_enrolment_and_the_plan_says_so() {
+    let w = world();
+    let wk = end();
+    let token = w.invite("worker-1", "box-w1", "i-0001");
+    let a = w.attest(
+        &w.aws,
+        &wk.id(),
+        "box-w1",
+        "i-0001",
+        "staging",
+        WORKER_CLASS,
+    );
+    let req = w.request_pinned(&wk, "worker-1", &token, a, Some(svc_pin("box-w1", 'a')));
+    w.hubd.receive_enrolment(&req, NOW).unwrap();
+    // pending is not pinned: nothing is in the roster until the owner applies the plan
+    assert!(w.hubd.roster().unwrap().is_empty());
+    let plan = w.hubd.plan_enrol("worker-1").unwrap();
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| s.contains("pin worker-1's approval service")
+                && s.contains("box box-w1")
+                && s.contains(&"a".repeat(16))),
+        "{:?}",
+        plan.steps
+    );
+    let rec = w.hubd.apply_enrol(&plan, NOW).unwrap();
+    assert_eq!(rec.service_pin, Some(svc_pin("box-w1", 'a')));
+    assert_eq!(
+        w.hubd.roster().unwrap()[0].service_pin,
+        Some(svc_pin("box-w1", 'a'))
+    );
+}
+
+#[test]
+fn a_worker_that_offers_no_approval_service_is_pinned_to_none_and_the_plan_says_so() {
+    let w = world();
+    let wk = end();
+    let token = w.invite("worker-1", "box-w1", "i-0001");
+    let a = w.attest(
+        &w.aws,
+        &wk.id(),
+        "box-w1",
+        "i-0001",
+        "staging",
+        WORKER_CLASS,
+    );
+    let req = w.request(&wk, "worker-1", &token, a);
+    w.hubd.receive_enrolment(&req, NOW).unwrap();
+    let plan = w.hubd.plan_enrol("worker-1").unwrap();
+    assert!(plan
+        .steps
+        .iter()
+        .any(|s| s.contains("pin no approval service")));
+    assert_eq!(w.hubd.apply_enrol(&plan, NOW).unwrap().service_pin, None);
+}
+
+#[test]
+fn a_pin_swapped_after_the_proof_or_malformed_is_refused_and_an_enrolled_worker_cannot_be_enrolled_again(
+) {
+    let w = world();
+    let wk = end();
+    let token = w.invite("worker-1", "box-w1", "i-0001");
+    let a = w.attest(
+        &w.aws,
+        &wk.id(),
+        "box-w1",
+        "i-0001",
+        "staging",
+        WORKER_CLASS,
+    );
+    // the pin was changed on the way to the hub: the proof (signed by the attested key) covered the other one
+    let mut req = w.request_pinned(
+        &wk,
+        "worker-1",
+        &token,
+        a.clone(),
+        Some(svc_pin("box-w1", 'a')),
+    );
+    req.service_pin = Some(svc_pin("box-w1", 'b'));
+    assert_eq!(code(w.hubd.receive_enrolment(&req, NOW)), CODE_WRONG_KEY);
+    // a pin added to a request that was proved without one
+    let mut req = w.request_pinned(&wk, "worker-1", &token, a.clone(), None);
+    req.service_pin = Some(svc_pin("box-w1", 'a'));
+    assert_eq!(code(w.hubd.receive_enrolment(&req, NOW)), CODE_WRONG_KEY);
+    // a pin that is not a key
+    let mut bad = svc_pin("box-w1", 'a');
+    bad.envelope_key_hex = "zz".into();
+    let req = w.request_pinned(&wk, "worker-1", &token, a.clone(), Some(bad));
+    assert_eq!(code(w.hubd.receive_enrolment(&req, NOW)), CODE_MALFORMED);
+    assert!(w.hubd.roster().unwrap().is_empty());
+    // enrolled with one pin, the worker is not enrolled again with another: not even an invite is planned for it
+    let req = w.request_pinned(&wk, "worker-1", &token, a, Some(svc_pin("box-w1", 'a')));
+    w.hubd.receive_enrolment(&req, NOW).unwrap();
+    let plan = w.hubd.plan_enrol("worker-1").unwrap();
+    w.hubd.apply_enrol(&plan, NOW).unwrap();
+    assert!(w
+        .hubd
+        .plan_invite(&spec("worker-1", "box-w1", "i-0001"))
+        .is_err());
+    assert_eq!(
+        w.hubd.roster().unwrap()[0].service_pin,
+        Some(svc_pin("box-w1", 'a'))
+    );
+}

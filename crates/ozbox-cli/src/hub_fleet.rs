@@ -150,11 +150,17 @@ impl HubAttachment {
         Ok(att)
     }
 
-    /// Add what enrolment attested to the channel, the fabric and the key directory, and drop what was removed.
+    /// Add what enrolment attested to the channel, the fabric and the key directory, and drop what was removed. Each worker's
+    /// approval-service pin follows the roster too: it is whatever the owner's enrolment applied (the ids and the public envelope
+    /// key the worker offered, covered by its proof), set when the worker joins and gone when it leaves. A message never moves it.
     pub fn sync_roster(&self) -> Result<usize, String> {
         let roster = roster_of(&self.socket)?;
         let mut now_known = BTreeSet::new();
+        let mut pins: BTreeMap<String, ServicePin> = BTreeMap::new();
         for r in &roster {
+            if let Some(p) = &r.service_pin {
+                pins.insert(r.worker.clone(), p.clone());
+            }
             if !self.dir.insert(&r.identity) {
                 continue;
             }
@@ -171,13 +177,32 @@ impl HubAttachment {
             }
             *known = now_known;
         }
+        let on_roster: BTreeSet<&str> = roster.iter().map(|r| r.worker.as_str()).collect();
+        let now = ozbox_hubd::daemon::now_ms();
+        let _ = self.svc.with(now, |_, st| {
+            // a worker that left the roster takes its pin with it
+            let stale: Vec<String> = st
+                .service_pins
+                .keys()
+                .filter(|w| !on_roster.contains(w.as_str()))
+                .cloned()
+                .collect();
+            for w in stale {
+                st.service_pins.remove(&w);
+            }
+            for (w, p) in &pins {
+                if st.service_pins.get(w) != Some(p) {
+                    st.pin_service(w, p.clone());
+                }
+            }
+        });
         Ok(roster.len())
     }
 
-    /// Pin a worker's approval service (its envelope key and ids), by a route the worker's own box cannot write: the owner's setup,
-    /// never a message. Until a worker is pinned, nothing it files is shown as a request.
-    // the owner's route for a pin is not built (the lead's B4-19 step uses the tests' seam); the harness and tests call it
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Pin a worker's approval service (its envelope key and ids) directly, from the server's own code (never a message): for a
+    /// worker whose enrolment offered none, and what tests use to pin a deliberately different key. The normal route is the owner's
+    /// enrolment, applied by [`HubAttachment::sync_roster`], which also replaces a pin set here for a worker that offered one and
+    /// drops the pin of a worker that left the roster. Until a worker is pinned, nothing it files is shown as a request.
     pub fn pin_service(&self, worker: &str, pin: ServicePin, now: u64) -> bool {
         self.svc
             .with(now, |_, st| st.pin_service(worker, pin))

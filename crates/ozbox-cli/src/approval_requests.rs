@@ -69,6 +69,8 @@ pub const RESERVED: &[&str] = &[
 
 pub const JOURNAL_FILE: &str = "approval-requests.journal";
 pub const STATE_FILE: &str = "approval-state.json";
+/// The approver set decisions relayed from the hub are checked against (no secret: public keys and names). Written only by root.
+pub const HUB_APPROVERS_FILE: &str = "hub-approvers.json";
 const SEAL_AAD: &[u8] = b"ozbox-approval-journal-v1";
 const KEEP_FINISHED_MS: u64 = 24 * 3_600_000;
 const REFUSED_LINES_PER_MINUTE: usize = 60;
@@ -661,6 +663,9 @@ impl RequestService {
         v: &Value,
         now: u64,
     ) -> Result<Value, String> {
+        if let Some(r) = self.hub_ops(store, gates, class, uid, v, now) {
+            return r;
+        }
         let op = match v["op"].as_str().unwrap_or("") {
             "areq_capabilities" => Op::Capabilities,
             "areq_file" => Op::File,
@@ -1134,6 +1139,170 @@ impl RequestService {
         }
     }
 
+    /// The worker's approval service for the hub agent (ADR 0042 section 8): **this** service verifies a decision `main` relayed, so a
+    /// compromised `main` can relay, delay, hide or deny and cannot make this box approve. Four operations, none on the box socket:
+    ///
+    /// * `areq_hub_pin` (supervisor socket, root): the public half of the envelope key and the ids every digest is computed with.
+    ///   Public by nature; the hub pins them by the owner's enrolment, never from a message.
+    /// * `areq_hub_pending` (supervisor socket): the signed envelopes of the requests pending now, in this epoch.
+    /// * `areq_hub_decide` (supervisor socket): a relayed decision. A Deny of a pending request needs no credential (fail safe);
+    ///   an approval needs a passkey assertion over **this box's own** challenge, from a credential in the approver set, checked by
+    ///   [`ozbox_core::hub::approvals::verify_fleet_decision`], then the book's own rules again. The Production tier and every scope
+    ///   a laptop key decides are refused there.
+    /// * `areq_hub_set_approvers` (**root only**): the approver set `main` trusts nothing about. It is written here, by a route the
+    ///   hub cannot reach, expires, and never goes back to an older sequence number.
+    fn hub_ops(
+        &self,
+        store: &EncryptedSecrets,
+        gates: &Gates,
+        class: SocketClass,
+        uid: Option<u32>,
+        v: &Value,
+        now: u64,
+    ) -> Option<Result<Value, String>> {
+        use ozbox_core::hub::approvals::{
+            verify_fleet_decision, ApproverSet, DecisionBody, ServicePin,
+        };
+        let op = v["op"].as_str().unwrap_or("");
+        if !matches!(
+            op,
+            "areq_hub_pin" | "areq_hub_pending" | "areq_hub_decide" | "areq_hub_set_approvers"
+        ) {
+            return None;
+        }
+        let allowed = match op {
+            "areq_hub_set_approvers" => class == SocketClass::Admin,
+            "areq_hub_pin" => matches!(class, SocketClass::Supervisor | SocketClass::Admin),
+            _ => class == SocketClass::Supervisor,
+        };
+        if !allowed {
+            return Some(Err("that is not allowed on this socket".into()));
+        }
+        Some((|| -> Result<Value, String> {
+            match op {
+                "areq_hub_pin" => Ok(json!({"pin": ServicePin {
+                    ids: self.ids.clone(),
+                    envelope_key_hex: self.envelope_key(store)?,
+                }})),
+                "areq_hub_pending" => {
+                    let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    let live: Vec<Request> = g
+                        .book
+                        .requests
+                        .iter()
+                        .filter(|r| {
+                            r.state == State::Pending
+                                && r.expires_at_ms > now
+                                && r.epoch == g.book.epoch
+                        })
+                        .cloned()
+                        .collect();
+                    drop(g);
+                    let mut out = Vec::new();
+                    for r in live
+                        .iter()
+                        .take(ozbox_core::hub::approvals::MAX_CARDS_PER_WORKER)
+                    {
+                        out.push(self.envelope(store, r)?);
+                    }
+                    Ok(json!({"envelopes": out}))
+                }
+                "areq_hub_decide" => {
+                    let d: DecisionBody = serde_json::from_value(v["decision"].clone())
+                        .map_err(|_| "that decision is not valid".to_string())?;
+                    let hub = v["hub"].as_str().unwrap_or("");
+                    if !ozbox_core::channel::wire::word_ok(hub) {
+                        return Err("that decision is not valid".into());
+                    }
+                    if let Some(p) = &d.passkey {
+                        for f in [
+                            &p.credential_id,
+                            &p.authenticator_data,
+                            &p.client_data,
+                            &p.signature,
+                        ] {
+                            if f.len() > MAX_EVIDENCE_FIELD {
+                                return Err("that decision is not valid".into());
+                            }
+                        }
+                    }
+                    if !ozbox_core::approval::request_id_ok(&d.request_id) {
+                        return Err(ozbox_core::approval::NOT_FOUND.to_string());
+                    }
+                    let req = {
+                        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        g.book
+                            .get(&d.request_id)
+                            .cloned()
+                            .ok_or(ozbox_core::approval::NOT_FOUND)?
+                    };
+                    let set = self.hub_approvers();
+                    let input =
+                        match verify_fleet_decision(set.as_ref(), &self.ids, &req, &d, hub, now) {
+                            Ok(i) => i,
+                            Err(e) => {
+                                self.audit_refused(
+                                    gates,
+                                    store,
+                                    now,
+                                    &format!(
+                                        "op=hub_decide id={} why={}",
+                                        log_id(&d.request_id),
+                                        sanitize_display(&e, 80)
+                                    ),
+                                );
+                                return Err(e);
+                            }
+                        };
+                    let r = self.apply_decision(
+                        store,
+                        gates,
+                        SocketClass::Supervisor,
+                        uid,
+                        &d.request_id,
+                        input,
+                        now,
+                    )?;
+                    Ok(json!({"state": r["request"]["state"]}))
+                }
+                _ => {
+                    let set: ApproverSet = serde_json::from_value(v["approvers"].clone())
+                        .map_err(|_| "that approver set is not valid".to_string())?;
+                    if set.approvers.len() > 32
+                        || set.approvers.iter().any(|a| {
+                            a.credential_id.len() > MAX_EVIDENCE_FIELD
+                                || a.public_key_hex.len() > 200
+                                || a.person.len() > 64
+                        })
+                    {
+                        return Err("that approver set is not valid".into());
+                    }
+                    if let Some(old) = self.hub_approvers() {
+                        if set.seq <= old.seq {
+                            return Err("that approver set is not newer than the one held".into());
+                        }
+                    }
+                    let bytes = serde_json::to_vec(&set)
+                        .map_err(|_| "that approver set is not valid".to_string())?;
+                    write_atomic(&self.state_dir.join(HUB_APPROVERS_FILE), &bytes)?;
+                    gates.audit_event(
+                        store,
+                        "secrets.approval.hub_approvers.set",
+                        "hub",
+                        &format!("seq={} approvers={}", set.seq, set.approvers.len()),
+                    );
+                    Ok(json!({"seq": set.seq, "approvers": set.approvers.len()}))
+                }
+            }
+        })())
+    }
+
+    /// The approver set root pinned for decisions relayed from `main`, if any. Read per call, so a set root replaced is the one used.
+    fn hub_approvers(&self) -> Option<ozbox_core::hub::approvals::ApproverSet> {
+        let b = std::fs::read(self.state_dir.join(HUB_APPROVERS_FILE)).ok()?;
+        serde_json::from_slice(&b).ok()
+    }
+
     fn decide(
         &self,
         store: &EncryptedSecrets,
@@ -1272,6 +1441,22 @@ impl RequestService {
             }
             _ => return Err("this route is not available in this release".into()),
         };
+        self.apply_decision(store, gates, class, uid, id, input, now)
+    }
+
+    /// The tail every decision shares: the book's own rules, then the audit line and the journal. An approval fails closed (no
+    /// chain line, no approval), a deny, revoke or cancel fails safe.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_decision(
+        &self,
+        store: &EncryptedSecrets,
+        gates: &Gates,
+        class: SocketClass,
+        uid: Option<u32>,
+        id: &str,
+        input: DecideInput,
+        now: u64,
+    ) -> Result<Value, String> {
         let (ctx, _) = self.ctx(store)?;
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         self.sweep_audit(gates, store, &mut g, now);
