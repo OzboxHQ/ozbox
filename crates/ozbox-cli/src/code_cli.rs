@@ -151,6 +151,8 @@ pub fn needs_change(state: code::ServiceState, secret_set: bool, new_password: b
 struct Plan {
     steps: Vec<String>,
     change_box: bool,
+    /// The IDE is set up, but the terminal settings on the box are from an older Oz Box: put the current ones there.
+    refresh_terminals: bool,
 }
 
 pub fn run_service(d: &mut Deps, a: &ServiceArgs, f: &Flags) -> Result<(), CliError> {
@@ -213,6 +215,10 @@ pub fn run_service(d: &mut Deps, a: &ServiceArgs, f: &Flags) -> Result<(), CliEr
                 plan.steps.push(t("code.plan_terminals", &[]));
             }
             plan.steps.push(t("code.plan_password", &[]));
+        } else if a.service == Service::Ide && !status.terminals {
+            plan.refresh_terminals = true;
+            plan.steps
+                .push(t("code.plan_refresh_terminals", &[("box", name)]));
         }
         if let Some((host, kind)) = &public {
             plan.steps.push(t(
@@ -258,8 +264,13 @@ pub fn run_service(d: &mut Deps, a: &ServiceArgs, f: &Flags) -> Result<(), CliEr
         }
         return Ok(());
     }
-    if plan.change_box || public.is_some() || a.remove_public {
+    if plan.change_box || plan.refresh_terminals || public.is_some() || a.remove_public {
         confirm(d, f, name)?;
+    }
+    if plan.refresh_terminals {
+        d.agent
+            .code_change(&rec, &Change::Terminals)
+            .map_err(|e| msg(e.to_string()))?;
     }
 
     // Apply.
@@ -415,9 +426,17 @@ fn local_session(
     } else {
         println!("{}", t("code.open_at", &[("url", &url)]));
         if svc == Service::Ide {
-            println!("{}", t("code.browser_note_title", &[]));
-            println!("{}", t("code.browser_chromium", &[]));
-            println!("{}", t("code.browser_firefox", &[]));
+            for k in [
+                "code.browser_note_title",
+                "code.browser_keys_mac",
+                "code.browser_keys_other",
+                "code.browser_tmux",
+                "code.browser_chromium",
+                "code.browser_firefox",
+                "code.browser_safari",
+            ] {
+                println!("{}", t(k, &[]));
+            }
         }
         if !a.no_open && !opened {
             println!("{}", t("code.err_open_failed", &[("url", &url)]));
@@ -1069,6 +1088,29 @@ mod tests {
     }
 
     #[test]
+    fn an_ide_set_up_by_an_older_version_gets_the_current_terminal_settings_and_keeps_its_password()
+    {
+        let r = rig(up(true, true, true));
+        r.agent.status.lock().unwrap().terminals = false;
+        r.secrets
+            .set("ide-password-dev", "abcdef0123456789abcdef0123456789")
+            .unwrap();
+        // it is a change on the box: no terminal and no --yes is refused, and nothing is changed
+        assert!(go(&r, &args(Service::Ide), false, false, false, false).is_err());
+        assert!(r.agent.changes.lock().unwrap().is_empty());
+        // a dry run changes nothing either
+        go(&r, &args(Service::Ide), true, true, false, false).unwrap();
+        assert!(r.agent.changes.lock().unwrap().is_empty());
+        go(&r, &args(Service::Ide), true, false, false, false).unwrap();
+        assert_eq!(*r.agent.changes.lock().unwrap(), vec![Change::Terminals]);
+        assert_eq!(
+            r.secrets.get("ide-password-dev").unwrap().as_deref(),
+            Some("abcdef0123456789abcdef0123456789"),
+            "the password is not changed"
+        );
+    }
+
+    #[test]
     fn a_service_that_is_not_set_up_is_planned_confirmed_and_set_up_with_a_new_password_kept_write_only(
     ) {
         let r = rig(up(true, false, false));
@@ -1283,8 +1325,12 @@ mod tests {
             "code.err_no_password",
             "code.ssh_written",
             "code.browser_note_title",
+            "code.browser_keys_mac",
+            "code.browser_keys_other",
+            "code.browser_tmux",
             "code.browser_chromium",
             "code.browser_firefox",
+            "code.browser_safari",
             "code.editor_unverified",
             "code.editor_steps_jetbrains",
             "code.forward_down",

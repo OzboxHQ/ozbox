@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { toast } from 'sonner';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -17,6 +16,7 @@ import { APPROVAL_SCOPES } from '../api/secrets';
 import { useApp } from '../App';
 import { withStepUp } from '../components/perm/with-step-up';
 import { t, type MessageKey } from '../lib/i18n';
+import { copyAndSay } from '../lib/copy-and-say';
 import { useAsync } from '../lib/use-async';
 
 const SCOPE_CHOICE: Record<ApprovalScope, MessageKey> = {
@@ -67,13 +67,8 @@ function CodeSheet({ minted, onClose }: { minted: Minted; onClose: () => void })
   const left = minted.expires_at_ms - now;
   const target = [minted.project, minted.env].filter((x) => x !== '').join(' / ');
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(minted.code);
-      toast.success(t('secrets.copied'));
-    } catch {
-      toast.error(t('secrets.copy_failed'));
-    }
+  function copy() {
+    return copyAndSay(minted.code, { kind: 'secret', done: t('secrets.copied'), failed: t('secrets.copy_failed') });
   }
 
   return (

@@ -8,6 +8,29 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.3.0-beta: copy and paste that behave like your own computer">
+  ## Copy and paste in the browser IDE, the dashboard's terminal and the desktop
+
+  Ctrl+V did not paste in the browser IDE's terminal on Windows and Linux, the dashboard's terminal typed `^V` instead of
+  pasting, and text selected in tmux never reached your clipboard from either terminal.
+
+  - **One set of keys per computer, in both terminals.** On a Mac, Cmd+C and Cmd+V, with Ctrl+C stopping the running
+    command. On Windows and Linux, Ctrl+C copies while text is selected and stops the command when nothing is; Ctrl+V,
+    Ctrl+Shift+V and Shift+Insert paste. Multi-line pastes wait for Enter.
+  - **Selecting in tmux copies to your clipboard**, in the browser IDE and in the dashboard's terminal: drag or
+    double-click, and let go. In the IDE a small Oz Box extension does this and says so in the status bar each time.
+  - **Copy with nothing selected** opens the text on the screen in a box you can select from, on a phone or tablet as well.
+  - **A program on the box can never read your clipboard**, and can only write to it right after you pressed a key or
+    clicked; otherwise you are asked.
+  - **Copy buttons for secrets say so** once the secret is on your clipboard.
+  - **The desktop's clipboard** goes both ways, up to 1 MB per copy.
+  - **Clear help for your browser** in the Code panel, the terminal and `ozbox code` (Chrome, Firefox and Safari differ).
+
+  **How to get it.** Upgrade the CLI and the dashboard. The next `ozbox ide <box>` offers to update the box's key bindings,
+  tmux settings and IDE extension (your own keys are kept); reload the IDE tab afterwards.
+  See [Coding from anywhere](/use-cases/coding-from-anywhere).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

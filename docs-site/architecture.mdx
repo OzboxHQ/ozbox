@@ -65,6 +65,10 @@ narrows the API, not the authority:** run start and the terminal already act as 
 has that authority; the protection is that the box user cannot reach the dashboard. A run started on it passes the same
 admission, caps and per-run token as one started on the box socket, and every request on it is logged with `via=supervisor`, the
 route's name and the outcome, never its path or body. No socket answers an agent's permission request; until a caller exists, the agent's hook hands the question back to the person in their own terminal. The daemon is handed the socket only if it declares that it takes one.
+The web IDE's terminal clipboard is a small editor extension in the box user's own editor (code-server's extension host)
+that listens on a Unix socket under `~/.local/state/ozbox/clip/` (folder 0700, socket 0600). tmux's `copy-command` hands each
+copy to it, and it writes the person's clipboard only while its window is in front, with a size cap; it never reads the
+clipboard. Anything running as the box user can reach it, as it can already drive tmux.
 A supervised agent run on a real box goes through that API (ADR 0019): the prompt is the run's standard input, and a run is
 given a per-run token and the address of the credential broker, never a provider key. The broker runs in `ozbox serve` on the
 operator's computer, so a reverse forward (`ssh -R 127.0.0.1:<port>:127.0.0.1:<port>`) over the connection already open to the

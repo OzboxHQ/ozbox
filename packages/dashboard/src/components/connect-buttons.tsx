@@ -1,4 +1,5 @@
-import { toast } from 'sonner';
+import { copyAndSay } from '../lib/copy-and-say';
+import { t } from '../lib/i18n';
 
 import { Button } from '@/components/ui/button';
 import type { BoxRecord } from '../api/types';
@@ -8,13 +9,8 @@ import { connectInfo } from '../lib/connect';
 export function ConnectButtons({ box, domain, className }: { box: BoxRecord; domain: string | null | undefined; className?: string }) {
   const c = connectInfo(box, domain);
   const reasonId = `connect-reason-${box.spec.name}`;
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(c.command);
-      toast.success('Connect command copied');
-    } catch {
-      toast.error('Could not copy. The command is: ' + c.command);
-    }
+  function copy() {
+    return copyAndSay(c.command, { done: t('connect.copied'), failed: t('connect.copy_failed', { command: c.command }) });
   }
   return (
     <div className={className}>

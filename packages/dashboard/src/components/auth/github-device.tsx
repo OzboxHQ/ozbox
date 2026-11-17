@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import type { GithubStart, SessionApi, SessionStatus } from '../../api/session';
 import { signInMessage } from '../../lib/auth-errors';
 import { t } from '../../lib/i18n';
+import { copyAndSay } from '../../lib/copy-and-say';
 
 /** GitHub's device flow: show the code, let the person approve on GitHub, poll at the pace the server sets. */
 export function GithubDevice({ api, onStatus, onCancel }: { api: SessionApi; onStatus: (s: SessionStatus) => void; onCancel: () => void }) {
@@ -69,10 +70,8 @@ export function GithubDevice({ api, onStatus, onCancel }: { api: SessionApi; onS
               variant="outline"
               className="h-11 lg:h-9"
               onClick={() => {
-                void navigator.clipboard
-                  .writeText(start.user_code)
-                  .then(() => setCopied(true))
-                  .catch(() => undefined);
+                // the code is shown on the page and typed on GitHub; it is not a secret
+                void copyAndSay(start.user_code, { done: t('auth.github_copied'), failed: t('openin.copy_failed', { what: start.user_code }) }).then(setCopied);
               }}
             >
               {copied ? t('auth.github_copied') : t('auth.github_copy')}

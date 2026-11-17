@@ -24,6 +24,7 @@ import { CannotNote } from '../components/role-scope';
 import { SourceNote } from '../components/source-badge';
 import { fmtBytes } from '../lib/format';
 import { t, type MessageKey } from '../lib/i18n';
+import { copyAndSay } from '../lib/copy-and-say';
 import { boxChoiceLabel, boxChoices, defaultEngine, deliveryOutcome, deliveryWhy, emptyTriggerForm, engineChoices, triggerFormToInput, triggerSchema, type TriggerForm } from '../lib/sched';
 import { useAsync } from '../lib/use-async';
 import { useCan } from '../lib/use-can';
@@ -176,7 +177,7 @@ function SecretSheet({ trigger, onClose }: { trigger: TriggerItem; onClose: () =
             variant="outline"
             className={TAP_ACTION}
             onClick={() => {
-              void navigator.clipboard?.writeText(trigger.secret ?? '').then(() => setCopied(true));
+              void copyAndSay(trigger.secret ?? '', { kind: 'secret', done: t('triggers.copied'), failed: t('triggers.copy_failed') }).then(setCopied);
             }}
           >
             {copied ? t('triggers.copied') : t('triggers.copy')}
