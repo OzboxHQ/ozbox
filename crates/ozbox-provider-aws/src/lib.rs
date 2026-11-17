@@ -1305,6 +1305,43 @@ impl AwsBackend {
         answer
     }
 
+    /// The account's own image is a deliberate choice, but not a reason to stay behind: when the publisher's newest
+    /// VERIFIED public release is newer than the own image's release (and is one this program can use, or the own one is
+    /// not), the public one is used and the own one is named as passed over. Anything that keeps the public image from being
+    /// verified (no publisher, a failed check, nothing listed) keeps the own image, as before.
+    fn newer_public_than(&self, own: ImageInfo, region: Option<&str>) -> ImageInfo {
+        let Some(publisher) = self.publisher() else {
+            return own;
+        };
+        let Some(own_release) = own.release.clone() else {
+            return own;
+        };
+        let Ok(public) = self.latest_public(&publisher, region) else {
+            return own;
+        };
+        let Some(pub_release) = public.release.clone() else {
+            return own;
+        };
+        let program = self.program();
+        let usable = |r: &str| {
+            ozbox_core::release::compat(&program, r) == ozbox_core::release::Compat::Compatible
+        };
+        let newer =
+            public_images::version_order(&pub_release, &own_release) == std::cmp::Ordering::Greater;
+        if !public.signature_verified || !newer || (!usable(&pub_release) && usable(&own_release)) {
+            return own;
+        }
+        let mut skipped = own.skipped.clone();
+        skipped.push(skip_line(
+            &own,
+            &format!(
+                "this account's own image, older than the signed public release {pub_release}"
+            ),
+        ));
+        skipped.extend(public.skipped.iter().cloned());
+        ImageInfo { skipped, ..public }
+    }
+
     /// A stable program never boots a pre-release by default. Decided from the verified manifest's own field.
     fn is_prerelease_for_stable_program(
         &self,
@@ -1913,7 +1950,8 @@ impl Backend for AwsBackend {
             "Name=architecture,Values=x86_64",
         ])?;
         if !found.images.is_empty() {
-            return Ok(self.pick_own(&found.images, region));
+            let own = self.pick_own(&found.images, region);
+            return Ok(self.newer_public_than(own, region));
         }
         // 2. The project's public images, only those the publisher account owns and the signed manifest lists.
         let Some(publisher) = self.publisher() else {
@@ -4618,10 +4656,15 @@ Usage: ozbox secrets <COMMAND>",
         );
         aws.publish_release_of(V, "us-east-1", &["ami-0pub"]);
         let latest = provider_publisher(&aws, None).latest_image(None)?;
+        // the own image's release (2026.11.0) is newer than the public one: it stays the choice
         assert_eq!(
             latest.id, NEW_IMAGE,
             "the account's own image is a deliberate choice"
         );
+        // with public images turned off they are not even looked at
+        let aws = Arc::new(FakeAws::new());
+        let latest = provider_publisher(&aws, Some("none")).latest_image(None)?;
+        assert_eq!(latest.id, NEW_IMAGE);
         assert!(
             aws.calls().iter().all(|c| c
                 .args
@@ -4629,6 +4672,59 @@ Usage: ozbox secrets <COMMAND>",
                 .all(|a| a != public_images::PUBLISHER_ACCOUNT_ID)),
             "the public images are not even looked at"
         );
+        Ok(())
+    }
+
+    /// B4-18 item 3: an account's own image of an OLDER signed release does not keep `latest` behind the publisher's newer
+    /// signed release; an own image as new or newer, or a public one that does not verify, keeps the own one.
+    #[test]
+    fn latest_prefers_a_newer_signed_public_release_over_the_accounts_own_older_image() -> TestResult
+    {
+        let setup = |own: &str, public_listed: bool| {
+            let aws = Arc::new(FakeAws::new());
+            aws.remove_images();
+            aws.add_image(
+                "ami-0own",
+                "x86_64",
+                "available",
+                "2026-11-20T00:00:00.000Z",
+                Some(own),
+            );
+            aws.publish_release_of(own, "us-east-1", &["ami-0own"]);
+            aws.add_public_image(
+                "ami-0pub",
+                public_images::PUBLISHER_ACCOUNT_ID,
+                "ozbox-0.2.1-20261201000000",
+                "2026-12-01T00:00:00.000Z",
+            );
+            if public_listed {
+                aws.publish_release_of("0.2.1", "us-east-1", &["ami-0pub"]);
+            }
+            aws
+        };
+        // older own release: the newer signed public one wins, and the own one is named as passed over
+        let aws = setup("0.2.0", true);
+        let latest = provider_program(&aws, "0.2.1").latest_image(None)?;
+        assert_eq!(latest.id, "ami-0pub");
+        assert!(latest.signature_verified);
+        assert!(
+            latest.skipped.iter().any(|l| l.starts_with("ami-0own ")
+                && l.contains("older than the signed public release 0.2.1")),
+            "{:?}",
+            latest.skipped
+        );
+        // the same release in the account: the own image stays
+        let aws = setup("0.2.1", true);
+        let latest = provider_program(&aws, "0.2.1").latest_image(None)?;
+        assert_eq!(latest.id, "ami-0own");
+        // a public one that does not verify never displaces the own one
+        let aws = setup("0.2.0", false);
+        let latest = provider_program(&aws, "0.2.1").latest_image(None)?;
+        assert_eq!(latest.id, "ami-0own");
+        // a newer public release this program cannot use (another minor) does not displace a usable own one
+        let aws = setup("0.1.9", true);
+        let latest = provider_program(&aws, "0.1.9").latest_image(None)?;
+        assert_eq!(latest.id, "ami-0own");
         Ok(())
     }
 
