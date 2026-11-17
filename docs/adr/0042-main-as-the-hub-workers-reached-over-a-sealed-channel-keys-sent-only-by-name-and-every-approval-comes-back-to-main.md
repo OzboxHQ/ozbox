@@ -4,7 +4,7 @@
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub. **Integrated (2026-11-17, for 0.3.0-beta, Preview until B4-19's real run):** every part below is wired into one hub and run end to end, in one process, over a loopback network, on the real daemon, transport, signer, sealer, enrolment and registrar code (section "Integration" at the end): workers enrol over the hub's own listener, dial out, take tasks and run them on different engines, ask for keys by name, send approvals to the fleet inbox, and their results go through the merge queue and lanes. **Never run on a real box:** that is B4-19's owner run. Not built: the box's own run transport behind the worker agent (a task is refused by name until it is attached), the AWS claim service's deployment, nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub. **Integrated (2026-11-17, for 0.3.0-beta, Preview until B4-19's real run):** every part below is wired into one hub and run end to end, in one process, over a loopback network, on the real daemon, transport, signer, sealer, enrolment and registrar code (section "Integration" at the end): workers enrol over the hub's own listener, dial out, take tasks and run them on different engines, ask for keys by name, send approvals to the fleet inbox, and their results go through the merge queue and lanes. **Never run on a real box:** that is B4-19's owner run. The worker's real run path (a task is a supervised run of its own box), its approval service and the owner's pin of it, its fabric end run by the agent, and the conductor's branch-head read are built and tested in the same harness (second pass, same day). Not built: the AWS claim service's deployment, nested hubs, and the tool that writes a worker's approver set from the owner's passkeys. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -1454,12 +1454,30 @@ box. The harness is `crates/ozbox-cli/src/serve/hub_fleet_e2e.rs` (with `ozbox-h
   end of the channel over a connection it dialed out, takes tasks, runs them through the engine-neutral session on the engine the task
   names (`Assign.engine` and `Assign.model`, filled from the feature) or the box's default, relays asks, state and results in the
   channel's own kinds, asks for keys by name, applies the decisions its own approval service verified, and deletes every key when the
-  hub has been out of reach for two minutes. **Not built:** the box's own run transport behind it (so on a real box every task is
-  refused by name, "no engine could be started", until it is attached), and the agent keeps no approval service on a real box yet.
+  hub has been out of reach for two minutes. **The run path is the box's own supervisor, not a second way to start a program**
+  (`ozbox_hubd::supervised`, `--tasks PATH` or beside `OZBOX_SETTINGS`): a task becomes one `RunSpec` queued in the box's task store through
+  `RunStarter::start_run` (origin `orchestration`, requested by `hub:<name>`, keyed by the task so a restarted agent finds its run again,
+  time-limited by the task's lease), and the box's supervisor (ADR 0014) admits and runs it with everything it already applies: the Models
+  routing for the engine and the provider (the hub names an engine and at most a `provider:model`; a bare model name is left to the box's
+  routing), the credential broker's per-run token (ADR 0017, so this module holds no key and builds no environment), the subscription
+  opt-in (B4-25), and the spend caps and monthly ledger (the one cap). The agent reads the run back as engine events: a cap pause or a
+  request waiting for a person is reported to the hub as `blocked` with the reason (never a failure, never a grant), a finished run as its
+  result on the commit its branch points at, a failed or stopped one as `failed`. A task the hub ends (`task.end`) or whose lease runs
+  out stops its run cleanly (the supervisor cancels it and stops the program); an engine with no headless adapter (OpenCode, Aider) or
+  that the box does not have is refused by name, and a Production declaration is refused at the agent again (D2, a fifth place beside the
+  four above) with nothing queued. **The approval service** is the worker's own secrets service on its supervisor socket
+  (`areq_hub_pending`, `areq_hub_decide`, `areq_hub_pin`, `areq_hub_set_approvers`): it signs the pending requests' envelopes, and **it
+  verifies a decision `main` relayed** against an approver set only root can write (`areq_hub_set_approvers` on the admin socket; the
+  sequence number never goes back, the set expires), over a challenge computed from its own ids, then the request book's own rules again.
+  **The conversation fabric** on the worker is the agent's: it pumps the replica every tick and serves it on a local socket
+  (`--fabric-socket`, a folder of the agent's group) that the box's tool host reaches with `SocketFabric`
+  (`OZBOX_HUB_AGENT_FABRIC` and `OZBOX_HUB_WORKER_NAME` on `ozbox serve`), so a worker's messages, shared memory and skills go through the
+  agent and nothing else.
 - **The merge queue checks the commit.** The lane's green is recorded against the commit it ran on, and a branch merges only while it
   still points at that commit (a worker that reported another, or a conductor side that sees the branch elsewhere, goes back through
-  the lane). The conductor box's own merger does not yet read a branch head (`Merger::head` is the seam), so the check there rests on
-  the reported commit.
+  the lane). The conductor box's merger reads the branch head from the remote itself (`Merger::head_step`: a fetch, then the
+  remote-tracking ref, a step at a time through the box daemon; `Pending` until it can say, a branch the remote lacks is an error), so the
+  check rests on the actual head, not only the commit a worker reported, and nothing is merged while the read is pending.
 
 **What the harness proves** (each a test that fails on the bug): two boxes enrolled through the real laptop registrar over the hub's
 listener, and one AWS-claim worker enrolled the same way from a fixture-signed instance identity document; workers connect by dialing
@@ -1472,9 +1490,25 @@ on the other, with a reviewed skill used by both; a person on Telegram and Whats
 replies; a worker that goes offline is reported unreachable and takes its queued task when it returns; both results go through the
 merge queue with a lane split across both workers, and a branch that moved after its lane passed is not merged on the old verdict.
 
+**Second pass (the same day), what the harness now runs.** Each worker is a box with its own task store, supervisor and secrets service: a
+task is queued by the agent and run by the supervisor on the fake-program adapters (the store's record shows the hub as requester, the
+orchestration as origin, the lease as the time limit, no provider named, and no credential in the run's environment); a task the hub
+ends stops its run; Production and an engine the box cannot run are refused with nothing queued; an approval service enrolled with its
+pin is shown on `main` with no further step, one that offered none and one pinned to another key are not (the hub rejects the envelope),
+and the real request journal verifies the relayed passkey; the workers' messages, memory and skills go through the agent's socket; and the
+merge check waits for the head read and refuses a moved branch.
+
 **Not covered.** The time is the real clock, so the offline test cuts a cable, it does not simulate a long partition; the reachability
-rules for 90 seconds of silence are H3's own tests. The worker's service pin (the approval service's envelope key and ids) is set by
-`HubAttachment::pin_service`; the owner's route to set it on a real box, and an attestation of that key at enrolment, are not built.
+rules for 90 seconds of silence are H3's own tests. The worker's service pin (the approval service's envelope key and ids) rides in the enrolment request
+under the worker's own proof (so only the attested channel key can offer it), is shown in the owner's enrolment plan, is kept in the roster
+and applied by the server from it; a second enrolment of a worker is refused, so a service key is not swapped by one. It is **not** vouched
+for by the registrar (a registrar attests the machine and the channel keys, not the service key), and `HubAttachment::pin_service` remains
+only as the server's own override for a worker that offered none. **Not built:** the command that writes a worker's approver set from the
+owner's passkeys (the service's admin operation exists and is tested; until a command carries the dashboard's credentials to it, a real
+worker decides no approval from `main`); a worker's task store has the agent's user and the box's supervisor sharing one file (the folder
+the unit may write); the fabric replica is in memory (a restart loses the posts the hub has not acknowledged, which the hub resends nothing
+for); and nothing here has run on a real box. The tool host's attachment of the worker fabric (`ozbox serve`) is tested only through the
+harness's tool host.
 The `BOX_REACH` rows for the new reserved names (`hub-key-`, `hub-release-`, `hub-delivered-`: box user none) belong to B4-29.
 
 **B4-19, the owner's real run on the integrated hub** (one `main`, two workers; 0.3.0-beta; every command below is on the box or computer
@@ -1496,12 +1530,23 @@ named, and the expected result follows it):
    --hub-identity-fp <fp> --secrets-socket /run/ozbox-secrets/supervisor/secrets.sock`. Expect "the hub holds the request for its owner".
 7. On `main`: `ozbox-hubd ctl --socket ... enrol_pending` lists `w1`; `enrol_plan '{"worker":"w1"}'`; read it; `enrol_apply '{"plan":<plan>}'`.
    Expect `roster` to list `w1`. Within a few seconds the server's tick has added it: no other step.
-8. On the worker, as root: `ozbox-hubd agent-setup w1 <main>:7443 <fp>`, then `systemctl start ozbox-hub-agent`. Expect, on `main`, the
-   worker reachable (the hub's status shows it connected) and `hub.session from=w1` in the hub's audit.
+   If the worker's secrets service keeps the request journal (`ozbox secrets serve` does), the request also carries its approval service's
+   pin, and the plan in step 7 has a line "pin w1's approval service: box ... envelope key ...": read it. Without a journal the plan says
+   "pin no approval service" and nothing the worker asks is shown as a request.
+8. On the worker, as root: `ozbox-hubd agent-setup w1 <main>:7443 <fp> <tasks-file>` (the box's task store, the file `ozbox serve` keeps its
+   runs in; the folder is the one place the agent may write), then `systemctl start ozbox-hub-agent`. For the supervisor to run what the
+   agent queues, `ozbox serve` on the worker must use the same file (`OZBOX_SETTINGS` in the same folder) and be able to enter
+   `/run/ozbox-hub-agent` (the folder of the agent's group) with `OZBOX_HUB_AGENT_FABRIC=/run/ozbox-hub-agent/fabric.sock` and
+   `OZBOX_HUB_WORKER_NAME=w1`. Expect, on `main`, the worker reachable (the hub's status shows it connected) and `hub.session from=w1` in
+   the hub's audit.
 9. Repeat 4 to 8 for `w2`. Then `ozbox orch start`, hand each worker a task with `transport: hub`, and `ozbox orch merge`.
-   **Expected today:** each worker answers "no engine could be started" (the box's run transport is not attached to the agent). That
-   refusal, the Production refusals (a task naming `production`, a key whose name says `live`) and a key delivery for a staging
-   task are what the run can prove; a full task round needs the run transport.
+   **Expected:** each worker's task **runs**: `ozbox runs list` on the worker shows it as a run requested by `hub:main`, the supervisor
+   admits it on the engine and provider the worker's own Models routing gives it (or says why it waits), the hub's status shows `working`
+   and then the result on the commit the branch points at, and `ozbox orch merge` takes it through the queue (the merge read checks the
+   remote's head first). Also expect the refusals: a task naming `production` or a key whose name says `live`, and an engine the worker
+   has no adapter for ("cannot run headless"). Spend shows in the worker's own cost views under the one cap. A task you stop on `main`
+   stops the run on the worker. **Not provable until a command writes the approver set:** deciding a worker's request from `main`'s
+   dashboard (the pending request is announced and its card is shown only if the service was pinned; the decision needs the set).
 10. Keys: on `main`, as root, stage a staging value: send `{"op":"hub_release_set","env":"staging","name":"stripe-test","value":"..."}` to the
     secrets service's admin socket; declare `stripe-test` in a task; the worker's service then holds it under `hub-delivered-*`, and it is gone
     after the task ends or the hub is stopped for two minutes. A `production` environment is refused at the admin socket.

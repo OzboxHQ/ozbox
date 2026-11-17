@@ -39,6 +39,9 @@ structural guard against any inbound rule. Each module's variables and outputs a
   workers' signed, sealed messages for the supervisor, enrols workers (an invite, an attested request, then plan and apply), and holds
   no private key: the channel's keys are in the secrets service, which gives the daemon's socket only the handshake signature and an
   enrolment token's tag. It binds no network port (`RestrictAddressFamilies=AF_UNIX`).
+  Its worker side, `ozbox-hubd agent` (Preview), dials out to the hub and runs what it is handed as a run of the worker's own box (queued in
+  the box's task store and run by its supervisor), announces the worker's approval requests, and runs the worker's end of the conversation
+  fabric, served to the box's tool host on a local socket.
 
 ## The box daemon (`ozboxd`)
 

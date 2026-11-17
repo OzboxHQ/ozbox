@@ -17,7 +17,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A worker joins by sending its request to the hub itself,** with a one-use invite and an attestation from your computer (or, on AWS, the claim service). You confirm a plan and it is on the roster; there is no list to edit by hand.
   - **A worker's approval requests appear in your fleet inbox on `main`;** you decide once with your passkey and the worker checks your decision itself.
   - **Keys reach a worker by name, sealed to it.** Production never does: it is refused in four places, and a worker deletes its keys when its task ends or the hub is out of reach for two minutes.
-  - **A branch is merged only while it still points at the commit its tests ran on.**
+  - **A task you hand a worker runs as a run of that worker's own box,** so its Models routing, its credential broker, its subscription choice and its spend caps all apply; a task you stop on `main` stops the run on the worker, and the worker's messages and shared memory go through its agent. Production is refused at the agent too.
+  - **A branch is merged only while it still points at the commit its tests ran on,** and the box doing the merge reads the branch's head from the remote to check it.
   - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [Agents that talk](/use-cases/agents-talk).
 </Update>
 

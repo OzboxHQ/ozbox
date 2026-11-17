@@ -226,8 +226,11 @@ box has a hub yet, and none has run on a real cloud box.**
   sent to the hub's own listener; you confirm the plan and it is on the roster, with no other step. It then dials out, takes tasks,
   runs them on whichever engine the task names, asks for staging keys by name, sends its approvals to `main`'s fleet inbox, and its
   finished commits go through the merge queue and lanes. Agents on different workers, even on different engines and providers, can
-  message each other and share reviewed memory and skills (see [Agents that talk](agents-talk.md)). **Not done:** a real worker box's
-  own run transport is not attached to its hub agent, so a task handed to one is refused by name until it is. The registrars are built
+  message each other and share reviewed memory and skills (see [Agents that talk](agents-talk.md)). On a worker, a task is a run of that
+  box's own supervisor (its Models routing, its credential broker, its subscription choice and its spend caps apply, and a task you stop on
+  `main` stops there), and the worker's messages and memory go through its agent. **Not done:** none of this has run on a real box yet (that is
+  the owner's run), and deciding a worker's request from `main`'s dashboard needs a command that writes the worker's approver set from your
+  passkeys, which is not built. The registrars are built
   (Preview, CI only; never run against real AWS or a real box); an AWS worker needs the claim service, which is not deployed.
 - **The registrars that vouch for a worker are built** (Preview, CI only; never run against real AWS or a real box). On AWS a worker
   proves it is the EC2 instance it claims with the identity document AWS signs, checked against AWS's published certificate for its
@@ -242,11 +245,13 @@ Design: [ADR 0042](../adr/0042-main-as-the-hub-workers-reached-over-a-sealed-cha
 ## What is not done yet
 
 - **A real cloud box and a real agent.** Everything here is tested with fake boxes and a simulated agent.
-- **A real worker's engine.** The box's own run transport is not attached to the hub agent yet. The AWS claim service that would call
-  the AWS registrar is not deployed. Section 11 is the part that is built.
+- **A real worker's run.** The worker's run path is built (a task is queued as a run of the worker's own box and run by its supervisor) and
+  tested end to end with fake programs; it has not run on a real box. The AWS claim service that would call the AWS registrar is not
+  deployed. Section 11 is the part that is built.
 - **Over the hub:** a laptop's decision on a worker, an agent's own permission asks (only requests in the worker's request book travel),
   and the lane's comparison of the test list with the base branch and its report merge. The check that a branch still points at the
-  commit the lane tested is built (the conductor box's own merger does not read a branch head yet, so there it rests on the reported commit).
+  commit the lane tested is built, and the conductor box's merger reads the branch's head from the remote for it, so it rests on the actual
+  head and not only the commit a worker reported.
 - **A message into a worker that is mid-turn.** It is typed in only when the worker's run is a conversation; otherwise the answer waits until the worker ends its turn, then resumes it from its branch.
 - **A claims check inside the engine** before each edit (an engine hook). The tool and the worker's instructions carry it today.
 - The **stdio** transport for the tools.
