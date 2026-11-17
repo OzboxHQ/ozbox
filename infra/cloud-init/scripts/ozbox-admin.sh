@@ -43,7 +43,7 @@
 # OZBOX_JOURNALCTL, OZBOX_LOGINCTL, OZBOX_REQUESTER_UID, OZBOX_USER_MANAGER.
 set -euo pipefail
 
-helper_rev=1
+helper_rev=2
 dir="${OZBOX_ADMIN_DIR:-/run/ozbox-admin}"
 log="${OZBOX_ADMIN_LOG:-/var/log/ozbox-admin.log}"
 reown="${OZBOX_REOWN:-/usr/local/sbin/ozbox-reown.sh}"
@@ -307,7 +307,14 @@ run_action() {
     enable-linger)
       [ $# = 0 ] || { echo "enable-linger takes no arguments"; return 2; }
       # The user is fixed here, never taken from the request.
-      "$loginctl_bin" enable-linger ozbox 2>&1 && echo "the box user's services now start at boot and keep running after logout" || return 1
+      # bounded: a login manager that does not answer must not hold the helper (and every request after it) forever; the
+      # box user's step below then turns linger on itself, with its own retries
+      if timeout 60 "$loginctl_bin" enable-linger ozbox 2>&1; then
+        echo "the box user's services now start at boot and keep running after logout"
+      else
+        [ -x "$user_manager" ] || return 1
+        echo "the login manager did not answer; the box user's service step turns linger on instead"
+      fi
       # and a manager that started before /work was mounted (so started none of the enabled units) is started properly
       # once; a healthy one is left alone
       if [ -x "$user_manager" ]; then "$user_manager" 2>&1 || return 1; fi ;;

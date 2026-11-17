@@ -89,6 +89,11 @@ impl Rig {
             &format!("echo shred \"$@\" >>'{l}'; shift; rm -f \"$@\" 2>/dev/null; exit 0"),
         );
         tool(&b, "runuser", &format!("echo runuser \"$@\" >>'{l}'"));
+        tool(
+            &b,
+            "systemd-run",
+            &format!("echo systemd-run \"$@\" >>'{l}'"),
+        );
         tool(&b, "install", &format!("echo install \"$@\" >>'{l}'"));
         tool(&b, "systemctl", &format!("echo systemctl \"$@\" >>'{l}'; case \"$1\" in restart) touch '{0}/active';; disable) [ \"$2\" = --now ] && rm -f '{0}/active';; is-active) [ -e '{0}/active' ];; esac; exit 0", r.display()));
         // the installed daemon: one that takes its socket from systemd carries the marker (G1 N4)
@@ -120,6 +125,8 @@ impl Rig {
             .env("OZBOX_PASSWD", b.join("passwd"))
             .env("OZBOX_SHRED", b.join("shred"))
             .env("OZBOX_RUNUSER", b.join("runuser"))
+            .env("OZBOX_SYSTEMD_RUN", b.join("systemd-run"))
+            .env("OZBOX_RETRY_DELAYS", "0 0")
             .env("OZBOX_GPASSWD", b.join("gpasswd"))
             .env("OZBOX_DAEMON_BIN", r.join("ozboxd"))
             .env("OZBOX_DASHBOARD_SETTLE_S", "0")
@@ -298,6 +305,7 @@ fn a_dashboard_that_does_not_start_puts_the_old_one_back() {
         .env("OZBOX_CHOWN", b.join("chown"))
         .env("OZBOX_PASSWD", b.join("passwd"))
         .env("OZBOX_RUNUSER", b.join("runuser"))
+        .env("OZBOX_SYSTEMD_RUN", b.join("systemd-run"))
         .output()
         .unwrap();
     assert!(!o.status.success());
@@ -1343,4 +1351,137 @@ fn a_dashboard_that_runs_but_does_not_answer_is_reported_as_failed_not_ok() {
         "{}",
         rig.log()
     );
+}
+
+fn steps(rig: &Rig) -> String {
+    std::fs::read_to_string(rig.dir.path().join("etc/ozbox/first-boot-steps")).unwrap_or_default()
+}
+
+fn agent_rig() -> (Rig, PathBuf) {
+    let rig = Rig::new(Some(OLD_UNIT));
+    std::fs::create_dir_all(rig.dir.path().join("work/home/ozbox")).unwrap();
+    std::fs::create_dir_all(rig.dir.path().join("etc/ozbox")).unwrap();
+    let bin = executable(&rig, "ozbox-bin");
+    (rig, bin)
+}
+
+/// B4-12: the plain way works: one runuser call, systemd is not asked, and the step is recorded for the self-test.
+#[test]
+fn the_agent_settings_step_is_recorded_when_it_works() {
+    let (rig, bin) = agent_rig();
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!rig.log().contains("systemd-run"), "{}", rig.log());
+    assert_eq!(steps(&rig), "agent_tools ok runuser 1\n");
+}
+
+/// B4-12: after an upgrade the setup's `runuser` was refused ("cannot set user id"), so the coding agents never got the Oz
+/// Box tools. Now systemd starts the step as the box user instead, in a unit of its own, with no terminal and no privileges
+/// to gain, and the person's home.
+#[test]
+fn a_refused_runuser_hands_the_agent_settings_step_to_systemd_as_the_box_user() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        &format!(
+            "echo runuser \"$@\" >>'{}'; echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+            l.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    let call = rig
+        .log()
+        .lines()
+        .find(|x| x.starts_with("systemd-run "))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("systemd was not asked:\n{}", rig.log()));
+    for want in [
+        "--wait",
+        "--pipe",
+        "--uid=ozbox",
+        "--gid=ozbox",
+        "--property=NoNewPrivileges=yes",
+        "/work/home/ozbox",
+        "ozbox-bin agent-mcp install",
+    ] {
+        assert!(call.contains(want), "{want}: {call}");
+    }
+    assert!(!call.contains("ozbox-supervisor"), "{call}");
+    assert_eq!(steps(&rig), "agent_tools ok systemd-run 1\n");
+}
+
+/// B4-12: a systemd that is not answering yet is asked again after a pause, a bounded number of times, never forever; a
+/// step that never ran is recorded as failed, naming why, and does not stop the rest of the setup.
+#[test]
+fn a_systemd_that_is_not_ready_is_asked_a_bounded_number_of_times() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        "echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+    );
+    // not ready on the first try, then it works
+    let n = rig.dir.path().join("tries");
+    tool(
+        &b,
+        "systemd-run",
+        &format!(
+            "echo systemd-run \"$@\" >>'{}'; echo x >>'{}'; if [ \"$(wc -l <'{}')\" -lt 2 ]; then echo 'Failed to connect to bus: No such file or directory' >&2; exit 1; fi; exit 0",
+            l.display(),
+            n.display(),
+            n.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(steps(&rig), "agent_tools ok systemd-run 2\n");
+
+    // never ready: the first try and one per pause (two), then it stops and says what to run
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    let l = rig.dir.path().join("calls.log");
+    tool(
+        &b,
+        "runuser",
+        "echo 'runuser: cannot set user id: Operation not permitted' >&2; exit 1",
+    );
+    tool(
+        &b,
+        "systemd-run",
+        &format!(
+            "echo systemd-run \"$@\" >>'{}'; echo 'Failed to start transient service unit: Connection timed out' >&2; exit 1",
+            l.display()
+        ),
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "the rest of the setup still runs: {}", text(&o));
+    assert_eq!(
+        rig.log().lines().filter(|x| x.starts_with("systemd-run ")).count(),
+        3
+    );
+    assert_eq!(steps(&rig), "agent_tools failed switch-user-refused 3\n");
+    assert!(text(&o).contains("ozbox admin <box> -- ensure-supervisor"), "{}", text(&o));
+}
+
+/// B4-12: a coding agent's settings the program refused (the person's own file) are said, recorded, and never retried or
+/// handed to systemd: switching user worked.
+#[test]
+fn a_refused_agent_setting_is_recorded_and_not_retried() {
+    let (rig, bin) = agent_rig();
+    let b = rig.dir.path().join("bin");
+    tool(
+        &b,
+        "runuser",
+        "echo '  Claude Code: left alone, it is not valid JSON.'; exit 1",
+    );
+    let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(!rig.log().contains("systemd-run"), "{}", rig.log());
+    assert_eq!(steps(&rig), "agent_tools failed agent-settings-refused 1\n");
 }
