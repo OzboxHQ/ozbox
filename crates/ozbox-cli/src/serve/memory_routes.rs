@@ -372,6 +372,25 @@ mod tests {
 
     use super::*;
 
+    /// B4-22: "the memory store could not be used: Permission denied (os error 13)" is said as the folder that is not the
+    /// dashboard's own, and the step that puts it right; any other failure keeps its own words.
+    #[test]
+    fn a_permission_refusal_names_the_folder_and_the_repair() {
+        let dir = std::path::Path::new("/work/ozbox-supervisor/agent-memory");
+        let said = memory_open_error(
+            dir,
+            "the memory store could not be used: Permission denied (os error 13)",
+        );
+        assert!(
+            said.contains("/work/ozbox-supervisor/agent-memory")
+                && said.contains("ensure-supervisor")
+                && !said.contains("os error 13"),
+            "{said}"
+        );
+        let other = "the memory store could not be used: No space left on device (os error 28)";
+        assert_eq!(memory_open_error(dir, other), other);
+    }
+
     fn app(dir: &std::path::Path) -> App {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7878);
         App::new(

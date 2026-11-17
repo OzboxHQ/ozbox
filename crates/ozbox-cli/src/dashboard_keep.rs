@@ -232,6 +232,23 @@ mod tests {
         }
     }
 
+    /// Sentinel: the kept tunnel token is in the store under its own name and nowhere else: not in the settings record beside
+    /// it, not in what a refused keep says (a box name the rule refuses), and not after `forget`.
+    #[test]
+    fn the_kept_token_is_in_the_store_only_and_never_in_an_error_or_the_settings_record() {
+        const SENTINEL: &str = "SENTINEL-tunnel-token-4f2a9c";
+        let s = RuleChecked::default();
+        remember(&s, "main", &kept(), Some(SENTINEL)).unwrap();
+        let record = s.0.get(&settings_name("main")).unwrap().unwrap();
+        assert!(!record.contains(SENTINEL) && !record.contains(&hex(SENTINEL.as_bytes())));
+        assert!(!format!("{:?}", recall(&s, "main")).contains(SENTINEL));
+        // refused by the name rule: the error says why, never the value
+        let e = remember(&s, &"a".repeat(41), &kept(), Some(SENTINEL)).unwrap_err();
+        assert!(!e.contains(SENTINEL), "{e}");
+        forget(&s, "main");
+        assert!(token(&s, "main").is_none());
+    }
+
     #[test]
     fn the_names_are_only_ever_for_a_valid_box_name_and_the_generic_routes_cannot_write_them() {
         assert!(KeychainSecrets::check_name(&token_name(&"a".repeat(41))).is_err());

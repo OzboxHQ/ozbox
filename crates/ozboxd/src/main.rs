@@ -568,6 +568,9 @@ mod daemon {
                 marker: std::path::PathBuf::from(selftest::DASHBOARD_MARKER),
                 migrated: std::path::PathBuf::from(selftest::DASHBOARD_MIGRATED),
                 old_home: std::path::PathBuf::from(selftest::DASHBOARD_OLD_HOME),
+                folder: std::path::PathBuf::from(selftest::DASHBOARD_FOLDER),
+                folder_state: std::path::PathBuf::from(selftest::DASHBOARD_FOLDER_STATE),
+                passwd: std::path::PathBuf::from(selftest::PASSWD),
             });
             stcfg.legacy_tunnel_paths = selftest::legacy_tunnel_paths(&stcfg.user_home);
         }

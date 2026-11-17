@@ -66,7 +66,10 @@ impl Rig {
         let b = r.join("bin");
         let log = r.join("calls.log");
         let l = log.display();
-        tool(&b, "id", &format!("case \"$*\" in '-u ozbox') echo 1500;; '-nG ozbox-supervisor') if [ -e '{0}/ingroup' ]; then echo 'ozbox-supervisor ozbox'; else echo ozbox-supervisor; fi;; ozbox-supervisor) [ -e '{0}/user' ];; *) exit 1;; esac", r.display()));
+        // `-u ozbox-supervisor` answers the id the files here really have (this test's own), or the one in `supuid` when a test
+        // plays a user made again with a new id
+        let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(r).unwrap());
+        tool(&b, "id", &format!("case \"$*\" in '-u ozbox') echo 1500;; '-u ozbox-supervisor') [ -e '{0}/user' ] || exit 1; if [ -e '{0}/supuid' ]; then cat '{0}/supuid'; else echo {me}; fi;; '-nG ozbox-supervisor') if [ -e '{0}/ingroup' ]; then echo 'ozbox-supervisor ozbox'; else echo ozbox-supervisor; fi;; ozbox-supervisor) [ -e '{0}/user' ];; *) exit 1;; esac", r.display()));
         tool(
             &b,
             "gpasswd",
@@ -1667,4 +1670,51 @@ fn everything_under_the_dashboards_folder_is_put_back_under_its_user_and_closed_
         "ozbox-supervisor:ozbox-supervisor {}",
         rig.dir.path().join("work/ozbox-supervisor").display()
     )));
+}
+
+/// B4-22: after the repair, root records whether everything under the dashboard's folder is its user's own and closed to others,
+/// in root's folder where the box user's self-test can read it (an id and a count, never a name). A user made again with a new id,
+/// whose files the repair could not put back, is counted and said.
+#[test]
+fn the_repair_records_whether_the_dashboards_folder_is_its_users_own_and_says_when_it_is_not() {
+    let rig = Rig::new(Some(OLD_UNIT));
+    let out = rig.run(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(rig.dir.path()).unwrap());
+    let state = rig
+        .dir
+        .path()
+        .join("work/ozbox-supervisor-keep/folder.state");
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        format!("uid={me} wrong=0\n")
+    );
+    // the box user's self-test reads it: the record is readable, and its folder can be passed through but not listed
+    assert_eq!(mode(&state), 0o644);
+    assert_eq!(mode(state.parent().unwrap()), 0o711);
+    // the user was made again with a new id, and the files (here: the recorder's chown changes nothing) stay under the old one
+    std::fs::write(rig.dir.path().join("supuid"), format!("{}\n", me + 1)).unwrap();
+    let out = rig.run(&["--socket-only"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout);
+    let rec = std::fs::read_to_string(&state).unwrap();
+    let wrong: u32 = rec
+        .trim()
+        .strip_prefix(&format!("uid={} wrong=", me + 1))
+        .unwrap_or_else(|| panic!("{rec}"))
+        .parse()
+        .unwrap();
+    assert!(wrong > 0, "{rec}");
+    assert!(
+        said.contains("Permission denied")
+            && said.contains("ozbox-supervisor")
+            && said.contains("chown -R -h"),
+        "{said}"
+    );
+    // nothing in the record names a file
+    assert!(!rec.contains('/') && !rec.contains("auth"), "{rec}");
 }

@@ -110,8 +110,36 @@ ensure_user() {
   # `chown` at a file elsewhere.
   "$chown_bin" -R -h "$sup:$sup" "$home" || say "could not put everything under $home back under $sup; the dashboard may report 'Permission denied' for its files (run: chown -R -h $sup:$sup $home)"
   chmod -R go-rwx "$home" 2>/dev/null || true
+  record_folder_state
   drop_box_user_ssh_config
   ensure_scoped_socket
+}
+
+# After the repair above (and after a first move): count what under the dashboard's folder is still not its user's own, or is open
+# to anyone else, and keep the answer in root's folder, where the box user's self-test reads it (the dashboard's folder is closed
+# to the box user, so the self-test cannot look itself). The record holds the user's id and a count, never a path or a file name.
+# Portable `find` (no `-perm /mode`); a symbolic link's own mode is always open, so only its owner is looked at.
+record_folder_state() {
+  local uid n tmp
+  uid="$("$id_bin" -u "$sup" 2>/dev/null || true)"
+  if printf '%s' "$uid" | grep -Eq '^[0-9]+$'; then
+    n="$(find "$home" -xdev \( ! -uid "$uid" -o \( ! -type l \( -perm -0001 -o -perm -0002 -o -perm -0004 -o -perm -0010 -o -perm -0020 -o -perm -0040 \) \) \) -print 2>/dev/null | wc -l | tr -d ' ')" || n=unknown
+    printf '%s' "$n" | grep -Eq '^[0-9]+$' || n=unknown
+  else
+    uid=unknown n=unknown
+  fi
+  tmp="$keep/folder.state.new.$$"
+  if mkdir -p "$keep" && chmod 0711 "$keep" \
+    && ( umask 022; printf 'uid=%s wrong=%s\n' "$uid" "$n" >"$tmp" ) && mv -f "$tmp" "$keep/folder.state"; then
+    :
+  else
+    rm -f "$tmp"
+  fi
+  case "$n" in
+    0) ;;
+    unknown) say "could not check that everything under $home belongs to $sup; the self-test will say so" ;;
+    *) say "$n entries under $home are still not $sup's own or are open to other users, so the dashboard may report 'Permission denied' for its memory and skills (run: chown -R -h $sup:$sup $home && chmod -R go-rwx $home)" ;;
+  esac
 }
 
 # The box user's `~/.ssh` was once copied into the supervisor's home. An `ssh_config` there can run a command
@@ -467,9 +495,12 @@ copy_state() {
     mkdir -p "$home/home/.config"
     cp -a "$src/.config/ozbox" "$home/home/.config/ozbox"
   fi
-  "$chown_bin" -R "$sup:$sup" "$home"
+  "$chown_bin" -R -h "$sup:$sup" "$home"
   chmod -R go-rwx "$home"
   : >"$home/.migrated"
+  "$chown_bin" -h "$sup:$sup" "$home/.migrated"
+  chmod 0600 "$home/.migrated"
+  record_folder_state
 }
 
 # Is there a sign-in settings file in the dashboard's own folder that the dashboard could read? Without one it exits at once

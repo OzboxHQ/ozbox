@@ -199,12 +199,23 @@ pub struct DashboardTraces {
     pub migrated: PathBuf,
     /// The box user's old dashboard folder, which an upgrade leaves on /work.
     pub old_home: PathBuf,
+    /// The dashboard user's own folder (`/work/ozbox-supervisor`): its owner can be seen from here, its contents cannot.
+    pub folder: PathBuf,
+    /// Root's record of what the last repair found inside that folder (`/work/ozbox-supervisor-keep/folder.state`).
+    pub folder_state: PathBuf,
+    /// The user database, to learn the dashboard user's id now (`/etc/passwd`).
+    pub passwd: PathBuf,
 }
 
 /// Where each trace is on a box.
 pub const DASHBOARD_MARKER: &str = "/work/ozbox-supervisor-keep/installed";
 pub const DASHBOARD_MIGRATED: &str = "/work/ozbox-supervisor/.migrated";
 pub const DASHBOARD_OLD_HOME: &str = "/work/home/ozbox/ozbox-dashboard";
+pub const DASHBOARD_FOLDER: &str = "/work/ozbox-supervisor";
+pub const DASHBOARD_FOLDER_STATE: &str = "/work/ozbox-supervisor-keep/folder.state";
+pub const PASSWD: &str = "/etc/passwd";
+/// The dashboard's own user (ADR 0023).
+const SUPERVISOR_USER: &str = "ozbox-supervisor";
 
 /// Does this path exist, and is that known? A refusal to look (a folder that is closed to us) is `None`, never `false`.
 fn seen(p: &Path) -> Option<bool> {
@@ -253,6 +264,95 @@ pub fn dashboard_check(
             "systemctl is-active",
             "a dashboard was installed on this box but no dashboard service is running (an upgrade removes the service and keeps the settings). Run: ozbox admin <box> -- ensure-supervisor; it makes the service again from the address kept on this box. If it says nothing is kept, run `ozbox dashboard install` from your computer",
         )
+    })
+}
+
+/// The id of `user` in a user database's text (`/etc/passwd` lines, `name:x:uid:gid:...`), or `None`.
+pub fn uid_in_passwd(text: &str, user: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next()? == user).then_some(())?;
+        f.next()?;
+        f.next()?.trim().parse().ok()
+    })
+}
+
+/// Root's record of the last repair of the dashboard's folder: `uid=<n> wrong=<n>`, either may be `unknown` (`None`). A record
+/// that is not in that shape is `None` as a whole.
+pub fn parse_folder_state(text: &str) -> Option<(Option<u32>, Option<u64>)> {
+    let mut uid = None;
+    let mut wrong = None;
+    let mut seen = (false, false);
+    for w in text.split_whitespace() {
+        if let Some(v) = w.strip_prefix("uid=") {
+            seen.0 = true;
+            uid = v.parse().ok();
+        } else if let Some(v) = w.strip_prefix("wrong=") {
+            seen.1 = true;
+            wrong = v.parse().ok();
+        } else {
+            return None;
+        }
+    }
+    (seen.0 && seen.1).then_some((uid, wrong))
+}
+
+/// The dashboard can write in its own folder: the folder belongs to the dashboard's user AS IT IS NOW (an upgrade makes the user
+/// again, and it may get a new id), and the last repair found nothing inside that is not its own or is open to others. A dashboard
+/// that cannot write there shows "Permission denied" on its Memory and Skills pages. This daemon runs as the box user and cannot
+/// look inside, so the inside comes from root's record of the repair. `None` when no dashboard was installed or it was never
+/// moved to its own user.
+pub fn dashboard_folder_check(t: &DashboardTraces) -> Option<Check> {
+    const NAME: &str = "dashboard_folder";
+    let traces = [seen(&t.marker), seen(&t.migrated), seen(&t.old_home)];
+    if !traces.contains(&Some(true)) {
+        return None;
+    }
+    let passwd = fs::read_to_string(&t.passwd).ok()?;
+    let uid = uid_in_passwd(&passwd, SUPERVISOR_USER)?;
+    if seen(&t.folder) != Some(true) {
+        return None;
+    }
+    let folder = t.folder.display().to_string();
+    let fix = "Run from your computer: ozbox admin <box> -- ensure-supervisor (it puts everything in the dashboard's folder back under the dashboard's own user)";
+    let Some(owner) = owner_uid(&t.folder) else {
+        return Some(unknown(
+            NAME,
+            format!("the owner of {folder} could not be read"),
+        ));
+    };
+    if owner != uid {
+        return Some(fail(
+            NAME,
+            "owner",
+            format!("{folder} belongs to user id {owner}, not to the dashboard's user ({SUPERVISOR_USER}, id {uid}; an upgrade made the user again with a new id), so the dashboard cannot write its memory and skills there. {fix}"),
+        ));
+    }
+    let record = match fs::read_to_string(&t.folder_state) {
+        Ok(r) => r,
+        Err(_) => {
+            return Some(unknown(
+                NAME,
+                format!("nothing records whether everything inside {folder} is the dashboard's own (a box set up before that record existed). {fix}"),
+            ))
+        }
+    };
+    Some(match parse_folder_state(&record) {
+        Some((Some(r), _)) if r != uid => fail(
+            NAME,
+            "record",
+            format!("the dashboard's user was made again (id {uid}) after the last repair of {folder} (id {r}), so what is inside may still belong to the old one. {fix}"),
+        ),
+        Some((Some(_), Some(0))) => pass(NAME),
+        Some((Some(_), Some(n))) => fail(
+            NAME,
+            "record",
+            format!("{n} entries inside {folder} are not the dashboard user's own or are open to other users, so the dashboard may not be able to write its memory and skills. {fix}"),
+        ),
+        _ => unknown(
+            NAME,
+            format!("the last repair could not check everything inside {folder}. {fix}"),
+        ),
     })
 }
 
@@ -1049,6 +1149,10 @@ pub fn run(
     // a dashboard that was installed is running (an upgrade removes its unit and keeps its settings)
     if let Some(t) = &cfg.dashboard_traces {
         if let Some(c) = dashboard_check(t, &cfg.user_wants_dir, runner) {
+            checks.push(c);
+        }
+        // and it can write in its own folder (B4-22: an upgrade made its user again with a new id)
+        if let Some(c) = dashboard_folder_check(t) {
             checks.push(c);
         }
     }
@@ -2164,7 +2268,106 @@ mod tests {
             marker: root.join("ozbox-supervisor-keep/installed"),
             migrated: root.join("ozbox-supervisor/.migrated"),
             old_home: root.join("home/ozbox/ozbox-dashboard"),
+            folder: root.join("ozbox-supervisor"),
+            folder_state: root.join("ozbox-supervisor-keep/folder.state"),
+            passwd: root.join("passwd"),
         }
+    }
+
+    const PASSWD_FIXTURE: &str = "root:x:0:0:root:/root:/bin/bash
+ozbox:x:1500:1500::/work/home/ozbox:/bin/bash
+ozbox-supervisor-x:x:7:7::/nonexistent:/usr/sbin/nologin
+ozbox-supervisor:x:995:986:Oz Box supervisor:/work/ozbox-supervisor/home:/usr/sbin/nologin
+";
+
+    #[test]
+    fn the_dashboards_user_id_and_roots_record_are_read_from_their_real_text() {
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "ozbox-supervisor"), Some(995));
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "ozbox"), Some(1500));
+        assert_eq!(uid_in_passwd(PASSWD_FIXTURE, "nobody"), None);
+        assert_eq!(
+            uid_in_passwd(
+                "ozbox-supervisor:x:abc:1::/:/bin/false\n",
+                "ozbox-supervisor"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_folder_state("uid=995 wrong=0\n"),
+            Some((Some(995), Some(0)))
+        );
+        assert_eq!(
+            parse_folder_state("uid=995 wrong=12\n"),
+            Some((Some(995), Some(12)))
+        );
+        assert_eq!(
+            parse_folder_state("uid=unknown wrong=unknown\n"),
+            Some((None, None))
+        );
+        assert_eq!(parse_folder_state("uid=995\n"), None);
+        assert_eq!(parse_folder_state("uid=995 wrong=0 /etc/shadow\n"), None);
+    }
+
+    /// B4-22: the Memory and Skills pages said "Permission denied (os error 13)" after an upgrade made the dashboard's user again
+    /// with a new id. The self-test now says so, names the folder and the step, and passes only on a clean record for today's id.
+    #[cfg(unix)]
+    #[test]
+    fn a_dashboard_folder_the_dashboard_cannot_write_in_fails_the_self_test_with_the_folder_and_the_step(
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        // no dashboard installed: not asked
+        assert!(dashboard_folder_check(&t).is_none());
+        fs::create_dir_all(t.marker.parent().unwrap()).unwrap();
+        fs::write(&t.marker, "").unwrap();
+        fs::create_dir_all(&t.folder).unwrap();
+        let me = fs::metadata(&t.folder).unwrap().uid();
+        // no dashboard user yet (still the box user's): not asked
+        fs::write(&t.passwd, "ozbox:x:1500:1500::/work/home/ozbox:/bin/bash\n").unwrap();
+        assert!(dashboard_folder_check(&t).is_none());
+        // the user was made again with another id than the folder's owner: a failure naming the folder and the step
+        fs::write(
+            &t.passwd,
+            format!("ozbox-supervisor:x:{}:1::/:/usr/sbin/nologin\n", me + 1),
+        )
+        .unwrap();
+        let c = dashboard_folder_check(&t).unwrap();
+        let folder = t.folder.display().to_string();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains(&folder) && reason.contains("ensure-supervisor") && reason.contains("new id")),
+            "{c:?}"
+        );
+        fs::write(
+            &t.passwd,
+            format!("ozbox-supervisor:x:{me}:1::/:/usr/sbin/nologin\n"),
+        )
+        .unwrap();
+        // no record of the inside: unknown, never a pass
+        let c = dashboard_folder_check(&t).unwrap();
+        assert!(matches!(c.outcome, Outcome::Unknown { .. }), "{c:?}");
+        // a record from before the user was made again
+        fs::write(&t.folder_state, format!("uid={} wrong=0\n", me + 1)).unwrap();
+        assert!(matches!(
+            dashboard_folder_check(&t).unwrap().outcome,
+            Outcome::Fail { .. }
+        ));
+        // entries inside that are not its own
+        fs::write(&t.folder_state, format!("uid={me} wrong=3\n")).unwrap();
+        let c = dashboard_folder_check(&t).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("3 entries") && reason.contains(&folder)),
+            "{c:?}"
+        );
+        // the repair could not look
+        fs::write(&t.folder_state, format!("uid={me} wrong=unknown\n")).unwrap();
+        assert!(matches!(
+            dashboard_folder_check(&t).unwrap().outcome,
+            Outcome::Unknown { .. }
+        ));
+        // clean: a pass
+        fs::write(&t.folder_state, format!("uid={me} wrong=0\n")).unwrap();
+        assert_eq!(dashboard_folder_check(&t).unwrap().outcome, Outcome::Pass);
     }
 
     fn systemctl_says(active: bool) -> RecordingRunner {

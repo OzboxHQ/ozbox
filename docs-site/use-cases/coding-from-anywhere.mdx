@@ -234,7 +234,10 @@ as it is. `ozbox dashboard forget <box>` removes what this computer kept; nothin
 **After an upgrade the dashboard comes back by itself.** An upgrade replaces the box's system disk, which held the dashboard's
 service; its settings stay on the box's own disk, and the box keeps the dashboard's address in a place only root can write. The box
 makes the service again when it starts (or when you run `ozbox admin <box> -- ensure-supervisor`), with the settings it already
-had, and the self-test fails a **dashboard** check if one was installed and none runs. If you run `ozbox dashboard install` again
+had, and the self-test fails a **dashboard** check if one was installed and none runs. A **dashboard_folder** check fails when the
+dashboard cannot write in its own folder (its user was made again with a new id and the files kept the old one: the Memory and Skills
+pages then say "Permission denied" and name the folder). `ozbox admin <box> -- ensure-supervisor` puts the folder back under the
+dashboard's user. If you run `ozbox dashboard install` again
 with settings that differ from the ones the dashboard has, it keeps its own, starts if it was stopped, and tells you so. To replace
 them (they decide who may approve), add `--replace-sign-in` and either `--approve-with-laptop-key` or `--settings-approval CODE`
 (a code from the dashboard's **Secret approvals**, for the approval binding the command prints). A box with no passkey or

@@ -159,7 +159,12 @@ the dashboard "already runs as its own user" while nothing ran. The self-test pa
 - **Everything under the dashboard's folder is put back under its user at every run**, not only at the first move
   (`chown -R -h`, mode go-rwx). An upgrade makes the user again with a new id, and what the old one made (the agent memory and skills
   folders) stayed under the old id, so the dashboard's Memory and Skills pages failed with "Permission denied". The page now names
-  the folder and the command that fixes it.
+  the folder and the command that fixes it. After every repair (and after a first move) root counts what inside the folder is
+  still not the user's own or is open to others, and keeps `uid=<id> wrong=<count>` in its own folder
+  (`/work/ozbox-supervisor-keep/folder.state`, no names). The self-test's **`dashboard_folder`** check reads that record. It also
+  checks, live, that the folder's owner is the dashboard user's id today. It fails, naming the folder and the step, when the owner
+  differs, when the record is from an older id, or when the count is not zero. It is "unknown" when there is no record (a box set
+  up before this change).
 - **The self-test fails `dashboard`** when a dashboard was installed and no service runs. It runs as the box user, which cannot
   look inside the dashboard's closed folder, so it reads root's readable marker (and the box user's old dashboard folder as a
   second trace); a refusal to look is "unknown", never a pass.
@@ -173,4 +178,5 @@ the dashboard "already runs as its own user" while nothing ran. The self-test pa
 only recover the dashboard through `ozbox dashboard install` from the person's computer, and the address of that one install
 is the box user's staged file (its sha256 proves the sign-in settings, not the address). The approval is spent even if the staged
 file turns out not to match, so a box user can only waste a code, not use one. The retire step cannot tell the two connectors apart
-on a box without `ss`; it then refuses rather than guess.
+on a box without `ss`; it then refuses rather than guess. The `dashboard_folder` record is what the last repair saw: only the folder's own owner is checked live,
+so a file inside that goes wrong later is seen at the next first boot or `ensure-supervisor`, not at once.
