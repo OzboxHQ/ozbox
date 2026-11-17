@@ -35,9 +35,7 @@ pub enum Waited {
 
 /// One line for the person: where to decide, and that stopping the wait leaves the request.
 pub fn waiting_line(id: &str) -> String {
-    format!(
-        "Waiting for approval, request {id}. Decide it in the dashboard (Approvals), from the link in your chat message, or with `ozbox secrets ingress requests`. Ctrl-C stops waiting; the request stays for 30 minutes."
-    )
+    crate::messages::t("approval.wait_line", &[("id", id)])
 }
 
 /// Wait for `id`. `call` sends one request line to the service and returns its `result`; `elapsed_ms` is the clock;

@@ -15,18 +15,18 @@ use crate::secrets_service::{handle_from, Gates, Policy};
 use crate::tokenmac::TokenMac;
 
 /// A value no request, answer, line or record may carry, apart from the import that stores it.
-const SENTINEL: &str = "sentinel-b4-27-value-0123456789";
+pub(super) const SENTINEL: &str = "sentinel-b4-27-value-0123456789";
 /// The owner's authenticator secret (base32), as the dashboard keeps it in the box's store.
-const TOTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+pub(super) const TOTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 
-struct Rig {
-    dir: tempfile::TempDir,
-    store: Arc<EncryptedSecrets>,
-    mac: TokenMac,
-    gates: Gates,
+pub(super) struct Rig {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) store: Arc<EncryptedSecrets>,
+    pub(super) mac: TokenMac,
+    pub(super) gates: Gates,
 }
 
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let p: Arc<dyn KeyProvider> = Arc::new(LocalKekProvider::random("local").unwrap());
     let store = Arc::new(EncryptedSecrets::new(dir.path().join("s.json"), "box-a", p).unwrap());
@@ -65,7 +65,7 @@ fn rig() -> Rig {
 
 impl Rig {
     /// One request line through the service's real dispatch, as the given socket.
-    fn raw(&self, policy: Policy, v: &Value) -> Value {
+    pub(super) fn raw(&self, policy: Policy, v: &Value) -> Value {
         serde_json::from_str(&handle_from(
             &self.store,
             &self.mac,
@@ -78,7 +78,7 @@ impl Rig {
     }
 
     /// The laptop's side of the sealed route: the `result`, or the refusal sentence.
-    fn laptop(&self, v: &Value) -> Result<Value, String> {
+    pub(super) fn laptop(&self, v: &Value) -> Result<Value, String> {
         let mut v = v.clone();
         // a test does not hold the service's long poll for its full 15 seconds
         if v["op"] == "areq_await" {
@@ -93,7 +93,7 @@ impl Rig {
     }
 
     /// The owner approves on the dashboard with an authenticator code: the supervisor socket, `factor: authenticator`.
-    fn dashboard_approve_with_code(&self, id: &str, code: &str) -> Value {
+    pub(super) fn dashboard_approve_with_code(&self, id: &str, code: &str) -> Value {
         self.raw(
             Policy::Supervisor,
             &json!({"op":"areq_decide","id":id,"outcome":"approve","person":"alice","role":"owner",
@@ -102,7 +102,7 @@ impl Rig {
     }
 
     /// Everything the service wrote beside its store: the journal, the state, the audit chain.
-    fn on_disk(&self) -> String {
+    pub(super) fn on_disk(&self) -> String {
         let mut all = String::new();
         for e in walk(self.dir.path()) {
             if e.file_name().is_some_and(|n| n == "s.json") {
@@ -129,7 +129,7 @@ fn walk(p: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-fn code_now() -> String {
+pub(super) fn code_now() -> String {
     let secret = crate::serve::auth::b64::decode_base32(TOTP_SECRET).unwrap();
     crate::serve::auth::totp::hotp(
         &secret,

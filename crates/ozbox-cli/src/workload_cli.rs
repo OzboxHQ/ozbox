@@ -223,6 +223,42 @@ fn import_by_request(
     Ok((approved.id, salt))
 }
 
+/// File `filing` (an `areq_file` line) on the box over the sealed route, say where to approve it, wait, and return the approved
+/// request (ADR 0041, B4-27). For a change only the dashboard approves (a declaration, a tunnel token, the box's own secrets):
+/// no key on this computer is offered. A box that keeps no requests for `scope`, or cannot spend one for this change, is told
+/// apart, so the person is told to upgrade it or use a code.
+pub fn request_and_wait(
+    runner: &dyn CommandRunner,
+    box_name: &str,
+    filing: &Value,
+    scope: &str,
+    production: bool,
+    what: &str,
+    wait_minutes: u64,
+) -> Result<crate::approval_flow::Approved, CliError> {
+    let mut call = |v: &Value| {
+        ssh_receive(runner, box_name, v)
+            .map(|r| r["result"].clone())
+            .map_err(|e| e.to_string())
+    };
+    if !crate::approval_flow::box_files(&mut call, scope) {
+        return Err(CliError::Msg(t("approval.flow_needs_newer", &[])));
+    }
+    let stop = stop_on_ctrl_c();
+    let start = std::time::Instant::now();
+    let elapsed = || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut say = |l: &str| eprintln!("{l}");
+    let mut flow = crate::approval_flow::Flow {
+        call: &mut call,
+        say: &mut say,
+        inline: None,
+        elapsed_ms: &elapsed,
+        stop: &stop,
+        max_wait_ms: wait_minutes.clamp(1, crate::approval_flow::MAX_WAIT_MINUTES) * 60_000,
+    };
+    crate::approval_flow::file_and_wait_with(&mut flow, filing, scope, production, what)
+}
+
 /// A flag Ctrl-C sets, so a wait stops between polls and changes nothing (a second Ctrl-C ends the program at once).
 fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -820,6 +856,7 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
             project,
             on_box,
             approval,
+            wait,
         } => {
             let text = std::fs::read_to_string(file)
                 .map_err(|_| CliError::Msg(t("secrets.import_unreadable", &[])))?;
@@ -865,12 +902,40 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
                             return Err(CliError::Msg(t("secrets.policy_needs_runner_uids", &[])));
                         }
                     }
-                    ssh_receive(
-                        runner,
-                        b.as_str(),
-                        &json!({"op": "policy", "project": project, "text": compact,
-                            "approval": approval.as_deref().unwrap_or("")}),
-                    )?;
+                    let mut req = json!({"op": "policy", "project": project, "text": compact,
+                        "approval": approval.as_deref().unwrap_or("")});
+                    match ssh_receive(runner, b.as_str(), &req) {
+                        // B4-27: the box needs an approval and none was given. Nothing was saved; file a request for exactly
+                        // this declaration (the box works out its digests itself), wait, and send it again with the request.
+                        Err(CliError::Msg(e))
+                            if approval.is_none() && crate::approval_flow::needs_approval(&e) =>
+                        {
+                            let filing = json!({"op": "areq_file", "subject": {"scope": "policy"},
+                                "project": project, "policy_text": compact});
+                            let what = t(
+                                "approval.flow_policy_what",
+                                &[
+                                    ("project", project),
+                                    ("box", b.as_str()),
+                                    ("count", &p.commands.len().to_string()),
+                                ],
+                            );
+                            let ok = request_and_wait(
+                                runner,
+                                b.as_str(),
+                                &filing,
+                                "policy",
+                                false,
+                                &what,
+                                *wait,
+                            )?;
+                            req["request_id"] = json!(ok.id);
+                            ssh_receive(runner, b.as_str(), &req)?;
+                        }
+                        other => {
+                            other?;
+                        }
+                    }
                 }
                 None => crate::workload_policy::save(&open_from_env().map_err(fail)?, project, &p)
                     .map_err(fail)?,
@@ -2002,6 +2067,7 @@ mod tests {
                     project: "app".into(),
                     on_box: Some("dev".parse().unwrap()),
                     approval: Some("CODE".into()),
+                    wait: 30,
                 },
                 &r,
                 true,
@@ -2047,6 +2113,7 @@ mod tests {
                     project: "app".into(),
                     on_box: Some("dev".parse().unwrap()),
                     approval: Some("CODE".into()),
+                    wait: 30,
                 },
                 r,
                 true,
@@ -2096,6 +2163,7 @@ mod tests {
                     project: "app".into(),
                     on_box: Some("dev".parse().unwrap()),
                     approval: None,
+                    wait: 30,
                 },
                 r,
                 true,

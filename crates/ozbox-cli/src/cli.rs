@@ -236,8 +236,9 @@ pub enum Command {
         /// Hetzner: the OpenBao KV mount (default secret).
         #[arg(long)]
         mount: Option<String>,
-        /// Hetzner: a fresh approval code, for a box whose dashboard has a second factor (from the dashboard, or
-        /// `ozbox secrets approve --scope box-secrets --project declaration`).
+        /// Hetzner, the fallback: a fresh approval code from the dashboard (Settings, Secrets). Without it, a box whose
+        /// dashboard has a second factor is sent an approval request for exactly this declaration, and the command waits
+        /// (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or authenticator code.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
     },
@@ -1431,9 +1432,12 @@ pub enum DashboardCommand {
         /// Caddy: the loopback port on your server that Caddy forwards to.
         #[arg(long, default_value_t = 7878)]
         remote_port: u16,
-        /// On a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's token, from
-        /// `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this computer
-        /// (the same token piped in; a box from an older image takes a code made without --token-stdin).
+        /// The fallback, on a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's
+        /// token, from `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this
+        /// computer (the same token piped in; a box from an older image takes a code made without --token-stdin). Without it
+        /// (and without --approve-with-laptop-key), the box is sent an approval request for exactly this token and the
+        /// command waits (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or
+        /// authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
         /// Read the approval code from the line after the token on standard input (needs --token-stdin), so it is not in
@@ -2066,7 +2070,8 @@ pub enum GuardCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
-    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route.
+    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route; a box that needs an
+    /// approval gets a request for exactly this declaration, and this command waits for you to approve it in the dashboard.
     Set {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -2074,9 +2079,16 @@ pub enum PolicyCommand {
         project: String,
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code from the dashboard (see `ozbox secrets import --approval`).
+        /// The fallback: an approval code from the dashboard (Settings, Secrets). Without it, a box whose dashboard has a
+        /// second factor is sent an approval request for exactly this declaration, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// saved and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// Print what to pin, to paste into a declaration. Run it on YOUR computer, against your own checkout at the commit the box
     /// has (`--commit`): a digest computed on the box only freezes what an agent may already have changed. It reads files and

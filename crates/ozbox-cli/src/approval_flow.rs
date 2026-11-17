@@ -121,14 +121,33 @@ pub fn needs_approval(refusal: &str) -> bool {
         || refusal.contains("this box takes approvals as requests")
 }
 
-/// Whether the box keeps approval requests for `scope` (`areq_capabilities`).
+/// Whether the box keeps approval requests for `scope` and can spend one for the change this program makes
+/// (`areq_capabilities`): an import, a declaration filed with its text (`policy_requests`), or a change the root helper's gate
+/// takes as `req-<id>` (`gate_requests`). An older box answers none of the last two, and the command says to upgrade it.
 pub fn box_files(call: &mut dyn FnMut(&Value) -> Result<Value, String>, scope: &str) -> bool {
     call(&json!({"op": "areq_capabilities"})).is_ok_and(|r| {
-        r["request_ops"] == json!(true)
-            && r["scopes"]
-                .as_array()
+        let listed = |k: &str| {
+            r[k].as_array()
                 .is_some_and(|s| s.iter().any(|x| x.as_str() == Some(scope)))
+        };
+        r["request_ops"] == json!(true)
+            && listed("scopes")
+            && match scope {
+                "import" => true,
+                "policy" => r["policy_requests"] == json!(true),
+                _ => listed("gate_requests"),
+            }
     })
+}
+
+/// Whether a key kept on a computer (a software key) may ever decide `scope`, outside Production: the box's own rule table
+/// (`software`). Where it may not, the program never offers it, and the waiting line names the dashboard alone.
+pub fn software_key_may_decide(scope: &str) -> bool {
+    use ozbox_core::approval::{Soft, RULES};
+    RULES
+        .iter()
+        .find(|r| r.key == scope)
+        .is_some_and(|r| matches!(r.software, Soft::MemberLevel | Soft::NewNonProductionNames))
 }
 
 /// File a request for `subject`, say where to approve it, offer this computer's key where it may decide, wait, and return
@@ -138,8 +157,26 @@ pub fn file_and_wait(
     subject: &Subject,
     what: &str,
 ) -> Result<Approved, CliError> {
-    let production = subject.production();
-    let filed = (flow.call)(&json!({"op": "areq_file", "subject": subject}))
+    file_and_wait_with(
+        flow,
+        &json!({"op": "areq_file", "subject": subject}),
+        subject.scope(),
+        subject.production(),
+        what,
+    )
+}
+
+/// The same for a filing whose subject the box works out itself (a declaration, filed with its text): `filing` is the whole
+/// `areq_file` line, and the digest checked on approval is the one the box answered the filing with.
+pub fn file_and_wait_with(
+    flow: &mut Flow<'_>,
+    filing: &Value,
+    scope: &str,
+    production: bool,
+    what: &str,
+) -> Result<Approved, CliError> {
+    let dashboard_only = production || !software_key_may_decide(scope);
+    let filed = (flow.call)(filing)
         .map_err(|e| CliError::Msg(t("approval.flow_not_filed", &[("why", &e)])))?;
     let r = &filed["request"];
     let (Some(id), Some(digest)) = (r["id"].as_str(), r["subject_digest"].as_str()) else {
@@ -150,13 +187,16 @@ pub fn file_and_wait(
     (flow.say)(&t(
         if production {
             "approval.flow_waiting_production"
+        } else if dashboard_only {
+            "approval.flow_waiting_dashboard"
         } else {
             "approval.flow_waiting"
         },
         &[("what", what), ("id", &id), ("minutes", &minutes)],
     ));
-    // a software key never decides Production: the offer is left out, and the line above already says the dashboard decides
-    if !production {
+    // a software key never decides Production, nor a scope the box never lets it decide: the offer is left out, and the line
+    // above already says the dashboard decides
+    if !dashboard_only {
         if let Some(inline) = flow.inline.as_mut() {
             match inline(&id, &digest) {
                 Inline::Approved | Inline::Declined => {}
@@ -208,3 +248,8 @@ pub fn ask_inline(input: &mut dyn std::io::BufRead, key: &str) -> bool {
 #[allow(clippy::unwrap_used)]
 #[path = "approval_flow_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "approval_flow_acts_tests.rs"]
+mod acts_tests;
