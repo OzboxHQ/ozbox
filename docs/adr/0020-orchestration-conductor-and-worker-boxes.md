@@ -57,3 +57,8 @@ passing result. A conflict, failing specs or a lane that could not finish go bac
 approval to merge is unchanged. `task_start` hands a task over the hub by default when the box has one and the worker is one of its
 workers. The queue still rebases and merges the feature's branch, and nothing yet checks that the branch still points at the commit the
 lane tested (ADR 0042, "The approval path, lanes and the merge queue").
+
+**Amendment (2026-11-17, 0.3.0-beta): the hub, integrated.** A feature handed to a worker over the hub (ADR 0042) goes through this merge queue
+with the commit the worker reported; the lane runs on that commit across workers, is never green while a spec has no passing result, and
+the branch merges only while it still points at the commit the lane tested. Run end to end in CI on the real transport (ADR 0042,
+"Integration"); **Preview until B4-19's real run**.

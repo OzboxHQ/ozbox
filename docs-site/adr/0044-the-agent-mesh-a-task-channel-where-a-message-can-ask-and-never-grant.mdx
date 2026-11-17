@@ -11,7 +11,9 @@ the starting limits are owner-ratified 2026-11-15** (D2), and the mesh **leaves 
 **Built:** the laptop-to-`main` task channel in `ozbox_core::agent_mesh` and `ozbox tasks`: a versioned, signed, sealed envelope; tasks
 with messages, status and artifacts; ordering, de-duplication, replay and restore defences; a durable store with an outbox; an audit
 trail; a key-shape screen; and a command transport. Run against fakes and a real binary in CI; **not run on a real box**.
-**Not built:** the approval path to the laptop (acts are refused by name), the stream transport, the hub's sealed channel, the
+**Built since (2026-11-17, ADR 0042 "Integration", Preview until B4-19):** the hub's sealed channel, over a real network transport, with the approval path
+to `main`'s fleet inbox (a message can ask and never grant, proven by attack tests). **Not built:** the approval path to the laptop (acts are
+refused by name), the stream transport, the
 directory and agent cards, the model gateway, chat rooms, the fleet view, the separate service user for the router, and the public
 A2A endpoint. This ADR is the core only; those are later records.
 

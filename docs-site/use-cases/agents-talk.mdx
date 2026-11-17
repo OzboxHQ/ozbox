@@ -11,9 +11,9 @@ every agent and every person one address and one mailbox, so this happens throug
 and a chat on Telegram or WhatsApp is just another participant.
 
 See [how to read the status](/use-cases#how-to-read-the-status). **Preview:** built and covered by the test suite, with a hub and
-two worker boxes over an in-memory network and through the same tools a run calls. It is **not yet attached to a box's server**
-(the hub's daemon does that), so on a box today the tools answer "agent messaging is not set up on this box". It has **not** run
-on a real box. The design is [ADR 0057](/adr/0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data).
+two worker boxes, first over an in-memory network and now over the real daemon, transport, signer and sealer in one process
+(ADR 0042, "Integration"). It is attached to `ozbox serve` on a box that is a hub; on any other box the tools answer "agent messaging
+is not set up on this box". It has **not** run on a real box. The design is [ADR 0057](/adr/0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data).
 
 **What a message can do:** ask and tell. It can never approve a request, grant a permission, release a key or change a policy,
 whoever sends it and whatever it says. An agent that needs a decision asks for it as it does today, and you decide it on the
@@ -98,7 +98,7 @@ itself. A chat message approves nothing. **Preview** (the gateway's side is bein
 
 ## Limits
 
-- Not attached to a box's server yet, and no command or page shows the mailboxes; the five tools are the way in.
+- Attached to the server of a hub box only; no command or page shows the mailboxes, so the five tools are the way in.
 - An agent appears to others once it has called a messaging tool.
 - Groups and fleets are set up on `main` by hand for now.
 - Only a skill's `SKILL.md` travels to other boxes.

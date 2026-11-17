@@ -1,6 +1,7 @@
 # 0056 — Agents on different engines and providers share one neutral turn model, and each engine is an adapter at the edge
 
-**Status.** Accepted. **Preview**: built and tested in CI with fakes of each program (in-process transcripts and real
+**Status.** Accepted. **Preview, integrated** (2026-11-17: the engine session runs inside the worker's hub agent, and a Claude-Code-like and a Codex-like program
+work one fleet over the real transport in CI): built and tested in CI with fakes of each program (in-process transcripts and real
 processes that check their own argv, environment and input). No Codex CLI or Gemini CLI run has been started on a real box
 with a real account. Amends [ADR 0014](0014-supervised-agent-runs.md) decision 2 (engines are adapters). Related: ADR 0015
 (Models routing), 0017 (per-run tokens), 0021 (hooks and notify), 0041 (approvals), 0042 (the hub), 0043 (the Oz Box tools for

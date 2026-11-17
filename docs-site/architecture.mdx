@@ -174,8 +174,7 @@ the hub (`main`), one per participant (`agent:<box>/<session>`, `person:<id>`, `
 own agents' mailboxes and queues their posts; the two talk over the hub's transport as their own profile of the signed, sealed channel,
 under a `<box>.fabric` endpoint. The hub also sends each worker the approved memory notes and approved skills its agents may read, and
 takes their memory proposals back for a person to review. A chat gateway posts a person's message in as that person and collects the
-agents' replies. A message is data: nothing in the fabric approves, grants or releases anything. The fabric is not attached to a box's
-server until the hub's daemon runs it.
+agents' replies. A message is data: nothing in the fabric approves, grants or releases anything. The fabric is attached to the server of a box that is a hub (ADR 0042, "Integration"; Preview).
 
 ## Secrets
 

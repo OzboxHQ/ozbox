@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.3.0-beta: a hub for your worker boxes (Preview)">
+  ## Oz Box 0.3.0-beta: your boxes can work as one fleet from a hub, and you can set it up step by step
+
+  Until now a worker box could be handed a task, but nothing carried it there for real. `main` can now be the hub: worker boxes join it, dial out to it, take tasks, ask for the keys they need by name, and send their finished work to the merge queue. **Preview:** the whole path is tested end to end in one process on the real parts, with a Claude Code program and a Codex program working side by side; it has not run on real boxes yet, and a real worker's own run transport is not attached to the hub agent, so a task handed to a real worker is refused by name for now.
+
+  - **`ozbox-hubd setup <box-id> <address:port>`** sets up the hub on `main`; it listens only on a loopback, private or tailnet address and never on a public one. **`ozbox-hubd agent-setup`**, **`request`**, **`enrol`** and **`agent`** do the worker's side. The step-by-step is in [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
+  - **A worker joins by sending its request to the hub itself,** with a one-use invite and an attestation from your computer (or, on AWS, the claim service). You confirm a plan and it is on the roster; there is no list to edit by hand.
+  - **A worker's approval requests appear in your fleet inbox on `main`;** you decide once with your passkey and the worker checks your decision itself.
+  - **Keys reach a worker by name, sealed to it.** Production never does: it is refused in four places, and a worker deletes its keys when its task ends or the hub is out of reach for two minutes.
+  - **A branch is merged only while it still points at the commit its tests ran on.**
+  - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [Agents that talk](/use-cases/agents-talk).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Codex CLI and Gemini CLI runs (Preview)">
   ## Codex CLI and Gemini CLI run on a box, and agents on different engines work one task together
 
@@ -24,7 +37,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 <Update label="[Release date]" tags={["CLI", "Security"]} description="Agents talk to each other and to you (Preview)">
   ## Agents on different boxes and engines can message each other, share what they learned, and answer you in your chats
 
-  Until now two agents on two boxes could only talk through an orchestration's conductor, and a note one agent wrote stayed on its own box. Now every agent has an address and a mailbox, whatever its engine or model, and the same five tools on every box. **Preview:** built and tested with a hub and two boxes over a simulated network; it is not yet switched on in a box's server and has not run on a real box.
+  Until now two agents on two boxes could only talk through an orchestration's conductor, and a note one agent wrote stayed on its own box. Now every agent has an address and a mailbox, whatever its engine or model, and the same five tools on every box. **Preview:** built and tested with a hub and two boxes over a simulated network; it is switched on in the server of a box that is a hub, and has not run on a real box.
 
   - **Five tools for every agent:** `participants_list`, `messages_post`, `messages_get` (it can wait for a message), `messages_thread` and `messages_ack`. A sender sees each message go from queued to accepted, delivered and read.
   - **Only your own agents talk to each other,** and only those that share a box, a project or an orchestration. Another person's agents are never visible.

@@ -5,6 +5,7 @@
 //! ozbox-hubd self-test --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME]
 //! ozbox-hubd setup     BOX-ID [ADDR:PORT]   (as root: the units, folders and registrars file; the address workers dial)
 //! ozbox-hubd agent-setup NAME ADDR:PORT HUB-IDENTITY-FP   (as root, on a worker: the agent's unit)
+//! ozbox-hubd request   --name NAME --box-id ID --machine ID --orchestration ID --hub-identity-fp FP --secrets-socket PATH   (prints what your computer attests)
 //! ozbox-hubd enrol     --name NAME --token-file PATH --attestation PATH --hub-addr ADDR:PORT --hub-identity-fp FP --secrets-socket PATH
 //! ozbox-hubd agent     --name NAME --hub-addr ADDR:PORT --hub-identity PATH --hub-identity-fp FP --secrets-socket PATH --hub-secrets-socket PATH [--hub NAME]
 //! ozbox-hubd ctl       --socket PATH OP [JSON]   (the owner's way to the daemon: roster, invite_plan, enrol_receive, ...)
@@ -91,7 +92,10 @@ fn main() -> ExitCode {
     if argv.first().map(String::as_str) == Some("ctl") {
         return ctl(&argv);
     }
-    if matches!(argv.first().map(String::as_str), Some("enrol" | "agent")) {
+    if matches!(
+        argv.first().map(String::as_str),
+        Some("enrol" | "agent" | "request")
+    ) {
         return match ozbox_hubd::workerbin::run(&argv) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

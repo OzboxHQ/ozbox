@@ -89,6 +89,7 @@ fn pinned_hub(path: &Path, fp: &str) -> Result<Identity, String> {
 pub fn run(argv: &[String]) -> Result<(), String> {
     match argv.first().map(String::as_str) {
         Some("enrol") => enrol(argv),
+        Some("request") => request(argv),
         Some("agent") => agent(argv),
         _ => Err("usage: ozbox-hubd enrol|agent ...".into()),
     }
@@ -99,6 +100,32 @@ fn dialer(addr: &str) -> TcpDialer {
         addr: addr.to_string(),
         timeout: Duration::from_secs(10),
     }
+}
+
+/// What a machine you own (or a Hetzner worker) shows the owner's computer to be attested: public facts and this box's public
+/// identity, read from its own secrets service. Prints the JSON that `ozbox hub attest --request` reads.
+fn request(argv: &[String]) -> Result<(), String> {
+    use crate::enrol::{Provider, WORKER_CLASS};
+    use crate::registrar::laptop::LaptopRequest;
+    let ops = SocketKeyOps::new(flag(argv, "--secrets-socket")?);
+    let identity = ops.identity().map_err(|e| e.to_string())?;
+    let req = LaptopRequest {
+        provider: Provider::Own,
+        machine: flag(argv, "--machine")?,
+        box_id: flag(argv, "--box-id")?,
+        orchestration: flag(argv, "--orchestration")?,
+        hub_identity_fp: flag(argv, "--hub-identity-fp")?,
+        private_address: String::new(),
+        class: WORKER_CLASS.into(),
+        environment: flag(argv, "--environment").unwrap_or_else(|_| "staging".into()),
+        identity,
+        creation_proof: String::new(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&req).map_err(|_| "the request could not be written")?
+    );
+    Ok(())
 }
 
 /// First contact: make the request from this box's own service (the proof is signed there), send it once over the hub's listener.

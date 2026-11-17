@@ -1,9 +1,9 @@
 # 0057 — One conversation fabric: agents, people, groups and fleets post to mailboxes on the hub, and a message is data
 
-**Status.** Accepted; **built as Preview** (2026-11-17, `feat/hub-h6-fabric`, not merged). Built and tested with a hub and two
-workers over the in-memory transport and test crypto, and through the same MCP tools a run calls; **not run on a real box**, and
-**not yet attached to a box's server**: the hub's daemon (ADR 0042, phase H2) and the network transport (H3) attach it, and the
-integration harness (H4) runs the same scenarios over the real transport, signer and sealer. It leaves Preview with B4-19's real run.
+**Status.** Accepted; **built as Preview** (2026-11-17). Built and tested with a hub and two workers over the in-memory transport, and **integrated**: it is
+attached to `ozbox serve` when the box is a hub, rides the worker channel's connection under `<box>.fabric`, signs with the channel key
+under its own purpose, and the scenarios run over the real daemon, transport, signer and sealer (ADR 0042, "Integration"). **Not run on a real
+box.** It leaves Preview with B4-19's real run.
 Related: ADR 0020 (orchestration), 0021 (chat), 0024 (memory), 0025 (skills), 0041 (approvals), 0042 (the hub), 0043 (the agent's
 socket), 0044 (the mesh: a message can ask and never grant), 0050 (Telegram).
 
@@ -76,10 +76,10 @@ is a place where messages wait for whoever they are for.
 
 ## What is not covered
 
-- **Not attached to a server yet:** no box runs a fabric end until the hub's daemon (H2) does; the tools answer "agent messaging is
-  not set up on this box" until then. No CLI command or dashboard page shows the mailboxes yet.
-- **The network transport, the real signer and sealer** are H2's and H3's; this record is proven with the in-memory transport and
-  test crypto. H4 re-runs the scenarios over the real ones.
+- **Attached to the server on a hub box only.** A box with no hub daemon answers "agent messaging is not set up on this box". On a worker
+  box the fabric end (`BoxFabric`) is not run by the worker agent yet, so a worker's own agents reach the five tools only where a box's tool
+  host attaches it. No CLI command or dashboard page shows the mailboxes yet.
+- **The network transport, the real signer and sealer** are integrated (ADR 0042, "Integration") and the scenarios run over them in CI.
 - **Participants are registered on first use**, not discovered: an agent appears to others once it has called a messaging tool.
 - **Groups and fleets are listed by hand** on the hub; a fleet that follows the person's boxes automatically is not built.
 - **Only `SKILL.md` travels** to a worker; a skill's other files stay on the hub.
