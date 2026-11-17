@@ -109,6 +109,13 @@ const STEP_KEY = {
   running: 'tools.job_step_running',
   ok: 'tools.job_step_ok',
   failed: 'tools.job_step_failed',
+  skipped: 'tools.job_step_skipped',
+} as const;
+
+const OUTCOME_KEY = {
+  ok: 'tools.job_outcome_ok',
+  failed: 'tools.job_outcome_failed',
+  skipped: 'tools.job_outcome_skipped',
 } as const;
 
 /** A running or finished job: the steps with their state and the live log. Safe to close; the job runs on the box. */
@@ -146,6 +153,15 @@ export function ToolJobSheet({ client, box, jobId, onClose, onFinished }: { clie
                   </li>
                 ))}
               </ol>
+              {finished && state === 'failed' && (job.data.job.outcomes ?? []).length > 0 && (
+                <ul className="space-y-1 text-sm" aria-label={t('tools.job_outcomes')} data-testid="tool-job-outcomes">
+                  {(job.data.job.outcomes ?? []).map((o) => (
+                    <li key={o.id} className="break-words" data-state={o.state}>
+                      {t(OUTCOME_KEY[o.state], { id: o.id, error: o.error ?? '' })}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {notes.length > 0 && (
                 <ul className="space-y-1 text-sm">
                   {notes.map((n) => (

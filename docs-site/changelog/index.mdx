@@ -8,6 +8,13 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Tool installs that go on past a failure">
+  ## Tools from a vendor's package source install again, and one failure no longer stops the rest
+
+  - **Packer, the GitHub CLI, Helm and the other tools that come from a vendor's own package source install again.** The check of the vendor's signing key could not run on a box, so a key that matched what the vendor publishes was refused as the wrong one. When a key really cannot be checked, the message now says that, and a key that does not match says which key it found and which one is expected.
+  - **One tool failing no longer stops the others.** `ozbox tools install` and the dashboard's install sheet go on with every tool that does not need the failed one, then say how each tool ended. The command still exits with an error if any tool did not finish.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

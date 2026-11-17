@@ -10,6 +10,11 @@ Tools are installed after the box boots, from pinned sources, and the plan is sh
 A tool whose source Oz Box could not confirm from the vendor's own documentation is listed too, but carries no install steps
 and is never put in a plan.
 
+One install can name several tools. If one of them fails (its download does not match, or its vendor's signing key cannot
+be checked), the others still install: only the tools that need the failed one are skipped. At the end, `ozbox tools install`
+prints one line per tool (`done`, `failed` with the reason, or not tried and why) and exits with an error if any did not
+finish. Run the same install again once the cause is fixed: the tools already in place are left alone.
+
 Every tool installs for the box user and never touches your projects. Boxes run Ubuntu 24.04 on 64-bit x86 or Arm. Nothing here
 installs on your own computer: Oz Box installs only on boxes.
 
