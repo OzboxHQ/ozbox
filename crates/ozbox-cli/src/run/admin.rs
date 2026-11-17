@@ -423,6 +423,7 @@ pub const HELPER_ACTIONS: &[(&str, HelperGate)] = &[
     ("ensure-runner", HelperGate::Ungated),
     ("migrate-legacy-tunnel", HelperGate::Ungated),
     ("ensure-supervisor", HelperGate::Ungated),
+    ("replace-dashboard-auth", HelperGate::Gated),
     ("configure-box-secrets", HelperGate::Ungated),
     ("recover-secrets", HelperGate::Gated),
     ("host-guard", HelperGate::Gated),

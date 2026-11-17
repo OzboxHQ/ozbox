@@ -20,12 +20,12 @@ use crate::secrets::{SecretStore, MAX_VALUE};
 
 /// The secret that holds the hosted dashboard's tunnel token for one box.
 pub fn token_name(box_name: &str) -> String {
-    format!("dashboard-tunnel-token-{box_name}")
+    format!("{}{box_name}", crate::secrets::DASHBOARD_TOKEN_PREFIX)
 }
 
 /// The secret that holds the install settings for one box (hex of a small JSON document).
 pub fn settings_name(box_name: &str) -> String {
-    format!("dashboard-install-{box_name}")
+    format!("{}{box_name}", crate::secrets::DASHBOARD_INSTALL_PREFIX)
 }
 
 /// What `ozbox dashboard install` was given, minus the token, the approval and the program (the program is chosen again from
@@ -103,6 +103,8 @@ impl Kept {
             approval_stdin: false,
             token_from_keychain: with_token,
             approve_with_laptop_key: approve_with_laptop_key && with_token,
+            replace_sign_in: false,
+            settings_approval: None,
         }
     }
 }
@@ -165,4 +167,96 @@ pub fn has_token(store: &dyn SecretStore, box_name: &str) -> bool {
 pub fn forget(store: &dyn SecretStore, box_name: &str) {
     let _ = store.delete(&token_name(box_name));
     let _ = store.delete(&settings_name(box_name));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::secrets::{KeychainSecrets, MemorySecrets};
+
+    /// A store that applies the SAME name rule the keychain applies (`KeychainSecrets::check_name`, the function behind `set`,
+    /// `get`, `exists` and `delete` there) and keeps values in memory. A plain `MemorySecrets` accepts any name, which is how
+    /// "that is not a name this server stores" shipped: the tests of keeping a token passed against a store with no rule.
+    #[derive(Default)]
+    struct RuleChecked(MemorySecrets);
+
+    impl SecretStore for RuleChecked {
+        fn set(&self, name: &str, value: &str) -> Result<(), crate::secrets::SecretError> {
+            KeychainSecrets::check_name(name)?;
+            self.0.set(name, value)
+        }
+        fn get(&self, name: &str) -> Result<Option<String>, crate::secrets::SecretError> {
+            KeychainSecrets::check_name(name)?;
+            self.0.get(name)
+        }
+        fn exists(&self, name: &str) -> Result<bool, crate::secrets::SecretError> {
+            KeychainSecrets::check_name(name)?;
+            self.0.exists(name)
+        }
+        fn delete(&self, name: &str) -> Result<(), crate::secrets::SecretError> {
+            KeychainSecrets::check_name(name)?;
+            self.0.delete(name)
+        }
+        fn label(&self) -> &'static str {
+            "rule-checked memory"
+        }
+    }
+
+    fn kept() -> Kept {
+        Kept {
+            public_url: "https://dash.example.com".into(),
+            tunnel: Some("cloudflare".into()),
+            people: vec!["owner".into()],
+            access_team: None,
+            access_audience: None,
+            ssh_host: None,
+            ssh_user: None,
+            ssh_port: 22,
+            remote_port: 7878,
+        }
+    }
+
+    #[test]
+    fn what_is_kept_for_a_box_is_accepted_by_the_real_name_rule_for_every_box_name() {
+        // a short name, a name with digits and dashes, and the longest a box may have (40 characters)
+        for box_name in ["main", "my-box-2", &"a".repeat(40)] {
+            let s = RuleChecked::default();
+            remember(&s, box_name, &kept(), Some("tok_abc123XYZ.="))
+                .unwrap_or_else(|e| panic!("{box_name}: {e}"));
+            assert!(has_token(&s, box_name), "{box_name}");
+            assert_eq!(token(&s, box_name).as_deref(), Some("tok_abc123XYZ.="));
+            assert_eq!(recall(&s, box_name), Some(kept()), "{box_name}");
+            forget(&s, box_name);
+            assert!(!has_token(&s, box_name) && recall(&s, box_name).is_none());
+        }
+    }
+
+    /// Sentinel: the kept tunnel token is in the store under its own name and nowhere else: not in the settings record beside
+    /// it, not in what a refused keep says (a box name the rule refuses), and not after `forget`.
+    #[test]
+    fn the_kept_token_is_in_the_store_only_and_never_in_an_error_or_the_settings_record() {
+        const SENTINEL: &str = "SENTINEL-tunnel-token-4f2a9c";
+        let s = RuleChecked::default();
+        remember(&s, "main", &kept(), Some(SENTINEL)).unwrap();
+        let record = s.0.get(&settings_name("main")).unwrap().unwrap();
+        assert!(!record.contains(SENTINEL) && !record.contains(&hex(SENTINEL.as_bytes())));
+        assert!(!format!("{:?}", recall(&s, "main")).contains(SENTINEL));
+        // refused by the name rule: the error says why, never the value
+        let e = remember(&s, &"a".repeat(41), &kept(), Some(SENTINEL)).unwrap_err();
+        assert!(!e.contains(SENTINEL), "{e}");
+        forget(&s, "main");
+        assert!(token(&s, "main").is_none());
+    }
+
+    #[test]
+    fn the_names_are_only_ever_for_a_valid_box_name_and_the_generic_routes_cannot_write_them() {
+        assert!(KeychainSecrets::check_name(&token_name(&"a".repeat(41))).is_err());
+        assert!(KeychainSecrets::check_name("dashboard-tunnel-token-").is_err());
+        assert!(KeychainSecrets::check_name("dashboard-install-UP").is_err());
+        assert!(KeychainSecrets::check_name("dashboard-install-a/b").is_err());
+        // set by `ozbox dashboard install` on this computer only: the dashboard server's generic secret routes refuse them
+        assert!(crate::secrets::is_managed_secret(&token_name("main")));
+        assert!(crate::secrets::is_managed_secret(&settings_name("main")));
+    }
 }

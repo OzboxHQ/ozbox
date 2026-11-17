@@ -1435,8 +1435,17 @@ pub enum DashboardCommand {
         /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
         /// token, as `ozbox secrets approve --scope tunnel-token --token-stdin` would, and send it. Needs a token
         /// (--token-stdin or --token-from-keychain).
-        #[arg(long, conflicts_with_all = ["approval", "approval_stdin"])]
+        #[arg(long, conflicts_with_all = ["approval", "approval_stdin", "replace_sign_in"])]
         approve_with_laptop_key: bool,
+        /// Replace the sign-in settings the dashboard already has (they decide who may approve on the box) with the ones given
+        /// here. Without this the dashboard keeps its own, and says so. Needs an approval made in the dashboard (Secret
+        /// approvals): pass its code with --settings-approval. This computer's key never approves it.
+        #[arg(long)]
+        replace_sign_in: bool,
+        /// A single-use approval code for replacing the sign-in settings, made in the dashboard (Secret approvals, "Replacing the
+        /// dashboard's sign-in settings", with the approval binding this command prints). Needs --replace-sign-in.
+        #[arg(long, value_name = "CODE", requires = "replace_sign_in")]
+        settings_approval: Option<String>,
     },
     /// Put a dashboard back on a box from what this computer kept when it was installed: the address, the people, the tunnel
     /// and its token (in the keychain, never in a file). One command after an upgrade that started a new secrets store.
@@ -1450,6 +1459,12 @@ pub enum DashboardCommand {
         /// token (the same step as `ozbox secrets approve --scope tunnel-token --token-stdin`), and send it.
         #[arg(long)]
         approve_with_laptop_key: bool,
+    },
+    /// Remove a tunnel an older setup left running as the box user, with a token file the box user (and every coding agent) can
+    /// read. Only once the box's own tunnel is seen working; the token is destroyed, not moved, so rotate it in Cloudflare after.
+    RetireLegacyTunnel {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
     },
     /// Forget what this computer kept for a box's dashboard (its token and install settings). Nothing on the box changes.
     Forget {

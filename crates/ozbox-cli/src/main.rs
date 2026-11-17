@@ -53,6 +53,7 @@ mod ingress_client;
 mod ingress_guard;
 mod init;
 mod init_cli;
+mod legacy_tunnel_cli;
 mod local_ai;
 mod mcp;
 mod memory_cli;
