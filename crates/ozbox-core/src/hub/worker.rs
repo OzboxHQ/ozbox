@@ -654,6 +654,12 @@ impl WorkerEnd<'_> {
         self.say(st, now, Kind::Question, text.as_bytes());
     }
 
+    /// Send one of an engine's turns, as the kind and body [`crate::engine_turn::to_hub`] made of it. The kinds a worker may send are
+    /// the channel's; the hub refuses any other and quarantines a worker that sends one it alone may.
+    pub fn send_body(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
+        self.say(st, now, kind, plain);
+    }
+
     /// Send a message of a kind the hub alone may send. Exists only so a test can show the hub's reaction to it.
     #[cfg(test)]
     pub fn say_raw(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {

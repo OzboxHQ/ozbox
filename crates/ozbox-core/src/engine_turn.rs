@@ -618,6 +618,8 @@ pub fn assign_of(task: &Task, keys: KeyDeclaration, lease_expiry_ms: u64) -> Ass
         contracts: Vec::new(),
         keys,
         lease_expiry_ms,
+        engine: None,
+        model: None,
     }
 }
 

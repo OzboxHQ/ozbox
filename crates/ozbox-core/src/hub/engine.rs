@@ -37,6 +37,13 @@ pub struct Assign {
     pub keys: KeyDeclaration,
     /// The absolute end of the lease: a worker that hears nothing by then stops.
     pub lease_expiry_ms: u64,
+    /// The engine this task is meant for (an engine-neutral id of ADR 0015, `claude-code`, `codex`, `gemini-cli`), when the
+    /// conductor chose one; the worker's own default otherwise. Never a key, a program path or a provider token.
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// The model chosen by the Models routing, by name.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// A worker's report (the body of `status`).

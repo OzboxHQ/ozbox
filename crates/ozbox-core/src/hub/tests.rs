@@ -448,6 +448,8 @@ pub(super) fn assign(feature: &str, keys: KeyDeclaration) -> Assign {
         contracts: Vec::new(),
         keys,
         lease_expiry_ms: 9_000_000,
+        engine: None,
+        model: None,
     }
 }
 

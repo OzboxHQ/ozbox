@@ -40,8 +40,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
 use self::frame::{
-    encode, Frame, FrameError, FrameReader, MAX_FRAME, MAX_HANDSHAKE_FRAME, T_ACCEPT, T_CHALLENGE,
-    T_HELLO, T_PROOF,
+    encode, Frame, FrameError, FrameReader, MAX_ENROL_FRAME, MAX_FRAME, MAX_HANDSHAKE_FRAME,
+    T_ACCEPT, T_CHALLENGE, T_ENROL, T_ENROLLED, T_HELLO, T_PROOF,
 };
 pub use self::link::Reach;
 use self::link::{LinkState, Resume, Stats, INBOX_FRAMES};
@@ -233,6 +233,8 @@ struct Shared {
     cv: Condvar,
     /// The workers this hub end admits and the keys their enrolment attested (empty on a worker). It grows as workers enrol.
     roster: std::sync::RwLock<BTreeMap<String, RosterEntry>>,
+    /// Who takes an enrolment request that arrives on a connection from a box not on the roster (the hub's daemon).
+    enrol: std::sync::RwLock<Option<Arc<EnrolHandler>>>,
     stop: AtomicBool,
 }
 
@@ -248,6 +250,7 @@ impl Shared {
             }),
             cv: Condvar::new(),
             roster: std::sync::RwLock::new(BTreeMap::new()),
+            enrol: std::sync::RwLock::new(None),
             stop: AtomicBool::new(false),
         })
     }
@@ -489,6 +492,11 @@ impl std::fmt::Display for NetError {
     }
 }
 
+/// What takes an enrolment request: the request's bytes in, `Ok` when it was received (held for the owner's plan and apply), or a
+/// refusal's code and words. It checks the one-use token, the registrar's attestation and the worker's proof itself; the transport
+/// only carries the bytes and rate-limits the source.
+pub type EnrolHandler = dyn Fn(&[u8]) -> Result<(), (String, String)> + Send + Sync;
+
 /// The hub's end: one listener, a thread per worker connection. A [`Transport`] for [`crate::hub::engine::Hub`].
 pub struct NetHub {
     shared: Arc<Shared>,
@@ -569,6 +577,13 @@ impl NetHub {
             g.links.remove(worker);
         }
         self.shared.cv.notify_all();
+    }
+
+    /// Accept first-contact enrolment requests with `h`. Without one, a connection that is not on the roster is closed.
+    pub fn set_enrol_handler(&self, h: Arc<EnrolHandler>) {
+        if let Ok(mut e) = self.shared.enrol.write() {
+            *e = Some(h);
+        }
     }
 
     /// The address actually listened on (the port, when 0 was asked).
@@ -667,10 +682,39 @@ fn hub_conn(mut s: TcpStream, from: IpAddr, sh: &Shared, cfg: &HubNetConfig) {
     let _ = s.set_read_timeout(Some(POLL));
     let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut rd = FrameReader::default();
-    match hub_handshake(&mut s, &mut rd, sh, cfg) {
+    // the first frame decides what this connection is: a worker proving itself, or a box on its first contact
+    let first = read_first(&mut s, &mut rd);
+    let result = match first {
+        Ok((T_ENROL, payload)) => {
+            let reply = match sh.enrol.read().ok().and_then(|h| h.clone()) {
+                Some(h) => h(&payload),
+                None => Err((
+                    "not-accepting".to_string(),
+                    "this hub takes no enrolment here".to_string(),
+                )),
+            };
+            let ok = reply.is_ok();
+            let body = match &reply {
+                Ok(()) => serde_json::json!({"ok": true}),
+                Err((code, why)) => serde_json::json!({"ok": false, "code": code, "why": why}),
+            };
+            let _ = send_frame(
+                &mut s,
+                &Frame::Handshake(T_ENROLLED, serde_json::to_vec(&body).unwrap_or_default()),
+            );
+            // a refusal counts against the source like a failed handshake: a token cannot be guessed at the speed of a loop
+            Err(if ok { Some(String::new()) } else { None })
+        }
+        Ok((T_HELLO, payload)) if payload.len() <= MAX_HANDSHAKE_FRAME => {
+            hub_handshake(&mut s, &mut rd, sh, cfg, &payload)
+        }
+        _ => Err(None),
+    };
+    match result {
         Ok((worker, gen)) => {
             sh.run(s, rd, &worker, gen);
         }
+        Err(Some(w)) if w.is_empty() => {}
         Err(worker) => {
             if let Ok(mut g) = sh.inner.lock() {
                 let now = now_ms();
@@ -688,15 +732,31 @@ fn hub_conn(mut s: TcpStream, from: IpAddr, sh: &Shared, cfg: &HubNetConfig) {
     }
 }
 
+/// The first frame of a connection the hub accepted: its type and payload, read within the handshake time and the enrolment cap.
+fn read_first(s: &mut TcpStream, rd: &mut FrameReader) -> Result<(u8, Vec<u8>), FrameError> {
+    let deadline = now_ms() + HANDSHAKE_MS;
+    loop {
+        if now_ms() > deadline {
+            return Err(FrameError::Closed);
+        }
+        match rd.next(s, MAX_ENROL_FRAME)? {
+            None => continue,
+            Some(Frame::Handshake(t, p)) => return Ok((t, p)),
+            Some(_) => return Err(FrameError::Malformed),
+        }
+    }
+}
+
 /// The hub's side of the handshake. On failure, the roster name the peer claimed (if it was one), for the count.
 fn hub_handshake(
     s: &mut TcpStream,
     rd: &mut FrameReader,
     sh: &Shared,
     cfg: &HubNetConfig,
+    first: &[u8],
 ) -> Result<(String, u64), Option<String>> {
     let deadline = now_ms() + HANDSHAKE_MS;
-    let hello: Hello = read_handshake(s, rd, T_HELLO, deadline).map_err(|_| None)?;
+    let hello: Hello = serde_json::from_slice(first).map_err(|_| None)?;
     let Some(entry) = sh
         .roster
         .read()
@@ -971,3 +1031,55 @@ fn worker_handshake(
 
 #[cfg(test)]
 mod tests;
+
+/// A box's first contact (ADR 0042 section 2): dial the hub, send the enrolment request once on a connection of its own, and read
+/// the answer. `Ok` means the hub received it and holds it for the owner; the refusal's code and words otherwise. The request
+/// proves itself (token, attestation, the worker's own signature), so nothing here is trusted and nothing is stored.
+pub fn enrol_over_net(dialer: &dyn Dialer, request: &[u8]) -> Result<(), (String, String)> {
+    let down = || {
+        (
+            "unreachable".to_string(),
+            "the hub could not be reached".to_string(),
+        )
+    };
+    let mut s = dialer.dial().map_err(|_| down())?;
+    let _ = s.set_read_timeout(Some(POLL));
+    let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
+    if request.len() > MAX_ENROL_FRAME {
+        return Err(("too-big".into(), "the request is too large".into()));
+    }
+    send_frame(&mut s, &Frame::Handshake(T_ENROL, request.to_vec())).map_err(|_| down())?;
+    let mut rd = FrameReader::default();
+    let deadline = now_ms() + HANDSHAKE_MS;
+    let bad = || {
+        (
+            "malformed".to_string(),
+            "the answer was not valid".to_string(),
+        )
+    };
+    loop {
+        if now_ms() > deadline {
+            return Err(("timeout".into(), "the hub did not answer".into()));
+        }
+        match rd.next(&mut s, MAX_HANDSHAKE_FRAME) {
+            Ok(None) => continue,
+            Ok(Some(Frame::Handshake(T_ENROLLED, p))) => {
+                let v: serde_json::Value = serde_json::from_slice(&p).map_err(|_| bad())?;
+                return if v["ok"].as_bool() == Some(true) {
+                    Ok(())
+                } else {
+                    Err((
+                        v["code"]
+                            .as_str()
+                            .unwrap_or("refused")
+                            .chars()
+                            .take(64)
+                            .collect(),
+                        v["why"].as_str().unwrap_or("").chars().take(200).collect(),
+                    ))
+                };
+            }
+            _ => return Err(bad()),
+        }
+    }
+}

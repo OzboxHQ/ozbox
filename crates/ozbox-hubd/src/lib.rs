@@ -11,6 +11,7 @@
 //! * [`selftest`]: what must hold before it is trusted.
 //! * [`setup`]: the units and folders, written by the script this program carries.
 //!
+//! * [`agent`]: a worker's hub agent: the worker's end of the channel, the engine runs, keys by name, the loss rule.
 //! * [`nethost`]: the network end, inside the daemon: workers dial out, the daemon checks and spools, the roster follows enrolment.
 //! * [`fleet`]: the three seams of sealed key delivery, backed by enrolment's attestations and the secrets service.
 //!
@@ -18,6 +19,7 @@
 
 #![cfg(unix)]
 
+pub mod agent;
 pub mod crypto;
 pub mod daemon;
 pub mod enrol;

@@ -21,6 +21,13 @@ pub const T_DATA: u8 = 5;
 pub const T_ACK: u8 = 6;
 pub const T_PING: u8 = 7;
 pub const T_PONG: u8 = 8;
+/// First contact (ADR 0042 section 2): a worker that is not on the roster yet sends its enrolment request, once, on a connection
+/// of its own. The reply is [`T_ENROLLED`]. Neither is ever a data frame.
+pub const T_ENROL: u8 = 9;
+pub const T_ENROLLED: u8 = 10;
+
+/// The most an enrolment request may be (an attestation, four public keys and a proof). Read from a peer that has proved nothing.
+pub const MAX_ENROL_FRAME: usize = 16 * 1024;
 
 /// One frame, decoded as far as its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +94,9 @@ impl std::fmt::Display for FrameError {
 /// Decode a frame's type and payload (the length is already taken off).
 pub fn decode(t: u8, payload: &[u8]) -> Result<Frame, FrameError> {
     match t {
-        T_HELLO | T_CHALLENGE | T_PROOF | T_ACCEPT => Ok(Frame::Handshake(t, payload.to_vec())),
+        T_HELLO | T_CHALLENGE | T_PROOF | T_ACCEPT | T_ENROL | T_ENROLLED => {
+            Ok(Frame::Handshake(t, payload.to_vec()))
+        }
         T_DATA => {
             let n = u64::from_be_bytes(
                 payload

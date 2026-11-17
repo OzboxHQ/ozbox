@@ -930,6 +930,8 @@ fn assign(feature: &str) -> Assign {
             names: vec!["SUPABASE_URL".into()],
         },
         lease_expiry_ms: NOW + 3_600_000,
+        engine: None,
+        model: None,
     }
 }
 

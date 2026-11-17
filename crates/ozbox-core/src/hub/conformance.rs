@@ -194,6 +194,8 @@ fn assign(feature: &str, keys: KeyDeclaration, brief: String) -> Assign {
         contracts: Vec::new(),
         keys,
         lease_expiry_ms: now_ms() + 3_600_000,
+        engine: None,
+        model: None,
     }
 }
 

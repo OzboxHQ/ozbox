@@ -55,6 +55,20 @@ impl NetHost {
             }),
         })
         .map_err(|e| format!("the hub could not listen: {e}"))?;
+        // first contact: a box that is not on the roster sends its enrolment request once; the daemon screens it (the one-use
+        // token, the registrar's attestation, the worker's own proof) and holds it for the owner's plan and apply
+        let taker = hubd.clone();
+        net.set_enrol_handler(Arc::new(move |bytes: &[u8]| {
+            let req: crate::enrol::EnrolRequest = serde_json::from_slice(bytes).map_err(|_| {
+                (
+                    "malformed".to_string(),
+                    "that request is not valid".to_string(),
+                )
+            })?;
+            taker
+                .receive_enrolment(&req, crate::daemon::now_ms())
+                .map_err(|e| (e.code.to_string(), e.message))
+        }));
         let host = NetHost {
             net: Arc::new(net),
             hubd,

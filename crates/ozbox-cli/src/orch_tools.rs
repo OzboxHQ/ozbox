@@ -927,6 +927,9 @@ impl Tools {
                     keys: decl.clone(),
                     lease_expiry_ms: now
                         .saturating_add(f.caps.max_runtime_s.unwrap_or(4 * 3600) * 1000),
+                    // the conductor's choice travels as engine-neutral ids; the worker's adapter honours it
+                    engine: Some(f.engine.clone()).filter(|e| !e.is_empty()),
+                    model: f.model.clone(),
                 };
                 let sent = h.with(now, |hub, st| hub.assign(st, &f.box_name, &assign, now));
                 let Some(r) = sent else {

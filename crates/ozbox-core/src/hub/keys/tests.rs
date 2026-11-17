@@ -207,6 +207,8 @@ fn assign(names: &[&str]) -> Assign {
             names: names.iter().map(|s| s.to_string()).collect(),
         },
         lease_expiry_ms: now_ms() + 3_600_000,
+        engine: None,
+        model: None,
     }
 }
 

@@ -1,0 +1,301 @@
+//! The worker's hub agent (ADR 0042 sections 2, 5, 6 and 8): what runs on a worker box to be a worker of a hub.
+//!
+//! It holds the worker's end of the channel ([`WorkerEnd`]) over a transport the worker dialed out on
+//! ([`ozbox_core::hub::net::NetWorker`]; nothing on a worker listens), and on every [`WorkerAgent::tick`]:
+//!
+//! * **takes what the hub sent**: a task (refused here if it names Production, D2 on the worker), a delivery of keys by name (handed
+//!   to the worker's own secrets service, which alone opens it), a revoke or the end of a task (their keys deleted), an answer to
+//!   a question, a relayed decision (verified by this box's own approval service), a lane shard;
+//! * **runs the task** through [`EngineSession`] with the engine the task names or the box's default, whatever its provider: it sees
+//!   only the engine-neutral turn model, never a program's own format;
+//! * **relays** the agent's asks, replies, state and result to the hub in the channel's own kinds ([`to_hub`]); a turn whose text
+//!   looks like a key is not sent; an approval an agent wants is the box's own ADR 0041 flow's, never a message;
+//! * **asks for keys by name** for a task that declared some (never Production, never a value in the ask);
+//! * **deletes every key it holds at once** when the hub cannot be reached for [`HUB_LOST_AFTER_MS`] (ADR 0042 section 5.3);
+//! * **announces its pending approval requests** and applies each decision its own service verified.
+//!
+//! It stores no secret: a key delivery is sealed to a key only the worker's secrets service holds ([`crate::fleet::ServiceDeliveryStore`]).
+//! Its state is disposable: losing it loses only messages the hub has not acknowledged, and the hub resends them.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+use ozbox_core::agent_engine::AgentEngine;
+use ozbox_core::channel::wire::{Sealer, Signer, Verifier};
+use ozbox_core::engine_turn::{
+    task_of, to_hub, EngineSession, HubOut, Reply, RunState, SessionStart, Turn,
+};
+use ozbox_core::hub::approvals::ApprovalService;
+use ozbox_core::hub::engine::Assign;
+use ozbox_core::hub::keys::DeliveryStore;
+use ozbox_core::hub::net::Reach;
+use ozbox_core::hub::wire::{Kind, Transport};
+use ozbox_core::hub::worker::{WorkerEnd, WorkerState};
+
+/// How long the hub may be out of reach before the worker deletes every key it holds (a reconnect takes up to 30 seconds, and a
+/// connection that hears nothing for three heartbeats is closed: this is a little past both).
+pub const HUB_LOST_AFTER_MS: u64 = 120_000;
+
+/// Makes the engine a task asked for. The real one fills in each adapter's transport on this box; a test fills in a fake program.
+pub trait EngineFactory: Send {
+    /// The engine for `engine` (an engine-neutral id; empty means the box's default). `Err` names why it cannot be started.
+    fn make(&mut self, engine: &str) -> Result<Box<dyn AgentEngine>, String>;
+}
+
+/// The box's repository, as far as the agent needs it: the commit a finished task's branch points at, which is what the hub's
+/// merge queue merges. `None` when there is none.
+pub trait Workspace: Send {
+    fn commit_of(&self, repo: Option<&str>, branch: &str) -> Option<String>;
+}
+
+/// What a tick did, for the host to act on and for tests.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TickReport {
+    /// Messages the hub sent that were applied.
+    pub applied: usize,
+    /// Tasks started on an engine this tick (`orchestration/feature`).
+    pub started: Vec<String>,
+    /// Tasks whose result went to the hub.
+    pub finished: Vec<String>,
+    /// Turns that were not sent, and why (a key shape in the text): the turn is dropped, never sent redacted-looking.
+    pub withheld: Vec<String>,
+    /// Actions an agent wants to take that the box's own approval flow decides (ADR 0041). Never a message.
+    pub approval_asks: Vec<(String, ozbox_core::approvals::AgentAction)>,
+    /// Whether every key was deleted this tick because the hub was out of reach too long.
+    pub keys_deleted: bool,
+}
+
+/// What a worker box needs to be a worker.
+pub struct AgentSeams {
+    pub me: String,
+    pub hub: String,
+    /// This box's name for engines and the run record.
+    pub box_name: String,
+    pub signer: Arc<dyn Signer>,
+    pub verifier: Arc<dyn Verifier>,
+    pub sealer: Arc<dyn Sealer>,
+    pub net: Arc<dyn Transport>,
+    /// How reachable the hub is (the transport's own account), for the loss rule.
+    pub reach: Arc<dyn Fn() -> Reach + Send + Sync>,
+    pub store: Arc<dyn DeliveryStore + Send + Sync>,
+    /// This box's own approval service; `None` announces nothing and applies nothing.
+    pub approvals: Option<Arc<Mutex<dyn ApprovalService + Send>>>,
+    pub engines: Box<dyn EngineFactory>,
+    pub workspace: Box<dyn Workspace>,
+}
+
+/// One worker box's agent.
+pub struct WorkerAgent {
+    s: AgentSeams,
+    pub state: WorkerState,
+    sessions: BTreeMap<String, EngineSession>,
+    started: BTreeSet<String>,
+    done: BTreeSet<String>,
+    said_hello: u64,
+    lost_since: Option<u64>,
+    keys_deleted: bool,
+}
+
+fn end_of(s: &AgentSeams) -> WorkerEnd<'_> {
+    WorkerEnd {
+        me: &s.me,
+        hub: &s.hub,
+        signer: s.signer.as_ref(),
+        verifier: s.verifier.as_ref(),
+        sealer: s.sealer.as_ref(),
+        net: s.net.as_ref(),
+    }
+}
+
+fn task_id(a: &Assign) -> String {
+    format!("{}/{}", a.orchestration, a.feature)
+}
+
+impl WorkerAgent {
+    /// `state` is made from the keys this worker enrolled with and the hub identity it pinned (`WorkerState::new`).
+    pub fn new(seams: AgentSeams, state: WorkerState) -> WorkerAgent {
+        WorkerAgent {
+            s: seams,
+            state,
+            sessions: BTreeMap::new(),
+            started: BTreeSet::new(),
+            done: BTreeSet::new(),
+            said_hello: 0,
+            lost_since: None,
+            keys_deleted: false,
+        }
+    }
+
+    /// Hand the decision on an action the agent proposed (made by this box's own ADR 0041 flow) to the engine that asked.
+    pub fn decide(&mut self, task: &str, approved: bool) -> Result<(), String> {
+        self.sessions
+            .get_mut(task)
+            .ok_or_else(|| "that task is not running here".to_string())?
+            .decide(approved)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The tasks running on an engine here.
+    pub fn running(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
+    }
+
+    /// One round: take what the hub sent, run the tasks, say what happened, ask for keys, delete them when the hub is lost.
+    pub fn tick(&mut self, now: u64) -> TickReport {
+        let mut rep = TickReport::default();
+        // 1. the hub's loss rule (ADR 0042 section 5.3): out of reach too long, every key goes at once
+        match (self.s.reach)() {
+            Reach::Connected { .. } => {
+                self.lost_since = None;
+                self.keys_deleted = false;
+            }
+            Reach::Never | Reach::NotAnswering { .. } => {
+                let since = *self.lost_since.get_or_insert(now);
+                if now.saturating_sub(since) >= HUB_LOST_AFTER_MS && !self.keys_deleted {
+                    let end = end_of(&self.s);
+                    end.hub_lost(&mut self.state, now, self.s.store.as_ref());
+                    self.keys_deleted = true;
+                    rep.keys_deleted = true;
+                }
+            }
+        }
+        // 2. the hub's messages (keys go to this box's own service)
+        if now.saturating_sub(self.said_hello) >= 1_000 || self.said_hello == 0 {
+            end_of(&self.s).hello(&mut self.state, now);
+            self.said_hello = now;
+        }
+        {
+            rep.applied = end_of(&self.s).poll_keys(&mut self.state, now, self.s.store.as_ref());
+        }
+        // 3. decisions this box's own approval service verifies, and the requests it announces
+        if let Some(svc) = self.s.approvals.clone() {
+            if let Ok(mut g) = svc.lock() {
+                let end = end_of(&self.s);
+                end.apply_decisions(&mut self.state, &mut *g, now);
+                end.announce_approvals(&mut self.state, &*g, now);
+            }
+        }
+        // 4. new tasks
+        let tasks: Vec<Assign> = self.state.tasks.clone();
+        for a in tasks {
+            let id = task_id(&a);
+            if self.started.contains(&id) || a.lease_expiry_ms <= now {
+                continue;
+            }
+            self.started.insert(id.clone());
+            match self.start(&a) {
+                Ok(()) => rep.started.push(id.clone()),
+                Err(why) => self.say_status(now, &a, "refused", &why),
+            }
+            if !a.keys.names.is_empty() {
+                let r = end_of(&self.s).ask_keys(
+                    &mut self.state,
+                    now,
+                    &a.orchestration,
+                    &a.feature,
+                    &a.keys.names,
+                );
+                if let Err(e) = r {
+                    self.say_status(now, &a, "refused", e.code);
+                }
+            }
+        }
+        // 5. answers the hub gave about these tasks go to the agent that asked
+        for ans in std::mem::take(&mut self.state.answers) {
+            let id = format!("{}/{}", ans.orchestration, ans.feature);
+            if let Some(sess) = self.sessions.get_mut(&id) {
+                let text = if ans.kind == "answer" {
+                    ans.text
+                } else {
+                    format!("{}: {}", ans.kind, ans.text)
+                };
+                let _ = sess.reply(&Reply {
+                    ask_id: String::new(),
+                    text,
+                });
+            }
+        }
+        // 6. what the agents did
+        let ids: Vec<String> = self.sessions.keys().cloned().collect();
+        for id in ids {
+            self.step(&id, now, &mut rep);
+        }
+        rep
+    }
+
+    fn start(&mut self, a: &Assign) -> Result<(), String> {
+        let engine = self
+            .s
+            .engines
+            .make(a.engine.as_deref().unwrap_or(""))
+            .map_err(|e| format!("no engine could be started: {e}"))?;
+        let sess = EngineSession::start(
+            engine,
+            &SessionStart {
+                task: task_of(a),
+                box_name: self.s.box_name.clone(),
+                model: a.model.clone(),
+                // the run's own token comes from the box's broker when the real factory starts it; nothing of a key is in a task
+                secret_env: BTreeMap::new(),
+                deny_commands: Vec::new(),
+                conversation: true,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        self.sessions.insert(task_id(a), sess);
+        Ok(())
+    }
+
+    fn say_status(&mut self, now: u64, a: &Assign, state: &str, text: &str) {
+        let body = ozbox_core::hub::engine::StatusBody {
+            orchestration: a.orchestration.clone(),
+            feature: a.feature.clone(),
+            state: state.to_string(),
+            text: text.chars().take(300).collect(),
+        };
+        if let Ok(b) = serde_json::to_vec(&body) {
+            end_of(&self.s).send_body(&mut self.state, now, Kind::Status, &b);
+        }
+    }
+
+    fn step(&mut self, id: &str, now: u64, rep: &mut TickReport) {
+        let Some(sess) = self.sessions.get_mut(id) else {
+            return;
+        };
+        let turns = match sess.step() {
+            Ok(t) => t,
+            Err(e) => vec![Turn::State(RunState::Failed, Some(e.to_string()))],
+        };
+        let assign = self.state.tasks.iter().find(|t| task_id(t) == id).cloned();
+        for t in turns {
+            let mut turn = t;
+            // a finished task reports the commit its branch points at: that is what the merge queue merges
+            if let (Turn::Result(o), Some(a)) = (&mut turn, &assign) {
+                if o.commit.is_none() {
+                    o.commit = self.s.workspace.commit_of(a.repo.as_deref(), &a.branch);
+                }
+            }
+            match to_hub(id, &turn) {
+                Ok(HubOut::Send(kind, body)) => {
+                    end_of(&self.s).send_body(&mut self.state, now, kind, &body);
+                    if kind == Kind::Result
+                        || matches!(&turn, Turn::State(RunState::Failed, _))
+                        || (kind == Kind::Status && matches!(&turn, Turn::Result(_)))
+                    {
+                        if self.done.insert(id.to_string()) {
+                            rep.finished.push(id.to_string());
+                        }
+                    }
+                }
+                Ok(HubOut::Approval(action)) => rep.approval_asks.push((id.to_string(), action)),
+                Ok(HubOut::Local) => {}
+                Err(e) => rep.withheld.push(format!("{id}: {e}")),
+            }
+        }
+        if self.done.contains(id) {
+            if let Some(mut s) = self.sessions.remove(id) {
+                let _ = s.stop();
+            }
+        }
+    }
+}
