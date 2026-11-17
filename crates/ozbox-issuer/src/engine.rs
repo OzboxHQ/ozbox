@@ -30,7 +30,7 @@ pub struct Approver {
     /// Raw public key bytes.
     pub public: Vec<u8>,
     /// For a laptop key: it needs the person present (a Secure Enclave or a security key with user verification). A software
-    /// key in the keychain does not, and is refused for Production unless the owner allows it.
+    /// key in the keychain does not, and is refused for Production, with no opt-in (ADR 0041 §3).
     #[serde(default)]
     pub user_presence: bool,
 }
@@ -77,6 +77,8 @@ pub struct Config {
     /// The passkeys' relying party and the exact origin of the dashboard they sign in on.
     pub rp_id: String,
     pub origin: String,
+    /// Read and **ignored**: it once let a software laptop key approve Production. A software key never decides Production,
+    /// with no opt-in (ADR 0041 §3, amendment of 2026-11-17). Kept so a config that still names it is read, never obeyed.
     #[serde(default)]
     pub allow_laptop_without_presence: bool,
     /// Origins the owner has established are **not served by the box**: a page the box cannot render. A passkey assertion is
@@ -259,7 +261,7 @@ impl std::fmt::Display for Error {
             Error::UnknownApprover => f.write_str("that approver is not pinned"),
             Error::WrongKind => f.write_str("that proof is not the kind this approver gives"),
             Error::NoUserPresence => f.write_str(
-                "that laptop key does not ask the person, so it cannot approve Production",
+                "that laptop key does not ask the person, so it cannot approve Production, and no setting changes that: approve with a laptop key that asks the person present, or the recovery key",
             ),
             Error::OriginServedByBox => f.write_str(
                 "a passkey on a page this box serves cannot approve Production: approve with a laptop key that asks the person",
@@ -483,10 +485,8 @@ impl Issuer<'_> {
         };
         match (ap.kind, proof) {
             (Kind::Laptop | Kind::Recovery, Proof::Signature(sig)) => {
-                if ap.kind == Kind::Laptop
-                    && !ap.user_presence
-                    && !self.config.allow_laptop_without_presence
-                {
+                // no setting turns this off: `allow_laptop_without_presence` is read and ignored (ADR 0041 §3)
+                if ap.kind == Kind::Laptop && !ap.user_presence {
                     let _ = self.audit(
                         "refused",
                         request_id,
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn a_software_laptop_key_is_refused_for_production_unless_the_owner_allows_it() {
+    fn a_software_laptop_key_is_refused_for_production_and_nothing_allows_it() {
         let mut w = world();
         let (soft, spub) = ed25519();
         w.cfg.approvers[1].public = spub;
@@ -1101,10 +1101,13 @@ mod tests {
             );
             (ch, sig)
         };
+        // the old opt-in is read and ignored (B4-28): a software key still never approves Production
         w.cfg.allow_laptop_without_presence = true;
-        w.issuer(&r)
-            .approve(&ch.request_id, "soft", Proof::Signature(sig.as_ref()), NOW)
-            .unwrap();
+        assert_eq!(
+            w.issuer(&r)
+                .approve(&ch.request_id, "soft", Proof::Signature(sig.as_ref()), NOW),
+            Err(Error::NoUserPresence)
+        );
     }
 
     #[test]

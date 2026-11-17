@@ -151,3 +151,107 @@ fn a_software_key_code_for_an_exact_production_import_is_refused() {
         assert!(!r.stored(env, "API_KEY"), "{env}: nothing stored");
     }
 }
+
+/// The dashboard's approval (the person's passkey or authenticator code) still imports into Production, and this computer's
+/// key still imports into a non-Production environment: only the software key for Production changed.
+#[test]
+fn the_dashboard_still_approves_production_and_a_software_key_still_approves_staging() {
+    let r = rig();
+    let code = r.dashboard_code("import", "app", "production");
+    let out = r.import("production", "API_KEY", &code);
+    assert!(ok(&out), "{out}");
+    assert!(r.stored("production", "API_KEY"));
+    for env in ["staging", "dev", "test", "e2e", "development"] {
+        let code = r.laptop_code("import", "app", env).unwrap();
+        let out = r.import(env, "API_KEY", &code);
+        assert!(ok(&out), "{env}: {out}");
+        assert!(r.stored(env, "API_KEY"), "{env}");
+    }
+}
+
+/// The gate is the boundary, not the mint: a software key's code that somehow exists for a Production import (made by an
+/// older program, or by a path that forgot the check) is refused when it is spent, names what approves it, and is not
+/// spent by the refusal. Nothing is stored, and the refusal holds no code and no value.
+#[test]
+fn the_gate_refuses_a_software_keys_production_code_even_when_one_exists() {
+    let r = rig();
+    // made directly on the gate, as a code an earlier program could have made
+    let code = r
+        .gates
+        .approvals
+        .mint_unchecked_for_test(
+            "import",
+            "app",
+            "production",
+            &crate::secrets_signer::Signer::SoftwareKey("laptop".into()),
+        )
+        .unwrap();
+    let out = r.import("production", "API_KEY", &code);
+    assert!(!ok(&out), "{out}");
+    let e = err(&out);
+    assert!(
+        e.contains("dashboard") && e.contains("passkey") && e.contains("authenticator"),
+        "{e}"
+    );
+    assert!(!e.contains(&code) && !e.contains(SENTINEL), "{e}");
+    assert!(!r.stored("production", "API_KEY"));
+    // it is still that code, still refused: the refusal did not spend it, and it never becomes good for Production
+    assert!(!ok(&r.import("production", "API_KEY", &code)));
+}
+
+/// A declaration with a command that takes secrets from Production (or that removes one) is a Production change: a software
+/// key's policy code is refused for it and the dashboard's is not. A staging-only declaration still takes a software key's code.
+#[test]
+fn a_software_key_never_approves_a_declaration_that_touches_production() {
+    let r = rig();
+    let code = r.laptop_code("policy", "app", "").unwrap();
+    let out = r.policy(&["production"], &code);
+    assert!(!ok(&out), "{out}");
+    assert!(err(&out).contains("dashboard"), "{out}");
+    assert!(
+        crate::workload_policy::load(r.store.as_ref(), "app")
+            .unwrap()
+            .is_none(),
+        "nothing was declared"
+    );
+    // the same code still approves a staging-only declaration: the refusal did not spend it
+    let out = r.policy(&["staging"], &code);
+    assert!(ok(&out), "{out}");
+    // the dashboard approves the Production one
+    let dash = r.dashboard_code("policy", "app", "");
+    assert!(ok(&r.policy(&["staging", "production"], &dash)));
+    // and now a software key can no longer replace it, not even with a staging-only one (that removes a Production command)
+    let code = r.laptop_code("policy", "app", "").unwrap();
+    assert!(!ok(&r.policy(&["staging"], &code)));
+}
+
+/// A guard override names one change by digest. A software key asking for an override "for production" (or for anything that
+/// is not a change digest) is refused before it signs anything; one for a digest is made as before.
+#[test]
+fn a_software_key_gets_a_guard_override_only_for_a_change_digest() {
+    let r = rig();
+    let e = r
+        .laptop_code("guard-override", "0123456789abcdef", "production")
+        .unwrap_err();
+    assert!(e.contains("dashboard") && e.contains("passkey"), "{e}");
+    assert!(r
+        .laptop_code("guard-override", "0123456789abcdef", "fedcba9876543210")
+        .is_ok());
+}
+
+/// The scopes that are the box's own settings (not a project environment) keep their laptop-key route: this change narrows
+/// Production only.
+#[test]
+fn the_box_own_scopes_still_take_a_software_keys_code() {
+    let r = rig();
+    for scope in [
+        "tunnel-token",
+        "signer-enroll",
+        "setup-code",
+        "kek-export",
+        "box-secrets",
+        "host-guard",
+    ] {
+        assert!(r.laptop_code(scope, "", "").is_ok(), "{scope}");
+    }
+}
