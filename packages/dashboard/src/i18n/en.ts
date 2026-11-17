@@ -27,6 +27,7 @@ import { enSecrets } from './en-secrets';
 import { enFleet } from './en-fleet';
 import { enAgentMcp } from './en-agent-mcp';
 import { enRoles } from './en-roles';
+import { enClipboard } from './en-clipboard';
 
 export const en = {
   ...enSetup,
@@ -55,6 +56,7 @@ export const en = {
   ...enFleet,
   ...enAgentMcp,
   ...enRoles,
+  ...enClipboard,
   'common.cancel': 'Cancel',
   'common.retry': 'Try again',
   'common.stale_title': 'Could not refresh',

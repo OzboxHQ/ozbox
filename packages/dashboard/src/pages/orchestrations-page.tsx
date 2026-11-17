@@ -23,6 +23,7 @@ import { CannotNote } from '../components/role-scope';
 import { SourceNote } from '../components/source-badge';
 import { fmtRelative } from '../lib/format';
 import { t, type MessageKey } from '../lib/i18n';
+import { copyAndSay } from '../lib/copy-and-say';
 import { mayWrite, PAGE_CANNOT, PAGE_CAPABILITY } from '../lib/role-gates';
 import { hrefs } from '../lib/router';
 import { fmtCents } from '../lib/tasks';
@@ -661,7 +662,7 @@ function ConnectSheet({ client, onClose }: { client: ApiClient; onClose: () => v
             <div className="space-y-2">
               <Label htmlFor="orch-mcp-snippet">{t('orch.connect_snippet')}</Label>
               <Textarea id="orch-mcp-snippet" readOnly rows={9} className="font-mono text-xs" value={snippet} data-testid="orch-mcp-snippet" />
-              <Button variant="outline" className={TAP_ACTION} onClick={() => (navigator.clipboard?.writeText(snippet) ?? Promise.reject(new Error('no clipboard'))).then(() => toast.success(t('orch.copied')), () => toast.error(t('orch.copy_failed')))}>
+              <Button variant="outline" className={TAP_ACTION} onClick={() => void copyAndSay(snippet, { kind: 'secret', done: t('orch.copied'), failed: t('orch.copy_failed') })}>
                 {t('orch.copy')}
               </Button>
             </div>
