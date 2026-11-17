@@ -31,6 +31,7 @@ pub mod procs;
 pub mod quiesce;
 #[cfg(unix)]
 pub mod run_backend;
+pub mod run_files;
 #[cfg(unix)]
 pub mod run_shim;
 #[cfg(unix)]

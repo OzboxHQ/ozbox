@@ -66,6 +66,10 @@ pub struct RunRequest {
     /// the run's record on disk, so a restarted daemon can keep checking it. Never the capability itself.
     #[serde(skip)]
     pub cap_sha256: Option<String>,
+    /// Files for this run only, in a private folder removed when it ends (ADR 0055; see `run_files`). Secret like the
+    /// environment: never logged, serialized, written to the run's record or passed to the spawner.
+    #[serde(default)]
+    pub files: Vec<crate::run_files::RunFile>,
 }
 
 /// The SHA-256 of a capability: all the daemon keeps of it.
@@ -108,6 +112,7 @@ impl fmt::Debug for RunRequest {
             .field("program", &self.program())
             .field("args", &self.argv.len().saturating_sub(1))
             .field("env_keys", &self.env.len())
+            .field("files", &self.files.len())
             .field("stdin_bytes", &self.stdin.as_ref().map(String::len))
             .field("memory_request_bytes", &self.memory_request_bytes)
             .finish()
@@ -129,6 +134,7 @@ impl RunRequest {
             keep_stdin_open: false,
             require_capability: false,
             cap_sha256: None,
+            files: Vec::new(),
         }
     }
 
@@ -176,6 +182,9 @@ impl RunRequest {
             .any(|(k, v)| !valid_key(k) || v.contains('\0') || v.len() > MAX_ARG_LEN)
         {
             return bad("an environment variable name or value is not allowed");
+        }
+        if let Some(why) = crate::run_files::invalid(&self.files, &self.env) {
+            return bad(why);
         }
         if self.labels.len() > MAX_LABELS
             || self
@@ -812,6 +821,9 @@ pub struct RunConfig {
     /// it. Never divided by the number of runs: admission already shares memory by what each asks for. `false` only for a
     /// box whose owner chose to run uncapped.
     pub default_memory_cap: bool,
+    /// Where a run's own files go (ADR 0055): a folder in the box user's runtime directory. `None` refuses a run that
+    /// brings files.
+    pub files_root: Option<PathBuf>,
 }
 
 impl Default for RunConfig {
@@ -822,6 +834,7 @@ impl Default for RunConfig {
             history: 100,
             default_max_runtime_s: None,
             default_memory_cap: true,
+            files_root: None,
         }
     }
 }
@@ -1020,7 +1033,40 @@ impl RunManager {
         Ok((id, RunState::Queued))
     }
 
-    fn launch(&mut self, mut info: RunInfo, req: &RunRequest) -> Result<(), RunError> {
+    /// Start a run, with its own files first when it brings any (ADR 0055). The spawner sees only the variable naming the
+    /// folder, never the files' text, and the folder goes again if the run does not start.
+    fn launch(&mut self, info: RunInfo, req: &RunRequest) -> Result<(), RunError> {
+        if req.files.is_empty() {
+            return self.launch_program(info, req);
+        }
+        let Some(root) = self.cfg.files_root.clone() else {
+            return Err(RunError::Start(
+                "this box cannot hand a run its own files: the daemon has no private runtime folder".into(),
+            ));
+        };
+        let (var, dir) = crate::run_files::materialise(&root, &info.id, &req.files)
+            .map_err(|e| RunError::Start(format!("run files: {}", e.kind())))?;
+        let mut r = req.clone();
+        r.files.clear();
+        r.env.insert(var, dir);
+        let id = info.id.clone();
+        let out = self.launch_program(info, &r);
+        if out.is_err() {
+            crate::run_files::remove(&root, &id);
+        }
+        out
+    }
+
+    /// Remove the folders of runs that are not going (a daemon that started again after its runs ended).
+    pub fn sweep_run_files(&self) -> usize {
+        let Some(root) = &self.cfg.files_root else {
+            return 0;
+        };
+        let keep: Vec<String> = self.active.iter().map(|a| a.info.id.clone()).collect();
+        crate::run_files::sweep(root, &keep)
+    }
+
+    fn launch_program(&mut self, mut info: RunInfo, req: &RunRequest) -> Result<(), RunError> {
         // A spawner that starts a unit sets the limits as the unit's properties: there is no cgroup of ours to make.
         // The way is decided first: the name of a run's cgroup depends on it.
         self.spawner.place(&info.id);
@@ -1178,6 +1224,10 @@ impl RunManager {
     }
 
     fn remember(&mut self, info: RunInfo) {
+        // every way a run ends comes here: its own files go with it
+        if let Some(root) = &self.cfg.files_root {
+            crate::run_files::remove(root, &info.id);
+        }
         self.done.push_back(info);
         while self.done.len() > self.cfg.history {
             if let Some(old) = self.done.pop_front() {
@@ -1483,6 +1533,7 @@ impl RunManager {
         for info in ended {
             self.remember(info);
         }
+        self.sweep_run_files();
         summary
     }
 
@@ -1662,6 +1713,8 @@ pub mod testing {
         pub obeys_term: Arc<std::sync::atomic::AtomicBool>,
         /// Whether a kill takes time: the child is not gone until the test says it exits (a scope emptied late).
         pub slow_kill: Arc<std::sync::atomic::AtomicBool>,
+        /// The environment and the count of files each spawn was handed (ADR 0055: the spawner never sees a file's text).
+        pub envs_seen: Mutex<Vec<(BTreeMap<String, String>, usize)>>,
     }
 
     impl FakeSpawner {
@@ -1777,6 +1830,9 @@ pub mod testing {
             if let Ok(mut l) = self.limits_seen.lock() {
                 l.push((id.to_string(), *limits));
             }
+            if let Ok(mut e) = self.envs_seen.lock() {
+                e.push((req.env.clone(), req.files.len()));
+            }
             let pid = {
                 let mut n = self
                     .next_pid
@@ -1838,6 +1894,58 @@ mod tests {
         r.memory_request_bytes = gib * GIB;
         r.memory_max_bytes = Some(gib.max(1) * GIB);
         r
+    }
+
+    /// ADR 0055: a run's own files are written to a private folder, the spawner is told only the variable naming it, and
+    /// the folder goes when the run ends; a box with no runtime folder refuses such a run.
+    #[cfg(unix)]
+    #[test]
+    fn a_runs_files_are_its_own_and_go_when_it_ends() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("rf");
+        let mut r = rig(
+            8 * GIB,
+            RunConfig {
+                files_root: Some(root.clone()),
+                ..RunConfig::default()
+            },
+        );
+        let mut rq = req(1);
+        rq.files.push(crate::run_files::RunFile {
+            dir_env: "CODEX_HOME".into(),
+            path: "auth.json".into(),
+            contents: "SENTINEL-subscription-sign-in".into(),
+        });
+        assert!(!format!("{rq:?}").contains("SENTINEL"));
+        let (id, st) = r.m.start(rq.clone()).unwrap();
+        assert_eq!(st, RunState::Running);
+        let dir = crate::run_files::dir_of(&root, &id);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("auth.json")).unwrap(),
+            "SENTINEL-subscription-sign-in"
+        );
+        let seen = r.sp.envs_seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1, 0, "the spawner never gets the files");
+        assert_eq!(
+            seen[0].0.get("CODEX_HOME").map(String::as_str),
+            Some(dir.to_str().unwrap())
+        );
+        assert!(seen[0].0.values().all(|v| !v.contains("SENTINEL")));
+        // another run, without files, gets neither the folder nor the variable
+        let (other, _) = r.m.start(req(1)).unwrap();
+        let seen = r.sp.envs_seen.lock().unwrap().clone();
+        assert!(!seen[1].0.contains_key("CODEX_HOME"));
+        assert!(!crate::run_files::dir_of(&root, &other).exists());
+        // the run ends: its folder goes
+        let pid = 1001;
+        r.sp.exit(pid, 0);
+        assert!(r.m.tick().contains(&id));
+        assert!(!dir.exists());
+        // a daemon with no runtime folder refuses a run that brings files, and starts nothing
+        let mut none = rig(8 * GIB, RunConfig::default());
+        assert!(matches!(none.m.start(rq), Err(RunError::Start(_))));
+        assert!(none.sp.envs_seen.lock().unwrap().is_empty());
     }
 
     /// A security review (2026-11-11): a capability lived only in this process's memory and `authorized` let any request
