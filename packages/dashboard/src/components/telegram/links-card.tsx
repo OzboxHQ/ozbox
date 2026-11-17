@@ -27,23 +27,40 @@ function when(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
-/** Allow chat on boxes: a passkey-signed delegation to one link (ADR 0050 decision 2). Converse only in this release. */
-function DelegationSheet({ link, boxes, status, onClose, onDone }: { link: TgLink; boxes: string[]; status: TgStatus; onClose: () => void; onDone: () => void }) {
+const SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
+
+/** A whole number of dollars from 1 to 500, or null. */
+function validDollars(s: string): number | null {
+  const n = Number(s.trim());
+  return Number.isInteger(n) && n >= 1 && n <= 500 ? n : null;
+}
+
+/**
+ * Allow chat on boxes, or box power: a passkey-signed delegation to one link (ADR 0050 decision 2). Box power carries its caps
+ * (the largest size a chat may create or resize to, and the daily money limit), and the passkey signs them with the rest.
+ */
+function DelegationSheet({ link, boxes, status, kind, onClose, onDone }: { link: TgLink; boxes: string[]; status: TgStatus; kind: 'converse' | 'power'; onClose: () => void; onDone: () => void }) {
   const { client } = useApp();
   const pk = usePasskeyStep();
   const [picked, setPicked] = useState<string[]>([]);
   const [days, setDays] = useState('7');
   const [hub, setHub] = useState(false);
+  const [maxSize, setMaxSize] = useState('');
+  const [daily, setDaily] = useState('10');
   const hubPicked = status.marks.hub !== null && picked.includes(status.marks.hub);
   const n = validDays(days);
-  const ok = picked.length > 0 && n !== null && (!hubPicked || hub) && !pk.busy && pk.supported;
+  const dollars = validDollars(daily);
+  const power = kind === 'power';
+  const ok = picked.length > 0 && n !== null && (!hubPicked || hub) && (!power || dollars !== null) && !pk.busy && pk.supported;
+  const title = power ? t('tg.allow_power') : t('tg.allow_chat');
   async function go() {
+    const caps = power ? { max_size: maxSize === '' ? null : maxSize, daily_usd: dollars ?? 10 } : undefined;
     const r = await pk.run(
-      () => client.telegram.delegationChallenge(link.id, { acts: ['converse'], boxes: picked, days: n ?? 7, hub_ack: hubPicked && hub }),
+      () => client.telegram.delegationChallenge(link.id, { acts: [kind], boxes: picked, days: n ?? 7, hub_ack: hubPicked && hub, caps }),
       (a) => client.telegram.delegationCreate(link.id, a),
     );
     if (r) {
-      toast.success(t('tg.allow_chat'));
+      toast.success(title);
       onDone();
     }
   }
@@ -51,8 +68,8 @@ function DelegationSheet({ link, boxes, status, onClose, onDone }: { link: TgLin
     <PanelSheet open onOpenChange={(o) => !o && !pk.busy && onClose()}>
       <PanelSheetContent size="compact" data-testid="tg-delegation-sheet">
         <PanelSheetHeader>
-          <PanelSheetTitle>{t('tg.allow_chat')}</PanelSheetTitle>
-          <PanelSheetDescription>{t('tg.enable_chat_help')}</PanelSheetDescription>
+          <PanelSheetTitle>{title}</PanelSheetTitle>
+          <PanelSheetDescription>{power ? t('tg.allow_power_help') : t('tg.enable_chat_help')}</PanelSheetDescription>
         </PanelSheetHeader>
         <PanelSheetBody className="space-y-3">
           {pk.note ? <Alert variant="destructive" role="alert" data-testid="tg-delegation-note"><AlertDescription>{pk.note}</AlertDescription></Alert> : null}
@@ -70,6 +87,24 @@ function DelegationSheet({ link, boxes, status, onClose, onDone }: { link: TgLin
             <Label htmlFor="tgd-days">{t('tg.days_label')}</Label>
             <Input id="tgd-days" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} data-testid="tgd-days" className="max-lg:h-11" />
           </div>
+          {power ? (
+            <>
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium" id="tgd-size-label">{t('tg.power_max_size')}</p>
+                <div className="flex flex-wrap gap-2" role="radiogroup" aria-labelledby="tgd-size-label">
+                  {['', ...SIZES].map((z) => (
+                    <Button key={z || 'none'} type="button" size="sm" variant={maxSize === z ? 'default' : 'outline'} className="h-11 min-w-11 lg:h-9" role="radio" aria-checked={maxSize === z} onClick={() => setMaxSize(z)} data-testid={`tgd-size-${z || 'none'}`}>
+                      {z || t('tg.power_no_create')}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="tgd-daily">{t('tg.power_daily')}</Label>
+                <Input id="tgd-daily" inputMode="numeric" value={daily} onChange={(e) => setDaily(e.target.value)} data-testid="tgd-daily" className="max-lg:h-11" />
+              </div>
+            </>
+          ) : null}
           {hubPicked ? (
             <div className="flex items-start gap-3">
               <TouchCheckbox id="tgd-hub" checked={hub} onCheckedChange={(v) => setHub(v === true)} />
@@ -123,7 +158,7 @@ function LinkRow({ link, ownerView, boxes, status, reload }: { link: TgLink; own
   const { client } = useApp();
   const pk = usePasskeyStep();
   const [unlink, setUnlink] = useState(false);
-  const [deleg, setDeleg] = useState(false);
+  const [deleg, setDeleg] = useState<null | 'converse' | 'power'>(null);
   const [transcript, setTranscript] = useState(false);
   const live = linkIsLive(link.state);
   const act = async (f: () => Promise<unknown>) => {
@@ -169,7 +204,8 @@ function LinkRow({ link, ownerView, boxes, status, reload }: { link: TgLink; own
         ) : null}
         {live && own ? (
           <>
-            <Button variant="outline" size="sm" className="max-lg:h-11" onClick={() => setDeleg(true)} data-testid="tg-allow-chat">{t('tg.allow_chat')}</Button>
+            <Button variant="outline" size="sm" className="max-lg:h-11" onClick={() => setDeleg('converse')} data-testid="tg-allow-chat">{t('tg.allow_chat')}</Button>
+            <Button variant="outline" size="sm" className="max-lg:h-11" onClick={() => setDeleg('power')} data-testid="tg-allow-power">{t('tg.allow_power')}</Button>
             <Button variant="outline" size="sm" className="max-lg:h-11" disabled={pk.busy} data-testid="tg-renew" onClick={() => void pk.run(() => client.telegram.renewChallenge(link.id), (a) => client.telegram.renew(link.id, a)).then(reload)}>
               {t('tg.renew')}
             </Button>
@@ -179,7 +215,7 @@ function LinkRow({ link, ownerView, boxes, status, reload }: { link: TgLink; own
         {link.state !== 'revoked' ? <Button variant="outline" size="sm" className="max-lg:h-11" onClick={() => setUnlink(true)} data-testid="tg-unlink">{t('tg.unlink')}</Button> : null}
       </div>
       <ConfirmDialog open={unlink} onOpenChange={setUnlink} title={t('tg.unlink_title')} description={t('tg.unlink_body')} confirmLabel={t('tg.unlink')} destructive onConfirm={async () => { await act(() => client.telegram.unlink(link.id)); }} />
-      {deleg ? <DelegationSheet link={link} boxes={boxes} status={status} onClose={() => setDeleg(false)} onDone={() => { setDeleg(false); reload(); }} /> : null}
+      {deleg ? <DelegationSheet link={link} boxes={boxes} status={status} kind={deleg} onClose={() => setDeleg(null)} onDone={() => { setDeleg(null); reload(); }} /> : null}
       {transcript ? <TranscriptSheet link={link} onClose={() => setTranscript(false)} /> : null}
     </li>
   );

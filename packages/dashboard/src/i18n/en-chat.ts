@@ -35,6 +35,7 @@ export const enChat = {
   'chat.link_body': 'This request needed your passkey, so it opened here. Deciding it asks for the passkey.',
   'chat.link_bad': 'That link did not work. A link is used once and lapses after ten minutes. Ask for a new one in the chat.',
   'chat.link_done': 'That request was already answered.',
+  'chat.link_used': 'This link was used: the request it names has been decided. Open Approvals to see the decision.',
   'chat.channels': 'Other chats',
   'chat.channels_desc': 'Link a chat once; only linked people are heard. A chat app only notifies about approvals, with a link back to the dashboard; it cannot approve, deny, stop or raise a spending limit.',
   'chat.channel_telegram': 'Telegram',

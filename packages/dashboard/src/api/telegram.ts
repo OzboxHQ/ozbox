@@ -109,7 +109,7 @@ export interface TelegramApi {
   unlink(id: string): Promise<{ removed: boolean }>;
   renewChallenge(id: string): Promise<Challenge & { expires_ms: number }>;
   renew(id: string, assertion: AssertionJson): Promise<{ link: TgLink }>;
-  delegationChallenge(id: string, wish: { acts: string[]; boxes: string[]; days?: number; hub_ack?: boolean }): Promise<Challenge & { summary: { boxes: string[]; acts: string[]; expires_ms: number; needs_owner: boolean } }>;
+  delegationChallenge(id: string, wish: { acts: string[]; boxes: string[]; days?: number; hub_ack?: boolean; caps?: { max_size?: string | null; daily_usd?: number } }): Promise<Challenge & { summary: { boxes: string[]; acts: string[]; expires_ms: number; needs_owner: boolean } }>;
   delegationCreate(id: string, assertion: AssertionJson): Promise<{ link: TgLink }>;
   delegationRevoke(id: string): Promise<{ link: TgLink }>;
   cosignChallenge(id: string): Promise<Challenge & { person: string; boxes: string[] }>;

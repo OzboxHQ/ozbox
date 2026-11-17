@@ -40,7 +40,7 @@ and it is a task on the board. Each message is one more turn of the same convers
 
 | Message | Does |
 |---|---|
-| `/new <box> <what to do>` | start a session and follow it |
+| `/run <box> <what to do>` (or `/new`) | start a session and follow it; `/run <what to do>` uses the box this chat follows |
 | plain text | the next turn of the session this chat follows |
 | `/status`, `/log` | where it is, and its last log lines |
 | `/pause`, `/resume` | save its work and stop it; continue the same conversation later |
@@ -49,24 +49,60 @@ and it is a task on the board. Each message is one more turn of the same convers
 | `/tasks`, `/switch <task>` | your sessions; follow another one |
 | `/sessions`, `/attach <session>`, `/adopt <session>`, `/detach` | agents in your own terminals (see 5) |
 | `/fleet`, `/box list`, `/whoami`, `/help` | Telegram: the boxes and their state, who this link is and what it may do, and what a chat can do |
+| `@<box> <message>`, `@<box>/<session> <message>`, `@<group> …`, `@fleet …` | Telegram: talk to the agent on a box, one session, a group of boxes or every box you may reach; each reply names its box and session |
+| `/to <address>`, `/who`, `/boxes`, `/fleets` | Telegram: where plain messages go from now on, where they go now, and what you may reach |
+| `/box resume`, `/box pause`, `/box extend`, `/box create`, `/box resize` | Telegram: box power, planned first and done only inside the limits you allowed with a passkey |
 | `/lock`, `/unlink` | Telegram: make this link read-only until a passkey lifts the lock, or cut it. Anyone linked may; they only make Telegram less able |
 
 **In Telegram, talking to an agent is something you allow in the dashboard first**, with a passkey, for each box and for a few days
 at a time: see [Control your boxes from Telegram](/use-cases/telegram-control). Reading (`/status`, `/fleet`, `/tasks`, `/log`) needs nothing
-beyond a link. In Slack and WhatsApp the rules are the ones described here.
+beyond a link. Slack and WhatsApp go through the same rules, and also understand `@<box>`, `@<box>/<session>`, `@<group>`, `@fleet`, `/to`, `/who`,
+`/boxes`, `/fleets` and `/run` ([section 3a there](/use-cases/telegram-control#3a-talk-to-a-box-an-agent-or-a-fleet)); box power is
+Telegram's only.
 
 **Status:** Preview.
 
 ## 3. Be told in the chat, decide in the dashboard
 
-**You want:** to know when an agent stopped to ask.
+**You want:** to know when an agent stopped to ask, or a change on a box waits for a person, and to land on it in one tap.
 
-The message names the exact action and carries a one-time link to the dashboard, where you decide. **A chat only tells you,
-for every kind of request:** there is no Approve or Deny button, and nothing said or pressed in a chat approves, denies or
-cancels, stops or raises the spend limit of anything. The decision and who made it are in **Activity**. The server refuses the act, so this does not depend on a button being missing.
+Every message that asks for a person reads the same way on every channel: a title that starts with what to do, what is asked
+in plain words, where (box, project, environment, with a **PRODUCTION** badge), who or what asked and why, the risk, when it
+expires, one link to exactly that item in the dashboard, and a short reference you can quote. On Telegram it looks like this:
 
-**Underneath:** the link is made of 24 random bytes and held only as a keyed hash; it works once, for ten minutes, for you
-only, and stops working if the server restarts.
+```
+🔐 Approve or deny: guard override
+A change was filed on a box and waits for a person with the right role.
+
+Box main · Project shop · Environment staging
+Hook: commit (pre-commit)
+Asked by: box-user (uid 1000)
+⚠️ Risk: Skips the secret scan for one commit.
+⏳ Expires in 2 h 5 min
+
+This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Approvals.
+Ref R1a2b3c4
+[ Open in dashboard ]
+```
+
+The button under it only opens the dashboard on that request. Slack shows the same as blocks with a link button, Discord as
+an embed, Teams as a card, email as a short page with a button and a plain-text copy, WhatsApp as one paragraph with the link,
+an SMS as one line (`Oz Box: Approve or deny: guard override (main). Open: https://dash.example.com/go#… Ref R1a2b3c4`), and a
+push notification opens the request when you tap it.
+
+**A chat only tells you, for every kind of request:** no button approves or denies, and nothing said or pressed in a chat
+approves, denies or cancels, stops or raises the spend limit of anything. The decision and who made it are in **Activity**. The
+server refuses the act, so this does not depend on a button being missing.
+
+**Underneath:** the link is made for each person when the message is sent: 24 random bytes held only as a keyed hash, for ten
+minutes, for that person only, and it stops working if the server restarts. Opening it changes nothing (you can open it in
+Telegram's browser and then your own). An agent's question links to **Chat**, where the request opens with Approve and Deny;
+that link is spent when the page opens it. The token is always in the part of the address after `#`, which your browser never
+sends to any server. Once the request is decided, the link says it was used. A shared place (a Slack channel,
+an email list, a webhook) gets the request's own address instead, which asks you to sign in. When the dashboard has no public
+address the message says "Open your dashboard → Approvals" rather than leave the link out silently. Other alerts (a full disk,
+memory, the budget) link to their box or page the same way. No key, token, value or long agent output is ever in a message.
 **Status:** Preview.
 
 ## 3a. Where the dashboard's conversation is kept

@@ -1,0 +1,3 @@
+Approve or deny: guard override
+---
+A change was filed on a box and waits for a person with the right role. | Box: main · Project: shop · Environment: staging | Hook: commit (pre-commit) | Repository: /work/shop | Asked by: box-user (uid 1000) | Risk: Skips the secret scan for one commit. | Expires in 2 h 5 min | This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey. | Open it on dash.example.com → Approvals (sign in first). | https://dash.example.com/approvals?request=R1a2b3c4 | Ref R1a2b3c4

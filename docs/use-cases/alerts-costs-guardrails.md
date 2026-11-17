@@ -15,6 +15,24 @@ See [how to read the status](README.md#how-to-read-the-status).
 test**, which shows each channel's result as it arrives. SMS works through Twilio, Vonage, Amazon SNS, Africa's Talking
 or Telnyx; email through Resend, Postmark, SendGrid, Amazon SES or your own SMTP server.
 
+Every alert reads the same way on every channel: what happened or what to do first, the box, the detail, and a link to
+the box or page it is about, made for the person it reaches. A full disk on Telegram:
+
+```
+🚨 Box main: the work disk is 96% full
+Grow the work disk, or clear space, before it fills.
+
+Box main
+
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.
+[ Open in dashboard ]
+```
+
+The same alert as a text message is one line: `Oz Box: Box main: the work disk is 96% full (main). Open: https://dash.example.com/go#…`.
+A change waiting for approval is described in [Chat with your coding agents](chat.md#3-be-told-in-the-chat-decide-in-the-dashboard).
+A Slack channel, a fleet email list and a webhook get the page's own address (sign in to open it), and a webhook also gets the
+fields as `notice` in its JSON. **Send test** carries a link made the same way, so a test shows whether the link reaches the phone.
+
 Amazon SES and SNS send with the AWS credentials of the computer the dashboard runs on, with no `aws` command needed: on a box,
 the box's own role; elsewhere `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. A computer that names a profile under `[aws]`, or
 has no such keys, still uses the `aws` command, which reads profiles. **On a box:** its role allows neither `ses:SendEmail` nor

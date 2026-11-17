@@ -136,6 +136,9 @@ pub fn valid_name(name: &str) -> bool {
         // a subscription sign-in an engine reads itself, and its opt-in (ADR 0055): the dashboard's alone
         "subscription-login-",
         "subscription-optin-",
+        // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's, never the store's
+        "tasks-sign-",
+        "tasks-seal-",
     ]
     .iter()
     .any(|p| {

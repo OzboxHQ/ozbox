@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,20 @@ pub struct Output {
 pub trait CommandRunner: Send + Sync {
     fn run(&self, cmd: &CommandSpec) -> Result<Output>;
 
+    /// Run with a **time limit** and a **cap on standard output**, for a command whose answer is read by a program and whose far end may
+    /// hang or flood (a transport over `ssh`). A command that outlasts `timeout` is killed and the call fails; one that writes more than
+    /// `max_stdout` bytes fails without the rest being read into memory. The default runs the command as [`CommandRunner::run`] does
+    /// (a recording runner has nothing to wait for), and [`SystemRunner`] enforces both.
+    fn run_limited(
+        &self,
+        cmd: &CommandSpec,
+        timeout: Duration,
+        max_stdout: usize,
+    ) -> Result<Output> {
+        let _ = (timeout, max_stdout);
+        self.run(cmd)
+    }
+
     /// Run and fail on a non-zero exit. stderr is truncated so a noisy tool cannot flood an error message.
     fn run_ok(&self, cmd: &CommandSpec) -> Result<Output> {
         let out = self.run(cmd)?;
@@ -147,6 +162,128 @@ impl CommandRunner for SystemRunner {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+
+    fn run_limited(
+        &self,
+        cmd: &CommandSpec,
+        timeout: Duration,
+        max_stdout: usize,
+    ) -> Result<Output> {
+        use std::io::Write;
+        let mut child = Self::spawn_limited(cmd)?;
+        let writer = child.stdin.take().map(|mut input| {
+            let bytes = cmd.stdin.clone().unwrap_or_default();
+            // a program that exits before reading everything is not an error here: its status says so
+            std::thread::spawn(move || {
+                let _ = input.write_all(&bytes);
+            })
+        });
+        let out_t = read_capped(child.stdout.take(), max_stdout);
+        let err_t = read_capped(child.stderr.take(), 64 * 1024);
+        let start = std::time::Instant::now();
+        let mut closed_at: Option<std::time::Instant> = None;
+        let closed_at = &mut closed_at;
+        let status = loop {
+            if let Some(s) = child.try_wait()? {
+                break Some(s);
+            }
+            // output that ended (EOF, or the cap was reached) while the program still runs: give it a moment to exit, then stop it
+            let drained = out_t.is_finished();
+            let grace_over = drained
+                && *closed_at.get_or_insert_with(std::time::Instant::now) + Duration::from_secs(2)
+                    <= std::time::Instant::now();
+            if start.elapsed() >= timeout || grace_over {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        };
+        // never wait forever for the pipes: a descendant of the program (an `ssh` master that kept a descriptor) can hold them open
+        // after the program itself is gone or killed. What has not finished within the wait is detached and its output is empty.
+        if let Some(w) = writer {
+            let _ = join_within(w, PIPE_WAIT);
+        }
+        let stdout = join_within(out_t, PIPE_WAIT).unwrap_or_default();
+        let stderr = join_within(err_t, PIPE_WAIT).unwrap_or_default();
+        if stdout.len() > max_stdout {
+            return Err(Error::Config(format!(
+                "`{}` wrote more than {max_stdout} bytes; the answer was not taken",
+                cmd.program
+            )));
+        }
+        if status.is_none() && stdout.len() <= max_stdout && start.elapsed() < timeout {
+            // the program closed its output and then did not exit: the output is complete, so it is taken as the answer
+            return Ok(Output {
+                status: Some(0),
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
+        let Some(status) = status else {
+            return Err(Error::Config(format!(
+                "`{}` did not finish within {} seconds and was stopped",
+                cmd.program,
+                timeout.as_secs()
+            )));
+        };
+        Ok(Output {
+            status: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
+}
+
+impl SystemRunner {
+    fn spawn_limited(cmd: &CommandSpec) -> std::io::Result<std::process::Child> {
+        use std::process::Stdio;
+        let mut c = Command::new(&cmd.program);
+        c.args(&cmd.args);
+        if let Some(dir) = &cmd.cwd {
+            c.current_dir(dir);
+        }
+        c.envs(&cmd.env);
+        c.stdin(if cmd.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    }
+}
+
+/// How long to wait for a reader thread once the program is gone.
+const PIPE_WAIT: Duration = Duration::from_secs(2);
+
+/// Join a thread, but only if it ends within `wait`; otherwise leave it running and return `None`.
+fn join_within<T>(h: std::thread::JoinHandle<T>, wait: Duration) -> Option<T> {
+    let until = std::time::Instant::now() + wait;
+    while !h.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if h.is_finished() {
+        h.join().ok()
+    } else {
+        None
+    }
+}
+
+fn read_capped(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+    cap: usize,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(p) = pipe {
+            // one byte past the cap is read, so "exactly the cap" and "more than the cap" can be told apart
+            let _ = p.take(cap as u64 + 1).read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 /// Records every command and answers from a queue of canned outputs (default: success, empty output).
@@ -215,5 +352,22 @@ mod tests {
         // env is never serialized either
         let json = serde_json::to_string(&r.calls()[0]).unwrap_or_default();
         assert!(!json.contains("s3cr3t"));
+    }
+
+    /// A descendant of the program keeps its output open after the program is gone (the way an `ssh` master can): the call still
+    /// returns, because the readers are not waited for forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_the_pipe_cannot_hang_a_limited_run() {
+        let cmd = CommandSpec::new("sh")
+            .arg("-c")
+            .arg("sleep 6 & echo hello; exit 0");
+        let t = std::time::Instant::now();
+        let r = SystemRunner.run_limited(&cmd, Duration::from_secs(30), 1024);
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "it waited for the descendant"
+        );
+        assert_eq!(r.unwrap().status, Some(0));
     }
 }

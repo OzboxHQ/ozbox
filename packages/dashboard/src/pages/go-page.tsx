@@ -3,9 +3,10 @@ import { useEffect, useState } from 'react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useApp } from '../App';
-import { AppPage, PageHeader } from '../components/page';
+import { ApiError } from '../api/client';
+import { AppLink, AppPage, PageHeader } from '../components/page';
 import { t } from '../lib/i18n';
-import { navigate } from '../lib/router';
+import { hrefs, navigate } from '../lib/router';
 import { pointerToken, safeInternalPath } from '../lib/telegram-flow';
 
 /**
@@ -15,13 +16,13 @@ import { pointerToken, safeInternalPath } from '../lib/telegram-flow';
  */
 export function GoPage() {
   const { client } = useApp();
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<null | 'failed' | 'used'>(null);
   useEffect(() => {
     const token = pointerToken(window.location.hash);
     // the fragment leaves the address bar whatever happens next
     window.history.replaceState(null, '', window.location.pathname);
     if (!token) {
-      setFailed(true);
+      setFailed('failed');
       return;
     }
     client.telegram
@@ -29,14 +30,24 @@ export function GoPage() {
       .then((r) => {
         const p = safeInternalPath(r.path);
         if (p) navigate(p);
-        else setFailed(true);
+        else setFailed('failed');
       })
-      .catch(() => setFailed(true));
+      // a link to something already decided says so (the server tells only the person the link was made for)
+      .catch((e: unknown) => setFailed(e instanceof ApiError && e.status === 410 ? 'used' : 'failed'));
   }, [client]);
   return (
     <AppPage>
       <PageHeader title={t('tg.go_title')} description={t('tg.go_help')} />
-      {failed ? (
+      {failed === 'used' ? (
+        <Alert role="status" data-testid="go-used">
+          <AlertDescription>
+            {t('tg.go_used')}{' '}
+            <AppLink href={hrefs.approvals} className="underline underline-offset-4">
+              {t('nav.approvals')}
+            </AppLink>
+          </AlertDescription>
+        </Alert>
+      ) : failed ? (
         <Alert variant="destructive" role="alert" data-testid="go-failed">
           <AlertDescription>{t('tg.go_failed')}</AlertDescription>
         </Alert>

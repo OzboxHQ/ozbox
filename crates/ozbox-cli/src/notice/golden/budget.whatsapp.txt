@@ -1,0 +1,3 @@
+Budget: 80% of the monthly budget is estimated spent
+---
+About 80 USD of 100 USD this month. | Open it on dash.example.com → Usage (sign in first). | https://dash.example.com/usage

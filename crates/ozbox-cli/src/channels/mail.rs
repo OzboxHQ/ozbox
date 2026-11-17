@@ -12,7 +12,7 @@
 use ozbox_core::CommandSpec;
 use serde_json::{json, Value};
 
-use super::{http_detail, one_line, sms::aws_failure, Ctx, SendResult};
+use super::{http_detail, sms::aws_failure, Ctx, SendResult};
 use crate::netguard::{Guard, HttpRequest};
 use crate::notify_config::{EmailProviderKind, SmtpSecurity};
 use crate::settings::EmailConfig;
@@ -38,12 +38,16 @@ pub fn allowed(cfg: &EmailConfig, to: &[String]) -> Vec<String> {
     out
 }
 
-pub fn subject(title: &str) -> String {
-    format!("[Oz Box] {}", one_line(title))
-}
-
 pub fn body(text: &str) -> String {
     format!("{text}\n\n{FOOTER}")
+}
+
+/// The HTML part with the same footer as the plain-text one.
+pub fn html_body(html: &str) -> String {
+    format!(
+        "{html}<p style=\"color:#777;font-size:12px;margin-top:24px\">{}</p>",
+        crate::notice::render::html(FOOTER)
+    )
 }
 
 pub struct Mail<'a> {
@@ -51,6 +55,8 @@ pub struct Mail<'a> {
     pub to: &'a [String],
     pub subject: &'a str,
     pub text: &'a str,
+    /// The HTML part, sent beside the plain text when there is one.
+    pub html: Option<&'a str>,
     pub now_secs: u64,
 }
 
@@ -66,15 +72,24 @@ pub fn send(ctx: &Ctx, m: &Mail<'_>) -> SendResult {
     match cfg.provider {
         EmailProviderKind::Resend => {
             let key = ctx.need("email-api-key", "email API key")?;
-            ctx.call(resend(&key, cfg, &to, m.subject, m.text), super::by_status)
+            ctx.call(
+                resend(&key, cfg, &to, m.subject, m.text, m.html),
+                super::by_status,
+            )
         }
         EmailProviderKind::Postmark => {
             let key = ctx.need("email-api-key", "Postmark server token")?;
-            ctx.call(postmark(&key, cfg, &to, m.subject, m.text), postmark_result)
+            ctx.call(
+                postmark(&key, cfg, &to, m.subject, m.text, m.html),
+                postmark_result,
+            )
         }
         EmailProviderKind::Sendgrid => {
             let key = ctx.need("email-api-key", "SendGrid API key")?;
-            ctx.call(sendgrid(&key, cfg, &to, m.subject, m.text), sendgrid_result)
+            ctx.call(
+                sendgrid(&key, cfg, &to, m.subject, m.text, m.html),
+                sendgrid_result,
+            )
         }
         EmailProviderKind::Ses => {
             // natively, unless this computer names an AWS profile (only the aws command reads profiles), or has no
@@ -88,12 +103,20 @@ pub fn send(ctx: &Ctx, m: &Mail<'_>) -> SendResult {
                     &to,
                     m.subject,
                     &body(m.text),
+                    m.html.map(html_body).as_deref(),
                 )? {
                     super::aws::Native::Sent(r) => return r,
                     super::aws::Native::NoCredentials => {}
                 }
             }
-            let cmd = ses_command(ctx.aws_profile.as_deref(), cfg, &to, m.subject, m.text);
+            let cmd = ses_command(
+                ctx.aws_profile.as_deref(),
+                cfg,
+                &to,
+                m.subject,
+                m.text,
+                m.html,
+            );
             match ctx.runner.run(&cmd) {
                 Ok(o) if o.status == Some(0) => ses_result(&o.stdout),
                 Ok(o) => Err(aws_failure(&o.stderr)),
@@ -112,8 +135,12 @@ pub fn resend(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> HttpRequest {
     let mut v = json!({ "from": cfg.from, "to": to, "subject": subject, "text": body(text) });
+    if let Some(h) = html {
+        v["html"] = json!(html_body(h));
+    }
     if !cfg.reply_to.is_empty() {
         v["reply_to"] = json!(cfg.reply_to);
     }
@@ -130,6 +157,7 @@ pub fn postmark(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> HttpRequest {
     let mut v = json!({
         "From": cfg.from,
@@ -138,6 +166,9 @@ pub fn postmark(
         "TextBody": body(text),
         "MessageStream": "outbound",
     });
+    if let Some(h) = html {
+        v["HtmlBody"] = json!(html_body(h));
+    }
     if !cfg.reply_to.is_empty() {
         v["ReplyTo"] = json!(cfg.reply_to);
     }
@@ -174,12 +205,17 @@ pub fn sendgrid(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> HttpRequest {
+    let mut content = vec![json!({ "type": "text/plain", "value": body(text) })];
+    if let Some(h) = html {
+        content.push(json!({ "type": "text/html", "value": html_body(h) }));
+    }
     let mut v = json!({
         "personalizations": [{ "to": to.iter().map(|t| json!({ "email": t })).collect::<Vec<_>>() }],
         "from": { "email": cfg.from },
         "subject": subject,
-        "content": [{ "type": "text/plain", "value": body(text) }],
+        "content": content,
     });
     if !cfg.reply_to.is_empty() {
         v["reply_to"] = json!({ "email": cfg.reply_to });
@@ -210,13 +246,17 @@ pub fn ses_command(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> CommandSpec {
-    let content = json!({
+    let mut content = json!({
         "Simple": {
             "Subject": { "Data": subject, "Charset": "UTF-8" },
             "Body": { "Text": { "Data": body(text), "Charset": "UTF-8" } }
         }
     });
+    if let Some(h) = html {
+        content["Simple"]["Body"]["Html"] = json!({ "Data": html_body(h), "Charset": "UTF-8" });
+    }
     let dest = json!({ "ToAddresses": to });
     let mut c = CommandSpec::new("aws").args([
         "sesv2",
@@ -274,6 +314,7 @@ fn smtp(ctx: &Ctx, cfg: &EmailConfig, to: &[String], m: &Mail<'_>) -> SendResult
         to,
         subject: m.subject,
         text: &body(m.text),
+        html: m.html.map(html_body).as_deref(),
         now_secs: m.now_secs,
         id_seed: &seed,
         domain,
@@ -316,6 +357,7 @@ mod tests {
             to,
             subject: "[Oz Box] Test",
             text: "hello",
+            html: None,
             now_secs: 1,
         }
     }
@@ -347,13 +389,13 @@ mod tests {
     fn resend_postmark_and_sendgrid_requests_follow_their_documentation() {
         let to = vec!["me@example.com".to_string()];
         let c = cfg(EmailProviderKind::Resend);
-        let r = resend("KEY", &c, &to, "S", "t");
+        let r = resend("KEY", &c, &to, "S", "t", None);
         assert_eq!(r.url, "https://api.resend.com/emails");
         let v = json_body(&r);
         assert_eq!(v["reply_to"], "help@example.com");
         assert!(v["text"].as_str().unwrap().ends_with(FOOTER));
 
-        let r = postmark("TOK", &c, &to, "S", "t");
+        let r = postmark("TOK", &c, &to, "S", "t", None);
         assert_eq!(r.url, "https://api.postmarkapp.com/email");
         assert!(r
             .headers
@@ -369,7 +411,7 @@ mod tests {
             )
         );
 
-        let r = sendgrid("SG", &c, &to, "S", "t");
+        let r = sendgrid("SG", &c, &to, "S", "t", None);
         assert_eq!(r.url, "https://api.sendgrid.com/v3/mail/send");
         let v = json_body(&r);
         assert_eq!(v["personalizations"][0]["to"][0]["email"], "me@example.com");
@@ -382,9 +424,9 @@ mod tests {
         let to = vec!["me@example.com".to_string()];
         let c = cfg(EmailProviderKind::Resend);
         for r in [
-            resend("K", &c, &to, "S", "t"),
-            postmark("K", &c, &to, "S", "t"),
-            sendgrid("K", &c, &to, "S", "t"),
+            resend("K", &c, &to, "S", "t", None),
+            postmark("K", &c, &to, "S", "t", None),
+            sendgrid("K", &c, &to, "S", "t", None),
         ] {
             assert_eq!(r.guard, Guard::Public);
             assert!(r.url.starts_with("https://"));

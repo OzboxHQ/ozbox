@@ -58,6 +58,7 @@ mod memory_routes;
 mod metrics_sim;
 mod models_routes;
 pub(crate) mod no_simulation;
+mod notice_reach;
 mod orch_merge;
 mod orch_routes;
 mod perm_routes;
@@ -69,6 +70,7 @@ pub(crate) mod setup;
 mod sim_code;
 mod skills_routes;
 mod subscription_routes;
+mod telegram_acts;
 mod telegram_bridge;
 mod telegram_link;
 #[cfg(test)]
@@ -334,6 +336,8 @@ pub struct App {
     runner: Arc<dyn CommandRunner>,
     secrets: Arc<dyn SecretStore>,
     http: Arc<dyn HttpClient>,
+    /// Agents on worker boxes of a hub, reached for chat over the hub's channel. None until the hub and the mesh are merged.
+    remote_agents: Arc<dyn crate::chat::remote::RemoteAgents>,
     prices: PriceCache,
     prices_path: Option<std::path::PathBuf>,
     state: ServerState,
@@ -506,6 +510,7 @@ impl App {
             runner: Arc::new(SystemRunner),
             secrets: Arc::new(crate::secrets::MemorySecrets::default()),
             http: Arc::new(UreqClient),
+            remote_agents: Arc::new(crate::chat::remote::NoRemote),
             prices: PriceCache::default(),
             prices_path: None,
             state: ServerState::default(),
@@ -598,6 +603,19 @@ impl App {
         self.secrets = secrets;
         self.sync_second_factor();
         self
+    }
+
+    /// Worker boxes reached over this computer's task channel, when it runs here.
+    fn with_chat_mesh(mut self, m: Option<crate::chat::mesh_agents::MeshAgents>) -> Self {
+        if let Some(m) = m {
+            self.remote_agents = Arc::new(m);
+        }
+        self
+    }
+
+    #[cfg(test)]
+    fn set_remote_agents(&mut self, r: Arc<dyn crate::chat::remote::RemoteAgents>) {
+        self.remote_agents = r;
     }
 
     #[cfg(test)]
@@ -2557,6 +2575,7 @@ pub fn serve(
                 .or_else(|| dirs::home_dir().map(|h| h.join(".ssh"))),
         )
         .with_secrets(Arc::clone(&secrets))
+        .with_chat_mesh(crate::tasks_cli::chat_route())
         .with_code_settings(crate::code::settings_path())
         .with_files(prices_path, state_path)
         .with_bill_file(bill_path)

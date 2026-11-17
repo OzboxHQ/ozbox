@@ -3565,3 +3565,66 @@ fn the_secrets_users_group_is_put_inside_ping_group_range_and_the_range_is_never
         .unwrap();
     assert!(s.find("# >>> ping-range").unwrap() < applied && applied < started);
 }
+
+#[test]
+fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mode() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    // stand-ins for the commands that need root: the user exists after "useradd", and every call is recorded
+    for name in ["id", "useradd", "passwd", "systemctl", "systemd-tmpfiles"] {
+        let p = bin.join(name);
+        let body = if name == "id" {
+            "#!/bin/sh\nexit 1\n".to_string()
+        } else {
+            format!(
+                "#!/bin/sh\necho \"{name} $@\" >> '{}'\n",
+                d.path().join("calls.log").display()
+            )
+        };
+        fs::write(&p, body)?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = sh(
+        &script("ozbox-mesh-setup.sh"),
+        &[],
+        &[
+            ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+            ("OZBOX_MESH_NO_SYSTEMCTL", "1"),
+            ("PATH", &path),
+        ],
+    )?;
+    assert!(out.status.success(), "{}", text(&out));
+    let calls = fs::read_to_string(d.path().join("calls.log")).unwrap_or_default();
+    assert!(
+        calls.contains("useradd --system")
+            && calls.contains("ozbox-mesh")
+            && calls.contains("passwd --lock"),
+        "{calls}"
+    );
+    let tmpfiles = fs::read_to_string(etc.join("tmpfiles.d/ozbox-mesh.conf"))?;
+    // the directory modes decide who may connect: the box user's group for the agent and relay sockets, root alone for admin
+    assert!(tmpfiles.contains("/var/lib/ozbox-mesh      0700 ozbox-mesh ozbox-mesh"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/agent    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/relay    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/admin    0700 ozbox-mesh ozbox-mesh"));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-mesh.service"))?;
+    assert!(
+        unit.contains("User=ozbox-mesh") && unit.contains("tasks serve --dir /var/lib/ozbox-mesh")
+    );
+    assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
+    // carried in the program (user-data has a hard size limit), run once at first boot through it
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    assert!(
+        !t.contains("ozbox-mesh-setup.sh"),
+        "the router's setup is not in user-data"
+    );
+    assert!(t.contains("/usr/local/bin/ozbox tasks router-setup ||"));
+    Ok(())
+}

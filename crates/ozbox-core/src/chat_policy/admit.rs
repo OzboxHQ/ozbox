@@ -62,6 +62,8 @@ impl Skip {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
     pub update_id: i64,
+    /// The message's own id in its chat (0 when Telegram gave none): a reply to it is threaded under it.
+    pub message_id: i64,
     /// Telegram's numeric user id (needs up to 52 bits): equal to the chat id in a private chat.
     pub from_id: i64,
     pub chat_id: i64,
@@ -151,6 +153,10 @@ pub fn admit(update: &Value) -> Result<Admitted, Skip> {
         .collect();
     Ok(Admitted {
         update_id,
+        message_id: msg
+            .get("message_id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
         from_id,
         chat_id,
         first_name,

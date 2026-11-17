@@ -1,0 +1,52 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in dashboard",
+            "type": "Action.OpenUrl",
+            "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "body": [
+          {
+            "color": "Attention",
+            "size": "Medium",
+            "text": "Box main: the work disk is 96% full",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "text": "Grow the work disk, or clear space, before it fills.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "facts": [
+              {
+                "title": "Box",
+                "value": "main"
+              }
+            ],
+            "type": "FactSet"
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

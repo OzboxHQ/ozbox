@@ -62,6 +62,8 @@ pub const SEALED_OPS: &[&str] = &[
     "areq_cancel",
     // a key's enrolment challenge, and the enrolment itself with its attestation
     "approval_key_enrol_challenge",
+    // `ozbox chat lock|unlink --box`: a Telegram link made less able, for the dashboard to apply (ADR 0050 §1c)
+    "chat_link_request",
 ];
 
 pub fn is_reserved(name: &str) -> bool {
@@ -351,6 +353,73 @@ impl SetupCode {
             None => None,
         }
     }
+}
+
+/// Telegram links the owner's computer asked, over the sealed route, to lock or cut: held until the dashboard takes them. Only
+/// `lock:<link>`, `unlink:<link>`, `lock:*` and `unlink:*` are kept, so a request here can only make a chat less able.
+#[derive(Default)]
+pub struct ChatLinkRequests(Mutex<Vec<(String, u64)>>);
+
+/// The most requests held at once.
+const CHAT_LINK_REQUESTS_MAX: usize = 50;
+
+impl ChatLinkRequests {
+    pub fn shaped(v: &str) -> bool {
+        let Some((act, link)) = v.split_once(':') else {
+            return false;
+        };
+        matches!(act, "lock" | "unlink")
+            && (link == "*"
+                || (!link.is_empty()
+                    && link.len() <= 64
+                    && link
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')))
+    }
+
+    pub fn put(&self, v: &str, now_ms: u64) -> Result<(), &'static str> {
+        if !Self::shaped(v) {
+            return Err("that is not a lock or an unlink of a link");
+        }
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() >= CHAT_LINK_REQUESTS_MAX {
+            return Err("too many requests are waiting for the dashboard");
+        }
+        g.push((v.to_string(), now_ms));
+        Ok(())
+    }
+
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect()
+    }
+}
+
+/// The lock and unlink requests waiting for this dashboard, taken from the secrets service (once each). Only on a box whose
+/// dashboard runs as the supervisor (the unit sets the socket); anywhere else, none.
+#[cfg(unix)]
+pub fn take_chat_link_requests() -> Vec<String> {
+    let Some(sock) = std::env::var_os("OZBOX_SUPERVISOR_SOCKET").filter(|p| !p.is_empty()) else {
+        return Vec::new();
+    };
+    crate::secrets_service::SocketSecrets::new(PathBuf::from(sock))
+        .call(json!({"op": "chat_link_take"}))
+        .ok()
+        .and_then(|v| v["value"].as_str().map(str::to_string))
+        .map(|s| {
+            s.lines()
+                .filter(|l| ChatLinkRequests::shaped(l))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(unix))]
+pub fn take_chat_link_requests() -> Vec<String> {
+    Vec::new()
 }
 
 fn hex(b: &[u8]) -> String {

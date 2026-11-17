@@ -135,6 +135,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox permissions show\|mode\|grant\|revoke\|check` | The default mode, the active rules, and time-boxed Production grants; rules are edited in the dashboard |
 | `ozbox audit list\|verify\|seal` | The tamper-evident audit log, and a check that nothing in it was changed |
 | `ozbox memory` · `ozbox skills` | Notes in git that agents read once you approve them; skills usable only after you approve their exact files |
+| `ozbox tasks` | Typed, signed tasks between your computer and a box (questions, answers, status), with a state and an audit record; acts are refused until the passkey approval path exists. Preview |
 | `ozbox orch` | One conductor agent hands features to worker boxes, with claims, contracts, a mailbox and a merge queue |
 | `ozbox schedule` · `ozbox trigger` | Agent runs on a schedule in your time zone, or started by signed webhooks |
 | `ozbox models` · `ozbox cost` | Your model providers, which engine uses which model, usage and prices; the real cloud bill beside the estimate |
@@ -171,6 +172,7 @@ at any time; `--access` answers it without a prompt.
 | `ozbox dashboard retire-legacy-tunnel <name>` | Remove an old tunnel and token file the box user could read, once the box's own tunnel is up |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
+| `ozbox chat lock\|unlink --link <id>` (or `--all`) [`--box <box>`] | Lock a Telegram link so it can only read, or cut it: on the computer that runs the dashboard, or for a dashboard on a box with `--box` over the sealed route. Shows the plan first; the dashboard applies it within seconds |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
 
 ## The dashboard
@@ -238,7 +240,7 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration, schedules and triggers, chat, linking Telegram with a passkey, and from a linked chat talking to a box, a session, a group or the whole fleet and starting, pausing, extending, creating or resizing boxes inside limits you allowed with a passkey ([ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); `/run` and worker boxes of another hub are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 

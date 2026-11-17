@@ -280,16 +280,18 @@ impl<'a> Bot<'a> {
         }))
     }
 
-    /// A plain-text message with no buttons, no preview and nothing to forward or copy. Returns its id, so a message that
-    /// carried a link can be deleted when the link is used.
+    /// A plain-text message (a reply) with no buttons, no preview and nothing to forward or copy. Returns its id, so a
+    /// message that carried a link can be deleted when the link is used.
     pub fn send(&self, chat_id: i64, text: &str) -> Result<i64, ApiError> {
-        let body = json!({
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": true,
-            "link_preview_options": { "is_disabled": true },
-            "protect_content": true,
-        });
+        self.send_notice(chat_id, &crate::notice::Notice::reply(text))
+    }
+
+    /// A notice as Telegram shows it (`notice::render::Telegram`): HTML with every value escaped, previews off, content
+    /// protected, and at most one URL button that only opens the dashboard.
+    pub fn send_notice(&self, chat_id: i64, n: &crate::notice::Notice) -> Result<i64, ApiError> {
+        use crate::notice::render::{Renderer, Telegram};
+        let mut body = Telegram::render(n);
+        body["chat_id"] = json!(chat_id);
         let v = self.call("sendMessage", "", Some(&body), Duration::from_secs(10))?;
         Ok(v.get("message_id").and_then(Value::as_i64).unwrap_or(0))
     }
@@ -303,16 +305,17 @@ impl<'a> Bot<'a> {
     }
 }
 
-/// A plain message, for the places that only need "did it go". The error never carries the token.
-pub fn send_text(
+/// A notice (a reply, or a structured message with its link button), for the places that only need "did it go". The error
+/// never carries the token.
+pub fn send_notice(
     http: &dyn HttpClient,
     token: &str,
     chat_id: i64,
-    text: &str,
+    n: &crate::notice::Notice,
 ) -> Result<(), String> {
     let base = ApiBase::from_env(std::env::var("OZBOX_TELEGRAM_API_BASE").ok().as_deref());
     Bot::new(http, token, &base)
-        .send(chat_id, text)
+        .send_notice(chat_id, n)
         .map(|_| ())
         .map_err(|e| redact(&e.to_string(), token))
 }
@@ -508,7 +511,11 @@ mod tests {
         assert!(!dbg.contains("FAKE-sentinel"), "{dbg}");
         // the one-call helpers refuse in words
         http.reply(401, "{}");
-        assert!(!send_text(&http, TOKEN, 5, "x").unwrap_err().contains(TOKEN));
+        assert!(
+            !send_notice(&http, TOKEN, 5, &crate::notice::Notice::reply("x"))
+                .unwrap_err()
+                .contains(TOKEN)
+        );
     }
 }
 
@@ -531,6 +538,8 @@ pub mod fake {
         pub next_message_id: i64,
         /// (chat id, text, message id)
         pub sent: Vec<(i64, String, i64)>,
+        /// The whole `sendMessage` body of each send, beside `sent` (a reply thread, a URL button).
+        pub bodies: Vec<Value>,
         pub deleted: Vec<i64>,
         /// Every call's method and query (never the token).
         pub calls: Vec<String>,
@@ -564,6 +573,7 @@ pub mod fake {
                     next_update_id: 100,
                     next_message_id: 1000,
                     sent: Vec::new(),
+                    bodies: Vec::new(),
                     deleted: Vec::new(),
                     calls: Vec::new(),
                     conflicts: 0,
@@ -742,10 +752,17 @@ pub mod fake {
                             return status(503, "{}");
                         }
                         let chat = body["chat_id"].as_i64().unwrap_or(0);
-                        let text = body["text"].as_str().unwrap_or("").to_string();
+                        // what the person sees: the words, and the address of a URL button under them
+                        let mut text = body["text"].as_str().unwrap_or("").to_string();
+                        if let Some(url) =
+                            body["reply_markup"]["inline_keyboard"][0][0]["url"].as_str()
+                        {
+                            text.push_str(&format!("\n[button] {url}"));
+                        }
                         s.next_message_id += 1;
                         let id = s.next_message_id;
                         s.sent.push((chat, text, id));
+                        s.bodies.push(body.clone());
                         ok(&json!({ "ok": true, "result": { "message_id": id } }))
                     }
                     "deleteMessage" => {

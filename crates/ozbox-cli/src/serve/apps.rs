@@ -111,6 +111,8 @@ impl App {
             self.start_telegram();
         }
         self.tg_sweep(now_ms);
+        self.tg_deadlines(now_ms);
+        self.tg_remote_pump(now_ms);
         if now_ms >= self.schedule.next_alerts_ms && !self.schedule.alerts_busy {
             self.schedule.next_alerts_ms = now_ms + ALERT_EVERY_MS;
             self.start_alerts(now_ms);
@@ -380,7 +382,7 @@ impl App {
     /// Hand a set of deliveries to the worker. With nothing to send, only what was decided is recorded.
     fn dispatch(
         &mut self,
-        alert: Alert,
+        mut alert: Alert,
         planned: Vec<(routing::Planned, u32)>,
         skipped: Vec<crate::notify::Delivery>,
         retry: bool,
@@ -393,6 +395,8 @@ impl App {
             self.record_delivery(&alert, skipped);
             return;
         }
+        // a link to exactly the item, made for each person it reaches, at the moment of sending
+        self.reach_alert(&mut alert, &planned, now_ms);
         let channels = self.channels();
         let (settings, chats) = (self.settings.clone(), self.state.telegram.chats.clone());
         let (a2, sk2, pl2) = (alert.clone(), skipped.clone(), planned.clone());
@@ -1052,13 +1056,19 @@ impl App {
             }
         }
         let now = unix_ms();
-        let alert = notify::test_alert(now);
+        let mut alert = notify::test_alert(now);
         let planned_list = routing::test_plan(
             &self.settings,
             &self.state.telegram.chats,
             b.person.as_deref(),
             &b.channel,
         );
+        // a test carries a link made the same way as a real alert's, so the test shows whether the link reaches the phone
+        if let Ok(list) = &planned_list {
+            let items: Vec<(routing::Planned, u32)> =
+                list.iter().map(|pl| (pl.clone(), 1)).collect();
+            self.reach_alert(&mut alert, &items, now);
+        }
         if b.run_async {
             return self.start_test_run(alert, &b.channel, planned_list, now);
         }
@@ -2980,6 +2990,8 @@ mod tests {
         let now = NOON;
         a.state.alerts.sent_ms = vec![now; notify::HOURLY_CAP];
         let alert = notify::Alert {
+            notice: None,
+            reach: Default::default(),
             key: "k".into(),
             kind: "disk".into(),
             severity: notify::Severity::Normal,
