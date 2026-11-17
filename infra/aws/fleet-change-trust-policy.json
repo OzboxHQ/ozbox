@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OnlyTheOwnersWindowSignIn",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::${account_id}:root" },
+      "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
+      "Condition": {
+        "ArnLike": { "aws:PrincipalArn": "${window_principal_arn}" },
+        "StringLike": { "sts:SourceIdentity": "ozbox-*", "sts:RoleSessionName": ["plan-*", "orch-*"] }
+      }
+    }
+  ]
+}

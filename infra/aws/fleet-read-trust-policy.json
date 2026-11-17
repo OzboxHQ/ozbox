@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OnlyMainsOwnRole",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::${account_id}:root" },
+      "Action": ["sts:AssumeRole", "sts:SetSourceIdentity"],
+      "Condition": {
+        "ArnEquals": { "aws:PrincipalArn": "${main_role_arn}" },
+        "StringLike": { "sts:SourceIdentity": "ozbox-*" }
+      }
+    }
+  ]
+}
