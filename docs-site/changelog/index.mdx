@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Codex CLI and Gemini CLI runs (Preview)">
+  ## Codex CLI and Gemini CLI run on a box, and agents on different engines work one task together
+
+  Until now only Claude Code could be started as a run; a run on another engine was accepted and then refused. Oz Box now starts Codex CLI and Gemini CLI on a box too, and an agent on one engine can hand work to, ask, answer and get a result from an agent on another. **Preview:** built and tested with fakes of each program; no Codex or Gemini CLI run has been started on a real box with a real account yet.
+
+  - **`ozbox run start --engine codex` and `--engine gemini-cli`** work like Claude Code runs: the board, caps, approvals and spend apply, and each run is priced against its own provider under the same spend cap.
+  - **Each run holds only its own provider's token.** A Codex run never sees the token a Claude Code run was given, and the reverse.
+  - **What crosses between two agents is the same whichever engines they are:** the task, a question, an answer, the state and the result. Saying "approved" in an answer approves nothing, and text that looks like a key is not sent.
+  - **Settings → Models says which engines run on a box.** OpenCode and Aider do not yet (use them in a terminal on the box).
+  - Not every engine can do everything: Codex keeps a run to its workspace with no network instead of refusing your ask list command by command, and Gemini CLI runs do not reach the Oz Box tools yet. See [Models and routing](/use-cases/models-and-routing) sections 6 to 8 and [ADR 0056](/adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
   ## Your computer and a box can pass tasks instead of notes
 

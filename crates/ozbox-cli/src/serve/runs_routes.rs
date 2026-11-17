@@ -107,6 +107,31 @@ impl ServeHost {
                 ))),
             );
         }
+        // the other engines with a headless adapter (ADR 0056); each keeps the state of its own runs
+        if !self
+            .real_engines
+            .contains_key(ozbox_core::codex_cli::ENGINE)
+        {
+            self.real_engines.insert(
+                ozbox_core::codex_cli::ENGINE.to_string(),
+                Box::new(ozbox_core::codex_cli::engine(BoxRunTransport::new(
+                    Arc::clone(agent),
+                    self.link.clone(),
+                ))),
+            );
+        }
+        if !self
+            .real_engines
+            .contains_key(ozbox_core::gemini_cli::ENGINE)
+        {
+            self.real_engines.insert(
+                ozbox_core::gemini_cli::ENGINE.to_string(),
+                Box::new(ozbox_core::gemini_cli::engine(BoxRunTransport::new(
+                    Arc::clone(agent),
+                    self.link.clone(),
+                ))),
+            );
+        }
         self.records = recs
             .into_iter()
             .map(|r| (r.spec.name.as_str().to_string(), r))

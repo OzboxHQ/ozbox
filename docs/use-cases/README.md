@@ -16,7 +16,7 @@ dashboard and on the command line, what happens underneath, and how mature that 
 | [A secure workspace for AI agents](secure-agent-workspace.md) | an agent with no keys in reach, a limited network, ask-mode, Production out of reach, an audit log, spend limits, and when a per-request sandbox fits better |
 | [Control your boxes from Telegram](telegram-control.md) | link a Telegram account with a passkey, allow a phone to talk to agents on chosen boxes, lock or cut it at any time; a chat never approves anything (Preview) |
 | [Chat with your coding agents](chat.md) | talk to agents from the dashboard, Telegram, Slack or WhatsApp: start, follow, answer, approve |
-| [Models and routing](models-and-routing.md) | your own model keys and cloud accounts, which engine uses which model, local models, spend |
+| [Models and routing](models-and-routing.md) | your own model keys and cloud accounts, which engine uses which model, which engines run on a box, agents on different engines working one task, local models, spend |
 | [Keeping boxes healthy](keeping-boxes-healthy.md) | upgrades, backups, restores, resizing, self-test, recovery |
 | [Alerts, costs and guardrails](alerts-costs-guardrails.md) | notifications and routing, budgets and the real bill, secrets, security |
 | [A browser for your agent](browser-on-the-box.md) | an agent that uses a real browser: approvals before it submits or pays, a person for CAPTCHAs, live view, take-over, replay |

@@ -101,6 +101,7 @@ export function EnginesCard({ settings, save, reload }: Props) {
           <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2" data-testid={`engine-${e.id}`}>
             <div className="min-w-0">
               <p className="text-sm font-medium">{e.label}</p>
+              {e.runs === undefined ? null : <p className="text-xs text-muted-foreground" data-testid={`engine-runs-${e.id}`}>{t(e.runs ? 'models.engine_runs_preview' : 'models.engine_runs_planned')}</p>}
               <p className="text-xs text-muted-foreground">{describe(settings.models.engines[e.id])}</p>
               {settings.models.engines[e.id]?.fallback ? <p className="text-xs text-muted-foreground">{t('models.engine_fallback')}: {describe(settings.models.engines[e.id]?.fallback ?? undefined)}</p> : null}
               {overrideBoxes(e.id).map(([b, per]) => (

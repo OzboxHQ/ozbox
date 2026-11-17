@@ -506,6 +506,8 @@ export interface EngineInfo {
   id: string;
   label: string;
   kinds: ModelKind[];
+  /** Whether Oz Box can start this engine as a run on a box (absent from an older server: treated as unknown). */
+  runs?: boolean;
 }
 
 export interface ModelsCatalog {

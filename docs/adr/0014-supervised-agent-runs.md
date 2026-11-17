@@ -33,3 +33,9 @@ step.
 **Not decided here.** Approving an action and then letting an agent that runs headless carry it out needs a permission hook in
 that agent; until an engine has one, the ask list is enforced by refusing those commands. Running engines on real boxes goes
 through the box daemon's run API (ADR 0019); the demo provider runs a simulated engine.
+
+**Amendment (2026-11-17, [ADR 0056](0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge.md)).**
+Decision 2 now has three adapters: Claude Code, Codex CLI (`codex exec --json`) and Gemini CLI (`gemini --output-format
+stream-json`), all through the box daemon with the task on standard input and only their own vendor family's credentials in
+the environment. What every engine reports is translated once into an engine-neutral turn model (task, ask, reply, tool use,
+usage, state, result), which is also what the hub carries. OpenCode and Aider have no adapter yet and say so. (Preview.)
