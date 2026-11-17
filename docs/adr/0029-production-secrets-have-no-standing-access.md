@@ -2070,7 +2070,7 @@ every box that declared secrets of its own failed to load them, and the only tra
 - **Push** (`pre-push`) stays closed for the whole outage. A push is what leaves the box and stored values cannot be compared, so it is stopped with the same plain words; the shapes it found are listed too. Nothing is lost: the commits are on the box.
 - **No box-user override.** A command the box user could run to wave a change through would be a way for an agent to do the same, and an approval is recorded by the service that is down. The way forward is to restore the service, which the message says how to do.
 
-**What this accepts.** While the service is down a stored value can enter a local commit unseen. It cannot leave through a push that runs the hooks: `pre-push` reads every commit the remote lacks once the service is back, and a commit with such a value then has to be rewritten before it can be pushed. The hooks are a barrier against accident, not a wall (ADR 0041 lists their limits: a push with `--no-verify`, or with `core.hooksPath` moved, runs none of them). What actually stops an unscanned value leaving the box is the egress allow-list and the host's push protection; the hooks add to them and are not what they rest on. This is the same exposure `post-commit` already accepted for a service that was missing. A box user who can make the service unreachable can commit unscanned, which the hook, a barrier against accident, never claimed to stop (ADR 0023); the closed network and the push check stand behind it. **For the owner to decide:** whether the unscanned commits should also be listed in the audit chain when the service returns (the service cannot record them while it is down), and whether a push should ever be allowed during an outage by a laptop-signed approval (it would need a path that does not go through the service).
+**What this accepts.** While the service is down a stored value can enter a local commit unseen. It cannot leave through a push that runs the hooks: `pre-push` reads every commit the remote lacks once the service is back, and a commit with such a value then has to be rewritten before it can be pushed. The hooks are a barrier against accident, not a wall (ADR 0041 lists their limits: a push with `--no-verify`, or with `core.hooksPath` moved, runs none of them). What actually stops an unscanned value leaving the box is the egress allow-list and the host's push protection; the hooks add to them and are not what they rest on. This is the same exposure `post-commit` already accepted for a service that was missing. A box user who can make the service unreachable can commit unscanned, which the hook, a barrier against accident, never claimed to stop (ADR 0023); the closed network and the push check stand behind it. **For the owner to decide:** whether the unscanned commits should also be listed in the audit chain when the service returns (the service cannot record them while it is down), and whether a push should ever be allowed during an outage by a laptop-signed approval (it would need a path that does not go through the service). (Decided in Amendment 18: yes to the first, no to the second.)
 
 ## Amendment 16 (2026-11-16): a hosted dashboard's tunnel token is kept on this computer, and an upgrade puts it back without making an approval
 
@@ -2116,3 +2116,99 @@ way round it. A box whose pinned key was applied when the new store's service st
 
 **What this does not close.** The put-back runs over the box user's SSH shell like the install it is (Amendment 3 of ADR 0028 names
 that route's limits). The pinned key is a software key; a hardware-backed key is not built. Not yet run against a real box.
+
+## Amendment 18 (2026-11-17): outage-window commits reach the audit chain, no approval opens a push during an outage, a downgrade cannot strand a KMS store, and the self-test reads typed state
+
+Amendment 15 left two questions for the owner, and the reviews of beta.3 left three smaller gaps. The owner decided the first two;
+the rest are fixes.
+
+**1. Commits made while the secrets service is down are recorded, and reach the audit chain once it is back.** The chain is
+written by the service that is down, so nothing could record them at the time.
+
+- `post-commit` writes one line per commit that stands (one the key shapes took back is not a commit) to a journal of the box
+  user's, `~/.local/state/ozbox/commit-guard-outage.jsonl` (mode 0600, folder 0700). A line names the commit, its tree, the
+  repository by the hash of its path (never the path), which outage it was (`no-socket` or `not-listening`) and the time. Each
+  line carries the hash of the one before it.
+- The next hook that reaches the service, before anything else, sends the lines to the audit chain in the order they were
+  written, as `guard.commit-unscanned` events whose detail starts `outage-window`. Then the journal is emptied. A service that is
+  still down leaves the journal as it was.
+- **Ordering and replay.** Lines are numbered by place and sent as one batch. Each event's source is the journal's random id and
+  that number, so a hook that dies between the append and emptying the journal sends nothing twice when it runs again (the chain
+  skips a source it already has as its last one).
+- **Damage.** A line that does not read, a number out of order or a broken link is not dropped. What reads is sent, each event
+  says `journal=damaged`, and one `guard.outage-journal-damaged` event before them says how many lines could not be read.
+- **What this does not close.** The journal is the box user's file, so a hostile box user (or an agent) can delete or rewrite it
+  before it is sent. It is a record against accident and for the owner's review, like the hooks themselves (ADR 0041). The chain
+  is tamper-evident only from the moment the events are in it. A duplicate is possible only if a hook dies after the append AND
+  another source-carrying write reaches the chain before the next hook runs; it then carries the same journal id and number, so
+  it reads as a repeat, never as another commit. A commit made while the service is down and never followed by another commit
+  or push on the box is not sent until there is one.
+
+**2. A push is never let through during an outage, by any approval.** The owner's answer to "should a laptop-signed approval
+ever let a push through during an outage" is no. A push is what leaves the box; the stored values cannot be compared; and a path
+that does not go through the service would be a second approval path, outside the one this ADR and ADR 0041 keep. So `pre-push`
+stays closed for the whole outage, as Amendment 15 built it: a code in `OZBOX_GUARD_APPROVAL` (whoever signed it, the
+owner's laptop included) is never read, and no request is filed or polled. A test holds this with a request side that would
+answer "approved" to anything: it is never asked. Local commits degrade as Amendment 15 says.
+
+**3. The upgrade plan reads the target image before it says a KMS store is kept.** The "kept" verdict of Amendment 15 was
+about the box. On a box whose new machine is given the fleet's KMS key (its record names the key, or `--use-fleet-key`), the
+target image must also be able to open such a store. An image older than 0.2.0-beta.3 cannot: its secrets service reached KMS
+through the `aws` command, which no image carries (Amendment 13). A downgrade onto one would leave the store unopenable on a box
+whose old system disk is already gone.
+
+- From now on the signed manifest says it. The upgrade record carries `secrets_keys`, the store keys the release's secrets
+  service opens by itself (`["file", "kms"]` today), taken from the tracked policy file. The parser refuses anything but a list
+  of short lowercase words.
+- A manifest from before that has no such key. The plan then goes by the release version: 0.2.0-beta.3 and later can, every
+  release before it cannot. A dated release or one that is not a version cannot be told.
+- **Cannot** is refused in the plan, before anything is confirmed. No flag lifts it: `--accept-new-secrets-store` would not
+  help, because a new store would be on the same key. **Cannot be told** is refused too, naming what to pass instead. Neither
+  is a half-applied upgrade. A box whose store is kept in a file is not affected.
+
+**4. The secrets self-test reads typed state and runs on fixtures.**
+
+- The service writes `phase=retrying | gave-up | stopped` in its state file (`ozbox_core::secrets_phase`). The self-test reads
+  that line, and reads the old sentence `(starting again)` only from a file written before the line existed. The behaviour is
+  unchanged.
+- "Is the service's folder on this machine at all?" is asked of the host abstraction, so the check is tested on fixtures,
+  never on the machine the test runs on.
+- The image build no longer looks for a few strings in the program. It runs `ozbox secrets native-check`, a hidden command: the
+  shipped program's own KMS and Parameter Store clients make a signed round trip, with an empty PATH and environment, against
+  loopback stand-ins the command starts itself. The stand-ins recompute every signature from the bytes that arrived, and refuse
+  a different encryption context. The client it builds accepts plain http to `127.0.0.1` only; no client the store or the loader
+  builds does. The credentials are random words made for the run.
+
+**Not covered.** No real KMS or Parameter Store call is made in CI (no cloud there). The outage journal and its replay have run
+only in tests, never on a real box with its service stopped.
+
+## Amendment 19 (2026-11-17): a tunnel token is rotated from this computer, kept until the new tunnel is healthy, and put back if it is not
+
+A hosted dashboard's tunnel token (and the web IDE's) is write-only on the box, and the only way to change it was to install
+again. That replaced the token with nothing to fall back on: a wrong token took the dashboard down. `ozbox admin <box> --
+replace-tunnel-token cloudflare|ngrok|ide` is the rotation, plan then apply (ADR 0002).
+
+- **The token is never an argument.** It is read from standard input (`--token-stdin`) or from an entry in this computer's
+  secret store (`--token-from-store NAME`). Its shape is checked here (the root helper's rule), and a refusal never repeats it.
+  It travels to the box the way `ozbox dashboard install` sends it: inside the script on the SSH connection's standard input. The
+  box user writes it to a private file, and the root helper reads that file once, removes it and stores the token. It is in no
+  command line, plan, report, log or error. A sentinel test checks every command, its debug and JSON forms, the plan and the
+  outcome.
+- **The old token is kept until the new tunnel is healthy.** This computer keeps the token in use (Amendment 16:
+  `dashboard-tunnel-token-<box>`, `ide-tunnel-token-<box>`). After the helper stores the new token and restarts the tunnel, the
+  box is asked whether the tunnel's service is still running about 12 seconds later without systemd having restarted it (a
+  refused token makes the connector exit). Only then does the kept copy become the new token.
+- **Rollback.** If the new tunnel is not healthy, the kept old token is handed over the same way and the tunnel is watched
+  again. The report says which state the tunnel is in: rolled back and healthy, or down with the one command to send a working
+  token. A box that refused the new token changed nothing.
+- **Approval.** The box's rule is unchanged (`tunnel-token`, Amendment 16). Once the dashboard has a second factor, a change
+  needs an approval bound to this token. `--approve-with-laptop-key` makes it with the key pinned when the box was made, only
+  for a box whose helper binds the code to the token, and for the rollback too.
+- **With no copy to put back** the plan says so, and the box's name must be typed (`--yes` does not stand for it). With
+  `--token-stdin` that cannot be asked, so the command refuses and names `--token-from-store`. With a copy, `--token-stdin`
+  needs `--yes`: standard input carries the token, so no question can be asked.
+- **Cloudflare is the person's side.** Nothing here holds a Cloudflare credential. The use case gives the dashboard steps:
+  rotate or revoke the old token there only after the command says the new tunnel is healthy.
+
+**Not covered.** "Healthy" is what the box can see. The connector stays up, but no request is made through the tunnel from
+outside. Ngrok's side is not described beyond "revoke the old token in its dashboard". Not yet run against a real tunnel.

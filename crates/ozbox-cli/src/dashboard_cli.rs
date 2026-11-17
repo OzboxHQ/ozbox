@@ -597,7 +597,7 @@ pub(crate) const HELPER_BINDS_MARKER: &str = "bind-token-stdin";
 /// One fixed question: does this box's root helper tie a tunnel-token approval to the token? The answer is a convenience for
 /// the hint that follows a refusal, never a proof (it travels through the box user's shell, like the probe above): `None`
 /// when the box could not say.
-fn helper_binds_approval(runner: &dyn CommandRunner, name: &BoxName) -> Option<bool> {
+pub(crate) fn helper_binds_approval(runner: &dyn CommandRunner, name: &BoxName) -> Option<bool> {
     let out = runner
         .run(&CommandSpec::new("ssh").args([
             "-o".to_string(),

@@ -245,6 +245,36 @@ cannot store a different token. Carrying the code to the box's root helper (the 
 goes through the box user's shell, which an agent on the box can in principle wrap; a forced command in the box's SSH daemon, in a
 later image, closes that.
 
+**Rotate the token, with a way back.** Running the install again replaces the token with nothing to fall back on: a wrong
+token takes the dashboard down. To rotate it safely, use the admin command, which keeps the old token until the new tunnel is
+healthy:
+
+```
+printf '%s\n' "$NEW_TOKEN" | ozbox admin ops --yes -- replace-tunnel-token cloudflare --token-stdin --approve-with-laptop-key
+ozbox admin ops --dry-run -- replace-tunnel-token cloudflare --token-from-store NAME   # the plan only
+```
+
+It shows the plan first. The new token goes to the box's root helper, which stores it and restarts the tunnel. After about 12
+seconds the command asks the box whether the tunnel is still running without having been restarted. If so, this computer keeps
+the new token in place of the old one. If not, the old token (kept on this computer since you installed) is put back, the same
+way, and the report says whether that tunnel is healthy again. The token is never an argument: it comes from standard input or
+from an entry in this computer's secret store (`--token-from-store NAME`). `--token-stdin` needs `--yes`, because standard input
+carries the token. With no old token kept here there is nothing to put back: the plan says so and asks you to type the box's
+name, which needs `--token-from-store`. `--approve-with-laptop-key` makes the approval a box with a second factor asks for, as
+`dashboard restore` does. Use `ide` for the web IDE's connector and `ngrok` for an ngrok tunnel.
+
+**On Cloudflare's side**, the order matters: get the new token, let the command switch to it, and retire the old one last.
+
+1. In the Cloudflare dashboard, open **Zero Trust → Networks → Tunnels** and pick the tunnel that serves `ozbox.example.com`.
+2. Get a new token for it from the tunnel's settings, where Cloudflare offers to refresh (rotate) it. Cloudflare's own
+   documentation says whether the old token keeps working after that, and for how long. If it stops at once, the command's
+   way back cannot bring the old tunnel up, and it says so (the tunnel is then down until a working token is sent).
+3. Run `replace-tunnel-token` with the new token, as above, and wait for it to say the new tunnel is healthy.
+4. Only then retire the old token in Cloudflare, if it is still valid there. If the command put the old token back, leave it
+   alone and check the new one first.
+
+**Status:** Preview (tested with a recorded box in CI; not yet run against a real tunnel).
+
 ## 10. Copy and paste that just works
 
 **You want:** normal copy and paste in the browser IDE's editor and terminal.

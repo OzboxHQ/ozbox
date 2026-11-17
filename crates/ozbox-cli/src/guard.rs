@@ -2243,6 +2243,46 @@ mod tests {
         );
     }
 
+    /// ADR 0029 Amendment 18: a commit that stands while the service is down gets a line in the outage journal; one the shapes
+    /// took back gets none (there is no commit to record), and the line names the commit that is HEAD.
+    #[test]
+    fn v6b_an_outage_commit_that_stands_is_journalled_and_one_taken_back_is_not() {
+        use crate::guard_outage::{read, Window};
+        let d = fresh();
+        let r = d.path();
+        let j = tempfile::tempdir().unwrap();
+        let jp = j.path().join("outage.jsonl");
+        put(
+            r,
+            "c.ts",
+            format!("const k = \"{}\";\n", k("AKI", "AIOSFODNN7EXAMPLE")).as_bytes(),
+        );
+        assert!(commit(r, &["--no-verify"]));
+        let (said, written) = crate::guard_cli::post_commit_unscanned_journalled(
+            r,
+            "the service is down",
+            Some((&jp, Window::NotListening)),
+        );
+        assert!(said.contains("taken back") && !written, "{said}");
+        assert!(read(&jp).unwrap().entries.is_empty());
+        g(r, &["rm", "-q", "-f", "--cached", "c.ts"]);
+        std::fs::remove_file(r.join("c.ts")).unwrap();
+        put(r, "ok.txt", b"fine\n");
+        assert!(commit(r, &["--no-verify"]));
+        let (said, written) = crate::guard_cli::post_commit_unscanned_journalled(
+            r,
+            "the service is down",
+            Some((&jp, Window::NotListening)),
+        );
+        assert!(written, "{said}");
+        assert!(said.contains("audit trail"), "{said}");
+        let got = read(&jp).unwrap();
+        assert!(got.intact);
+        assert_eq!(got.entries.len(), 1);
+        assert_eq!(got.entries[0].commit, head(r));
+        assert_eq!(got.entries[0].window, Window::NotListening);
+    }
+
     #[test]
     fn v7_a_box_is_known_by_the_file_its_image_writes_and_not_by_where_the_binary_is() {
         let d = tempfile::tempdir().unwrap();

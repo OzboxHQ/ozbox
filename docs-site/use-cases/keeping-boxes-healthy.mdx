@@ -69,6 +69,12 @@ as `instance missing`, and running the same `ozbox upgrade` again finishes the j
 and a simulated OpenTofu, never run against Hetzner). The secrets-store check and recovery are Preview (tested in CI, not yet
 on a real box).
 
+**An image that cannot open a store on the fleet's key is refused.** A box whose store is on your fleet's KMS key can only be
+upgraded to an image whose secrets service reaches that key by itself: 0.2.0-beta.3 or later (from now on, the image's signed
+release says which keys it opens). Going back to an older image would leave the store unopenable, so the plan refuses it before
+anything changes and no flag lifts it; pick a newer image (`ozbox upgrade main` picks the newest). An image whose release cannot
+be told is refused the same way. A box whose store is kept in a file is not affected. **Status:** Preview.
+
 ## 1b. Move an existing AWS box's secrets store to your fleet's KMS key
 
 **You want:** a box that was made before your fleet's KMS key existed (its secrets store's key is a file on the system disk,
