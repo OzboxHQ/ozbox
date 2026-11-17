@@ -154,6 +154,18 @@ fn the_user_data_stays_inside_the_provider_limit() {
 }
 
 #[test]
+fn the_hub_daemon_has_a_socket_of_its_own_that_only_its_group_may_enter() {
+    let t = repo(SETUP);
+    let tmp = section(&t, "EOF_TMPFILES");
+    // ADR 0042: the handshake and the token tag are asked for here, by `ozbox-hub` alone; never the box user's group
+    assert!(tmp.contains("d /run/ozbox-secrets/hub      0750 ozbox-secrets ozbox-hub"));
+    let svc = section(&t, "EOF_SECRETS");
+    assert!(svc.contains("--hub-socket /run/ozbox-secrets/hub/hub.sock"));
+    assert!(t.contains("--comment \"Oz Box hub daemon\" ozbox-hub"));
+    assert!(!t.contains("usermod -aG ozbox-hub ozbox") && !t.contains("gpasswd -a ozbox "));
+}
+
+#[test]
 fn the_supervisor_has_a_socket_directory_the_box_group_cannot_enter_and_the_box_users_sockets_shrink(
 ) {
     let t = repo(SETUP);

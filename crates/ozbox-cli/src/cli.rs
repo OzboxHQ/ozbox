@@ -848,6 +848,10 @@ pub enum SecretsCommand {
         /// shrink to what the box user needs, and the supervisor alone can issue run tokens and ask for an approval.
         #[arg(long)]
         supervisor_socket: Option<std::path::PathBuf>,
+        /// The hub daemon's socket (a directory only the secrets user and `ozbox-hub` may enter): the hub's public identity, its
+        /// handshake signature and an enrolment token's tag, and nothing that opens or signs a message (ADR 0042).
+        #[arg(long)]
+        hub_socket: Option<std::path::PathBuf>,
         /// Where the box's own secrets are kept while the box is up: a file on tmpfs, sealed under the same key. Without
         /// it the service holds none.
         #[arg(long)]
