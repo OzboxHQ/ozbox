@@ -250,9 +250,23 @@ What each part does:
   use its key; a service that holds a key reaches only the hosts the project declares (`egress`), through a proxy
   that is its own unit and lives exactly as long as the service, and only that service's user may connect to it (a kernel rule on the
   user, and the proxy checks the same for itself); with nothing declared, or no secret, it reaches this machine's loopback and nothing
-  else (a program must honour `HTTPS_PROXY`). A project that declares `tcp` destinations cannot start a service that holds a key yet: a
+  else (a program must honour `HTTPS_PROXY`; see **Which programs use the route** below). A project that declares `tcp` destinations cannot start a service that holds a key yet: a
   raw tunnel is held back until the box has proven its ports cannot be taken by another user; what the server prints goes to the journal, and only `--status` is scrubbed of stored
   values; and `npm run start` cannot receive a secret, because a package script is not covered by a pin.
+- **Which programs use the route.** A command or service whose project declares `egress` is given `HTTPS_PROXY` (and
+  `https_proxy`, `NO_PROXY`), and also `NODE_USE_ENV_PROXY=1`, because Node's built-in `fetch` (and so most JavaScript SDKs) ignores
+  `HTTPS_PROXY` without it. None of these names can be set by a declaration. What reads them:
+
+  | Runtime or tool | Uses the route | Note |
+  |---|---|---|
+  | Node 22.21+ or 24.5+ (`fetch`, `http`, `https`) | Yes | through `NODE_USE_ENV_PROXY=1`, which Oz Box sets |
+  | Node older than that | No | its calls go direct and are refused; upgrade Node, or give the program a proxy agent yourself |
+  | curl, Python (`requests`, `httpx`, `urllib`), Go `net/http`, Deno, Bun, Rust `reqwest` | Yes | they read `HTTPS_PROXY` on their own |
+  | Python `aiohttp` | Only with `trust_env=True` | its default ignores the proxy variables |
+  | Java | No | it reads `-Dhttps.proxyHost` / `-Dhttps.proxyPort`, not the environment |
+
+  A program that does not use the route fails to connect (the closed network refuses it); it never reaches a host the project did not
+  declare. Raw `tcp` destinations are tunnels, not the proxy, so they work from every runtime.
 - **`public`** names stored values that you marked public when you imported them (`ozbox secrets import .env.staging --project shop
   --env staging --public NEXT_PUBLIC_ANON_KEY --public NEXT_PUBLIC_APP_URL --box main`): a public URL, or a hosted backend's anonymous
   key, which looks like a secret and is public by design. A command or service that lists the name (and an `envs` list) receives it as

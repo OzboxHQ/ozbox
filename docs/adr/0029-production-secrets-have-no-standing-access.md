@@ -1905,6 +1905,14 @@ runs, anyone can *listen* on it, and the service's own traffic (a tunnel carries
    properties added once the ports are known; the names stay reserved for a declaration. `HTTP_PROXY`, `http_proxy` and `ALL_PROXY` are
    **not** set: a plain `http://` request through the proxy is a 405, and a client that wants https reads `HTTPS_PROXY`. `NODE_EXTRA_CA_CERTS`
    and `SSL_CERT_*` are not set either: TLS passes through to the declared host. A program has to honour the proxy variables.
+   **Amended 2026-11-17 (B4-30):** `NODE_USE_ENV_PROXY=1` is set beside `HTTPS_PROXY` (and is a reserved name, as every `NODE_` and
+   `_PROXY` name already was), for a service's unit and for a one-shot command alike, because Node's built-in `fetch` ignores
+   `HTTPS_PROXY` without it (Node 22.21 and 24.5 onward read it; an older Node ignores it and goes direct, which the closed network
+   refuses). Found by a real `ozbox env run --named` of a Node command: its https calls went direct and failed, while its `tcp` tunnels
+   worked. A test runs the machine's `node` against the exact variables the runner sets and shows `fetch` reaching a test proxy (with the
+   run's password, for a one-shot command), and not reaching it without the opt-in. The runtimes that read `HTTPS_PROXY` on their own
+   (curl, Python `requests`/`httpx`/`urllib`, Go, Deno, Bun, Rust `reqwest`) and the ones that do not (`aiohttp` without `trust_env`,
+   Java) are listed in the secure agent workspace use case.
 5. **The same rules as a one-shot secret command.** The proxy is `egress::start_open_on`: a listener it is handed and no
    `Proxy-Authorization`, otherwise the one-shot proxy's code, with exact hosts only (a project that has a secret service cannot declare
    a wildcard, and the proxy refuses one in depth), the public-address check and the TLS hello check. **A service that holds no secret
