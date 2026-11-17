@@ -25,6 +25,7 @@ Tick each against the current code and tests before a release.
 - [ ] The dashboard listens on loopback only; sign-in is a passkey or a verified proxy token; host, origin and cookie scope derive from one address.
 - [ ] No secret appears in an argument, a log, a plan, an answer, a URL or an error; every secret path has a sentinel test.
 - [ ] Secrets are encrypted at rest; internal tokens are stored only as HMAC and compared in constant time.
+- [ ] What the box user may do with each secret name is one table; a person's sign-in factors (authenticator secrets, the sign-in client secret, push keys) and the store's own keys are not read, written, asked about or listed from a socket the box user can reach ([0018](adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md), Amendment 1).
 - [ ] Agents get per-run, short-lived, scoped tokens, never a long-lived vendor key.
 - [ ] A box's first approver is never enrolled from a socket the box user can reach (it is pinned by `ozbox create`); each secrets-service socket is in its directory's group and the self-test connects to it as the box user ([0028](adr/0028-the-audit-chain-has-a-writer-of-its-own-and-cloud-accounts-go-through-the-broker.md), Amendment 1).
 - [ ] The broker relays only each provider's inference endpoints and model list; a store's key file is never on `/work` and backups leave out the secrets service's private folder ([0029](adr/0029-production-secrets-have-no-standing-access.md), Amendment 7).

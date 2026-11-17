@@ -20,7 +20,7 @@ Each record states one decision, why, and what it costs. A decision changes only
 | [0015](0015-model-providers-and-local-ai.md) | Model providers use your keys or your cloud account, and local models stay on the box |
 | [0016](0016-the-real-bill-and-forgotten-resources.md) | The real bill is read with your own read access and shown beside the estimate; forgotten resources are listed, and only tagged ones can be deleted |
 | [0017](0017-credential-broker-per-run-tokens.md) | Runs never hold a provider key: a credential broker and per-run tokens |
-| [0018](0018-secrets-are-encrypted-and-out-of-the-agents-reach.md) | Secrets are encrypted at rest, held by a separate user, and out of an agent's reach |
+| [0018](0018-secrets-are-encrypted-and-out-of-the-agents-reach.md) | Secrets are encrypted at rest, held by a separate user, and out of an agent's reach (amended 2026-11-17: the box user's reach is one table, and sign-in factors are not in it) |
 | [0019](0019-agent-runs-on-real-boxes.md) | Agent runs on a real box: the box daemon's run API, and a reverse forward for the broker |
 | [0020](0020-orchestration-conductor-and-worker-boxes.md) | Orchestration: a conductor hands features to worker boxes, with claims, contracts, a merge queue and the Oz Box tools over MCP |
 | [0021](0021-chat-with-coding-agents.md) | Chat with coding agents: one conversation model, only linked people, risky approvals by passkey |

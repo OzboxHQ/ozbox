@@ -127,6 +127,8 @@ mod secrets_escrow;
 mod secrets_file;
 mod secrets_ingress;
 mod secrets_persist;
+#[cfg(test)]
+mod secrets_reach_tests;
 mod secrets_recover;
 mod secrets_restic;
 #[cfg(unix)]
