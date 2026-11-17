@@ -1321,14 +1321,14 @@ impl AwsBackend {
     /// VERIFIED public release is newer than the own image's release (and is one this program can use, or the own one is
     /// not), the public one is used and the own one is named as passed over. Anything that keeps the public image from being
     /// verified (no publisher, a failed check, nothing listed) keeps the own image, as before.
-    fn newer_public_than(&self, own: ImageInfo, region: Option<&str>) -> ImageInfo {
+    fn newer_public_than(&self, own: ImageInfo, region: Option<&str>, arch: &str) -> ImageInfo {
         let Some(publisher) = self.publisher() else {
             return own;
         };
         let Some(own_release) = own.release.clone() else {
             return own;
         };
-        let Ok(public) = self.latest_public(&publisher, region) else {
+        let Ok(public) = self.latest_public(&publisher, region, arch) else {
             return own;
         };
         let Some(pub_release) = public.release.clone() else {
@@ -1992,7 +1992,7 @@ impl Backend for AwsBackend {
         ])?;
         if !found.images.is_empty() {
             let own = self.pick_own(&found.images, region);
-            return Ok(self.newer_public_than(own, region));
+            return Ok(self.newer_public_than(own, region, arch));
         }
         // 2. The project's public images, only those the publisher account owns and the signed manifest lists.
         let Some(publisher) = self.publisher() else {

@@ -1722,6 +1722,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         crate::ingress_client::testing::install("dev");
         for json in [false, true] {

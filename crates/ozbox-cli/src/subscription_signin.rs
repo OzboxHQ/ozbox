@@ -44,11 +44,6 @@ pub const SIGN_IN_WAIT: Duration = Duration::from_secs(15 * 60);
 /// The largest sign-in file accepted from the vendor's command.
 pub const MAX_LOGIN_BYTES: usize = PART * MAX_PARTS * 3 / 4;
 
-/// Whether a secret's name is one of these records: the box user's socket never answers for it.
-pub fn is_subscription_secret(name: &str) -> bool {
-    name.starts_with("subscription-")
-}
-
 /// An engine whose own sign-in may be handed to its runs, on the owner's opt-in.
 #[derive(Debug)]
 pub struct Adapter {

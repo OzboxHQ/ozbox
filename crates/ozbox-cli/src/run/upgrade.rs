@@ -3127,6 +3127,7 @@ mod tests {
                         detail: "the store's key is in a file on the system disk".into(),
                     },
                     accept_new_store: accept,
+                    fleet_key: false,
                     old_disk: OldDisk::NotOffered,
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,
@@ -3143,6 +3144,7 @@ mod tests {
                     first_boot: FirstBootOpts::default(),
                     strict_checkpoint: false,
                     legacy_checkpoint: false,
+                    no_checkpoint: false,
                 },
             )
             .map_err(|e| format!("{fate:?} accept={accept}: {e}"))?;
@@ -3388,6 +3390,7 @@ mod tests {
                     detail: "kept".into(),
                 },
                 accept_new_store: false,
+                fleet_key: false,
                 old_disk: OldDisk::NotOffered,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
@@ -3395,6 +3398,7 @@ mod tests {
                 restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
                 review_signers: &|_| None,
                 place_escrow: &|_, _| None,
                 first_boot: FirstBootOpts::default(),

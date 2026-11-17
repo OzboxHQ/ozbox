@@ -233,13 +233,6 @@ pub fn user_name_count(store: &EncryptedSecrets) -> Option<u32> {
     u32::try_from(names.iter().filter(|n| !is_system_name(n)).count()).ok()
 }
 
-/// Names only the dashboard's own user (the supervisor socket) and the root helper may touch: a subscription sign-in and its
-/// opt-in (ADR 0055). The box user's socket neither reads, writes, deletes, asks about nor lists them. When the box user's
-/// reach becomes one table (ADR 0018 Amendment 1), this is its row: no reach for the box user, read back by the supervisor.
-pub fn supervisor_only(name: &str) -> bool {
-    crate::subscription_signin::is_subscription_secret(name)
-}
-
 pub fn box_may_get(name: &str) -> bool {
     box_reach(name) == BoxReach::Read
 }
@@ -3410,7 +3403,7 @@ mod tests {
             json!({"op":"delete","name":login}),
         );
         assert_eq!(r["ok"], true);
-        assert!(supervisor_only(login) && !box_may_get(login));
+        assert!(supervisor_may_get(login) && !box_may_get(login));
     }
 
     #[test]
@@ -4055,6 +4048,7 @@ mod tests {
                 "app",
                 "production",
                 "ABCD-EFGH-JKMN-PQRS",
+                false,
                 1,
                 |_| Ok(()),
             )
@@ -4082,7 +4076,14 @@ mod tests {
         // and a laptop-key code for another environment is still not a Production approval
         let code = g
             .approvals
-            .mint("import", "app", "staging", "laptop-key:laptop", 1, 60_000)
+            .mint(
+                "import",
+                "app",
+                "staging",
+                &crate::secrets_signer::Signer::SoftwareKey("laptop".into()),
+                1,
+                60_000,
+            )
             .unwrap();
         assert!(g
             .require(&s, "import", "app", "production", &code, 2)
