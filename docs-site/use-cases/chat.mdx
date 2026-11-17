@@ -92,7 +92,9 @@ server refuses the act, so this does not depend on a button being missing.
 
 **Underneath:** the link is made for each person when the message is sent: 24 random bytes held only as a keyed hash, for ten
 minutes, for that person only, and it stops working if the server restarts. Opening it changes nothing (you can open it in
-Telegram's browser and then your own). Once the request is decided, the link says it was used. A shared place (a Slack channel,
+Telegram's browser and then your own). An agent's question links to **Chat**, where the request opens with Approve and Deny;
+that link is spent when the page opens it. The token is always in the part of the address after `#`, which your browser never
+sends to any server. Once the request is decided, the link says it was used. A shared place (a Slack channel,
 an email list, a webhook) gets the request's own address instead, which asks you to sign in. When the dashboard has no public
 address the message says "Open your dashboard → Approvals" rather than leave the link out silently. Other alerts (a full disk,
 memory, the budget) link to their box or page the same way. No key, token, value or long agent output is ever in a message.

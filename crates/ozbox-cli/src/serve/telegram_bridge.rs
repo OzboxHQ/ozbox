@@ -941,9 +941,10 @@ fn gateway_text(act: &ChatAct, original: &str) -> String {
 pub(super) fn redact_for_record(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    // a pointer link (`/go#<token>`) and a chat page link (`?link=<token>`) alike
+    // a pointer link (`/go#<token>`) and a chat page link (`#link=<token>`, or `?link=` from an older message) alike
     while let Some((i, n)) = [
         rest.find("/go#").map(|i| (i, 4)),
+        rest.find("#link=").map(|i| (i, 6)),
         rest.find("?link=").map(|i| (i, 6)),
     ]
     .into_iter()

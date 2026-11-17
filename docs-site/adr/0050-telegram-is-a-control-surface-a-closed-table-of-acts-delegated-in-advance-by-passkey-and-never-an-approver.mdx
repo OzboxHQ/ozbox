@@ -571,6 +571,9 @@ for the person who received it. What changes:
 - **An alert message is not deleted when its link lapses** (unlike a handoff's): it is the person's record of what happened, and it
   says where to go after ten minutes.
 
-What this does not cover: an agent's question in a chat still links to the dashboard's Chat page with its one-time token in the
-address's query (`/chat?link=`), as before this amendment, not in the fragment; moving it to a pointer link is left to the chat
-sessions work. A webhook never gets a link made for a person. The real-phone check of the new message is an owner run.
+- **An agent's question links to the dashboard's Chat page with its token in the fragment** (`/chat#link=<token>`), never in the
+  query, so no server, tunnel, proxy log or referrer sees it. The page takes it out of the address bar and redeems it once over
+  POST, for the person it was made for. Deciding the question (on any surface) makes the link read as used, and so does opening it
+  after the question was decided or lapsed.
+
+What this does not cover: a webhook never gets a link made for a person. The real-phone check of the new message is an owner run.

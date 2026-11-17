@@ -52,6 +52,12 @@ export function pointerToken(hash: string): string | null {
   return m ? (m[1] ?? null) : null;
 }
 
+/** The token of a chat page link (`#link=<48 hex>`, possibly followed by more of the fragment), or null. */
+export function chatLinkToken(hash: string): string | null {
+  const m = /^#link=([0-9a-fA-F]{48})(?=$|[&#])/.exec(hash);
+  return m ? (m[1] ?? null) : null;
+}
+
 /**
  * A path the server named for a pointer link is a path inside this dashboard and nothing else. The one query allowed is the
  * request a message is about (`/approvals?request=<id>`), so a link lands on exactly that item.
