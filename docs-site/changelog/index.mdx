@@ -8,23 +8,40 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="0.2.0-beta.4: clearer upgrades on AWS">
-  ## Upgrades tag the system disk, keep your project repositories, and say what to do next
+<Update label="[Release date]" tags={["CLI", "Security", "Dashboard", "Docs"]} description="0.3.0-beta">
+  ## What is new in 0.3.0-beta
+
+  ### Upgrades tag the system disk, keep your project repositories, and say what to do next
 
   - **A new system disk is tagged the moment AWS creates it**, so on the upgrade after next the pre-upgrade copy is no longer refused as "not tagged ozbox-managed". A box whose disk was made by an older version still needs its disk tagged once by an account administrator: the refusal now gives the exact command, or you can pass `--no-pre-upgrade-snapshot`.
   - **Ordinary project repositories are saved before an upgrade.** A repository was skipped as a "home or dotfiles repository" just because it held a committed `.npmrc` or `.docker` folder. Now only your home folder, or a repository holding an untracked credentials folder at its top level, is left out, and the report names which.
   - **After a new secrets store, the report tells you how to pin its key.** It shows the new fingerprint and, at a terminal, offers to pin it after you type the box name. Nothing is replaced without that confirmation, so the next `ozbox secrets import --box` no longer fails first.
   - **A Production import says why an approval was refused.** Production imports need an approval from the dashboard (passkey or authenticator), not this computer's key, and `ozbox secrets approve --scope import --env production` now says so instead of making a code that cannot work.
 
-  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
-<Update label="[Release date]" tags={["CLI", "Docs"]} description="0.3.0-beta">
-  ## Creating a box sends less to the cloud
+  ### Creating a box sends less to the cloud
 
-  The setup a new box is given at first start is smaller, because the larger scripts now come from the `ozbox` program that the box already has. Behaviour is the same, and a box's own setup scripts now match the program release it runs.
-
+  - The setup a new box is given at first start is smaller, because the larger scripts now come from the `ozbox` program that the box already has. Behaviour is the same, and a box's own setup scripts now match the program release it runs.
   - A new box's first-start data fits well inside each provider's limit, with room for what comes next.
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.4: the dashboard survives an upgrade">
-  ## Your dashboard is still there after `ozbox upgrade`
+
+  ### Node commands can reach the hosts their project declares
+
+  A Node command or server run with `ozbox env run` in a project that declares `egress` could not reach those hosts over https: Node's built-in `fetch`, and the SDKs built on it, ignored the proxy address Oz Box gives the command and went direct, where the closed network refused them. Raw `tcp` destinations worked, which made the failure confusing.
+
+  - **Node 22.21 and 24.5 onward now use the route** with no change to your project: Oz Box also sets `NODE_USE_ENV_PROXY=1`, and a declaration cannot override it.
+  - **Which runtimes use the route** (Node, curl, Python, Go, Deno, Bun, Rust, Java) is listed in [A secure workspace for AI agents](/use-cases/secure-agent-workspace).
+  - **Known limit.** An older Node, Python `aiohttp` without `trust_env=True`, and Java do not read the proxy variables, so their https calls still fail.
+
+  ### Boxes on OpenBao load their secrets, and SES and SNS alerts send from a box
+
+  - **A box whose secrets are in OpenBao loads them**, and escrows its store's key there, without the `bao` program the box image does not carry. The vault must have a certificate from a public authority. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - **Amazon SES email and Amazon SNS texts send without the `aws` command**, so the dashboard on a box can deliver them with the box's role. A computer that names an AWS profile keeps using the `aws` command. See [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
+  - **Let a box send them, for one sender and one topic only.** Off by default. Name the SES identity and the SNS topic under `[aws]` (`notify_ses_identity_arn`, `notify_sns_topic_arn`), run `ozbox init`, then set `notify_send_grants = true` and create or `ozbox upgrade` the box. The box may send from that identity and publish to that topic and nothing else, and the plan refuses a wildcard or a missing ARN.
+  - **A box on an arm (Graviton) machine is offered arm images** by `ozbox upgrade` and the dashboard, instead of an x86 image it could not use.
+  - **For image publishers:** older image versions are now made private and kept by default, and deleted only when you ask (`retire_old: delete`); the image workflow runs only from `main` or an `image-v*` tag. See [Releasing](/releasing).
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
+
+  ### Your dashboard is still there after `ozbox upgrade`
 
   An upgrade could leave a box with its dashboard settings in place and no dashboard running, while the command reported that it "already runs". That is fixed.
 
@@ -34,25 +51,23 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Keeping the tunnel token on your computer works for every box name**, so an upgrade can put the dashboard and its token back.
   - **An old tunnel left running as the box user is found and can be retired**: `ozbox dashboard retire-legacy-tunnel <box>`. Its token file could be read by every agent on the box, so rotate the token in Cloudflare afterwards.
   - **The dashboard's Memory and Skills pages work after an upgrade**, and say which folder and which command to use if they cannot. A new self-test check, `dashboard_folder`, fails when the dashboard cannot write in its own folder.
-<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Tool installs that go on past a failure, a live view that follows the page">
-  ## Tools from a vendor's package source install again, the browser's live view shows the page, and Models says what it needs
+
+  ### Tools from a vendor's package source install again, the browser's live view shows the page, and Models says what it needs
 
   - **Packer, the GitHub CLI, Helm and the other tools that come from a vendor's own package source install again.** The check of the vendor's signing key could not run on a box, so a key that matched what the vendor publishes was refused as the wrong one. When a key really cannot be checked, the message now says that, and a key that does not match says which key it found and which one is expected.
   - **Settings → Models says why Edit is unavailable.** Until a provider is set up, the engines, default models and prices cards say "Add a provider first", with a link to **Add provider**, instead of a greyed-out button with no reason.
   - **The browser's live view no longer goes blank.** Once the agent scrolled a page, Watch showed a white picture; it now shows what is on screen. A browser that has not gone to a page yet says so, instead of showing an empty white box.
   - **One tool failing no longer stops the others.** `ozbox tools install` and the dashboard's install sheet go on with every tool that does not need the failed one, then say how each tool ended. The command still exits with an error if any tool did not finish.
-<Update label="[Release date]" tags={["CLI"]} description="SSH right after create, throwaway boxes, clearer sign-in lists">
-  ## `ssh` works straight after `ozbox create`, and throwaway boxes leave nothing billed by surprise
+
+  ### `ssh` works straight after `ozbox create`, and throwaway boxes leave nothing billed by surprise
 
   - **`ozbox create` writes the box's SSH entry on this computer**, so `ssh ozbox-<name>` works with no extra step. The plan says so before anything changes; `--no-ssh-entry` skips it.
   - **`ozbox destroy <name> --no-final-snapshot` is for throwaway boxes.** You still type the name. The plan says no copy of `/work` is kept, and names any snapshots the box already has, which stay billed, with how to delete them first.
   - **A dashboard's people are given by id, not email.** `ozbox dashboard install --person` and `ozbox auth init --person` now refuse an email given as the id at once, and say the id to use and where the email goes (`--person jane,google=jane@example.com`).
 
   See [One box](/use-cases/one-box) and [Coding from anywhere](/use-cases/coding-from-anywhere).
-</Update>
 
-<Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Boxes finish their first boot, and say when they did not">
-  ## A box's first boot finishes setting up your coding agents, and the self-test says when it did not
+  ### A box's first boot finishes setting up your coding agents, and the self-test says when it did not
 
   After an upgrade, a box could come up without the Oz Box tools in your coding agents' settings, and the only sign was a line in the boot log.
 
@@ -61,18 +76,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The self-test names a first-boot step that did not finish** (`first_boot_steps`) and the command that runs it again.
 
   See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Node commands and the egress route">
-  ## Node commands can reach the hosts their project declares
 
-  A Node command or server run with `ozbox env run` in a project that declares `egress` could not reach those hosts over https: Node's built-in `fetch`, and the SDKs built on it, ignored the proxy address Oz Box gives the command and went direct, where the closed network refused them. Raw `tcp` destinations worked, which made the failure confusing.
-
-  - **Node 22.21 and 24.5 onward now use the route** with no change to your project: Oz Box also sets `NODE_USE_ENV_PROXY=1`, and a declaration cannot override it.
-  - **Which runtimes use the route** (Node, curl, Python, Go, Deno, Bun, Rust, Java) is listed in [A secure workspace for AI agents](/use-cases/secure-agent-workspace).
-  - **Known limit.** An older Node, Python `aiohttp` without `trust_env=True`, and Java do not read the proxy variables, so their https calls still fail.
-
-  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
-<Update label="[Release date]" tags={["CLI"]} description="First-run setup you can preview, script and trust">
-  ## `ozbox init` previews every step, stops before a quota bites, and cleans up after itself
+  ### `ozbox init` previews every step, stops before a quota bites, and cleans up after itself
 
   Setting up an AWS account could stop half way: a network that needed an address the account had no room for failed in the middle, left
   part of itself behind, and a dry run could not show anything after the state bucket. A script had to answer prompts to leave a step out.
@@ -91,31 +96,21 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 
   The setup permission set now also allows reading service quotas (`servicequotas:GetServiceQuota`); without it the plan says the quota
   could not be checked. See the [CLI reference](/cli-reference).
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Upgrades, imports and the dashboard tunnel">
-  ## Upgrades never skip a checkpoint behind your back, and imports explain every key
+
+  ### Upgrades never skip a checkpoint behind your back, and imports explain every key
 
   - **An upgrade or resize of a box with an older agent asks you to choose.** Such an agent cannot take the hidden snapshot, so the command now stops before anything changes, even with `--yes`, until you pick `--legacy-checkpoint` (the agent's own checkpoint, which writes a visible branch and pushes it where the box is set to push) or `--no-checkpoint` (go on without one). `--dry-run` still shows the plan.
   - **`ozbox upgrade` takes the newer signed release.** An Oz image in your own account no longer keeps a box on an older release when a newer signed public release exists; the plan names your image as passed over. A public image that does not verify never replaces yours.
   - **`ozbox secrets import --box` names every key the box did not store, with its reason**, so the count always adds up. A `.env` file saved with Windows line endings or a byte-order mark is read correctly.
   - **The dashboard tunnel no longer warns about ping on every start.** New boxes let the tunnel open its ping socket; `ozbox upgrade` brings it to an existing box.
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Safer upgrades, tunnel tokens and outages">
-  ## Rotate a tunnel token with a way back, and an outage leaves a record
+
+  ### Rotate a tunnel token with a way back, and an outage leaves a record
 
   - **Rotate a tunnel token safely.** `ozbox admin <box> -- replace-tunnel-token cloudflare --token-stdin` puts the new token on the box, waits for the tunnel to stay up, and puts the old token back if it does not. The token is never typed on the command line.
   - **Commits made while a box's secrets service is down are recorded.** Once the service is back they are added to the box's audit trail, marked as made in the outage. A push stays stopped for the whole outage, and no approval opens it.
   - **An upgrade will not strand a store on your fleet's key.** Upgrading such a box to an image older than 0.2.0-beta.3 is refused in the plan, before anything changes.
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="OpenBao, SES and SNS without extra programs on a box; arm images; old images kept private">
-  ## Boxes on OpenBao load their secrets, and SES and SNS alerts send from a box
 
-  - **A box whose secrets are in OpenBao loads them**, and escrows its store's key there, without the `bao` program the box image does not carry. The vault must have a certificate from a public authority. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
-  - **Amazon SES email and Amazon SNS texts send without the `aws` command**, so the dashboard on a box can deliver them with the box's role. A computer that names an AWS profile keeps using the `aws` command. See [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
-  - **Let a box send them, for one sender and one topic only.** Off by default. Name the SES identity and the SNS topic under `[aws]` (`notify_ses_identity_arn`, `notify_sns_topic_arn`), run `ozbox init`, then set `notify_send_grants = true` and create or `ozbox upgrade` the box. The box may send from that identity and publish to that topic and nothing else, and the plan refuses a wildcard or a missing ARN.
-  - **A box on an arm (Graviton) machine is offered arm images** by `ozbox upgrade` and the dashboard, instead of an x86 image it could not use.
-  - **For image publishers:** older image versions are now made private and kept by default, and deleted only when you ask (`retire_old: delete`); the image workflow runs only from `main` or an `image-v*` tag. See [Releasing](/releasing).
-
-  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.3.0-beta: copy and paste that behave like your own computer">
-  ## Copy and paste in the browser IDE, the dashboard's terminal and the desktop
+  ### Copy and paste in the browser IDE, the dashboard's terminal and the desktop
 
   Ctrl+V did not paste in the browser IDE's terminal on Windows and Linux, the dashboard's terminal typed `^V` instead of
   pasting, and text selected in tmux never reached your clipboard from either terminal.
@@ -135,8 +130,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** Upgrade the CLI and the dashboard. The next `ozbox ide <box>` offers to update the box's key bindings,
   tmux settings and IDE extension (your own keys are kept); reload the IDE tab afterwards.
   See [Coding from anywhere](/use-cases/coding-from-anywhere).
-<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Preview: managing the fleet from a box's dashboard">
-  ## The first part of managing your fleet from a box's own dashboard (Preview)
+
+  ### The first part of managing your fleet from a box's own dashboard (Preview)
 
   A box's dashboard shows only that box, because a box holds no cloud credentials. This release adds the first part of letting it manage your other boxes, built and tested but **not turned on yet**.
 
@@ -144,8 +139,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Every change is confirmed for that exact plan.** The dashboard plans and shows each change as it does today; applying it then needs a change window opened from your own computer and your passkey over that plan. An authenticator code or a computer's key is not accepted.
   - **Boxes stay in your own network, and the managing box stays out of reach.** A box made this way can only be placed in Oz Box's own subnets, a change can attach only its own box's disks, and nothing can be attached to, started on, or cloned from the box that manages the fleet, including from its older backups.
   - **Known limit.** The part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the fleet is not connected. See ADR 0040.
-<Update label="[Release date]" tags={["Dashboard", "Docs", "Security"]} description="0.3.0-beta: use your ChatGPT plan with Codex, on your opt-in">
-  ## Run Codex on your ChatGPT plan, if you choose to, and see where every other plan stands
+
+  ### Run Codex on your ChatGPT plan, if you choose to, and see where every other plan stands
 
   You may already pay for a Claude, ChatGPT, Google or GitHub Copilot plan and want your agents to use it instead of an API key. **Settings → Models → Use a subscription instead of a key** now tells you, for each engine and plan, whether Oz Box can connect it, why not where it cannot, and links the vendor's own documentation and terms.
 
@@ -156,10 +151,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Claude plans, Google accounts and Aider are not offered**, because the vendors' terms do not allow it. ChatGPT and GitHub Copilot through OpenCode, and Gemini CLI, are planned; each row says what is missing.
 
   This is a preview: no real sign-in has been tried yet. See [Models and routing](/use-cases/models-and-routing).
-</Update>
 
-<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Approve imports and other changes in the dashboard, with nothing to copy">
-  ## Approve an import, a declaration or a tunnel token in your dashboard while the command waits, with no code to copy
+  ### Approve an import, a declaration or a tunnel token in your dashboard while the command waits, with no code to copy
 
   Importing keys into a box with a second factor used to mean asking the dashboard for a code, copying it into `--approval` and running the import again before it expired. Now the import asks for its own approval and waits.
 
@@ -174,10 +167,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **`--approval CODE` still works**, as the fallback and for a box from before this release. Setting a tunnel token from the box itself, removing one, placing a vault token and a host guard change still take a code for now; importing a `.env` file from the dashboard itself is planned.
 
   This is Preview until it has run on a real box. **How to get it.** `ozbox upgrade <box>` to the release that carries this, and update `ozbox` on your computer. See [Secure agent workspace](/use-cases/secure-agent-workspace).
-</Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Production approvals come from the dashboard">
-  ## A key kept on your computer can no longer approve Production
+  ### A key kept on your computer can no longer approve Production
 
   A code made with your computer's own approval key (`ozbox secrets approve`) could approve an import into a Production environment, although Production is meant to be approved only by a person with their passkey or authenticator. The box now refuses it.
 
@@ -188,10 +179,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Everything else is unchanged.** Your computer's key still approves ordinary imports into non-Production environments and guard overrides for one change, and the dashboard's codes work as before.
 
   **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Secure agent workspace](/use-cases/secure-agent-workspace).
-</Update>
 
-<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Agents on a box cannot reach your authenticator">
-  ## Agents on a box can no longer read or replace your authenticator
+  ### Agents on a box can no longer read or replace your authenticator
 
   On a box made before the dashboard had a user of its own, and not upgraded since, an agent on the box could read the secret behind your authenticator app and make valid sign-in codes, or replace it. It could also read the dashboard's Google sign-in secret and the keys that send notifications to your devices.
 
@@ -200,10 +189,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **On a box that has not been upgraded**, the authenticator, Google sign-in and device notifications stop working until you upgrade it, and restarting its dashboard signs everyone out. Passkeys keep working.
 
   **What to do after upgrading.** Treat an authenticator set up before this release as possibly seen: on the dashboard's **Account** page, under **Authenticator app**, choose **Remove**, then **Set up an authenticator app** again (if the authenticator is your only second factor, add a passkey first). If that box used Google sign-in, make a new client secret for your OAuth app and save it again. Upgrade with `ozbox upgrade <box>`.
-</Update>
 
-<Update label="[Release date]" tags={["Dashboard", "CLI", "Security"]} description="0.3.0-beta: talk to any box or the whole fleet from Telegram, and start or pause boxes from your phone">
-  ## Talk to a box, a session or the whole fleet from Telegram, and start or pause boxes from your phone
+  ### Talk to a box, a session or the whole fleet from Telegram, and start or pause boxes from your phone
 
   A linked Telegram chat could talk to one coding session at a time and could not wake or pause a box. Now:
 
@@ -217,10 +204,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **`ozbox chat lock` and `ozbox chat unlink`**, on the dashboard's computer or from yours with `--box`.
 
   Preview: tested against a test Telegram, never yet with a real phone. See [Control your boxes from Telegram](/use-cases/telegram-control).
-</Update>
 
-<Update label="[Release date]" tags={["Dashboard", "Security"]} description="0.3.0-beta: clear chat messages that open the right request">
-  ## Chat and alert messages open exactly what they are about
+  ### Chat and alert messages open exactly what they are about
 
   A message about an approval could reach your phone with no link, and read as one block of text.
 
@@ -231,10 +216,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Email alerts have an HTML version**, with the plain text beside it.
 
   See [Chat with your coding agents](/use-cases/chat) and [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
-</Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
-  ## Your computer and a box can pass tasks instead of notes
+  ### Your computer and a box can pass tasks instead of notes
 
   Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box, and it leaves Preview when that proof passes.
 
@@ -244,10 +227,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Acts that need an approval are refused by name** until the passkey approval path exists, and a Production act is refused outright.
   - A closed laptop is a normal state: the task waits and is delivered when you next sync.
   - See [A task channel](/use-cases/task-channel) and [ADR 0044](/adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant).
-</Update>
 
-<Update label="[Release date]" tags={["CLI", "Security"]} description="Main as the hub (Preview)">
-  ## `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
+  ### `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
 
   Until now `main` reached a worker through your computer's connection. This release adds the first part of a route that does not: `task_start` takes `transport: hub`, the task goes to the worker as a signed, sealed message, and `task_status` shows what the worker reported. **Preview:** built and tested with fake boxes only; no box has a hub yet, and it has not run on a real cloud box.
 
