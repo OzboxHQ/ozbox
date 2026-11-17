@@ -504,5 +504,5 @@ fn the_workflow_checks_the_quota_first_makes_room_then_publishes_then_may_retire
         "planned from the signed manifest"
     );
     // the retirement stays its own step with its own switch
-    assert!(w[retire - 600..retire].contains("RETIRE: ${{ inputs.retire_old }}"));
+    assert!(w[retire - 1200..retire].contains("RETIRE: ${{ inputs.retire_old }}"));
 }

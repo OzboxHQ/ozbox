@@ -74,6 +74,7 @@ fn the_attachments_the_module_makes_are_the_ones_the_operator_policy_allows() {
         "ozbox-box-parameters",
         "ozbox-box-parameters-key",
         "ozbox-box-session-logs",
+        "ozbox-box-notify",
         "ozbox-box-fleet-key-",
     ] {
         assert!(text.contains(name), "the module no longer names {name}");

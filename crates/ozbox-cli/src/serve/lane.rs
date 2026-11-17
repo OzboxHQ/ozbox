@@ -910,15 +910,17 @@ impl ReadCtx {
         };
         let provider = Arc::clone(&self.provider);
         let region = rec.spec.region.clone();
+        let machine = rec.machine_type.clone();
         let budget = self.lane.budgets.status;
         let flown = self
             .lane
             .calls
             .run(&format!("image:{}", rec.spec.name), budget, move || {
-                let (latest, latest_error) = match provider.latest_image(region.as_deref()) {
-                    Ok(i) => (Some(i), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
+                let (latest, latest_error) =
+                    match provider.latest_image_for(region.as_deref(), machine.as_deref()) {
+                        Ok(i) => (Some(i), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    };
                 let current = rec.spec.image.clone();
                 let upgrade_available = match (&current, &latest) {
                     (Some(c), Some(l)) => Some(*c != l.id),

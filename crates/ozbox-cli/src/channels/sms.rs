@@ -5,7 +5,7 @@
 //! Provider documentation:
 //! * Twilio: <https://www.twilio.com/docs/messaging/api/message-resource#create-a-message-resource>
 //! * Vonage SMS API: <https://developer.vonage.com/en/api/sms>
-//! * AWS SNS: <https://docs.aws.amazon.com/cli/latest/reference/sns/publish.html>
+//! * AWS SNS (`Publish`, natively; the CLI where an AWS profile is named): <https://docs.aws.amazon.com/sns/latest/api/API_Publish.html>
 //! * Africa's Talking: <https://developers.africastalking.com/docs/sms/sending/bulk>
 //! * Telnyx: <https://developers.telnyx.com/api/messaging/send-message>
 //!
@@ -323,8 +323,19 @@ impl Sns {
     }
 }
 
+/// What a person is told when neither a native send nor the `aws` command had credentials to use.
+pub const NO_AWS_CREDENTIALS: &str = "the AWS credentials on this computer are missing or expired (on a box: its role; elsewhere: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or a profile under [aws] with the aws command installed)";
+
 impl SmsProvider for Sns {
     fn send(&self, ctx: &Ctx, cfg: &SmsConfig, to: &str, text: &str) -> SendResult {
+        // natively, unless this computer names an AWS profile (only the aws command reads profiles), or has no credentials
+        // of its own to sign with (a laptop on its default profile)
+        if ctx.aws_profile.is_none() {
+            match super::aws::sns(ctx, cfg.region.as_deref(), &cfg.from, to, text)? {
+                super::aws::Native::Sent(r) => return r,
+                super::aws::Native::NoCredentials => {}
+            }
+        }
         let cmd = Self::command(
             ctx.aws_profile.as_deref(),
             cfg.region.as_deref(),
@@ -335,7 +346,7 @@ impl SmsProvider for Sns {
         match ctx.runner.run(&cmd) {
             Ok(o) if o.status == Some(0) => Self::interpret(&o.stdout),
             Ok(o) => Err(aws_failure(&o.stderr)),
-            Err(_) => Err("the aws command could not be run".into()),
+            Err(_) => Err(NO_AWS_CREDENTIALS.into()),
         }
     }
 }

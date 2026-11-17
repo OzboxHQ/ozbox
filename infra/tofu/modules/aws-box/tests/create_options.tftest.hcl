@@ -284,3 +284,103 @@ run "an_instance_refuses_a_backend_with_no_prefix_even_when_no_policy_is_attache
 
   expect_failures = [aws_instance.box]
 }
+
+# B4-9: sending alerts from a box is off by default, and on it attaches exactly one SES identity and one SNS topic.
+run "no_notify_grant_by_default" {
+  command = apply
+
+  assert {
+    condition     = length(aws_iam_role_policy_attachment.notify) == 0 && length(data.aws_iam_policy.notify) == 0
+    error_message = "no ses:SendEmail or sns:Publish unless notify_send_grants is on"
+  }
+
+  assert {
+    condition     = output.notify_grants == null
+    error_message = "the output says nothing is granted"
+  }
+}
+
+run "notify_send_grants_attaches_exactly_the_scoped_statements" {
+  command = apply
+
+  variables {
+    notify_send_grants      = true
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+  }
+
+  override_data {
+    target = data.aws_iam_policy.notify[0]
+    values = {
+      # one statement with strings and one with lists: IAM writes either
+      policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"SendAlertEmailFromTheOneIdentity\",\"Effect\":\"Allow\",\"Action\":\"ses:SendEmail\",\"Resource\":\"arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com\"},{\"Sid\":\"PublishAlertTextsToTheOneTopic\",\"Effect\":\"Allow\",\"Action\":[\"sns:Publish\"],\"Resource\":[\"arn:aws:sns:us-east-1:123456789012:ozbox-alerts\"]}]}"
+    }
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy_attachment.notify) == 1 && endswith(aws_iam_role_policy_attachment.notify[0].policy_arn, ":policy/ozbox-box-notify")
+    error_message = "the role attaches the account's notify policy, and no inline policy"
+  }
+
+  assert {
+    condition = local.notify_grants == toset([
+      "Allow ses:SendEmail arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com",
+      "Allow sns:Publish arn:aws:sns:us-east-1:123456789012:ozbox-alerts",
+    ])
+    error_message = "exactly ses:SendEmail on the one identity and sns:Publish on the one topic"
+  }
+
+  assert {
+    condition     = output.notify_grants.ses_send_email == var.notify_ses_identity_arn && output.notify_grants.sns_publish == var.notify_sns_topic_arn
+    error_message = "the output names the two resources"
+  }
+}
+
+run "notify_send_grants_without_both_arns_is_refused" {
+  command = plan
+
+  variables {
+    notify_send_grants      = true
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+  }
+
+  override_data {
+    target = data.aws_iam_policy.notify[0]
+    values = {
+      policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
+    }
+  }
+
+  expect_failures = [aws_iam_role_policy_attachment.notify]
+}
+
+run "an_account_notify_policy_that_grants_more_is_refused" {
+  command = plan
+
+  variables {
+    notify_send_grants      = true
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+  }
+
+  override_data {
+    target = data.aws_iam_policy.notify[0]
+    values = {
+      policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"ses:SendEmail\",\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":\"sns:Publish\",\"Resource\":\"arn:aws:sns:us-east-1:123456789012:ozbox-alerts\"}]}"
+    }
+  }
+
+  expect_failures = [aws_iam_role_policy_attachment.notify]
+}
+
+run "a_wildcard_notify_arn_is_refused_by_the_box_module" {
+  command = plan
+
+  variables {
+    notify_send_grants      = true
+    notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/*"
+    notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+  }
+
+  expect_failures = [var.notify_ses_identity_arn]
+}

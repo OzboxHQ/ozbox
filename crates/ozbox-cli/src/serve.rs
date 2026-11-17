@@ -1169,7 +1169,10 @@ impl App {
                 if let Some(m) = crate::run::upgrade::finishing_image(&rec) {
                     *image = m;
                 } else {
-                    match self.provider.latest_image(rec.spec.region.as_deref()) {
+                    match self
+                        .provider
+                        .latest_image_for(rec.spec.region.as_deref(), rec.machine_type.as_deref())
+                    {
                         Ok(i) => *image = i.id,
                         Err(e) => return Resp::from_core(&e),
                     }
@@ -1209,14 +1212,16 @@ impl App {
             (&request.operation, plan.is_noop())
         {
             // The same rule as the command: an image whose signature could be checked and was not is refused.
-            let region = self.record(name.as_str()).ok().and_then(|r| r.spec.region);
+            let rec = self.record(name.as_str()).ok();
+            let region = rec.as_ref().and_then(|r| r.spec.region.clone());
+            let machine = rec.as_ref().and_then(|r| r.machine_type.clone());
             let info = self
                 .provider
                 .image_info(image, region.as_deref())
                 .ok()
                 .or_else(|| {
                     self.provider
-                        .latest_image(region.as_deref())
+                        .latest_image_for(region.as_deref(), machine.as_deref())
                         .ok()
                         .filter(|i| &i.id == image)
                 });

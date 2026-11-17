@@ -666,13 +666,11 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
         return Ok(());
     }
     let root = root_for(&prefix, &role).map_err(CliError::Msg)?;
-    let runner = ozbox_core::SystemRunner;
     let params = match backend.as_str() {
         "aws-ssm" => AwsSsm::new(&env("OZBOX_BOX_SECRETS_REGION")).fetch(&root),
-        "openbao" => OpenBao {
-            runner: &runner,
-            mount: std::env::var("OZBOX_BOX_SECRETS_MOUNT").unwrap_or_else(|_| "secret".into()),
-        }
+        "openbao" => OpenBao::from_env(
+            std::env::var("OZBOX_BOX_SECRETS_MOUNT").unwrap_or_else(|_| "secret".into()),
+        )
         .fetch(&root),
         _ => {
             return Err(CliError::Msg(
@@ -685,7 +683,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
     let from = match backend.as_str() {
         "aws-ssm" => AwsSsm::new("").label(),
         _ => OpenBao {
-            runner: &runner,
+            vault: None,
             mount: String::new(),
         }
         .label(),
@@ -706,7 +704,7 @@ fn load_box(socket: Option<&std::path::Path>) -> Result<(), CliError> {
         skipped.malformed,
         skipped.production_looking
     );
-    escrow_key(&runner);
+    escrow_key();
     Ok(())
 }
 
@@ -760,7 +758,7 @@ fn running_as_root() -> bool {
 
 /// A box that keeps its store's key in a file escrows it in its vault, so a replaced system disk can open the store again
 /// (see `secrets_escrow`). Run by the loader, which holds the vault token. Says what it did; never the key.
-fn escrow_key(runner: &dyn ozbox_core::CommandRunner) {
+fn escrow_key() {
     if !crate::secrets_file::file_kek_selected() {
         return;
     }
@@ -777,7 +775,7 @@ fn escrow_key(runner: &dyn ozbox_core::CommandRunner) {
     let Ok(kek) = std::fs::read_to_string(&file).map(zeroize::Zeroizing::new) else {
         return;
     };
-    match escrow.place(runner, &kek) {
+    match escrow.place(&kek) {
         Ok(true) => println!("the store's key was escrowed in the vault"),
         Ok(false) => {}
         Err(e) => eprintln!("{e}"),
@@ -1125,7 +1123,7 @@ fn store_kind_gate(
     }
     let copy = (stored == "file" && !key_file.exists()).then(|| {
         let declared = crate::secrets_escrow::Escrow::declared(&|k| std::env::var(k).ok());
-        crate::secrets_escrow::recover_key(escrow, declared, &ozbox_core::SystemRunner, key_file)
+        crate::secrets_escrow::recover_key(escrow, declared, key_file)
     });
     Err(classify_kind_mismatch(
         &stored,
@@ -1202,12 +1200,7 @@ fn serve_inner(
     if file_kek && path.exists() && !key_file.exists() {
         use crate::secrets_escrow::{recover_key, Missing};
         let declared = crate::secrets_escrow::Escrow::declared(&|k| std::env::var(k).ok());
-        match recover_key(
-            escrow.as_ref(),
-            declared,
-            &ozbox_core::SystemRunner,
-            &key_file,
-        ) {
+        match recover_key(escrow.as_ref(), declared, &key_file) {
             Missing::Recovered => eprintln!("the store's key came back from the vault's escrow"),
             Missing::NoEscrow(m) => return Err(StartFailure::NoEscrow(m)),
             Missing::Unavailable(m) => return Err(Transient(m)),

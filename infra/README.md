@@ -104,8 +104,13 @@ release use the role and sign its manifest, so the trust deliberately names noth
    for an organization that has the immutable-id subject claim on. If yours still uses the plain form, the subject is
    `repo:<org>/<repo>:environment:image`; the ids make it survive a rename and a re-created repository name.
 4. Attach it as the role's trust relationship. The role's permissions (create and delete only resources tagged
-   `ozbox-managed=true`, and, to publish, copy images to the copy regions, change an image's launch permission, and deregister an
-   image and delete its snapshot) are separate.
+   `ozbox-managed=true`, and, to publish, copy images to the copy regions, read and change an image's launch permission
+   (`ec2:DescribeImageAttribute`, `ec2:ModifyImageAttribute`), deregister an image and delete its snapshot, and read the
+   public-image quota with `servicequotas:ListServiceQuotas`) are separate. Without the quota read the scripts assume AWS's
+   default of 5 and say so.
+
+Run the workflow from `main` or an `image-v*` tag: those are the only refs the signed manifest's identity names, so any other
+(the program's `v*` tag included) is refused before anything is built.
 
 If AWS still refuses the sign-in, the workflow stops with a message that names the subject it presented and what the role has to
 trust, instead of failing deep inside the build.
@@ -127,11 +132,12 @@ the repository variable `OZBOX_IMAGE_PUBLIC` to `true`; then, in order ([ADR 005
 2. the release manifest is built and signed, recording every image id per region and architecture; it is refused if any region is
    missing;
 3. only then are the manifest's images tagged as ours and made public (`scripts/image/publish.sh`), and read back to check they are;
-4. images outside the retention window are retired in every region (`scripts/image/retention.sh`): the AMI is
-   deregistered, then its snapshot deleted. The window is the last three versions plus the newest version of each of the last
+4. images outside the retention window are taken out of use in every region (`scripts/image/retention.sh`): by default each
+   one that is still public is made **private** (the image and its snapshot are kept); only a manual run with
+   `retire_old: delete` retires them (the AMI is deregistered, then its snapshot deleted, which cannot be undone). The window is the last three versions plus the newest version of each of the last
    three minors; pre-releases do not count toward it and go only after their release has shipped and 14 days have passed. A pre-release is built private and encrypted unless the run's `publish_prerelease_version` equals the version and ends in `-beta.N` (one beta may be public; never rc, alpha or dev). Nothing is scheduled. It only touches images owned by the account that carry our tags and an Oz Box name,
-   never the release just made or anything newer, and does nothing if that release is not among the images. Run it without
-   `--apply` for a list.
+   never the release just made or anything newer, and does nothing if that release is not among the images. Without
+   `--apply` it prints the plan and changes nothing. See [releasing](../docs/releasing.md) for the switch.
 
 Check the first public image once by hand: launch it (or attach its snapshot's volume to a throwaway instance) and confirm the SSM
 agent's state, both `authorized_keys` files and the journal are empty.
@@ -295,7 +301,7 @@ A box's role carries only customer-managed policies made once per account (`tofu
 and never AWS's broader one: `ozbox-box-session-manager` (what the Session Manager agent needs, no read of any parameter, secret
 or key), and, when a box uses them, `ozbox-box-parameters` (its own Parameter Store path, read from the role's tags, under
 `/ozbox`), `ozbox-box-fleet-key-<fleet>` (the fleet key, for this box's own secrets only), `ozbox-box-parameters-key` and
-`ozbox-box-session-logs`. `ozbox init` makes them (it needs the fleet key and, for session logs, `ozbox harden`, done first; run it
+`ozbox-box-session-logs`, and `ozbox-box-notify` (see "Alerts from a box through SES and SNS" below). `ozbox init` makes them (it needs the fleet key and, for session logs, `ozbox harden`, done first; run it
 again to add one), once, with
 the **setup identity** (`OzBoxSetup`, which includes `OzBoxPolicyAdmin`, `infra/aws/box-policy-admin-policy.json`). Your **daily operator role** (`infra/aws/operator-policy.json`) may attach that one policy by ARN and
 cannot create or change a policy, so it cannot widen what a box's role may do. A box cannot be created or upgraded before the
@@ -382,6 +388,25 @@ same options plans no change. `ozbox box-patch <box> --rule when-idle --from 2 -
 only inside that window of the day (UTC) once nothing has used it for a while; the default is never. Any `when-idle` rule needs
 a fresh approval (`--approval CODE`, scope `host-guard`, project `patch`); `never` does not. On Hetzner there is no equivalent of these services: the
 image's unattended upgrades are the patch policy, and `ozbox box-patch` works the same.
+
+## Alerts from a box through SES and SNS (opt-in)
+
+A box's dashboard sends Amazon SES email and Amazon SNS texts with the box's own role, which by default may do neither. To let
+it, for one sender identity and one topic only ([ADR 0035](../docs/adr/0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use.md), Amendment 2):
+
+1. Add both ARNs under `[aws]` in your config file, then run `ozbox init` with the setup identity. It makes `ozbox-box-notify`,
+   which allows `ses:SendEmail` on that identity and `sns:Publish` on that topic, nothing else:
+   ```toml
+   [aws]
+   notify_ses_identity_arn = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com"
+   notify_sns_topic_arn    = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts"
+   ```
+2. Add `notify_send_grants = true` under `[aws]`. Boxes created afterwards, and boxes you `ozbox upgrade`, attach the policy (the
+   module variables `notify_send_grants`, `notify_ses_identity_arn`, `notify_sns_topic_arn`; output `notify_grants`).
+
+The plan refuses `notify_send_grants` without both ARNs, an ARN with a wildcard, and an account policy that allows anything but
+those two actions on those two ARNs. Any process on such a box, an agent included, can send from that identity and publish to
+that topic, so leave it off unless the box's dashboard needs it.
 
 ## Tests (no credentials)
 

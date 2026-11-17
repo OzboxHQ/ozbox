@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Retires old Oz Box images in every region a release was published to (ADR 0052): keeps the newest KEEP versions, and
-# deregisters the AMIs of older ones and deletes their snapshots. Run by the image workflow after a release has been built,
-# signed and made public; never by hand against an account you do not mean to clean.
+# Takes old Oz Box images out of use in every region a release was published to (ADR 0052): keeps the newest KEEP versions,
+# and for the older ones, by default, makes each one that is still public PRIVATE (its launch permission is removed; the image
+# and its snapshots are kept, and it can be made public again by hand). Only with --delete are they RETIRED: the AMI is
+# deregistered and its snapshots deleted, which cannot be undone, and breaks a box (in any account) that still names that
+# image when it is rebuilt. Run by the image workflow after a release has been built, signed and made public; never by hand
+# against an account you do not mean to clean.
 #
-#   scripts/image/retention.sh --released 0.3.0 --regions us-east-1,eu-west-1 --owner 123456789012 [--keep 3] [--apply]
+#   scripts/image/retention.sh --released 0.3.0 --regions us-east-1,eu-west-1 --owner 123456789012 [--keep 3] [--delete] [--apply]
 #
-# It DOES NOTHING unless --apply is given: without it, it prints what it would delete (a dry run) and exits 0. It only ever
-# touches images the selector (retention.jq) calls ours, and never the released version or anything newer. A failure in one
-# region stops that region and is reported at the end (exit 1), after the other regions were still processed.
+# It is a plan unless --apply is given: without it, it prints what it would make private (or, with --delete, retire) and
+# exits 0, changing nothing. It only ever touches images the selector (retention.jq) calls ours, and never the released version
+# or anything newer. A failure in one region stops that region and is reported at the end (exit 1), after the other regions
+# were still processed.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 keep=3
 apply=0
+delete=0
 released=""
 regions=""
 owner=""
@@ -23,6 +28,7 @@ while [ $# -gt 0 ]; do
     --owner) owner="${2:?--owner needs an account id}"; shift 2 ;;
     --keep) keep="${2:?--keep needs a number}"; shift 2 ;;
     --apply) apply=1; shift ;;
+    --delete) delete=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -54,23 +60,44 @@ for region in ${regions//,/ }; do
   if ! jq -n --slurpfile images "$tmp/images.json" --slurpfile snaps "$tmp/snaps.json" \
        --arg owner "$owner" --arg released "$released" --argjson keep "$keep" --argjson now "$now" \
        -f "$here/retention.jq" >"$tmp/decision.json" 2>"$tmp/err.txt"; then
-    echo "nothing is deleted in $region: $(cat "$tmp/err.txt")" >&2; failed=1; continue
+    echo "nothing is changed in $region: $(cat "$tmp/err.txt")" >&2; failed=1; continue
   fi
   echo "keeping versions: $(jq -r '.keep_versions | join(", ")' "$tmp/decision.json")"
   n="$(jq '.delete | length' "$tmp/decision.json")"
-  if [ "$n" = 0 ]; then echo "nothing to retire"; continue; fi
-  jq -r '.delete[] | "retire \(.image_id) \(.name) (\(.version)); snapshots: \(.snapshots | join(" "))"' "$tmp/decision.json"
-  if [ "$apply" != 1 ]; then echo "dry run: nothing was changed (pass --apply to retire these)"; continue; fi
+  if [ "$n" = 0 ]; then echo "nothing outside the window"; continue; fi
+  if [ "$delete" = 1 ]; then
+    jq -r '.delete[] | "retire (delete) \(.image_id) \(.name) (\(.version)); snapshots: \(.snapshots | join(" "))"' "$tmp/decision.json"
+    if [ "$apply" != 1 ]; then echo "plan only: nothing was changed (pass --apply to retire these; this cannot be undone)"; continue; fi
+    while IFS= read -r row; do
+      id="$(jq -r .image_id <<<"$row")"
+      # deregister first: a snapshot cannot be deleted while an image uses it
+      if ! "$aws_cmd" ec2 deregister-image --region "$region" --image-id "$id" >/dev/null; then
+        echo "could not deregister $id in $region" >&2; failed=1; continue
+      fi
+      echo "retired $id"
+      for snap in $(jq -r '.snapshots[]' <<<"$row"); do
+        "$aws_cmd" ec2 delete-snapshot --region "$region" --snapshot-id "$snap" >/dev/null \
+          || { echo "could not delete snapshot $snap in $region" >&2; failed=1; }
+      done
+    done < <(jq -c '.delete[]' "$tmp/decision.json")
+    continue
+  fi
+  # the default: make private, keep everything
+  jq -r '.delete[] | "make private \(.image_id) \(.name) (\(.version)); the image and its snapshots are kept"' "$tmp/decision.json"
+  if [ "$apply" != 1 ]; then echo "plan only: nothing was changed (pass --apply to make these private; --delete instead retires them, which cannot be undone)"; continue; fi
   while IFS= read -r row; do
     id="$(jq -r .image_id <<<"$row")"
-    # deregister first: a snapshot cannot be deleted while an image uses it
-    if ! "$aws_cmd" ec2 deregister-image --region "$region" --image-id "$id" >/dev/null; then
-      echo "could not deregister $id in $region" >&2; failed=1; continue
+    if ! public="$("$aws_cmd" ec2 describe-image-attribute --region "$region" --image-id "$id" --attribute launchPermission --output json)"; then
+      echo "could not read who may launch $id in $region" >&2; failed=1; continue
     fi
-    for snap in $(jq -r '.snapshots[]' <<<"$row"); do
-      "$aws_cmd" ec2 delete-snapshot --region "$region" --snapshot-id "$snap" >/dev/null \
-        || { echo "could not delete snapshot $snap in $region" >&2; failed=1; }
-    done
+    if ! jq -e '[.LaunchPermissions[]? | select(.Group == "all")] | length > 0' <<<"$public" >/dev/null; then
+      echo "$id is already private: kept"; continue
+    fi
+    if "$aws_cmd" ec2 modify-image-attribute --region "$region" --image-id "$id" --launch-permission 'Remove=[{Group=all}]' >/dev/null; then
+      echo "made $id private: kept"
+    else
+      echo "could not make $id private in $region" >&2; failed=1
+    fi
   done < <(jq -c '.delete[]' "$tmp/decision.json")
 done
 exit "$failed"

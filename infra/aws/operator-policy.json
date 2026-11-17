@@ -278,7 +278,8 @@
             "arn:aws:iam::${account_id}:policy/ozbox-box-session-manager",
             "arn:aws:iam::${account_id}:policy/ozbox-box-parameters",
             "arn:aws:iam::${account_id}:policy/ozbox-box-parameters-key",
-            "arn:aws:iam::${account_id}:policy/ozbox-box-session-logs"
+            "arn:aws:iam::${account_id}:policy/ozbox-box-session-logs",
+            "arn:aws:iam::${account_id}:policy/ozbox-box-notify"
           ]
         }
       }

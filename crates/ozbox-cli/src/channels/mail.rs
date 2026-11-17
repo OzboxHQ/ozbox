@@ -6,7 +6,7 @@
 //! * Resend: <https://resend.com/docs/api-reference/emails/send-email>
 //! * Postmark: <https://postmarkapp.com/developer/api/email-api>
 //! * SendGrid: <https://www.twilio.com/docs/sendgrid/api-reference/mail-send/mail-send>
-//! * Amazon SES (v2 CLI): <https://docs.aws.amazon.com/cli/latest/reference/sesv2/send-email.html>
+//! * Amazon SES (API v2, natively; the v2 CLI where an AWS profile is named): <https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html>
 //! * SMTP: RFC 5321 with STARTTLS (RFC 3207) or implicit TLS (RFC 8314).
 
 use ozbox_core::CommandSpec;
@@ -77,11 +77,27 @@ pub fn send(ctx: &Ctx, m: &Mail<'_>) -> SendResult {
             ctx.call(sendgrid(&key, cfg, &to, m.subject, m.text), sendgrid_result)
         }
         EmailProviderKind::Ses => {
+            // natively, unless this computer names an AWS profile (only the aws command reads profiles), or has no
+            // credentials of its own to sign with (a laptop on its default profile)
+            if ctx.aws_profile.is_none() {
+                match super::aws::ses(
+                    ctx,
+                    cfg.region.as_deref(),
+                    &cfg.from,
+                    &cfg.reply_to,
+                    &to,
+                    m.subject,
+                    &body(m.text),
+                )? {
+                    super::aws::Native::Sent(r) => return r,
+                    super::aws::Native::NoCredentials => {}
+                }
+            }
             let cmd = ses_command(ctx.aws_profile.as_deref(), cfg, &to, m.subject, m.text);
             match ctx.runner.run(&cmd) {
                 Ok(o) if o.status == Some(0) => ses_result(&o.stdout),
                 Ok(o) => Err(aws_failure(&o.stderr)),
-                Err(_) => Err("the aws command could not be run".into()),
+                Err(_) => Err(super::sms::NO_AWS_CREDENTIALS.into()),
             }
         }
         EmailProviderKind::Smtp => smtp(ctx, cfg, &to, m),

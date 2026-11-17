@@ -1,4 +1,6 @@
-//! A small, native AWS client for the calls a box makes about its own secrets (the key service and the parameter store): no `aws` command, no SDK (ADR 0008).
+//! A small, native AWS client for the calls a box makes about its own secrets (the key service and the parameter store) and
+//! for the alert channels that send through the fleet's own AWS account (SES email, SNS text messages): no `aws` command, no
+//! SDK (ADR 0008).
 //!
 //! The box image does not carry the AWS CLI (its installer's signature cannot be verified, so `ozbox tools` refuses it), so
 //! anything the secrets service needs from AWS must work without it. This module is the one place that does:
@@ -309,11 +311,31 @@ impl AwsJson {
         }
     }
 
+    /// The SigV4 headers (`x-amz-date`, `x-amz-security-token`, `authorization`) for `req`, whose other headers and body are
+    /// already final, for a caller that sends it through its own guarded client (the alert channels). `Unavailable` when
+    /// there are no credentials.
+    pub fn sign(
+        &self,
+        req: &HttpRequest,
+        region: &str,
+        service: &str,
+    ) -> Result<Vec<(String, String)>, Failure> {
+        self.with_creds(|keys| {
+            sign_v4(req, keys, region, service, now()).map_err(|_| Failure::Unavailable)
+        })
+    }
+
     fn forget(&self) {
         if let Ok(mut g) = self.creds.lock() {
             *g = None;
         }
     }
+}
+
+/// The client this process shares (credentials are fetched once and kept until shortly before they expire).
+pub fn shared() -> std::sync::Arc<AwsJson> {
+    static ONE: std::sync::OnceLock<std::sync::Arc<AwsJson>> = std::sync::OnceLock::new();
+    std::sync::Arc::clone(ONE.get_or_init(|| std::sync::Arc::new(AwsJson::new())))
 }
 
 impl Default for AwsJson {

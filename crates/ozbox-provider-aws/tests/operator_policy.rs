@@ -272,6 +272,7 @@ fn iam_is_limited_to_ozbox_named_roles_and_profiles() {
         arns,
         [
             "arn:aws:iam::${account_id}:policy/ozbox-box-fleet-key-*",
+            "arn:aws:iam::${account_id}:policy/ozbox-box-notify",
             "arn:aws:iam::${account_id}:policy/ozbox-box-parameters",
             "arn:aws:iam::${account_id}:policy/ozbox-box-parameters-key",
             "arn:aws:iam::${account_id}:policy/ozbox-box-session-logs",
