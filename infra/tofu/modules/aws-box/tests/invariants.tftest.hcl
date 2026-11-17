@@ -451,6 +451,33 @@ run "user_data_fits_the_providers_limit_with_the_longest_values" {
   }
 }
 
+# The three largest first-boot scripts are carried in the program (`ozbox first-boot install-scripts`), so the user data is a
+# stub: with every value at its longest it stays under 11 KB, which leaves the room the next first-boot additions need.
+# A script that would push it over belongs in the program, not here (ADR 0036, last amendment). Measured 2026-11-17: 7 812 bytes.
+run "user_data_stays_a_small_stub_because_the_big_scripts_are_in_the_program" {
+  command = apply
+
+  variables {
+    box_name           = "a123456789-123456789-123456789-12345678z"
+    region             = "ap-southeast-3"
+    secrets_key_arn    = "arn:aws-us-gov:kms:ap-southeast-3:123456789012:key/0123abcd-0123-abcd-0123-0123456789ab"
+    fleet              = "a123456789-123456789-12345678z"
+    agent_release_repo = "an-owner-name-of-thirty-nine-characters/a-repository-name-of-one-hundred-characters-a-repository-name-of-one-hundred"
+    agent_release_tag  = "image-v0.123.456-rc.789-and-some-more-words-to-make-it-very-long"
+    runs_max_active    = 64
+  }
+
+  assert {
+    condition     = length(base64gzip(output.cloud_init)) * 3 / 4 <= 11264
+    error_message = "the compressed first-boot configuration must stay at most 11264 bytes: it is ${length(base64gzip(output.cloud_init)) * 3 / 4}. Move the largest script into the program."
+  }
+
+  assert {
+    condition     = !strcontains(output.cloud_init, "action_gates=") && strcontains(output.cloud_init, "ozbox first-boot install-scripts")
+    error_message = "the root helper is installed by the program, not carried in the user data"
+  }
+}
+
 run "the_box_does_not_run_its_own_backup_schedule" {
   command = apply
 
@@ -465,15 +492,16 @@ run "user_data_hands_secrets_setup_to_a_script_and_carries_no_secret" {
 
   assert {
     condition = (
-      strcontains(output.cloud_init, "/usr/local/sbin/ozbox-secrets-setup.sh") &&
+      !strcontains(output.cloud_init, "path: /usr/local/sbin/ozbox-secrets-setup.sh") &&
+      strcontains(output.cloud_init, "ozbox first-boot install-scripts") &&
       strcontains(output.cloud_init, "[bash, /usr/local/sbin/ozbox-secrets-setup.sh, \"dev-1\"")
     )
-    error_message = "the secrets setup script and the box's scope must be in the user data"
+    error_message = "the secrets setup script is installed by the program, and the box's scope is in the user data"
   }
 
   assert {
-    # The helper scripts are plain text on AWS and the admin script names the legacy cloudflared.env (it migrates it
-    # away), so the check is that no file of that name is WRITTEN by the user data, not that the word never appears.
+    # The user data writes no file of the legacy cloudflared.env name (the root helper, which is now carried in the program,
+    # names it to migrate it away), so the check is that none is WRITTEN.
     condition     = !strcontains(output.cloud_init, "TUNNEL_TOKEN=ey") && !can(regex("path: [^\n]*cloudflared\\.env", output.cloud_init))
     error_message = "no secret value or box-readable secret file may appear in the user data"
   }
@@ -570,11 +598,6 @@ run "the_ingress_account_is_made_at_first_boot_with_the_key_from_the_label" {
   assert {
     condition     = strcontains(output.cloud_init, "AllowUsers ozbox ozbox-ingress")
     error_message = "sshd must let the ingress account in, and only it besides the box user"
-  }
-
-  assert {
-    condition     = strcontains(output.cloud_init, "--ingress-socket /run/ozbox-secrets/ingress/ingress.sock")
-    error_message = "the secrets service must listen on the ingress socket"
   }
 
   assert {

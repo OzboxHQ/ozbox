@@ -1132,10 +1132,12 @@ fn first_boot_and_the_image_turn_linger_on_and_carry_tmux_and_python() {
     );
     let helper = fs::read_to_string(script("ozbox-user-manager.sh")).unwrap();
     assert!(helper.contains("enable-linger \"$user\""));
-    // the helper is written by the template like the other scripts
-    assert!(
-        written_file(&t, "/usr/local/sbin/ozbox-user-manager.sh").contains("ozbox-user-manager.sh")
-    );
+    // the helper is written by the program (`ozbox first-boot install-scripts`), before anything runs it
+    let install = runcmd
+        .find("ozbox first-boot install-scripts")
+        .expect("the program writes the scripts");
+    assert!(install < secrets && install < manager);
+    assert!(!t.contains("path: /usr/local/sbin/ozbox-user-manager.sh"));
     let p = read("infra/packer/ozbox-image/scripts/provision.sh");
     assert!(
         p.contains("tmux python3"),
@@ -1327,7 +1329,6 @@ fn the_template_writes_the_helpers_with_the_right_owner_and_modes() {
     for (path, mode) in [
         ("/usr/local/sbin/ozbox-reown.sh", "0755"),
         ("/usr/local/sbin/ozbox-install-agent.sh", "0755"),
-        ("/usr/local/sbin/ozbox-admin.sh", "0755"),
         ("/usr/local/bin/ozbox-admin-request", "0755"),
     ] {
         let f = written_file(&t, path);
@@ -3136,4 +3137,79 @@ fn the_daemon_starts_after_the_box_users_manager() {
     assert!(line("Wants=").contains("user@1500.service"), "{unit}");
     // never Requires: a manager that is held back (no /work yet) must not stop the daemon
     assert!(!unit.contains("Requires=user@"));
+}
+
+/// The first-boot user data is limited by the provider (16 KB on AWS). The three biggest scripts are carried in the program
+/// (`ozbox first-boot install-scripts`), so the template is a small stub that must stay small: a script that grows past the
+/// bound here belongs in the program too, not in the user data.
+#[test]
+fn the_big_first_boot_scripts_are_carried_in_the_program_and_the_template_stays_small() {
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    let runcmd = &t[t.find("\nruncmd:\n").expect("runcmd")..];
+    for moved in [
+        "ozbox-admin.sh",
+        "ozbox-secrets-setup.sh",
+        "ozbox-user-manager.sh",
+    ] {
+        assert!(
+            !t.contains(&format!("scripts_dir}}/{moved}")),
+            "{moved} must not be read into the user data"
+        );
+        assert!(
+            !t.contains(&format!("path: /usr/local/sbin/{moved}")),
+            "{moved} must not be written by the user data"
+        );
+        let c = read("crates/ozbox-cli/src/first_boot_cli.rs");
+        assert!(
+            c.contains(&format!("scripts/{moved}\")")),
+            "{moved} is carried in the program"
+        );
+    }
+    // the program that carries them is installed before they are written, and they are written before anything runs them
+    let install_agent = runcmd
+        .find("ozbox-install-agent.sh ||")
+        .expect("install agent");
+    let write = runcmd
+        .find("ozbox first-boot install-scripts")
+        .expect("install-scripts");
+    let admin_path = runcmd
+        .find("enable, --now, ozbox-admin.path")
+        .expect("admin path");
+    let secrets = runcmd
+        .find("ozbox-secrets-setup.sh,")
+        .expect("secrets setup");
+    assert!(install_agent < write && write < admin_path && write < secrets);
+    assert!(runcmd[write..]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .contains("|| echo"));
+    // what the tofu test used to read out of the user data: the secrets setup (now carried in the program) still has the
+    // secrets service listen on the ingress socket
+    assert!(read("infra/cloud-init/scripts/ozbox-secrets-setup.sh")
+        .contains("--ingress-socket /run/ozbox-secrets/ingress/ingress.sock"));
+    // the stub: the template with its comments dropped (what the user data carries) stays under 18 KB, and the helper scripts
+    // that are still written into it stay under 14 KB between them (measured 2026-11-17: 16.2 KB and 12.1 KB on main)
+    let strip = |s: &str| -> usize {
+        s.lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with('#') && !t.starts_with("#!"))
+            })
+            .map(|l| l.len() + 1)
+            .sum()
+    };
+    assert!(strip(&t) < 18_000, "the template is {} bytes", strip(&t));
+    let still: usize = [
+        "ozbox-reown.sh",
+        "ozbox-install-agent.sh",
+        "ozbox-admin-request.sh",
+    ]
+    .iter()
+    .map(|n| strip(&read(&format!("infra/cloud-init/scripts/{n}"))))
+    .sum();
+    assert!(
+        still < 14_000,
+        "the scripts still in the user data are {still} bytes"
+    );
 }
