@@ -2868,6 +2868,91 @@ fn an_authenticator_code_is_checked_by_the_dashboard_before_it_approves_a_reques
     );
 }
 
+/// Review open question (a), B4-27: the authenticator's accepted time step is one record per person, shared by sign-in and
+/// approval, so a code that signed someone in cannot also approve a request, and a code that approved a request cannot also
+/// sign anyone in (someone who watched it typed into one gets nothing from the other).
+#[test]
+fn an_authenticator_code_spent_on_a_sign_in_cannot_approve_and_one_spent_on_an_approval_cannot_sign_in(
+) {
+    let r = rig();
+    let mut c = Client::new();
+    let flow = github_start(&r, &mut c).body["flow"].clone();
+    r.advance(5_100);
+    github_user_replies(&r, "owner-gh", 4242);
+    r.send(&mut c, "POST", "/auth/github/poll", json!({"flow": flow}));
+    let secret = r.send(&mut c, "POST", "/auth/totp/setup", Value::Null).body["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let key = super::b64::decode_base32(&secret).unwrap();
+    let code_now = || totp::hotp(&key, r.clock.load(Ordering::SeqCst) / 1000 / 30, 6);
+    assert_eq!(
+        r.send(
+            &mut c,
+            "POST",
+            "/auth/totp/confirm",
+            json!({"code": code_now()})
+        )
+        .state(),
+        "signed_in"
+    );
+    let cookie = c
+        .cookie
+        .as_ref()
+        .map(|s| format!("__Host-ozbox_session={s}"));
+    let approve = request(
+        "POST",
+        "/v1/approvals/requests/r1/approve-authenticator",
+        "",
+        &Value::Null,
+        cookie.as_deref(),
+        &c.csrf,
+        HOST,
+        Some(ORIGIN),
+    );
+    let sign_in = |c: &mut Client| {
+        let flow = github_start(&r, c).body["flow"].clone();
+        r.advance(5_100);
+        github_user_replies(&r, "owner-gh", 4242);
+        assert_eq!(
+            r.send(c, "POST", "/auth/github/poll", json!({"flow": flow}))
+                .state(),
+            "needs_second_factor"
+        );
+    };
+    // a code spent on a sign-in ...
+    r.advance(61_000);
+    let mut c2 = Client::new();
+    sign_in(&mut c2);
+    let code = code_now();
+    let v = r.send(&mut c2, "POST", "/auth/second/totp", json!({"code": code}));
+    assert_eq!((v.status, v.state()), (200, "signed_in"));
+    // ... does not approve a request
+    let e = r.auth.approval_authenticator(&approve, &code).unwrap_err();
+    assert_eq!((e.0, e.1), (401, "code_refused"));
+    // a code spent on an approval ...
+    r.advance(61_000);
+    let code = code_now();
+    assert!(r.auth.approval_authenticator(&approve, &code).is_ok());
+    // ... does not sign anyone in (the sign-in's own wait keeps it inside the code's window)
+    let mut c3 = Client::new();
+    sign_in(&mut c3);
+    let v = r.send(&mut c3, "POST", "/auth/second/totp", json!({"code": code}));
+    assert_eq!(
+        v.status, 401,
+        "a code spent on an approval signed someone in"
+    );
+    // and the next window's code still does both jobs: only the spent step is refused
+    r.advance(31_000);
+    let v = r.send(
+        &mut c3,
+        "POST",
+        "/auth/second/totp",
+        json!({"code": code_now()}),
+    );
+    assert_eq!((v.status, v.state()), (200, "signed_in"));
+}
+
 /// B4-27 (owner, 2026-11-17): an authenticator code may approve any request, Production included, but only for a person
 /// with no passkey. A person with a passkey is sent to it before any code is looked at, so the weaker factor is never the
 /// one used when the stronger one is enrolled.
