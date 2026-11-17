@@ -103,3 +103,24 @@ upgrade again then said "Nothing to do", because the box was already on that ima
   extracting or migrating. *L4.* The Rust and shell rules differ on file names with a backslash or newline, a plain file
   named `tests`, and names that are not UTF-8; refuse such names in both. *L6.* The record is the last first-boot step, so a
   first boot cut short leaves none and the next upgrade replaces the machine (errs toward repair; worth knowing).
+
+## Amendment — the biggest first-boot scripts are carried in the program
+
+**What went wrong.** The provider limits the first-boot user data (16 KB on AWS, 32 KB on Hetzner), and every addition made it
+grow. With the next release's changes merged together the AWS user data was 15,492 bytes against a 15,360-byte budget, and
+Hetzner's tests failed. Each change alone fitted; the growth was cumulative.
+
+**Decision.** The root helper (`ozbox-admin.sh`), the secrets setup (`ozbox-secrets-setup.sh`) and the box-user services script
+(`ozbox-user-manager.sh`) are no longer written by the user data. The program carries them (as it already carried the
+supervisor, browser and task-router setups), and first boot runs `ozbox first-boot install-scripts` once, right after the
+program is installed and before anything runs them, which writes them root-owned (0755) to `/usr/local/sbin`, each beside its old
+copy and renamed into place. The text comes from the root-owned program installed from the signed release, never from a file
+the box user can reach. The scripts stay under `infra/cloud-init/scripts/`, so they remain part of the first-boot hash (a change
+to one is still a change to first boot). A new first-boot script that is more than a few lines belongs in the program the same
+way. The user data keeps only what must run before the program exists: the disk setup, the agent installer, the re-own script, and the
+units and settings files.
+
+**Not covered.** A machine from stock Ubuntu whose release cannot be fetched has no program, so it gets none of these three
+scripts (first boot says so and goes on); before, it had them but could run little else of the box. The comments the user data
+dropped to save space are now kept in the installed files.
+

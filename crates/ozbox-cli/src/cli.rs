@@ -312,6 +312,12 @@ pub enum Command {
         #[arg(num_args = 1.., allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run on a box as root, by first-boot configuration: write the box's root scripts from this program. Not for typing by hand.
+    #[command(hide = true)]
+    FirstBoot {
+        #[arg(num_args = 1.., allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
     /// Run on a box by its root helper: the box's own guards. Not for typing by hand.
     #[command(hide = true)]
     HostGuard {
