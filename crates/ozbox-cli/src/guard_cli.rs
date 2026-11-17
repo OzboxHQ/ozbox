@@ -190,6 +190,7 @@ fn blocked(msg: String) -> Result<(), CliError> {
 
 /// What `post-commit` prints when the box's secrets service did not answer (`why`): the check it can still do (shapes, file names,
 /// `.env` files), the commit taken back if it fails, and the plain statement that stored values were not looked for.
+#[cfg(test)]
 pub(crate) fn post_commit_unscanned(repo: &Path, why: &str) -> String {
     post_commit_unscanned_journalled(repo, why, None).0
 }
