@@ -193,6 +193,8 @@ pub fn run_with(
             );
             Ok(())
         }
+        // handled by `run`, which has the keychain and the state directory
+        HubCommand::Approvers { .. } => Ok(()),
         HubCommand::RegistrarKey => {
             if d.site.box_markers.iter().any(|p| p.exists()) {
                 return Err(msg("hubreg.on_a_box"));
@@ -293,6 +295,16 @@ pub fn run_with(
 
 pub fn run(cmd: &HubCommand, f: Flags) -> Result<(), CliError> {
     use std::io::IsTerminal;
+    if let HubCommand::Approvers { command } = cmd {
+        return crate::hub_approvers_cli::run(
+            command,
+            crate::hub_approvers_cli::Flags {
+                yes: f.yes,
+                dry_run: f.dry_run,
+                json: f.json,
+            },
+        );
+    }
     let registrars: PathBuf = match cmd {
         HubCommand::Repin { registrars, .. } => registrars
             .clone()

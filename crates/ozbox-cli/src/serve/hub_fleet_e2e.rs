@@ -16,11 +16,14 @@ use std::time::Duration;
 use ozbox_core::agent_engine::AgentEngine;
 use ozbox_core::approval::Role as ApprovalRole;
 use ozbox_core::approval_subject::from_hex;
+use ozbox_core::approval_subject::Ids;
 use ozbox_core::channel::wire::hex;
 use ozbox_core::claude_code::{ClaudeCodeEngine, Launch, LogChunk, RunTransport};
 use ozbox_core::fabric::node::{BoxFabric, Seams as FabricSeams};
 use ozbox_core::fabric::{CoreScreen, FabricApi};
-use ozbox_core::hub::approvals::{Approver, ApproverSet};
+use ozbox_core::hub::approver_sync::{
+    build_set, signed_bytes, Bundle, BundleEntry, CredentialRecord, SignedApprovers,
+};
 use ozbox_core::hub::net::{enrol_over_net, HubNetConfig, NetWorker, TcpDialer, WorkerNetConfig};
 use ozbox_core::hub::testkit::{test_rp, Passkey};
 use ozbox_core::hub::worker::WorkerState;
@@ -420,7 +423,7 @@ struct Worker {
     tools: Tools,
     /// The box's own secrets service (the real request journal) and the owner's passkey it was given as an approver.
     svc: Arc<BoxSvc>,
-    owner: Passkey,
+    owner: Arc<Passkey>,
     cli: FakeCli,
     cable: Cable,
     /// The box's task store, its supervisor and the host it runs engines on: the run path a task from the hub takes.
@@ -440,6 +443,9 @@ struct Fleet {
     hub_tools: Tools,
     addr: SocketAddr,
     laptop: SeedSigner,
+    /// The owner's computer's approval key: its public half is enrolled on every worker box as a trusted key (the way a box is made),
+    /// and its seed signs the approver lists. Never on a worker.
+    approval: (Zeroizing<String>, String),
     running: Option<ozbox_hubd::daemon::Running>,
     workers: Vec<Worker>,
     /// How soon a worker deletes its keys when the hub is out of reach (a real box: two minutes).
@@ -505,6 +511,7 @@ impl Fleet {
             hub_tools,
             addr,
             laptop,
+            approval: crate::approval_key::generate().unwrap(),
             running: Some(running),
             workers: Vec::new(),
             lost_after_ms: 120_000,
@@ -643,22 +650,12 @@ impl Fleet {
             text: text.into(),
             st: Arc::new(Mutex::new(CliState::default())),
         };
-        let owner = Passkey::new(&format!("cred-owner-{name}")).unwrap();
-        // the approver set is the owner's, written on this box by root's route (the admin socket), never by the hub
+        let owner = Arc::new(Passkey::new(&format!("cred-owner-{name}")).unwrap());
+        // the owner's computer is a trusted approval key on this box, enrolled the way a box is made (root's route)
         svc.on(
             crate::secrets_service::Policy::Admin,
             None,
-            json!({"op": "areq_hub_set_approvers", "approvers": ApproverSet {
-                seq: 1,
-                expires_ms: u64::MAX,
-                rp: test_rp(),
-                approvers: vec![Approver {
-                    credential_id: owner.id.clone(),
-                    public_key_hex: owner.public_hex(),
-                    person: "owner".into(),
-                    role: ApprovalRole::Owner,
-                }],
-            }}),
+            json!({"op": "approval_key_enroll", "key_id": "laptop", "public_key": self.approval.1}),
         )
         .unwrap();
         let tasks = self.tmp.path().join(format!("tasks-{name}"));
@@ -730,7 +727,108 @@ impl Fleet {
             sup: Supervisor::new(),
             serving: Some(serving),
         });
-        self.workers.len() - 1
+        let idx = self.workers.len() - 1;
+        // the owner's approvers reach the worker the real way: signed on the owner's computer, carried by main, verified by the
+        // worker's own service. A worker whose service the owner never pinned has no approvers (and decides nothing from main).
+        if self.hub_state().service_pins.contains_key(name) {
+            let owner = self.workers[idx].owner.clone();
+            self.sync_approvers(idx, &[&*owner], 1);
+        }
+        idx
+    }
+
+    /// The signed approver list for worker `idx`, made on the owner's computer with `seed`.
+    fn signed_set(
+        &self,
+        idx: usize,
+        seed: &str,
+        people: &[(&Passkey, &str)],
+        version: u64,
+        valid_ms: u64,
+    ) -> SignedApprovers {
+        let w = &self.workers[idx];
+        let pin: ozbox_core::hub::approvals::ServicePin = serde_json::from_value(
+            w.svc
+                .on(
+                    crate::secrets_service::Policy::Supervisor,
+                    None,
+                    json!({"op": "areq_hub_pin"}),
+                )
+                .unwrap()["pin"]
+                .clone(),
+        )
+        .unwrap();
+        let recs: Vec<CredentialRecord> = people
+            .iter()
+            .map(|(p, who)| CredentialRecord {
+                credential_id: p.id.clone(),
+                person: (*who).into(),
+                role: ApprovalRole::Owner,
+                public_key: p.public_hex(),
+                rp: test_rp(),
+            })
+            .collect();
+        let body = build_set(
+            &Ids {
+                box_id: pin.ids.box_id,
+                store_id: pin.ids.store_id,
+            },
+            &recs,
+            version,
+            valid_ms,
+            now_ms(),
+        )
+        .unwrap();
+        let text = body.to_text().unwrap();
+        SignedApprovers {
+            signature: crate::approval_key::sign(
+                seed,
+                &String::from_utf8_lossy(&signed_bytes(&text)),
+            )
+            .unwrap(),
+            body: text,
+        }
+    }
+
+    /// Sign one list on the owner's computer, hand it to main, and wait until the worker says it holds that version.
+    fn sync_approvers(&mut self, idx: usize, people: &[&Passkey], version: u64) {
+        let named: Vec<(&Passkey, &str)> = people.iter().map(|p| (*p, "owner")).collect();
+        let signed = self.signed_set(
+            idx,
+            &self.approval.0.clone(),
+            &named,
+            version,
+            30 * 86_400_000,
+        );
+        let name = self.workers[idx].name.clone();
+        // main can send to a worker only once it has a session with it
+        let who = name.clone();
+        self.until("the worker has a session with main", move |f| {
+            let st = f.hub_state();
+            f.workers.iter().find(|w| w.name == who).is_some_and(|w| {
+                st.peer_inc(&w.name) == w.agent.state.inc() && w.agent.state.hub_inc() != 0
+            })
+        });
+        let sent = self.att.send_bundle(
+            &Bundle {
+                sets: vec![BundleEntry {
+                    worker: name.clone(),
+                    signed,
+                }],
+            },
+            now_ms(),
+        );
+        assert!(
+            sent[0].1.is_ok(),
+            "main did not send the list: {:?}",
+            sent[0].1
+        );
+        self.until("the worker says it holds the owner's approvers", move |f| {
+            f.hub_state()
+                .peers
+                .get(&name)
+                .is_some_and(|p| p.approvers.held_seq >= version)
+        });
     }
 
     /// Move every end one round: the daemon's listener, the server's tick, each worker's agent and fabric.
@@ -1319,6 +1417,359 @@ fn a_workers_request_reaches_the_fleet_inbox_and_the_owners_passkey_is_verified_
             .get("-")
             .is_some_and(|m| m.get("-").is_some_and(|s| s.state == "approval"))
     });
+}
+
+/// The owner's approvers reach a worker only as the owner's computer signed them: a list `main` made up, one signed by a computer the
+/// box does not trust, an older one and a list for another box change nothing; a newer list that drops a person stops that person's
+/// passkey from approving, end to end through main's inbox and the worker's own service.
+#[test]
+fn the_owners_signed_approvers_reach_a_worker_a_forged_or_older_list_changes_nothing_and_a_removed_person_cannot_approve(
+) {
+    use ozbox_core::approval::Outcome;
+    use ozbox_core::hub::approvals::DecisionBody;
+    let mut f = pair();
+    let file = |w: &Worker, tree: char| -> String {
+        let r = w
+            .svc
+            .on(
+                crate::secrets_service::Policy::Box,
+                Some(1000),
+                json!({"op": "areq_file", "reason": "public url",
+                    "scanned_text": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+a public url\n",
+                    "subject": {"scope": "guard-override", "hook": "commit", "repo_path_hash": "1".repeat(64),
+                        "hook_kind": "pre-commit", "tree_id": tree.to_string().repeat(40)}}),
+            )
+            .unwrap();
+        r["request"]["id"].as_str().unwrap().to_string()
+    };
+    let state_of = |f: &Fleet, id: &str| -> String {
+        f.workers[0]
+            .svc
+            .on(
+                crate::secrets_service::Policy::Supervisor,
+                None,
+                json!({"op": "areq_get", "id": id}),
+            )
+            .unwrap()["request"]["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // main relays a person's assertion over the card's own challenge, and the worker answers (its status, never main's)
+    let relay = |f: &mut Fleet, id: &str, p: &Passkey, counter: u32| {
+        let card = f
+            .hub_state()
+            .inbox(now_ms())
+            .into_iter()
+            .find(|c| c.worker == "box-a" && c.request_id == id)
+            .unwrap();
+        let ch: [u8; 32] = from_hex(&card.approve_challenge)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let d = DecisionBody {
+            request_id: id.into(),
+            subject_digest: card.subject_digest.clone(),
+            outcome: Outcome::Approve,
+            claimed_person: "owner".into(),
+            passkey: p.assert(&test_rp(), &ch, 0x05, counter),
+        };
+        let now = now_ms();
+        f.att
+            .svc
+            .with(now, |h, st| h.relay_decision(st, "box-a", &d, now))
+            .unwrap()
+            .unwrap();
+    };
+    let said = |f: &Fleet, word: &str| -> bool {
+        f.hub_state().peers["box-a"]
+            .report
+            .status
+            .get("-")
+            .and_then(|m| m.get("-"))
+            .is_some_and(|s| s.state == word)
+    };
+    let rid = file(&f.workers[0], 'a');
+    f.until("the card is in the inbox", |f| {
+        f.hub_state()
+            .inbox(now_ms())
+            .iter()
+            .any(|c| c.request_id == rid)
+    });
+    // the first list (version 1, the owner's passkey) was carried at enrolment: the worker holds it, and decides
+    assert_eq!(f.hub_state().peers["box-a"].approvers.held_seq, 1);
+    // forged: a computer the box never trusted signs a list that names someone else; main carries it; the worker refuses
+    let mallory = Passkey::new("cred-mallory").unwrap();
+    let (stranger_seed, stranger_pk) = crate::approval_key::generate().unwrap();
+    let forged = f.signed_set(
+        0,
+        &stranger_seed,
+        &[(&mallory, "mallory")],
+        2,
+        30 * 86_400_000,
+    );
+    f.att.send_bundle(
+        &Bundle {
+            sets: vec![BundleEntry {
+                worker: "box-a".into(),
+                signed: forged.clone(),
+            }],
+        },
+        now_ms(),
+    );
+    f.until("the worker refused the forged list", |f| {
+        f.hub_state().peers["box-a"].approvers.refused.is_some()
+    });
+    assert_eq!(f.hub_state().peers["box-a"].approvers.held_seq, 1);
+    // so mallory's passkey, however main relays it, approves nothing
+    relay(&mut f, &rid, &mallory, 1);
+    f.until("the worker refused mallory's approval", |f| {
+        said(f, "approval-refused")
+    });
+    assert_eq!(state_of(&f, &rid), "pending");
+    // an unsigned list and a list for another box are refused by main's own early check or by the worker: nothing changes
+    let unsigned = SignedApprovers {
+        body: forged.body.clone(),
+        signature: String::new(),
+    };
+    f.att.send_bundle(
+        &Bundle {
+            sets: vec![BundleEntry {
+                worker: "box-a".into(),
+                signed: unsigned,
+            }],
+        },
+        now_ms(),
+    );
+    let other = f.signed_set(
+        1,
+        &f.approval.0.clone(),
+        &[(&mallory, "mallory")],
+        2,
+        30 * 86_400_000,
+    );
+    f.att.send_bundle(
+        &Bundle {
+            sets: vec![BundleEntry {
+                worker: "box-a".into(),
+                signed: other,
+            }],
+        },
+        now_ms(),
+    );
+    for _ in 0..30 {
+        f.round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(f.hub_state().peers["box-a"].approvers.held_seq, 1);
+    // the owner rotates her passkey: a newer list, signed on her computer, names only the new one
+    let fresh = Passkey::new("cred-owner-new").unwrap();
+    f.sync_approvers(0, &[&fresh], 2);
+    // an older list (version 1 again) is refused by main at once, and by the worker if main were taken over
+    let owner = f.workers[0].owner.clone();
+    let older = f.signed_set(
+        0,
+        &f.approval.0.clone(),
+        &[(&*owner, "owner")],
+        1,
+        30 * 86_400_000,
+    );
+    let now = now_ms();
+    assert!(f
+        .att
+        .svc
+        .with(now, |h, st| h.send_approvers(st, "box-a", &older, now))
+        .unwrap()
+        .is_err());
+    // the removed passkey (the old owner's) can no longer approve; the new one can
+    relay(&mut f, &rid, &owner, 2);
+    for _ in 0..30 {
+        f.round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(state_of(&f, &rid), "pending", "a removed approver approved");
+    relay(&mut f, &rid, &fresh, 3);
+    f.until(
+        "the worker's own service approved it for the new passkey",
+        |f| state_of(f, &rid) == "approved",
+    );
+    // no seed, public key or signature is in the hub's state, the worker's audit or main's record of what the worker said
+    let mut seen = serde_json::to_string(&f.hub_state()).unwrap();
+    for w in &f.workers {
+        seen.push_str(&serde_json::to_string(&w.agent.state.core.audit).unwrap());
+    }
+    for sentinel in [
+        f.approval.0.to_string(),
+        f.approval.1.clone(),
+        stranger_seed.to_string(),
+        stranger_pk,
+        forged.signature,
+    ] {
+        assert!(!seen.contains(&sentinel), "a key value or signature leaked");
+    }
+}
+
+/// The same, through the commands: `ozbox hub approvers targets`, `sign` (on the owner's computer) and `sync` (on main) write the files
+/// the server's round then carries, and the worker's own service takes the list.
+#[test]
+fn the_commands_carry_the_owners_new_list_from_her_computer_through_main_to_the_worker() {
+    use crate::cli::HubApproversCommand as C;
+    use crate::hub_approvers_cli::{run_with, Ctx, Flags, OUTBOX_FILE};
+    let mut f = pair();
+    let state = tempfile::tempdir().unwrap();
+    // main's hub state, where the commands read the workers and where the server watches for a bundle
+    let store = ozbox_core::channel::store::Store::<ozbox_core::hub::engine::HubState>::new(
+        state.path().join("hub"),
+    );
+    store.create(&f.hub_state()).unwrap();
+    let keys = crate::secrets::MemorySecrets::default();
+    {
+        use crate::secrets::SecretStore;
+        keys.set(
+            &format!("{}laptop", crate::approval_key::KEYCHAIN_PREFIX),
+            &f.approval.0,
+        )
+        .unwrap();
+    }
+    let yes = Flags {
+        yes: true,
+        dry_run: false,
+        json: false,
+    };
+    let run = |cmd: &C, on_box: bool| -> Result<String, String> {
+        let mut stdin = std::io::Cursor::new(Vec::new());
+        let mut out = Vec::new();
+        let r = {
+            let mut c = Ctx {
+                keys: &keys,
+                state_dir: Some(state.path().to_path_buf()),
+                box_markers: if on_box {
+                    vec![state.path().to_path_buf()]
+                } else {
+                    vec![]
+                },
+                stdin: &mut stdin,
+                interactive: false,
+                out: &mut out,
+                now: now_ms(),
+            };
+            run_with(cmd, &mut c, yes)
+        };
+        r.map(|_| String::from_utf8(out).unwrap())
+            .map_err(|e| e.to_string())
+    };
+    let fresh = Passkey::new("cred-owner-cli").unwrap();
+    let creds = state.path().join("creds.json");
+    std::fs::write(
+        &creds,
+        json!({"approvers": [{"credential_id": fresh.id, "person": "owner", "role": "owner",
+            "public_key": fresh.public_hex(), "rp": test_rp()}]})
+        .to_string(),
+    )
+    .unwrap();
+    let targets = state.path().join("targets.json");
+    run(
+        &C::Targets {
+            out: Some(targets.clone()),
+        },
+        false,
+    )
+    .unwrap();
+    // the held version in the file is what main knew when the file was made; the worker already holds 1
+    let bundle = state.path().join("bundle.json");
+    run(
+        &C::Sign {
+            targets,
+            credentials: creds,
+            version: 2,
+            valid_days: 30,
+            key_id: "laptop".into(),
+            out: bundle.clone(),
+        },
+        false,
+    )
+    .unwrap();
+    // signing is never done on a box
+    assert!(run(
+        &C::Sign {
+            targets: state.path().join("targets.json"),
+            credentials: state.path().join("creds.json"),
+            version: 3,
+            valid_days: 30,
+            key_id: "laptop".into(),
+            out: state.path().join("nope.json")
+        },
+        true,
+    )
+    .is_err());
+    run(&C::Sync { bundle }, false).unwrap();
+    // the server's round takes the file
+    let outbox = state.path().join(OUTBOX_FILE);
+    f.att.send_outbox_file(&outbox, now_ms());
+    assert!(!outbox.exists(), "the server took the bundle");
+    f.until("both workers say they hold version 2", |f| {
+        let st = f.hub_state();
+        ["box-a", "box-b"]
+            .iter()
+            .all(|w| st.peers.get(*w).is_some_and(|p| p.approvers.held_seq >= 2))
+    });
+    // and the owner's new passkey decides on box-a through main
+    let file_id = f.workers[0]
+        .svc
+        .on(
+            crate::secrets_service::Policy::Box,
+            Some(1000),
+            json!({"op": "areq_file", "reason": "public url",
+                "scanned_text": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+a public url\n",
+                "subject": {"scope": "guard-override", "hook": "commit", "repo_path_hash": "1".repeat(64),
+                    "hook_kind": "pre-commit", "tree_id": "d".repeat(40)}}),
+        )
+        .unwrap()["request"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.until("the card is on main", |f| {
+        f.hub_state()
+            .inbox(now_ms())
+            .iter()
+            .any(|c| c.request_id == file_id)
+    });
+    let card = f
+        .hub_state()
+        .inbox(now_ms())
+        .into_iter()
+        .find(|c| c.request_id == file_id)
+        .unwrap();
+    let ch: [u8; 32] = from_hex(&card.approve_challenge)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let d = ozbox_core::hub::approvals::DecisionBody {
+        request_id: file_id.clone(),
+        subject_digest: card.subject_digest.clone(),
+        outcome: ozbox_core::approval::Outcome::Approve,
+        claimed_person: "owner".into(),
+        passkey: fresh.assert(&test_rp(), &ch, 0x05, 4),
+    };
+    let now = now_ms();
+    f.att
+        .svc
+        .with(now, |h, st| h.relay_decision(st, "box-a", &d, now))
+        .unwrap()
+        .unwrap();
+    f.until(
+        "the worker's service approved for the passkey the owner's computer signed",
+        |f| {
+            f.workers[0]
+                .svc
+                .on(
+                    crate::secrets_service::Policy::Supervisor,
+                    None,
+                    json!({"op": "areq_get", "id": file_id}),
+                )
+                .is_ok_and(|v| v["request"]["state"] == "approved")
+        },
+    );
 }
 
 /// Keys go to a worker by name, sealed to the key its enrolment attested; Production is refused on the hub, in front of the issuer, in

@@ -2900,6 +2900,180 @@ mod hub_agent {
             .unwrap();
     }
 
+    /// The owner's list, signed on a computer holding `seed`, for this rig's service.
+    fn signed_list(r: &Rig, seed: &str, people: &[&Passkey], version: u64, issued: u64) -> Value {
+        use ozbox_core::hub::approver_sync::{
+            build_set, signed_bytes, CredentialRecord, SignedApprovers,
+        };
+        let recs: Vec<CredentialRecord> = people
+            .iter()
+            .map(|p| CredentialRecord {
+                credential_id: p.id.clone(),
+                person: "owner".into(),
+                role: Role::Owner,
+                public_key: p.public_hex(),
+                rp: test_rp(),
+            })
+            .collect();
+        let b = build_set(&r.svc().ids(), &recs, version, 30 * 86_400_000, issued).unwrap();
+        let text = b.to_text().unwrap();
+        let signature =
+            crate::approval_key::sign(seed, &String::from_utf8_lossy(&signed_bytes(&text)))
+                .unwrap();
+        json!({"op":"areq_hub_take_approvers","signed": SignedApprovers { body: text, signature }})
+    }
+
+    #[test]
+    fn the_hub_agent_hands_over_the_owners_signed_list_and_the_service_checks_the_signature_against_a_key_the_box_trusts(
+    ) {
+        let r = rig(true, false);
+        let owner = Passkey::new("cred-owner").unwrap();
+        let (seed, pk) = crate::approval_key::generate().unwrap();
+        let (stranger_seed, _) = crate::approval_key::generate().unwrap();
+        let id = r.file_guard('b', BOX_UID, T0);
+        let now = T0 + 5;
+        // a box with no trusted computer key takes no list, whoever signed it
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                signed_list(&r, &seed, &[&owner], 1, now),
+            )
+            .unwrap_err();
+        assert!(e.contains("no trusted"), "{e}");
+        // the owner's computer is a trusted key on this box (root enrolled it, the way a box is made)
+        r.store
+            .set(&format!("{}laptop", crate::approval_key::KEY_PREFIX), &pk)
+            .unwrap();
+        // only the hub agent's socket carries it; the box user's, the ingress account's and root's do not
+        for c in [SocketClass::Box, SocketClass::Ingress, SocketClass::Admin] {
+            assert!(
+                r.at(
+                    c,
+                    Some(BOX_UID),
+                    now,
+                    signed_list(&r, &seed, &[&owner], 1, now)
+                )
+                .is_err(),
+                "{c:?}"
+            );
+        }
+        // forged: a computer the box does not trust
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                signed_list(&r, &stranger_seed, &[&owner], 1, now),
+            )
+            .unwrap_err();
+        assert!(e.contains("not signed by your computer"), "{e}");
+        // nothing was written: still decides nothing from main
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now),
+            )
+            .unwrap_err();
+        assert!(e.contains("no approver set pinned"), "{e}");
+        // the owner's own signed list is taken, and then the owner's passkey decides
+        let ok = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                signed_list(&r, &seed, &[&owner], 2, now),
+            )
+            .unwrap();
+        assert_eq!(ok["seq"], 2);
+        // an older or equal version is never taken, even when the owner signed it
+        for v in [2, 1] {
+            let e = r
+                .at(
+                    SocketClass::Supervisor,
+                    None,
+                    now,
+                    signed_list(&r, &seed, &[&owner], v, now),
+                )
+                .unwrap_err();
+            assert!(e.contains("not newer"), "{e}");
+        }
+        let a = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                decision(&r, &id, "approve", Some(&owner), now),
+            )
+            .unwrap();
+        assert_eq!(a["state"], "approved");
+    }
+
+    #[test]
+    fn a_key_in_its_enrolment_wait_a_list_for_another_box_or_an_expired_one_signs_nothing_and_no_signature_is_kept(
+    ) {
+        let r = rig(true, false);
+        let owner = Passkey::new("cred-owner").unwrap();
+        let (seed, pk) = crate::approval_key::generate().unwrap();
+        r.store
+            .set(&format!("{}laptop", crate::approval_key::KEY_PREFIX), &pk)
+            .unwrap();
+        let now = T0 + 5;
+        // a key still in its 24-hour wait after enrolment is not yet trusted to sign
+        let mut waiting = crate::approval_keystore::KeyMeta::software("ed25519", now);
+        waiting.active_from_ms = now + 86_400_000;
+        crate::approval_keystore::write_meta(r.store.as_ref(), "laptop", &waiting).unwrap();
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now,
+                signed_list(&r, &seed, &[&owner], 1, now),
+            )
+            .unwrap_err();
+        assert!(e.contains("no trusted"), "{e}");
+        waiting.active_from_ms = 0;
+        crate::approval_keystore::write_meta(r.store.as_ref(), "laptop", &waiting).unwrap();
+        // a list for another box (another store id) is refused even though the owner signed it
+        let mut other = signed_list(&r, &seed, &[&owner], 1, now);
+        let body = other["signed"]["body"]
+            .as_str()
+            .unwrap()
+            .replace(&r.svc().ids().box_id, "another-box");
+        let sig = crate::approval_key::sign(
+            &seed,
+            &String::from_utf8_lossy(&ozbox_core::hub::approver_sync::signed_bytes(&body)),
+        )
+        .unwrap();
+        other["signed"] = json!({"body": body, "signature": sig});
+        let e = r.at(SocketClass::Supervisor, None, now, other).unwrap_err();
+        assert!(e.contains("another box"), "{e}");
+        // an expired one
+        let e = r
+            .at(
+                SocketClass::Supervisor,
+                None,
+                now + 40 * 86_400_000,
+                signed_list(&r, &seed, &[&owner], 1, now),
+            )
+            .unwrap_err();
+        assert!(e.contains("expired"), "{e}");
+        // a refusal is on the chain by reason, and no signature, key or body is in an answer or a file
+        let ok = signed_list(&r, &seed, &[&owner], 1, now);
+        let sig = ok["signed"]["signature"].as_str().unwrap().to_string();
+        r.at(SocketClass::Supervisor, None, now, ok).unwrap();
+        let written =
+            std::fs::read_to_string(r.dir.path().join("state").join(HUB_APPROVERS_FILE)).unwrap();
+        assert!(
+            !written.contains(&sig)
+                && !written.contains(&pk)
+                && !written.contains(&seed.to_string())
+        );
+    }
+
     #[test]
     fn a_relayed_approval_needs_the_pinned_approver_sets_passkey_and_a_swapped_or_unpinned_one_is_refused(
     ) {

@@ -47,6 +47,7 @@ mod guard_scan;
 mod helper_refresh;
 mod host_guard_cli;
 mod host_tools;
+mod hub_approvers_cli;
 mod hub_cli;
 mod hub_fleet;
 mod import_report;

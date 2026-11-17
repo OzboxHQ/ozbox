@@ -361,6 +361,16 @@ pub trait ApprovalService {
         d: &DecisionBody,
         now: u64,
     ) -> Result<String, String>;
+    /// Verify and take the approver list `main` carried (`pins.set`). The service checks the **owner's signature** against a laptop key
+    /// the box already trusts, that the list is for this service, not expired, and newer than the one it holds; only then does it
+    /// write. A service that cannot says so, and a message from `main` alone changes nothing. Returns the version now held.
+    fn set_approvers(
+        &mut self,
+        _s: &super::approver_sync::SignedApprovers,
+        _now: u64,
+    ) -> Result<u64, String> {
+        Err("this worker's approval service does not take an approver list".into())
+    }
 }
 
 /// Turn a relayed decision into the request book's input, verifying everything the worker can: the request, the digest, the tier,
@@ -467,6 +477,8 @@ pub struct MemApprovals {
     pub book: RequestBook,
     pub ctx: Ctx,
     pub approvers: Option<ApproverSet>,
+    /// The laptop approval keys this box trusts (public halves, hex): what an approver list's signature is checked against.
+    pub trusted: Vec<String>,
     key: ring::signature::Ed25519KeyPair,
 }
 
@@ -486,6 +498,7 @@ impl MemApprovals {
                 ever_presence_key: false,
             },
             approvers: None,
+            trusted: Vec::new(),
             key,
         })
     }
@@ -559,6 +572,24 @@ impl ApprovalService for MemApprovals {
             verify_fleet_decision(self.approvers.as_ref(), &self.ctx.ids, &req, d, hub, now)?;
         let r = self.book.decide(&self.ctx, now, &d.request_id, input)?;
         Ok(r.state.as_str().to_string())
+    }
+
+    fn set_approvers(
+        &mut self,
+        s: &super::approver_sync::SignedApprovers,
+        now: u64,
+    ) -> Result<u64, String> {
+        let set = s.verify(&self.trusted, &self.ctx.ids, now)?;
+        if self
+            .approvers
+            .as_ref()
+            .is_some_and(|old| set.seq <= old.seq)
+        {
+            return Err("that approver list is not newer than the one held".into());
+        }
+        let seq = set.seq;
+        self.approvers = Some(set);
+        Ok(seq)
     }
 }
 

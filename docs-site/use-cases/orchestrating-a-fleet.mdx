@@ -233,9 +233,12 @@ box has a hub yet, and none has run on a real cloud box.**
   finished commits go through the merge queue and lanes. Agents on different workers, even on different engines and providers, can
   message each other and share reviewed memory and skills (see [Agents that talk](/use-cases/agents-talk)). On a worker, a task is a run of that
   box's own supervisor (its Models routing, its credential broker, its subscription choice and its spend caps apply, and a task you stop on
-  `main` stops there), and the worker's messages and memory go through its agent. **Not done:** none of this has run on a real box yet (that is
-  the owner's run), and deciding a worker's request from `main`'s dashboard needs a command that writes the worker's approver set from your
-  passkeys, which is not built. The registrars are built
+  `main` stops there), and the worker's messages and memory go through its agent. **Your approvers reach each worker** with `ozbox hub approvers`:
+  `targets` and `sync` on `main`, `sign` on your own computer. Your computer signs the passkeys your dashboard lists, one list per
+  worker, and `main` only carries them: the worker checks your signature itself against an approval key the box already trusts, and
+  refuses an unsigned, forged, older, expired or other-box list, so `main` cannot change who approves. `status` shows the version each
+  worker holds. Re-sign with a higher version before the 90 days (or the days you chose) run out; an expired list decides nothing.
+  **Not done:** none of this has run on a real box yet (that is the owner's run). The registrars are built
   (Preview, CI only; never run against real AWS or a real box); an AWS worker needs the claim service, which is not deployed.
 - **The registrars that vouch for a worker are built** (Preview, CI only; never run against real AWS or a real box). On AWS a worker
   proves it is the EC2 instance it claims with the identity document AWS signs, checked against AWS's published certificate for its

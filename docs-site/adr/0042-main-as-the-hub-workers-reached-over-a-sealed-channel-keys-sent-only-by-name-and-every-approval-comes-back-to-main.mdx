@@ -9,7 +9,7 @@ description: "Status. Accepted design; first slice built (2026-11-14, on feat/ma
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub. **Integrated (2026-11-17, for 0.3.0-beta, Preview until B4-19's real run):** every part below is wired into one hub and run end to end, in one process, over a loopback network, on the real daemon, transport, signer, sealer, enrolment and registrar code (section "Integration" at the end): workers enrol over the hub's own listener, dial out, take tasks and run them on different engines, ask for keys by name, send approvals to the fleet inbox, and their results go through the merge queue and lanes. **Never run on a real box:** that is B4-19's owner run. The worker's real run path (a task is a supervised run of its own box), its approval service and the owner's pin of it, its fabric end run by the agent, and the conductor's branch-head read are built and tested in the same harness (second pass, same day). Not built: the AWS claim service's deployment, nested hubs, and the tool that writes a worker's approver set from the owner's passkeys. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub. **Integrated (2026-11-17, for 0.3.0-beta, Preview until B4-19's real run):** every part below is wired into one hub and run end to end, in one process, over a loopback network, on the real daemon, transport, signer, sealer, enrolment and registrar code (section "Integration" at the end): workers enrol over the hub's own listener, dial out, take tasks and run them on different engines, ask for keys by name, send approvals to the fleet inbox, and their results go through the merge queue and lanes. **Never run on a real box:** that is B4-19's owner run. The worker's real run path (a task is a supervised run of its own box), its approval service and the owner's pin of it, its fabric end run by the agent, and the conductor's branch-head read are built and tested in the same harness (second pass, same day). The tool that carries the owner's approvers to a worker is built too (third pass, same day: `ozbox hub approvers`, section 8 and "Integration"). Not built: the AWS claim service's deployment and nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -521,7 +521,7 @@ A worker is, in the threat model, a place an agent has run. What it sends back i
 | `approval.decision` | hub | worker | a signature or assertion for the worker's service. A **Deny of a pending request** is accepted without an assertion (fail safe: `main` can deny by silence anyway); a **revoke of an approved request** needs its credential | ack; the service decides if it is valid |
 | `keys.deliver`, `keys.revoke` | hub | worker | an **inner** sealed value for `store_delivery`, and its deletion (§5) | ack |
 | `lease.renew` | hub | worker | a renewed lease and budget, signed by the top | ack; no renewal means stop |
-| `pins.set` | hub | worker | a laptop-signed root key, approver set or delegation, relayed (§8). **Accepted only if signed by an attested presence root key**; until one exists a worker refuses `pins.set` and takes a set only by a route `main` cannot write | ack; verified by the worker |
+| `pins.set` | hub | worker | a laptop-signed root key, approver set or delegation, relayed (§8). **Built today for the approver list only:** exactly a signed list (`{body, signature}`, nothing beside it), which the worker's own approval service verifies against a laptop approval key the box already trusts before it writes anything; a root key or a delegation is still refused. Root keys are accepted only if signed by an attested presence root key; until one exists a worker takes them only by a route `main` cannot write | ack; verified by the worker |
 | `laptop.relay` | laptop via hub | worker | a laptop request sealed end to end (`pins sync`, `approvals show`, a direct decision) and its reply | `main` relays bytes only |
 | `shard.assign`, `shard.result` | hub, worker | | a lane's part (§7) | ack |
 | `artifact.offer`, `artifact.pull` | worker, hub | | an archive's or bundle's name, size and hash; the hub pulls (§5) | the hub pulls; the worker never pushes into `main` |
@@ -667,6 +667,9 @@ changes. The Help page and `ozbox hub status` state the present rule.
 A worker trusts three things for approval: **the laptop root key(s)**, the **approver set** (the owner's passkey public keys, the
 laptop keys, their dashboard origin) and **delegations**. Sets are **signed by the laptop root key** with a higher sequence number.
 A worker is **pinned** when the laptop has put its root key and approver set on it by a route `main` cannot write.
+**As built, the approver list also travels through `main`:** the owner's computer signs it for one worker, `main` carries it as `pins.set`,
+and the worker's own approval service verifies the owner's signature against a laptop approval key the box already trusts (pinned at creation
+or enrolled by an approval) before it writes anything. So `main` is a courier, never a route that can change who approves (see "Integration").
 
 | Provider | The root key reaches the worker through | Residual |
 |---|---|---|
@@ -1023,7 +1026,7 @@ enrolment proof, not by a handshake of its own; `ozbox hub repin` is built (amen
 - **The worker's approval service** is the core's in-memory one in the tests; the secrets service's hub-agent socket still refuses an
   approval from another box until it is given the approver set and calls the same verifier.
 - **Where the approver set comes from.** The set is taken as given (the route `main` cannot write: AWS parameter path, Hetzner
-  apply); `pins.set` stays refused. A cloned authenticator is caught per worker only (the counter is per box), as §8 says.
+  apply), or, as built in the third pass, carried by `ozbox hub approvers` as a list the owner's computer signed (below). A cloned authenticator is caught per worker only (the counter is per box), as §8 says.
 - **One touch can be redirected below the Production tier** by a compromised `main` (§8's residual): the worker verifies the touch, not
   what `main`'s page showed.
 - **Lanes.** The hub plans the files itself even for `split = "shard"` (so it can move a lost worker's part), and the worker passes
@@ -1507,9 +1510,25 @@ rules for 90 seconds of silence are H3's own tests. The worker's service pin (th
 under the worker's own proof (so only the attested channel key can offer it), is shown in the owner's enrolment plan, is kept in the roster
 and applied by the server from it; a second enrolment of a worker is refused, so a service key is not swapped by one. It is **not** vouched
 for by the registrar (a registrar attests the machine and the channel keys, not the service key), and `HubAttachment::pin_service` remains
-only as the server's own override for a worker that offered none. **Not built:** the command that writes a worker's approver set from the
-owner's passkeys (the service's admin operation exists and is tested; until a command carries the dashboard's credentials to it, a real
-worker decides no approval from `main`); a worker's task store has the agent's user and the box's supervisor sharing one file (the folder
+only as the server's own override for a worker that offered none. **Built, third pass (2026-11-17): the owner's approvers reach each worker.** `ozbox hub approvers targets` (on `main`) lists the
+workers with the ids their approval services pinned; `ozbox hub approvers sign` (on **your own computer**, refused on a box) signs the passkeys
+your dashboard lists (the file `ozbox fleet approvers sign` reads) as one set **per worker**, with your computer's approval key, after you
+confirm a plan; `ozbox hub approvers sync` (on `main`) shows the plan and hands the bundle to the server, whose next round sends each entry
+as `pins.set`; `ozbox hub approvers status` shows the version each worker was sent and says it holds. The format is B4-20's laptop-signed
+approver set: an Ed25519 signature over `tag + "\n" + the body's JSON text, exactly as sent` (`ozbox_core::hub::approver_sync`), with
+three differences: a different tag (`ozbox-hub-approvers-v1`, so a fleet-change signature can never be replayed as a hub list or the reverse),
+a body bound to **one worker's** approval-service box id and store id, and the service's own shape (a version that only goes up, an
+expiry of at most 90 days, the dashboard's relying party). **The worker's service verifies it** (`areq_hub_take_approvers` on the supervisor
+socket, which the hub agent carries): the signature must verify with an enrolled, active Ed25519 laptop approval key of **that box's own
+store** (never a key the message names, and never one still in its enrolment wait), the ids must be its own, the list must be unexpired and
+not dated ahead, and the version must be higher than the one held. Only then does it write the file the decision check reads
+(`areq_hub_set_approvers`, root's own route, stays and keeps the same never-backwards rule). A list `main` made up, an unsigned or forged
+one, one signed by a computer the box does not trust, one for another box, an expired one and an older one are each refused with nothing
+written, and the worker reports its refusal in a sentence that names no key. `main` shows only what the worker said; the worker's service is
+the authority. A newer list that drops a person stops that person's passkey approving, end to end (tested). A key value, signature or seed
+is in no state, audit record or answer (sentinel tests at the core, the service and the harness). **Not covered:** a box whose approval key
+was never pinned or enrolled takes no list (the commands do not enrol a key); the lists are not renewed automatically (re-sign before the
+expiry, a higher version each time); a worker's task store has the agent's user and the box's supervisor sharing one file (the folder
 the unit may write); the fabric replica is in memory (a restart loses the posts the hub has not acknowledged, which the hub resends nothing
 for); and nothing here has run on a real box. The tool host's attachment of the worker fabric (`ozbox serve`) is tested only through the
 harness's tool host.
@@ -1549,8 +1568,12 @@ named, and the expected result follows it):
    and then the result on the commit the branch points at, and `ozbox orch merge` takes it through the queue (the merge read checks the
    remote's head first). Also expect the refusals: a task naming `production` or a key whose name says `live`, and an engine the worker
    has no adapter for ("cannot run headless"). Spend shows in the worker's own cost views under the one cap. A task you stop on `main`
-   stops the run on the worker. **Not provable until a command writes the approver set:** deciding a worker's request from `main`'s
-   dashboard (the pending request is announced and its card is shown only if the service was pinned; the decision needs the set).
+   stops the run on the worker. **Approvers (new step):** on `main`, `ozbox hub approvers targets --out targets.json`; on your own computer,
+   `ozbox hub approvers sign --targets targets.json --credentials creds.json --version 1 --out bundle.json` (confirm the plan); on `main`,
+   `ozbox hub approvers sync --bundle bundle.json`, then `ozbox hub approvers status`. **Expected:** each worker's row reads `sent 1,
+   worker says it holds 1`; then deciding a worker's request from `main`'s dashboard (the pending request is announced and its card is
+   shown only if the service was pinned) works, and the worker's own record shows the decision came `via=fleet:main` and was decided by your
+   passkey. A bundle signed by another computer, or a lower version, is refused and `status` shows the worker's refusal.
 10. Keys: on `main`, as root, stage a staging value: send `{"op":"hub_release_set","env":"staging","name":"stripe-test","value":"..."}` to the
     secrets service's admin socket; declare `stripe-test` in a task; the worker's service then holds it under `hub-delivered-*`, and it is gone
     after the task ends or the hub is stopped for two minutes. A `production` environment is refused at the admin socket.

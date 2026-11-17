@@ -1166,13 +1166,19 @@ impl RequestService {
         let op = v["op"].as_str().unwrap_or("");
         if !matches!(
             op,
-            "areq_hub_pin" | "areq_hub_pending" | "areq_hub_decide" | "areq_hub_set_approvers"
+            "areq_hub_pin"
+                | "areq_hub_pending"
+                | "areq_hub_decide"
+                | "areq_hub_set_approvers"
+                | "areq_hub_take_approvers"
         ) {
             return None;
         }
         let allowed = match op {
             "areq_hub_set_approvers" => class == SocketClass::Admin,
             "areq_hub_pin" => matches!(class, SocketClass::Supervisor | SocketClass::Admin),
+            // the hub agent carries it; what it carries is checked here against the owner's signature, so the socket is not the authority
+            "areq_hub_take_approvers" => class == SocketClass::Supervisor,
             _ => class == SocketClass::Supervisor,
         };
         if !allowed {
@@ -1265,6 +1271,44 @@ impl RequestService {
                     )?;
                     Ok(json!({"state": r["request"]["state"]}))
                 }
+                "areq_hub_take_approvers" => {
+                    let signed: ozbox_core::hub::approver_sync::SignedApprovers =
+                        serde_json::from_value(v["signed"].clone())
+                            .map_err(|_| "that approver list is not valid".to_string())?;
+                    let refuse = |why: String| {
+                        gates.audit_event(
+                            store,
+                            "secrets.approval.hub_approvers.refused",
+                            "hub",
+                            &format!("why={}", sanitize_display(&why, 80)),
+                        );
+                        why
+                    };
+                    // the owner's computer signs it; the keys it is checked against are the box's own, never one the message names
+                    let trusted = self.trusted_laptop_keys(store, now);
+                    let set = signed.verify(&trusted, &self.ids, now).map_err(&refuse)?;
+                    if let Some(old) = self.hub_approvers() {
+                        if set.seq <= old.seq {
+                            return Err(refuse(
+                                "that approver list is not newer than the one held".into(),
+                            ));
+                        }
+                    }
+                    let bytes = serde_json::to_vec(&set)
+                        .map_err(|_| "that approver set is not valid".to_string())?;
+                    write_atomic(&self.state_dir.join(HUB_APPROVERS_FILE), &bytes)?;
+                    gates.audit_event(
+                        store,
+                        "secrets.approval.hub_approvers.set",
+                        "hub",
+                        &format!(
+                            "seq={} approvers={} via=owner-signed",
+                            set.seq,
+                            set.approvers.len()
+                        ),
+                    );
+                    Ok(json!({"seq": set.seq, "approvers": set.approvers.len()}))
+                }
                 _ => {
                     let set: ApproverSet = serde_json::from_value(v["approvers"].clone())
                         .map_err(|_| "that approver set is not valid".to_string())?;
@@ -1295,6 +1339,32 @@ impl RequestService {
                 }
             }
         })())
+    }
+
+    /// The laptop approval keys this box trusts to sign an approver list: enrolled Ed25519 keys that are out of their enrolment wait.
+    /// Public halves, in hex. A key the message names is never one of them.
+    fn trusted_laptop_keys(&self, store: &EncryptedSecrets, now: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(names) = store.names(crate::approval_key::KEY_PREFIX) else {
+            return out;
+        };
+        for n in names {
+            let Some(id) = n
+                .strip_prefix(crate::approval_key::KEY_PREFIX)
+                .filter(|i| crate::approval_key::id_ok(i))
+            else {
+                continue;
+            };
+            if crate::approval_key::in_wait(store, id, now).unwrap_or(true) {
+                continue;
+            }
+            if let Ok(Some(v)) = crate::approval_keystore::load_key_view(store, id) {
+                if v.key_type == ozbox_core::approval::KeyType::Ed25519 {
+                    out.push(v.public_half);
+                }
+            }
+        }
+        out
     }
 
     /// The approver set root pinned for decisions relayed from `main`, if any. Read per call, so a set root replaced is the one used.

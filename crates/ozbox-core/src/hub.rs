@@ -37,6 +37,7 @@
 //! (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and that is the transport's job.
 
 pub mod approvals;
+pub mod approver_sync;
 #[doc(hidden)]
 pub mod conformance;
 pub mod engine;
@@ -54,5 +55,7 @@ pub mod worker;
 mod tests;
 #[cfg(test)]
 mod tests_approvals;
+#[cfg(test)]
+mod tests_approver_sync;
 #[cfg(test)]
 mod tests_lane;

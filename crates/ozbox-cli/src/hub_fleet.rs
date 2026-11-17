@@ -40,6 +40,8 @@ pub struct HubAttachment {
     known: Mutex<BTreeSet<String>>,
     issuer: ServiceIssuer,
     attest: Arc<dyn ozbox_core::hub::keys::Attestations>,
+    /// Where `ozbox hub approvers sync` leaves a signed bundle for the next tick to send.
+    outbox: Option<PathBuf>,
 }
 
 /// What attaching needs. `ops` is the secrets service on the supervisor's socket.
@@ -145,6 +147,10 @@ impl HubAttachment {
             attest: Arc::new(AttestSocket {
                 socket: cfg.hubd_socket,
             }),
+            outbox: cfg
+                .state_dir
+                .as_ref()
+                .map(|d| d.join(crate::hub_approvers_cli::OUTBOX_FILE)),
         });
         att.sync_roster()?;
         Ok(att)
@@ -214,12 +220,64 @@ impl HubAttachment {
     /// One round, called on the server's tick: the roster, what the workers sent, the key asks, the fabric.
     pub fn tick(&self, now: u64) {
         let _ = self.sync_roster();
+        self.send_outbox(now);
         let _ = self.svc.with(now, |hub, st| {
             hub.poll(st, now);
             // keys by name: through the issuer path, sealed to the attested key, never Production
             hub.serve_key_asks(st, self.attest.as_ref(), &self.issuer, now);
         });
         let _ = self.fabric.pump(now);
+    }
+}
+
+impl HubAttachment {
+    /// Carry each entry of a signed approver bundle to its worker. An entry the hub's own early check refuses is audited and dropped.
+    pub(crate) fn send_bundle(
+        &self,
+        b: &ozbox_core::hub::approver_sync::Bundle,
+        now: u64,
+    ) -> Vec<(String, Result<u64, String>)> {
+        self.svc
+            .with(now, |hub, st| {
+                b.sets
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.worker.clone(),
+                            hub.send_approvers(st, &e.worker, &e.signed, now)
+                                .map_err(|e| e.to_string()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Send a signed approver bundle `ozbox hub approvers sync` left, then remove it. The hub only carries it: the file holds public
+    /// keys, names and the owner's signature, and each worker's own service verifies the signature, so a file anyone wrote can ask
+    /// and cannot change who approves. An entry the hub's own early check refuses is audited and dropped.
+    fn send_outbox(&self, now: u64) {
+        if let Some(path) = &self.outbox {
+            self.send_outbox_file(path, now);
+        }
+    }
+
+    pub(crate) fn send_outbox_file(&self, path: &std::path::Path, now: u64) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        let bundle = if meta.len() <= 1024 * 1024 {
+            std::fs::read(path).ok().and_then(|b| {
+                serde_json::from_slice::<ozbox_core::hub::approver_sync::Bundle>(&b).ok()
+            })
+        } else {
+            None
+        };
+        if let Some(b) = bundle {
+            let _ = self.send_bundle(&b, now);
+        }
+        // a bundle that cannot be read is removed too, so one bad file never blocks the next
+        let _ = std::fs::remove_file(path);
     }
 }
 

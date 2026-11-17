@@ -42,6 +42,10 @@ pub struct WorkerState {
     /// What the hub said back about this worker's features (a merge conflict, failing tests, an answer).
     #[serde(default)]
     pub answers: Vec<super::merge::AnswerBody>,
+    /// Approver lists `main` carried, waiting for this box's own service to verify them ([`WorkerEnd::apply_approver_sets`]). Evidence
+    /// only: nothing here changes who approves until the service has checked the owner's signature.
+    #[serde(default)]
+    pub approver_sets: Vec<super::approver_sync::SignedApprovers>,
 }
 
 impl HasCore for WorkerState {
@@ -66,6 +70,7 @@ impl WorkerState {
             announced: Default::default(),
             shards: Vec::new(),
             answers: Vec::new(),
+            approver_sets: Vec::new(),
         }
     }
 
@@ -230,6 +235,12 @@ impl WorkerEnd<'_> {
                     if code == CODE_UNSUPPORTED {
                         applied += 1;
                         self.unsupported(st, now, kind);
+                    } else if code == super::approver_sync::CODE_NOT_AN_APPROVER_SET {
+                        st.note(
+                            now,
+                            super::approver_sync::AUDIT_WORKER_REFUSED,
+                            format!("kind={} code={code}", kind.name()),
+                        );
                     } else if code == super::approvals::CODE_NOT_A_DECISION {
                         st.note(
                             now,
@@ -337,7 +348,23 @@ impl WorkerEnd<'_> {
                         );
                     }
                 }
-                Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay => {
+                Kind::PinsSet => {
+                    // the screen has already refused anything that is not exactly a signed approver list
+                    if let Ok(a) =
+                        serde_json::from_slice::<super::approver_sync::SignedApprovers>(&plain)
+                    {
+                        if st.approver_sets.len() < 4 {
+                            st.approver_sets.push(a);
+                        } else {
+                            st.note(
+                                now,
+                                super::approver_sync::AUDIT_WORKER_REFUSED,
+                                "reason=backlog".into(),
+                            );
+                        }
+                    }
+                }
+                Kind::KeysDeliver | Kind::KeysRevoke | Kind::LaptopRelay => {
                     // the screen refuses these first; kept so a screen that ever lets one through still answers
                     self.unsupported(st, now, kind);
                 }
@@ -642,6 +669,40 @@ impl WorkerEnd<'_> {
         out
     }
 
+    /// Hand each approver list `main` carried to this box's own service, which verifies the owner's signature and writes it only then.
+    /// What the service says is reported back as the worker's own status (the version it holds, or its refusal), so the person sees the
+    /// worker's answer and not `main`'s.
+    pub fn apply_approver_sets(
+        &self,
+        st: &mut WorkerState,
+        svc: &mut dyn super::approvals::ApprovalService,
+        now: u64,
+    ) -> Vec<Result<u64, String>> {
+        use super::approver_sync::{
+            AUDIT_WORKER_REFUSED, AUDIT_WORKER_SET, STATE_HELD, STATE_REFUSED,
+        };
+        let mut out = Vec::new();
+        for a in std::mem::take(&mut st.approver_sets) {
+            let r = svc.set_approvers(&a, now);
+            match &r {
+                Ok(seq) => {
+                    st.note(
+                        now,
+                        AUDIT_WORKER_SET,
+                        format!("seq={seq} via=fleet:{}", self.hub),
+                    );
+                    self.status(st, now, "-", "-", STATE_HELD, &format!("seq={seq}"));
+                }
+                Err(why) => {
+                    st.note(now, AUDIT_WORKER_REFUSED, "reason=service".to_string());
+                    self.status(st, now, "-", "-", STATE_REFUSED, why);
+                }
+            }
+            out.push(r);
+        }
+        out
+    }
+
     /// Report a lane shard's results (all at once, or as they come; `finished` when the runner is done).
     pub fn shard_result(&self, st: &mut WorkerState, now: u64, r: &super::lane::ShardResult) {
         if let Ok(b) = serde_json::to_vec(r) {
@@ -672,8 +733,15 @@ impl WorkerEnd<'_> {
 /// earlier message. An assignment's key declaration may hold its environment and names and nothing else.
 fn screen(kind: &str, _ext: &[u8], plain: &[u8]) -> Result<(), &'static str> {
     match Kind::parse(kind) {
-        Some(Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay) => {
-            Err(CODE_UNSUPPORTED)
+        Some(Kind::KeysDeliver | Kind::KeysRevoke | Kind::LaptopRelay) => Err(CODE_UNSUPPORTED),
+        // an approver list is exactly its two fields and no larger than a list may be; whether it is the owner's is the service's to say
+        Some(Kind::PinsSet) => {
+            if plain.len() > super::approver_sync::MAX_SET_BYTES + 1024 {
+                return Err(super::approver_sync::CODE_NOT_AN_APPROVER_SET);
+            }
+            serde_json::from_slice::<super::approver_sync::SignedApprovers>(plain)
+                .map(|_| ())
+                .map_err(|_| super::approver_sync::CODE_NOT_AN_APPROVER_SET)
         }
         Some(Kind::TaskAssign) => declaration_is_names_only(plain),
         // a message can ask and never grant: a decision is exactly its fields, so a grant, a token or a flag beside them is refused

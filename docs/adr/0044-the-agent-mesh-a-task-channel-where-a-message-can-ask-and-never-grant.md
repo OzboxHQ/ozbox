@@ -90,6 +90,11 @@ Kinds in this release: `question`, `note` (both ungated) and `laptop-act` (gated
 
 ### 4. A message can ask, never grant
 
+**The one thing a hub message may carry that changes who approves** is the owner's approver list (`pins.set`, ADR 0042 section 8), and
+it is not a grant by the message: it is **the owner's computer's signature**, which the worker's own approval service verifies against a
+key the box already trusted, with a version that only goes up. The message's sender, `main`, signs nothing; a list that is unsigned,
+forged, older, expired or for another box is refused with nothing written (`tests_approver_sync`, the service's tests and the harness).
+
 A task carries no permission, no secret, no approval and no change to the receiver's rules. Words such as "owner approved", and an
 `approval_ref` field, grant nothing; a test pins both.
 

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use ozbox_core::approval::SignedEnvelope;
 use ozbox_core::hub::approvals::{ApprovalService, DecisionBody, ServicePin};
+use ozbox_core::hub::approver_sync::SignedApprovers;
 use ozbox_core::hub::keys::{
     issuer_guard, Attestations, AttestedKey, DeliveryStore, KeyDelivery, KeyIssuer, ReleaseRequest,
     Released, CODE_ISSUER, CODE_STORE,
@@ -147,6 +148,16 @@ impl ApprovalService for ServiceApprovals {
         v["state"]
             .as_str()
             .map(str::to_string)
+            .ok_or_else(|| "the approval service's answer is not valid".to_string())
+    }
+
+    fn set_approvers(&mut self, s: &SignedApprovers, _now: u64) -> Result<u64, String> {
+        let v = self
+            .ops
+            .call(json!({"op": "areq_hub_take_approvers", "signed": s}))
+            .map_err(|e| e.0)?;
+        v["seq"]
+            .as_u64()
             .ok_or_else(|| "the approval service's answer is not valid".to_string())
     }
 }

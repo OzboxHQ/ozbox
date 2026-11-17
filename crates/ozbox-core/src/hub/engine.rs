@@ -95,6 +95,10 @@ pub struct PeerState {
     /// Key asks received and not yet served ([`Hub::serve_key_asks`]). Names only.
     #[serde(default)]
     pub key_asks: Vec<super::keys::KeyAsk>,
+    /// What this hub sent this worker as its approver set and what the worker said back (information only; the worker's own service
+    /// is the authority).
+    #[serde(default)]
+    pub approvers: super::approver_sync::Track,
 }
 
 /// Everything the hub keeps. Plain data: it serialises into its store.
@@ -431,18 +435,22 @@ impl Hub<'_> {
         match kind {
             Kind::Status => {
                 if let Ok(s) = serde_json::from_slice::<StatusBody>(&plain) {
-                    if peer.knows(&s.orchestration, &s.feature) {
-                        peer.report
-                            .status
-                            .entry(s.orchestration.clone())
-                            .or_default()
-                            .insert(s.feature.clone(), s);
-                    } else {
-                        st.note(
-                            now,
-                            "hub.rejected",
-                            format!("from={from} reason=unassigned-feature kind=status"),
-                        );
+                    // a worker's word about its approver set is its own account, kept beside the roster and not as a feature's status
+                    if !super::approver_sync::take_status(st, from, &s, now) {
+                        let peer = st.peers.entry(from.to_string()).or_default();
+                        if peer.knows(&s.orchestration, &s.feature) {
+                            peer.report
+                                .status
+                                .entry(s.orchestration.clone())
+                                .or_default()
+                                .insert(s.feature.clone(), s);
+                        } else {
+                            st.note(
+                                now,
+                                "hub.rejected",
+                                format!("from={from} reason=unassigned-feature kind=status"),
+                            );
+                        }
                     }
                 }
             }

@@ -1180,6 +1180,53 @@ pub enum HubCommand {
         #[arg(long, value_name = "FILE")]
         out: Option<std::path::PathBuf>,
     },
+    /// Who may approve on your workers: sign your approvers on your own computer, send them from `main`, and see what each worker holds.
+    Approvers {
+        #[command(subcommand)]
+        command: HubApproversCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubApproversCommand {
+    /// On `main`: list the workers an approver list can be made for (their names and ids) and the version each holds. Writes a file to
+    /// take to your computer with `--out`.
+    Targets {
+        /// Write the list here (JSON) instead of printing it.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+    /// On your own computer: sign the people who may approve (the passkeys your dashboard lists, a JSON file with an "approvers" list)
+    /// for each worker in a targets file, with your computer's approval key. Refused on a box. A worker takes only a version higher than
+    /// the one it holds.
+    Sign {
+        /// The workers (from `ozbox hub approvers targets --out`).
+        #[arg(long, value_name = "FILE")]
+        targets: std::path::PathBuf,
+        /// The passkeys that may approve: the file `ozbox fleet approvers sign` also reads.
+        #[arg(long, value_name = "FILE")]
+        credentials: std::path::PathBuf,
+        /// The version of this list; it must be higher than the one each worker holds.
+        #[arg(long)]
+        version: u64,
+        /// How many days the list stays valid (1 to 90). A worker decides nothing from `main` once it has expired.
+        #[arg(long, default_value_t = 30)]
+        valid_days: u64,
+        /// Which of your computer's approval keys signs (default laptop).
+        #[arg(long, default_value = "laptop")]
+        key_id: String,
+        /// Write the signed bundle here.
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+    },
+    /// On `main`: show the plan, then hand a signed bundle to the hub to carry to each worker. Each worker checks your signature itself
+    /// and refuses anything else, so `main` cannot change who approves.
+    Sync {
+        #[arg(long, value_name = "FILE")]
+        bundle: std::path::PathBuf,
+    },
+    /// On `main`: the version each worker has been sent and says it holds, and any refusal it gave.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

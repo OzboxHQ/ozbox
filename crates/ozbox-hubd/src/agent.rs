@@ -248,6 +248,7 @@ impl WorkerAgent {
         if let Some(svc) = self.s.approvals.clone() {
             if let Ok(mut g) = svc.lock() {
                 let end = end_of(&self.s);
+                end.apply_approver_sets(&mut self.state, &mut *g, now);
                 end.apply_decisions(&mut self.state, &mut *g, now);
                 end.announce_approvals(&mut self.state, &*g, now);
             }
