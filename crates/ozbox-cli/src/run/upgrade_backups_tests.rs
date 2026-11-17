@@ -202,6 +202,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
             },
             strict_checkpoint: false,
             legacy_checkpoint: false,
+            no_checkpoint: false,
         },
     )
     .map_err(|e| e.to_string())

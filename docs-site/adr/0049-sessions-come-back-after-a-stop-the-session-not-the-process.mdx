@@ -191,7 +191,11 @@ cannot be renewed in a loop. Every `POST` and `DELETE` writes one audit line to 
 **An older agent, and a 503.** A box whose agent predates this answers 404 or 405. The command then does **not** call the old
 `POST /v1/checkpoint` by itself: that writes a visible branch `wip/<box>/<time>` and pushes it if the box has a push remote, which
 the person did not agree to. It says plainly that the agent is older, that uncommitted work is **not** snapshotted and runs are **not**
-asked to end, and asks again before stopping (`--yes` goes on; anything not a terminal refuses). The old path is behind
+asked to end. *Amended 2026-11-17:* it then refuses before anything changes, even with `--yes`, until the person names a choice:
+`--legacy-checkpoint` (below) or `--no-checkpoint` (go on with none, never asked again). Neither is the default, because ADR 0002
+says the plan decides what happens before the confirmation, and `--yes` only confirms what the plan said: defaulting to the old
+checkpoint would push a branch the person never agreed to, and defaulting to none let a scripted `--yes` lose the checkpoint
+without a word. A dry run is never refused. The old path is behind
 `--legacy-checkpoint`, whose help and output say it writes a visible branch and pushes it where the box is set to push; it cannot be
 combined with `--strict-checkpoint`, and `--strict-checkpoint` refuses an older agent. A **503** from a box of this release means
 the service did not start, and is a failure, never "older": same wording, no fallback.

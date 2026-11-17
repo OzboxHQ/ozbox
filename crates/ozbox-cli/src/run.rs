@@ -834,6 +834,7 @@ pub fn run(cli: Cli) -> Result<()> {
             use_fleet_key,
             strict_checkpoint,
             legacy_checkpoint,
+            no_checkpoint,
         } => {
             // On AWS the store's fate is read from the box's root, never from the box user's SSH answer
             let root_fn = |rec: &ozbox_core::BoxRecord| aws_root_facts(&config, rec);
@@ -858,6 +859,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 crate::quiesce::Mode {
                     strict: strict_checkpoint,
                     legacy: legacy_checkpoint,
+                    none: no_checkpoint,
                 },
                 use_fleet_key,
                 root,
@@ -1024,6 +1026,7 @@ pub fn run(cli: Cli) -> Result<()> {
             disk,
             strict_checkpoint,
             legacy_checkpoint,
+            no_checkpoint,
         } => {
             let agent = crate::serve::agent_for(kind == ProviderKind::Fake, route_inputs(&config));
             mutate_quiesced(
@@ -1038,6 +1041,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 crate::quiesce::Mode {
                     strict: strict_checkpoint,
                     legacy: legacy_checkpoint,
+                    none: no_checkpoint,
                 },
             )
         }
@@ -1658,10 +1662,16 @@ fn mutate_inner(
     plan.notes.extend(notes);
     plan.notes.extend(crate::infra_cli::plan_notes());
     // Only a plan that stops a running machine is quiesced; what will end is read (never changed) before the plan shows.
+    // A box whose agent is older needs its checkpoint chosen by name; refused after the plan is shown (never on a dry run).
+    let mut older_refusal = None;
     let stopping = match (&quiesce, p.get(plan.operation.box_name()).ok().flatten()) {
-        (Some((agent, _)), Some(rec)) if crate::quiesce::needed(&plan, &rec) => {
-            plan.notes
-                .extend(crate::quiesce::preview(*agent, &rec).notes(rec.spec.name.as_str()));
+        (Some((agent, mode)), Some(rec)) if crate::quiesce::needed(&plan, &rec) => {
+            let preview = crate::quiesce::preview(*agent, &rec);
+            plan.notes.extend(preview.notes(rec.spec.name.as_str()));
+            match crate::quiesce::older_choice(&preview.service, *mode, rec.spec.name.as_str()) {
+                Ok(note) => plan.notes.extend(note),
+                Err(refusal) => older_refusal = Some(refusal),
+            }
             Some(rec)
         }
         _ => None,
@@ -1677,6 +1687,9 @@ fn mutate_inner(
             println!("Dry run: nothing was changed.");
         }
         return finish(f, &plan, false, None);
+    }
+    if let Some(refusal) = older_refusal {
+        return Err(CliError::Msg(refusal));
     }
     confirm(&plan, f)?;
     // The box is asked to end its runs and save its work. From here until the change is applied, the hold on new runs is

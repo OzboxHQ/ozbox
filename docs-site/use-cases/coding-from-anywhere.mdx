@@ -73,9 +73,10 @@ older than 14 days are removed; the result says what was left out. **To get a sn
 the repository: `mkdir ../recovered && git archive <ref> | tar -x -C ../recovered` copies everything it held into a separate
 folder; `git diff HEAD <ref>` shows what differs; `git show <ref>:<file>` prints one file. Do not run
 `git restore --source=<ref> --worktree -- .` over a folder you kept working in: it replaces every file the snapshot holds and removes
-files it does not. A box whose agent is older cannot do any of this: the plan says so, uncommitted work is **not** snapshotted, and
-you are asked again before the box is stopped (`--legacy-checkpoint` uses that agent's own checkpoint, which writes a visible branch
-and pushes it if the box has a push remote). A snapshot that fails is reported and you are asked again, since `/work` is kept;
+files it does not. A box whose agent is older cannot do any of this: the plan says so, and the command is refused before anything
+changes (even with `--yes`) until you choose: `--legacy-checkpoint` uses that agent's own checkpoint, which writes a visible branch
+and **pushes it** if the box has a push remote; `--no-checkpoint` goes on with no checkpoint (uncommitted work is **not**
+snapshotted; `/work` is kept). `--dry-run` shows the plan without choosing. A snapshot that fails is reported and you are asked again, since `/work` is kept;
 `--strict-checkpoint` refuses to stop the box unless it was fully ready. **Status:** Preview (**not yet proven on a real box**).
 
 ## 4. See and stop what you left running

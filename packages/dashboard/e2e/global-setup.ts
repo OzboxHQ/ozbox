@@ -24,7 +24,9 @@ export default async function globalSetup(): Promise<void> {
   run('create', 'delta', '--size', 'S', '--yes');
   run('pause', 'delta', '--yes');
 
-  const child = spawn(bin, ['serve', '--port', String(PORT)], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+  // `--provider fake` by name: with no provider named, a server on a machine that is itself an Oz box serves only that box
+  // (the fleet is "not connected"), and every spec that makes or changes a box would fail there for a reason not its own.
+  const child = spawn(bin, ['serve', '--provider', 'fake', '--port', String(PORT)], { env, stdio: ['ignore', 'pipe', 'inherit'] });
   const url = await new Promise<string>((ok, fail) => {
     let buf = '';
     child.stdout.on('data', (d: Buffer) => {

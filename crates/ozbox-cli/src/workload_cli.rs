@@ -217,6 +217,8 @@ pub fn import(
     let mut unchanged: Vec<String> = Vec::new();
     // names the box or the store itself held back (it knows a value as production that the file does not show)
     let mut held_by_service: Vec<String> = Vec::new();
+    // names the box or the store did not store, each with the reason it gave (names and reasons only, never a value)
+    let mut not_stored: Vec<(String, String)> = Vec::new();
     if yes {
         if a.allow_live_all || !a.allow_live.is_empty() {
             // the person sees exactly which production-looking keys they are agreeing to, before being asked to type anything
@@ -318,6 +320,16 @@ pub fn import(
                 };
                 stored = Some(names("names"));
                 held_by_service = names("held");
+                for n in names("invalid") {
+                    not_stored.push((n, "the box refused the name".into()));
+                }
+                if let Some(x) = v["skipped"].as_array() {
+                    for e in x {
+                        if let (Some(n), Some(why)) = (e["name"].as_str(), e["why"].as_str()) {
+                            not_stored.push((n.to_string(), why.to_string()));
+                        }
+                    }
+                }
                 held_back = Some(rows.iter().filter(|r| held(&r.name, &r.status)).count());
             }
             None => {
@@ -351,6 +363,17 @@ pub fn import(
                 held_back = Some(done.held_back.len());
                 held_by_service = done.held_back;
                 stored = Some(done.stored);
+                not_stored.extend(
+                    done.invalid
+                        .into_iter()
+                        .map(|n| (n, "the store refused the name".to_string())),
+                );
+                not_stored.extend(
+                    done.blank
+                        .into_iter()
+                        .map(|n| (n, "the value is blank".to_string())),
+                );
+                not_stored.extend(done.unstorable);
             }
         }
     }
@@ -372,8 +395,14 @@ pub fn import(
                 Outcome::Stored
             } else if needs_newer.contains(&r.name) {
                 Outcome::Skipped("only a newer box can store it (see above)".into())
+            } else if let Some((_, why)) = not_stored.iter().find(|(n, _)| n == &r.name) {
+                Outcome::Skipped(format!("not stored: {why}"))
             } else {
-                Outcome::Skipped("it was not stored".into())
+                // a box from before per-name reasons says only what it stored
+                Outcome::Skipped(
+                    "not stored, and the box gave no reason (an older box reports only what it stored; upgrade it to see why)"
+                        .into(),
+                )
             }
         })
         .collect();
@@ -386,7 +415,7 @@ pub fn import(
                 json!({"name": (r.status != Status::Invalid).then(|| r.name.clone()), "line": r.line,
                     "fingerprint": r.fingerprint,
                     "status": match &r.status { Status::Ready => "ready", Status::Live(_) => "production_looking", Status::Invalid => "invalid", Status::Blank => "blank", Status::Unstorable(_) => "cannot_be_stored" },
-                    "reason": skippable(r),
+                    "reason": match o { Outcome::Skipped(why) => Some(why.clone()), _ => skippable(r) },
                     "outcome": o.word(),
                     "encoded": r.encoded,
                     "public": a.public.contains(&r.name),
@@ -404,16 +433,21 @@ pub fn import(
                 "unchanged": unchanged})
         );
     } else {
-        for r in &rows {
+        for (r, o) in rows.iter().zip(&outcomes) {
             let enc = if r.encoded { "  (stored encoded)" } else { "" };
             let enc = if a.public.contains(&r.name) {
                 format!("{enc}  (marked PUBLIC: given to a declared command as plain environment)")
             } else {
                 enc.to_string()
             };
-            let note = match &r.status {
-                Status::Ready => enc.clone(),
-                Status::Live(why) => format!("  production-looking ({why}){enc}"),
+            let note = match (&r.status, o) {
+                // after an applied import, a name the box or store did not take says why, on its own line of the listing
+                (Status::Ready | Status::Live(_), Outcome::Skipped(why)) => format!("  {why}"),
+                (Status::Ready, Outcome::HeldBack) => {
+                    "  held back: this value is already stored as production".to_string()
+                }
+                (Status::Ready, _) => enc.clone(),
+                (Status::Live(why), _) => format!("  production-looking ({why}){enc}"),
                 _ => format!("  {}", skippable(r).unwrap_or_default()),
             };
             let _ = writeln!(
@@ -1480,6 +1514,61 @@ mod tests {
                 "{shown}"
             );
             assert!(r.calls().is_empty());
+        }
+    }
+
+    /// B4-18 item 9: an applied import over a box accounts for every name with its reason: what the box did not store is named
+    /// with the box's own reason, and a box from before per-name reasons is told apart from a name that vanished. No value
+    /// appears in either form of the output.
+    #[test]
+    fn a_box_import_names_every_name_it_did_not_store_with_the_reason() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(
+            d.path(),
+            &format!("STORED_ONE={SENTINEL}\nREFUSED_ONE=refused-0123456789\nSILENT_ONE=silent-0123456789\n"),
+        );
+        let args = ImportArgs {
+            file: &f,
+            project: "app",
+            env: "staging",
+            allow_live: &[],
+            allow_live_all: false,
+            public: &[],
+            on_box: Some("dev"),
+            approval: None,
+        };
+        crate::ingress_client::testing::install("dev");
+        for json in [false, true] {
+            let r = RecordingRunner::new();
+            r.reply(Output {
+                status: Some(0),
+                stdout: "{\"ok\":true,\"names\":[\"STORED_ONE\"],\"held\":[],\"invalid\":[],\"skipped\":[{\"name\":\"REFUSED_ONE\",\"why\":\"the value is too long (over 64 KB)\"}]}\n".into(),
+                stderr: String::new(),
+            });
+            let mut out = Vec::new();
+            import(
+                &args,
+                &r,
+                &mut std::io::empty(),
+                false,
+                json,
+                true,
+                &mut out,
+            )
+            .unwrap();
+            let shown = String::from_utf8(out).unwrap();
+            assert!(
+                shown.contains("REFUSED_ONE") && shown.contains("too long"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains("SILENT_ONE") && shown.contains("gave no reason"),
+                "{shown}"
+            );
+            assert!(!shown.contains("it was not stored"), "{shown}");
+            for needle in [SENTINEL, "refused-0123", "silent-0123"] {
+                assert!(!shown.contains(needle), "{needle} (json={json}): {shown}");
+            }
         }
     }
 

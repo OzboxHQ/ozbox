@@ -1440,6 +1440,7 @@ pub(super) fn command(
             first_boot,
             strict_checkpoint: quiesce_mode.strict,
             legacy_checkpoint: quiesce_mode.legacy,
+            no_checkpoint: quiesce_mode.none,
         },
     )
 }
@@ -1475,6 +1476,8 @@ pub(super) struct Around<'a> {
     pub strict_checkpoint: bool,
     /// `--legacy-checkpoint`: on a box whose agent is older, use its own checkpoint (a visible branch that may be pushed).
     pub legacy_checkpoint: bool,
+    /// `--no-checkpoint`: on a box whose agent is older, go on with no checkpoint (named, so it is never assumed).
+    pub no_checkpoint: bool,
 }
 
 /// The first-boot side of an upgrade: the hash this program renders (its own copy, or developer modules), `--reprovision`
@@ -2375,9 +2378,20 @@ pub(super) fn execute(
     });
     // what will end when the box stops, read (never changed) before the plan shows
     let stopping = crate::quiesce::needed(&plan, &rec);
+    let mode = crate::quiesce::Mode {
+        strict: around.strict_checkpoint,
+        legacy: around.legacy_checkpoint,
+        none: around.no_checkpoint,
+    };
+    // a box whose agent is older needs the person to choose its checkpoint by name; refused after the plan is shown
+    let mut older_refusal = None;
     if stopping {
-        plan.notes
-            .extend(crate::quiesce::preview(agent, &rec).notes(name.as_str()));
+        let preview = crate::quiesce::preview(agent, &rec);
+        plan.notes.extend(preview.notes(name.as_str()));
+        match crate::quiesce::older_choice(&preview.service, mode, name.as_str()) {
+            Ok(note) => plan.notes.extend(note),
+            Err(refusal) => older_refusal = Some(refusal),
+        }
     }
     if !f.json {
         print!("{plan}");
@@ -2427,6 +2441,9 @@ pub(super) fn execute(
             },
         );
     }
+    if let Some(refusal) = older_refusal {
+        return Err(CliError::Msg(refusal));
+    }
     confirm(&plan, f)?;
 
     // The copy of the old system disk is taken NOW, before the box is made ready for its stop: the hold the box puts on new runs
@@ -2455,10 +2472,7 @@ pub(super) fn execute(
             let q = crate::quiesce::perform(
                 agent,
                 &rec,
-                &crate::quiesce::Opts::command(crate::quiesce::Mode {
-                    strict: around.strict_checkpoint,
-                    legacy: around.legacy_checkpoint,
-                }),
+                &crate::quiesce::Opts::command(mode),
                 &crate::quiesce::RealPace::new(),
             );
             hold = Some(crate::quiesce::Hold::new(agent, &rec));
@@ -2836,6 +2850,7 @@ mod tests {
                 },
                 strict_checkpoint: false,
                 legacy_checkpoint: false,
+                no_checkpoint: false,
             },
         );
         (r, asked.load(Ordering::SeqCst))
@@ -2932,6 +2947,7 @@ mod tests {
                 first_boot: FirstBootOpts::default(),
                 strict_checkpoint: false,
                 legacy_checkpoint: false,
+                no_checkpoint: false,
             },
         )
     }
@@ -3173,6 +3189,180 @@ mod tests {
             }
             Err(AgentError::Unsupported("none".into()))
         }
+    }
+
+    /// A box whose agent predates the quiesce service (it answers 404), and counts what it was asked.
+    struct OlderAgent {
+        inner: FirstBootBox,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl BoxAgent for OlderAgent {
+        fn metrics_now(
+            &self,
+            r: &BoxRecord,
+            t: u64,
+        ) -> std::result::Result<MetricsSample, AgentError> {
+            self.inner.metrics_now(r, t)
+        }
+        fn metrics_series(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+            c: u64,
+        ) -> std::result::Result<Vec<MetricsSample>, AgentError> {
+            self.inner.metrics_series(r, a, b, c)
+        }
+        fn selftest(&self, r: &BoxRecord, t: u64) -> std::result::Result<SelfTest, AgentError> {
+            self.inner.selftest(r, t)
+        }
+        fn incidents(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+        ) -> std::result::Result<Vec<Incident>, AgentError> {
+            self.inner.incidents(r, a, b)
+        }
+        fn quiesce_call(
+            &self,
+            _: &BoxRecord,
+            method: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, serde_json::Value), AgentError> {
+            if let Ok(mut g) = self.calls.lock() {
+                g.push(format!("quiesce {method}"));
+            }
+            Ok((404, serde_json::json!({})))
+        }
+        fn checkpoint(
+            &self,
+            _: &BoxRecord,
+        ) -> std::result::Result<crate::serve::agent::CheckpointOutcome, AgentError> {
+            if let Ok(mut g) = self.calls.lock() {
+                g.push("checkpoint".into());
+            }
+            Err(AgentError::Unsupported("none".into()))
+        }
+    }
+
+    fn upgrade_older(
+        agent: &OlderAgent,
+        p: &dyn Provider,
+        name: &BoxName,
+        legacy: bool,
+        none: bool,
+        dry_run: bool,
+    ) -> Result<()> {
+        execute(
+            p,
+            agent,
+            name.clone(),
+            Some("fake-image-2".into()),
+            false,
+            &Flags {
+                yes: true,
+                dry_run,
+                json: true,
+            },
+            Waits {
+                timeout: Duration::from_millis(1),
+                poll: Duration::from_millis(1),
+            },
+            &Around {
+                store_check: &|_, _| StoreCheck {
+                    fate: StoreFate::Kept,
+                    detail: "kept".into(),
+                },
+                accept_new_store: false,
+                old_disk: OldDisk::NotOffered,
+                recover: &|_, _| None,
+                restore_backups: &|_, _| None,
+                restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
+                memory_guard: &|_, _| None,
+                refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                review_signers: &|_| None,
+                place_escrow: &|_, _| None,
+                first_boot: FirstBootOpts::default(),
+                strict_checkpoint: false,
+                legacy_checkpoint: legacy,
+                no_checkpoint: none,
+            },
+        )
+    }
+
+    /// B4-18 item 7: on a box whose agent is older, neither checkpoint is chosen for the person, not even with --yes. The
+    /// command is refused before anything changes until --legacy-checkpoint or --no-checkpoint is named; a dry run shows
+    /// the plan and is never refused.
+    #[test]
+    fn an_older_agent_needs_its_checkpoint_chosen_by_name_even_with_yes() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let older = || OlderAgent {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let image = |p: &dyn Provider| -> std::result::Result<Option<String>, String> {
+            Ok(p.get(&n)
+                .map_err(|e| e.to_string())?
+                .ok_or("gone")?
+                .spec
+                .image)
+        };
+        let before = image(&p)?;
+
+        // a dry run is not refused
+        let a = older();
+        upgrade_older(&a, &p, &n, false, false, true).map_err(|e| e.to_string())?;
+        assert_eq!(image(&p)?, before);
+
+        // --yes alone: refused, nothing changed, the box was never asked to get ready or to checkpoint
+        let a = older();
+        let e = upgrade_older(&a, &p, &n, false, false, false)
+            .err()
+            .ok_or("an older agent with no choice went on")?
+            .to_string();
+        assert!(
+            e.contains("--legacy-checkpoint")
+                && e.contains("--no-checkpoint")
+                && e.contains("Nothing was changed"),
+            "{e}"
+        );
+        assert_eq!(image(&p)?, before, "nothing changed");
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(
+            calls,
+            vec!["quiesce GET".to_string()],
+            "only the read-only preview"
+        );
+
+        // --no-checkpoint: goes on, with no checkpoint and no POST
+        let a = older();
+        upgrade_older(&a, &p, &n, false, true, false).map_err(|e| e.to_string())?;
+        assert_eq!(image(&p)?.as_deref(), Some("fake-image-2"));
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert!(!calls.contains(&"checkpoint".to_string()), "{calls:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_older_agent_with_legacy_checkpoint_uses_its_checkpoint() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let a = OlderAgent {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        upgrade_older(&a, &p, &n, true, false, false).map_err(|e| e.to_string())?;
+        let calls = a.calls.lock().map_err(|e| e.to_string())?.clone();
+        assert!(calls.contains(&"checkpoint".to_string()), "{calls:?}");
+        Ok(())
     }
 
     /// The hold the box puts on new runs lasts ten minutes from the start of its preparation for the stop, and a first copy of a
@@ -4544,6 +4734,7 @@ mod tests {
                     },
                     strict_checkpoint: false,
                     legacy_checkpoint: false,
+                    no_checkpoint: false,
                 },
             )
         };
