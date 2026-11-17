@@ -1,6 +1,6 @@
 # 0041 — One approval model: the box files a request, a person decides it where they are, and the box hands the decision to the waiting operation
 
-**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
+**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
 0 Critical, 6 High, 12 Medium, 6 Low, and the owner's decisions of the same day. This text is one current design that answers the
 review. **Phases 1 and 2 are built (see the notes below); phase 3 and the rest are not.** It amends ADR 0028 (item 4 and Amendments 1 to 3: the approval gate, codes and the laptop
 key), ADR 0023 (the commit barrier's override) and ADR 0029 Amendment 6 §3 and §6 (the ingress account and who may approve), and
@@ -688,6 +688,17 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
 - Agent approvals, tool requests and Production use keep their own stores; only the envelope, table, inbox and audit words are
   shared. A fourth kind of gate must choose its store with the gate that spends.
 - The `secret-use` (Production) row is a pointer to ADR 0029, which keeps its own issuer; the no-software-key rule is repeated in its Amendment 9 §4.
+- **Legacy codes and the box's own acts.** Closed by the review fix of 2026-11-17 (Amendment of 2026-11-17, "Review fix"): on the
+  code path a software laptop key now makes no code for `policy`, `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`,
+  `box-secrets` or `host-guard`, exactly as the request table says. The first-time dashboard code on a box
+  whose only approver is a software laptop key is reached through the **first-day window** (Amendment of 2026-11-17, "First-day
+  window"). What is still not covered: during that window, a program on the owner's computer that holds the ingress key (and, on
+  AWS, the AWS sign-in) can read the code and enrol its own passkey before the owner does; and on such a box the store key's
+  escrow, a tunnel token and a declaration go through a request decided by a laptop key that proves a touch, by root, or by the
+  dashboard where it offers the change, never by this computer's software key.
+- **The issuer's laptop presence is still declared.** The issuer refuses a laptop key whose record says it does not ask the
+  person, and no setting changes that any more, but whether a key asks the person is still what its pinned record says, not a
+  verified attestation (pending phase 2, as above).
 - Not proven on a real box. Every part is Planned.
 
 ## Delegated decisions and fixes (2026-11-12, overnight)
@@ -1278,3 +1289,153 @@ Git common operations on a 4 vCPU / 8 GiB / 40 GB box, with the hooks installed 
   stored value (inside the store's lock for the policy and the limits).
 - A loosening refused for lack of a fresh second factor writes a `permission.deny` event to the audit chain, like a role
   refusal. Its detail names the act and the reason, never a value.
+
+## Amendment of 2026-11-17: the code path records its signer, and a software key never approves Production there (B4-28)
+
+**What was wrong.** §3 says a software key never decides Production, with no opt-in. The request path held that
+(`software_cell` refuses a Production subject for a key without proved presence). The legacy code path did not. A laptop key's
+signature on a challenge made a scope-only code for any scope, project and environment, and the gate checked only those three, never
+who had made the code. So a code made with a software laptop key for exactly `import`, a project and `production` was accepted, and
+the import stored the values once the person typed the Production confirmation. A test against the service in process showed it (the
+code was made and the value stored). The laptop program refusing to ask for such a code is defence in depth, not the boundary: any
+process with the ingress route can ask the box directly.
+
+**Decision.**
+
+1. **Every code records who made it**: the dashboard (after the person's passkey or authenticator code, the supervisor's step-up) or a
+   software laptop key, by id. The record is typed, not read back from the audit words, and the audit line still says
+   `dashboard-stepup` or `laptop-key:<id>`.
+2. **Every scope a code can be for has a Production rule**, in one table beside `SCOPE_RULES` (a test keeps them equal, and a scope
+   with no row is Production, the fail-safe reading):
+   - `import`: Production when its environment is not a listed non-Production one (`dev`, `development`, `staging`, `test`, `e2e`),
+     the rule of §3 (`is_production_environment`).
+   - `policy` (for the dashboard's codes; a software key approves no declaration since the review fix below): the code carries no
+     environment, so the declaration decides. It is Production when a command in it, or in the
+     declaration it replaces, takes secrets from a Production environment, or when the project's Production identifiers change (a
+     declaration that cannot be read is treated as Production).
+   - `guard-override`: a code names one change by digest. A code for anything that is not a change digest is refused for a software
+     key.
+   - `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets`, `host-guard`: first written here as the box's own
+     settings, not Production. **Superseded by the review fix below**: they, and `policy`, are Production-tier for a software key.
+3. **A software key's code is refused for every Production act, on every path**: when the laptop asks for a challenge (before it
+   signs anything), when the code would be made, and when a code is spent. The spend is the boundary: a code an older program made is
+   refused there too, and the refusal does not spend it. A refused challenge writes a bounded `secrets.signer.refused` line
+   (`why=software-key-production`), and a refused spend a gate line with the same reason.
+4. **The refusal names what approves it**: the box's dashboard with the person's passkey or authenticator (a message in the
+   catalogue, `approval.software_key_production`). The request path's refusal now names the dashboard passkey (an owner), a laptop
+   key that needs a touch, or root.
+5. **The issuer's opt-in is gone.** `allow_laptop_without_presence` is read and ignored: a laptop key whose record says it does not
+   ask the person never approves a Production use, and no setting changes that.
+6. **Nothing else changes.** The dashboard's codes approve what they approved before, Production included. A software key's code
+   for a non-Production import, a declaration that touches no Production environment, a guard override for a change digest and the
+   box's own settings is made and spent as before. (Narrowed by the review fix below: a software key no longer approves a
+   declaration or the box's own settings.)
+
+**Tests.** The proof test (a software key's code for an exact Production import, refused for `production`, `prod`, `live` and
+`qa`, nothing stored); the gate refusing a software key's Production code that already exists, naming the dashboard, with no code
+and no value in the refusal, and the code left unspent; the dashboard still importing into Production; a software key still
+importing into each non-Production environment; a declaration with a Production command, and one that removes it, refused for a
+software key and accepted from the dashboard; a guard override for `production` refused and one for a digest made; the box's own
+scopes still taking a software key's code (reversed by the review fix below); a scope-by-scope table of what a software key may approve, and the parity of the
+Production table with `SCOPES`; on the request path, every row's software cell classified and a software key refused for each
+Production import (four environments, a live key name, the filer's flag); the issuer refusing a software key with the old opt-in
+set.
+
+**Benchmark.** None: the approval gate is not on a measured path.
+
+**Not proven on a real box.** Planned: a laptop's `ozbox secrets approve --scope import --env production` against a real box,
+refused with the sentence above, and a dashboard code for the same import accepted.
+
+### Review fix (2026-11-17): one software-key table for both paths, and an import judged by what it carries
+
+An independent review of this amendment found two gaps, both fixed in the same change.
+
+- **High: the code path's own table let a software key approve the box's own acts.** Its rows called `tunnel-token`,
+  `signer-enroll`, `setup-code`, `kek-export`, `box-secrets` and `host-guard` "not Production", so a software laptop key's code was
+  made and spent for them, while the request table (§3.1, `software: never`) refuses all of them, and `policy` too. The attack is a
+  program on the owner's computer that can use the keychain key: it mints a `kek-export` code and takes the file-kept store key (which
+  opens every Production value), or a `setup-code` code and enrols its own passkey, which then approves anything as the dashboard.
+  **Decision:** the code path no longer keeps a table of its own. Its tier is read from the request table's `software` column, the
+  column the request path's software cell reads too (`member-level` is one change by digest, `new-non-production-names` is judged by
+  the environment and what the import carries, `never` is refused always). So a software key makes and spends no code for `policy`,
+  `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets` or `host-guard` on either path, and the two cannot
+  drift. The refusal for these says a software key never approves them and names a laptop key that proves a touch, root, or the
+  dashboard where it offers the change (`approval.software_key_never`).
+- **Medium: a legacy import was judged by its environment's name alone.** A software key's code for `staging` carrying
+  `STRIPE_LIVE_KEY`, or a value starting `sk_live_`, was accepted, while the request path treats the same import as Production (a name
+  that says production or live; a live-mode or production-looking value). **Decision:** at the legacy import's spend the box reads the
+  rows with the request path's own helpers (`name_says_production`, `value_says_production`), and an import whose names or values say
+  Production is Production for a software key, whatever its environment. The refusal does not spend the code.
+
+**Consequence.** On a box whose only approver is this computer's software key, `ozbox secrets ingress escrow`, a tunnel token set
+with this computer's key, and a declaration approved by it are refused; they go through a request decided by a laptop key that proves
+a touch, or by root (see "what is not covered"). The first-time dashboard code has its own route, the first-day window below.
+
+**Tests.** Each fails on the code before the fix: a software key gets no code for any of the six box scopes and a code that somehow
+exists for `kek-export` or `setup-code` is refused at the gate, unspent; a software key gets no `policy` code and one that exists is
+refused for a staging-only declaration as for a Production one; a software key's `staging` code is refused for an import with a key
+named live or production, a `sk_live_` value or a production address, nothing stored and the code left good for an ordinary import;
+the set of scopes a software key never decides is the same on both paths, read from `RULES`.
+
+### First-day window (2026-11-17): the first-time dashboard code through the sealed route, until the first enrolment or a day
+
+**Why.** The review fix leaves a box made by `ozbox create` with one approver, the computer's software key, which never approves
+`setup-code`. The dashboard's first-time code is how the first passkey or authenticator is enrolled, so the owner could not set the
+dashboard up. Owner decision (2026-11-17): the code comes through the sealed ingress route with no approval, for that first day only.
+The root helper's admin action was considered and refused: `ozbox admin` reaches the root helper through the box user's own account,
+and root writes its answer where the box user reads it, so any agent on the box could ask for the code.
+
+**Decision.**
+
+1. The window is open only while **no approver of any kind is enrolled** (no passkey, no authenticator, and no laptop key that
+   `ozbox create` pinned: the enrolled marker is absent) **and** it is within **24 hours of the box's first secrets-service start**.
+   While it is open the secrets service answers the sealed `setup_code` request with no approval. The audit line says
+   `via=ingress-first-day`; it never holds the code. (Second independent review, Medium: the first version had no time limit and
+   ignored a pinned key, so a stolen ingress key could read the code on a box whose pinned key used to have to approve it.)
+   On a box with a pinned laptop key the window is never open: `setup-code` needs that key's approval as before, and it must be a key
+   whose touch was proved (a plain software key stays refused, review H1).
+   The start time is kept in the encrypted store under a reserved name, written once at the service's first start; a restart never
+   resets it, and the box user's sockets and the dashboard cannot write or remove it. Only **root** (the admin socket,
+   `setup_window_extend`) can start the day again, audited as `secrets.setup-code.window-extended`, and never after an enrolment has
+   closed the window for good. After 24 hours the request with no approval is refused with the sentence that says to sign in to the
+   dashboard or approve from the computer that holds the key.
+2. The dashboard tells the service on **every** enrolment, passkey or authenticator, and at every start once anyone is enrolled, through
+   a new call, `setup_code_close`, on the supervisor's own socket only (a folder only the supervisor's user may enter). The service
+   records the window closed in its encrypted store under a reserved name and forgets the code it holds. The record survives restarts;
+   no socket of the box user's, and not the supervisor, can write or remove it; nothing in the program removes it. The window never
+   reopens, even if every approver is later removed.
+3. Once closed, the sealed request without an approval is refused with a sentence that says someone is enrolled and to sign in to the
+   dashboard. With an approval it is judged as before, and a software laptop key never gives one (review H1).
+4. `ozbox secrets ingress setup-code` sends no approval and no longer uses this computer's key.
+
+**What reaching the route takes**, from the code (`sshconfig::ingress_block`, `ingress_client::send`, `ingress_guard`):
+
+- **On AWS**: `ssh` to the box's ingress alias, whose proxy command pushes this computer's ingress key
+  (`~/.ssh/ozbox_ingress_ed25519.pub`) for the `ozbox-ingress` account through EC2 Instance Connect for 60 seconds, then opens the
+  connection with `aws ssm start-session` (`AWS-StartSSHSession`). So it takes **an AWS sign-in allowed to start a Session Manager
+  session to that instance** (and to send an SSH public key to it through EC2 Instance Connect, unless the key is already in the
+  account's list) **and the ingress private key** on that computer.
+- **On Hetzner**: no cloud sign-in is in the path. The route is the box's SSH route, a Headscale tailnet this computer is signed in to
+  or a Cloudflare tunnel opened with `cloudflared access ssh`, to the `ozbox-ingress` account, whose only key is the one pinned when
+  the box was made, in a root-owned file. So it takes **the ingress private key and a way onto that route**, not a cloud sign-in.
+- **On every provider**, the account is forced to run `ozbox secrets receive` and nothing else, its key list is root-owned, its key is
+  never the box user's, and its socket is in a folder only the secrets user and that account may enter. **No process of the box user
+  can reach the route**, so no agent on the box can read the code through it.
+
+**Residual risk.** During the window only, a program on the owner's computer that holds the ingress key (and, on AWS, can use the AWS
+sign-in) can read the code and enrol its own passkey first. The owner then finds the code refused when they use it. The window ends
+at the first enrolment or 24 hours after the box's first service start, whichever is first, and the code lasts 30 minutes. A box
+with a pinned laptop key has no window at all, so this risk is absent there. A box left unenrolled for a day needs an approval
+(or root's extension) to get the code.
+
+**Tests.** The window open: the code read through the sealed route with no approval on a fresh box. Refused when an approver is
+enrolled (a pinned key), and after 24 hours (a clock passed in); a restart keeps the clock; the box user, the dashboard and the sealed
+route cannot move or write it, root can extend it before an enrolment and never after. Only the
+supervisor closes it (the box, locked box, import, runner, broker, ingress, unsealed and admin sockets cannot, and a sealed close is
+refused). Neither the box user nor the dashboard can write or remove the record. After the close the code is gone, the read with no
+approval is refused, a software key's code is refused (none is made, one that exists is refused), and a fresh service on the same store
+keeps it closed. The code is in no file the service wrote. Every passkey or authenticator enrolment in the dashboard closes the window,
+and signing in does not.
+
+**Benchmark.** None. **Not proven on a real box.** Planned: on a new AWS box and a new Hetzner box, `ozbox secrets ingress setup-code
+--box <box>` prints the code before anyone enrols, and after a passkey is enrolled it is refused with the sentence above.

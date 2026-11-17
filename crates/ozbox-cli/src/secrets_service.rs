@@ -491,6 +491,9 @@ impl Gates {
     /// if the write fails ([`crate::secrets_approval::ApprovalGate::consume_then`]), the lock not held across the write. Check everything that does not depend on the approval BEFORE
     /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
     /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
+    ///
+    /// `declared` says what the caller knows of the change: it touches Production (a declaration with a Production command), so a
+    /// code a software key made is refused for it (ADR 0041 §3). It can only make the gate stricter.
     #[allow(clippy::too_many_arguments)]
     pub fn require_then<T>(
         &self,
@@ -499,6 +502,7 @@ impl Gates {
         project: &str,
         env: &str,
         approval: &str,
+        declared: bool,
         now_ms: u64,
         effect: impl FnOnce(&str) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -522,16 +526,26 @@ impl Gates {
             line("refused", "none why=codes-off");
             return Err(CODES_REFUSED.to_string());
         }
-        match self
-            .approvals
-            .consume_then(approval, scope, project, env, now_ms, |via| {
+        match self.approvals.consume_then_tiered(
+            approval,
+            scope,
+            project,
+            env,
+            declared,
+            now_ms,
+            |via| {
                 let out = effect(via)?;
                 line("allowed", via);
                 Ok(out)
-            }) {
+            },
+        ) {
             Ok(out) => Ok(out),
             Err(ConsumeThen::Effect(e)) => {
                 line("kept", "none");
+                Err(e)
+            }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
                 Err(e)
             }
             Err(ConsumeThen::Approval(e)) => {
@@ -573,6 +587,40 @@ impl Gates {
         approval: &str,
         now_ms: u64,
     ) -> Result<String, Refusal> {
+        self.require_typed_tiered(store, scope, project, env, approval, false, now_ms)
+    }
+
+    /// [`Gates::require`] for an act the spender knows more about: `declared` says the thing being approved touches Production
+    /// (an import whose names or values say so), which only ever makes the signer rule stricter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn require_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, String> {
+        self.require_typed_tiered(store, scope, project, env, approval, declared, now_ms)
+            .map_err(|r| match r {
+                Refusal::NoApprover(m) | Refusal::Approval(m) => m,
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_typed_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, Refusal> {
+        use crate::secrets_approval::ConsumeThen;
         let line =
             |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
         if !store
@@ -595,13 +643,18 @@ impl Gates {
         }
         match self
             .approvals
-            .consume(approval, scope, project, env, now_ms)
+            .consume_tiered(approval, scope, project, env, declared, now_ms)
         {
             Ok(via) => {
                 line("allowed", &via);
                 Ok(via)
             }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
+                Err(Refusal::Approval(e))
+            }
             Err(e) => {
+                let e = e.into_message();
                 line("refused", "none");
                 Err(Refusal::Approval(if approval.is_empty() {
                     "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
@@ -990,7 +1043,12 @@ pub fn handle_from(
                 Resp::fail(&format!("{n} is already stored for this project and environment, and this box has no second factor enrolled, so it cannot be replaced from the box. Enrol a passkey in the dashboard (or make the box with `ozbox create` from a computer with a keychain), then import it with an approval"))
             } else {
                 let gate = if r.request_id.is_empty() {
-                    gates.require(store, "import", &r.project, &r.env, &r.approval, now)
+                    // a legacy code is judged by what the import carries as well as by its environment's name, with the
+                    // request path's own helpers: a key named live, or a live-mode value, makes it Production for a software key
+                    let declared = crate::secrets_signer::import_says_production(
+                        lines.iter().map(|l| (l.name.as_str(), l.value.as_str())),
+                    );
+                    gates.require_tiered(store, "import", &r.project, &r.env, &r.approval, declared, now)
                 } else {
                     spend_import_request(store, gates, &r.project, &r.env, &lines, &r.request_id, &r.salt, now)
                 };
@@ -1063,6 +1121,11 @@ pub fn handle_from(
                     &r.project,
                     "",
                     &r.approval,
+                    // a declaration that touches Production is never approved by a key kept on a computer (ADR 0041 §3); one
+                    // whose current declaration cannot be read is treated as touching it, the stricter reading
+                    crate::workload_policy::load(store, &r.project).map_or(true, |cur| {
+                        crate::secrets_signer::declaration_touches_production(&p, cur.as_ref())
+                    }),
                     now,
                     |via| {
                         crate::workload_policy::save(store, &r.project, &p).map_err(|e| e.0)?;
@@ -1140,22 +1203,51 @@ pub fn handle_from(
                 Err(e) => Resp::fail(e),
             }
         }
-        (Policy::Unsealed, "setup_code") => match gates
-            .require(store, "setup-code", "", "", &r.approval, now)
-            .and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string()))
-        {
-            Ok(code) => {
-                gates.audit_event(store, "secrets.setup-code.read", "", "via=ingress");
-                Resp {
-                    value: Some(code),
-                    ..Resp::ok()
+        // The dashboard says a person enrolled a passkey or an authenticator: the first-day window closes for good (a reserved
+        // name in the store, so a restart keeps it closed) and the held code is forgotten. The supervisor's socket only.
+        (Policy::Supervisor, "setup_code_close") => {
+            match store.set(crate::secrets_ingress::SETUP_WINDOW_CLOSED, "1") {
+                Ok(()) => {
+                    gates.setup_code.clear();
+                    gates.audit_event(store, "secrets.setup-code.window-closed", "", "via=dashboard");
+                    Resp::ok()
                 }
+                Err(e) => Resp::fail(&e.0),
             }
-            Err(e) if e == "none" => Resp::fail(
-                "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
-            ),
-            Err(e) => Resp::fail(&e),
-        },
+        }
+        // The first-day window (ADR 0041, Amendment of 2026-11-17): until the dashboard says a person enrolled a passkey or an
+        // authenticator, the code is read through this sealed route with no approval. Reaching the route takes the owner's
+        // ingress key (and, on AWS, the AWS sign-in that opens the session); no process of the box user can. Once closed, the
+        // code needs an approval, which a software laptop key never gives (review H1).
+        (Policy::Unsealed, "setup_code") => {
+            let refusal = crate::secrets_ingress::setup_window_refusal(store, now);
+            let first_day = refusal.is_none();
+            let gate = if first_day {
+                Ok(String::new())
+            } else if r.approval.is_empty() {
+                Err(crate::messages::t(refusal.unwrap_or("ingress.setup_window_closed"), &[]))
+            } else {
+                gates.require(store, "setup-code", "", "", &r.approval, now)
+            };
+            match gate.and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string())) {
+                Ok(code) => {
+                    let via = if first_day {
+                        "via=ingress-first-day"
+                    } else {
+                        "via=ingress"
+                    };
+                    gates.audit_event(store, "secrets.setup-code.read", "", via);
+                    Resp {
+                        value: Some(code),
+                        ..Resp::ok()
+                    }
+                }
+                Err(e) if e == "none" => Resp::fail(
+                    "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
+                ),
+                Err(e) => Resp::fail(&e),
+            }
+        }
         // A copy of the file-kept store key for the owner's keychain, so an upgrade that replaces the system disk can put it
         // back (ADR 0029 Amendment 6 section 9). Only a sealed request from the owner's computer; recorded; never logged.
         (Policy::Unsealed, "kek_export") => match (
@@ -1193,7 +1285,7 @@ pub fn handle_from(
                 &r.scope,
                 &r.project,
                 &r.env,
-                "dashboard-stepup",
+                &crate::secrets_signer::Signer::Dashboard,
                 now,
                 crate::secrets_approval::DEFAULT_TTL_MS,
             ) {
@@ -1250,6 +1342,20 @@ pub fn handle_from(
                     ..Resp::ok()
                 },
                 Err(e) => Resp::fail(&e.0),
+            }
+        }
+        // Root alone can start the first-day window's day again (never after the first enrolment closed it): the box user,
+        // the dashboard and the owner's sealed route cannot.
+        (Policy::Admin, "setup_window_extend") => {
+            match store.exists(crate::secrets_ingress::SETUP_WINDOW_CLOSED) {
+                Ok(false) => match store.set(crate::secrets_ingress::SETUP_WINDOW_STARTED, &now.to_string()) {
+                    Ok(()) => {
+                        gates.audit_event(store, "secrets.setup-code.window-extended", "", "via=admin");
+                        Resp::ok()
+                    }
+                    Err(e) => Resp::fail(&e.0),
+                },
+                _ => Resp::fail("the first-day window was closed by an enrolment and never reopens"),
             }
         }
         (Policy::Admin, "unenroll") => match store.delete(crate::secrets_approval::ENROLLED_MARKER)
@@ -1627,6 +1733,8 @@ pub fn serve_gates(
     broker: Option<Arc<Broker>>,
     gates: Arc<Gates>,
 ) {
+    // the first-day window's clock starts with the box's first service start and survives every restart
+    crate::secrets_ingress::start_setup_window(store.as_ref(), crate::tokenmac::now_ms());
     let mac = Arc::new(TokenMac::new(store.clone() as Arc<dyn SecretStore>));
     let gate = Arc::new(IssuerGate::default());
     let mut handles = Vec::new();

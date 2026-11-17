@@ -989,7 +989,14 @@ mod enrol {
     fn mint_enroll_code(r: &Rig, id: &str) -> String {
         r.gates
             .approvals
-            .mint("signer-enroll", id, "", "dashboard-stepup", T, 60_000)
+            .mint(
+                "signer-enroll",
+                id,
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                T,
+                60_000,
+            )
             .unwrap()
     }
 
@@ -1002,12 +1009,13 @@ mod enrol {
         r.store
             .set(crate::secrets_approval::ENROLLED_MARKER, "1")
             .unwrap();
-        // the laptop's challenge route is open
+        // the laptop's challenge route is open (for a non-Production import: a key kept on a computer never approves
+        // Production, ADR 0041 §3, and an import with no environment named is not a known non-Production one)
         assert!(handle(
             &r.store,
             &r.gates,
             Policy::Unsealed,
-            &json!({"op":"approval_challenge","key_id":"first","scope":"import"}),
+            &json!({"op":"approval_challenge","key_id":"first","scope":"import","env":"staging"}),
             T
         )
         .is_ok());
@@ -1163,7 +1171,7 @@ mod enrol {
     }
 
     #[test]
-    fn when_the_request_journal_did_not_open_the_dashboard_still_makes_no_enrolment_code_and_the_wait_still_holds(
+    fn when_the_request_journal_did_not_open_the_dashboard_still_makes_no_enrolment_code_and_a_software_key_enrols_nothing(
     ) {
         let dir = tempfile::tempdir().unwrap();
         let p: Arc<dyn KeyProvider> = Arc::new(LocalKekProvider::random("local").unwrap());
@@ -1190,22 +1198,35 @@ mod enrol {
         // the dashboard's socket enrols by a request only, and there is no journal to hold one
         let code = gates
             .approvals
-            .mint("signer-enroll", "evil", "", "dashboard-stepup", T, 60_000)
+            .mint(
+                "signer-enroll",
+                "evil",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                T,
+                60_000,
+            )
             .unwrap();
         let e = handle(&store, &gates, Policy::Supervisor, &json!({"op":"approval_key_enroll","key_id":"evil","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap_err();
         assert!(e.contains("approved request"), "{e}");
-        // a code enrolment through the laptop's route serves the wait, read from the store alone
+        // nor does a software laptop key enrol another key any more (who may approve is never a software key's act, on any
+        // path: review H1 of 2026-11-17): no code is made for it, and one that somehow exists is refused and enrols nothing
+        let soft = crate::secrets_signer::Signer::SoftwareKey("first".into());
+        assert!(gates
+            .approvals
+            .mint("signer-enroll", "second", "", &soft, T, 60_000)
+            .is_err());
         let code = gates
             .approvals
-            .mint("signer-enroll", "second", "", "laptop-key:first", T, 60_000)
+            .mint_unchecked_for_test("signer-enroll", "second", "", &soft)
             .unwrap();
-        handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
-            .unwrap();
-        let m = crate::approval_keystore::read_meta(&*store, "second")
+        let e = handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
+            .unwrap_err();
+        assert!(e.contains("passkey"), "{e}");
+        assert!(crate::approval_keystore::read_meta(&*store, "second")
             .unwrap()
-            .unwrap();
-        assert_eq!(m.active_from_ms, T + crate::approval_key::ENROL_WAIT_MS);
+            .is_none());
     }
 
     #[test]

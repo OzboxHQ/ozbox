@@ -701,6 +701,7 @@ impl Auth {
             last_used_ms: now,
         });
         self.save(&inner);
+        self.note_enrolled();
         if sess.level == Level::EnrollRequired {
             return self.upgrade(&mut inner, &key, true);
         }
@@ -873,6 +874,7 @@ impl Auth {
             s.pending_totp = None;
         }
         self.save(&inner);
+        self.note_enrolled();
         if sess.level == Level::EnrollRequired {
             return self.upgrade(&mut inner, &key, false);
         }

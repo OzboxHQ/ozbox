@@ -46,12 +46,7 @@ pub fn run(command: &IngressCommand, json: bool) -> Result<(), CliError> {
             on_box,
             json,
         ),
-        IngressCommand::SetupCode { on_box } => setup_code(
-            &runner,
-            crate::approval_key_cli::keychain().as_ref(),
-            on_box,
-            json,
-        ),
+        IngressCommand::SetupCode { on_box } => setup_code(&runner, on_box, json),
         IngressCommand::Requests { on_box, action } => {
             crate::approval_laptop::run(on_box, action, json)
         }
@@ -91,16 +86,13 @@ pub fn escrow(
 /// The first-time dashboard code, through the ingress route, so it never has to be read from a log the box user can read.
 pub fn setup_code(
     runner: &dyn CommandRunner,
-    keys: &dyn SecretStore,
     on_box: &BoxName,
     json: bool,
 ) -> Result<(), CliError> {
-    let approval = crate::approval_key_cli::obtain_for(runner, keys, on_box, "setup-code");
-    let v = call(
-        runner,
-        on_box.as_str(),
-        &json!({"op": "setup_code", "approval": approval.unwrap_or_default()}),
-    )?;
+    // The first-day window (ADR 0041, Amendment of 2026-11-17): while nobody has enrolled a passkey or an authenticator in the
+    // dashboard, the sealed route alone reads the code. After that the box asks for an approval this computer's software key
+    // never gives, so none is asked for here; the refusal says the dashboard is the route.
+    let v = call(runner, on_box.as_str(), &json!({"op": "setup_code"}))?;
     let code = zeroize::Zeroizing::new(v["value"].as_str().unwrap_or("").to_string());
     if code.is_empty() {
         return Err(CliError::Msg(t("ingress.bad_answer", &[])));
@@ -157,7 +149,7 @@ mod tests {
         testing::install("code-box");
         let r = RecordingRunner::new();
         reply(&r, json!({"ok": true, "value": "ABCDE-23456"}));
-        setup_code(&r, &MemorySecrets::default(), &b, true).unwrap();
+        setup_code(&r, &b, true).unwrap();
         let sent = testing::open_sent("code-box", r.calls()[0].stdin.as_ref().unwrap());
         assert_eq!(sent["op"], "setup_code");
         let r = RecordingRunner::new();
@@ -168,7 +160,7 @@ mod tests {
                     .to_string(),
             stderr: String::new(),
         });
-        let e = setup_code(&r, &MemorySecrets::default(), &b, true).unwrap_err();
+        let e = setup_code(&r, &b, true).unwrap_err();
         assert!(matches!(e, CliError::Msg(m) if m.contains("no first-time code")));
     }
 }

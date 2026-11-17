@@ -131,6 +131,9 @@ mod secrets_recover;
 mod secrets_restic;
 #[cfg(unix)]
 mod secrets_service;
+mod secrets_signer;
+#[cfg(test)]
+mod secrets_signer_tests;
 mod secrets_state;
 mod serve;
 mod settings;

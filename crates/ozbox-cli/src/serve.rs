@@ -2583,6 +2583,14 @@ pub fn serve(
             )
             .map_err(|e| e.to_string())?,
         );
+        // the first-day window closes on the first enrolment (and is closed again at every start once anyone is enrolled, so an
+        // enrolment made by an older dashboard, or a close that did not reach the service, is caught up)
+        a.set_on_enrolled(Arc::new(|| {
+            let _ = crate::secrets_ingress::close_setup_window();
+        }));
+        if a.has_second_factor() {
+            let _ = crate::secrets_ingress::close_setup_window();
+        }
         setup_code = a.issue_setup_code();
         // On a box the code goes to the secrets service, which gives it to the owner's computer through the ingress route
         // (`ozbox secrets ingress setup-code`); it is never printed where the box user reads logs.
