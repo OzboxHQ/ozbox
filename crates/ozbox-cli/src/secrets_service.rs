@@ -84,7 +84,8 @@ pub enum BoxReach {
     None,
     /// Asked whether it is set, and listed; written only through the root helper's admin action (see `box_may_write`).
     Ask,
-    /// Written, deleted, asked about and listed; never read back.
+    /// Written and deleted on the box socket of a service with no supervisor socket, asked about and listed; never read
+    /// back. A locked box socket writes nothing.
     Write,
     /// What `Write` allows, and read back, on the box socket of a service with no supervisor socket only (the dashboard then
     /// runs as the box user and sends with it). A locked box socket never reads anything back.
@@ -127,9 +128,11 @@ use NameRule::{Exact, Prefix};
 
 /// The whole access rule for the box user's socket, first match wins. The names the store keeps for its own approval keys,
 /// audit keys, ingress key and markers are checked before the table (see [`box_reach`]); a name no row matches is
-/// [`BoxReach::Write`]: the box user may store a secret of its own under it and never read it back.
+/// [`BoxReach::None`]. Both reading back and writing are allow-lists: only the `Read` rows are read back, and only the
+/// `Read` and `Write` rows are written, which are the names a box user's command or a dashboard running as the box user
+/// writes (a valid name of `secrets::valid_name`, or one a command makes).
 ///
-/// Reading back is an allow-list: only the `Read` rows. A person's sign-in and second factors and the dashboard's own keys
+/// Reading back is the shorter list: only the `Read` rows. A person's sign-in and second factors and the dashboard's own keys
 /// are `None`: the dashboard reads and writes them as its own user (`ozbox-supervisor`), never the box user. A security
 /// review (2026-11-17) found `totp-<user>` on the read list, so on a service with no supervisor socket any agent could read
 /// the owner's authenticator secret and make valid codes, and write one of its own.
@@ -146,6 +149,18 @@ pub const BOX_REACH: &[ReachRow] = &[
     row(Prefix("workload"), BoxReach::None, false), // a workload secret or a project's declaration
     // decides where the dashboard is reached from: the root helper writes it, behind a fresh approval
     row(Prefix("tunnel-token-"), BoxReach::Ask, false), // a tunnel token
+    // written by a box user's command, never read back
+    row(Exact("restic-password"), BoxReach::Write, false), // backups (`ozbox backup`, a restore)
+    row(Exact("restic-env"), BoxReach::Write, false),      // backups
+    row(Exact("restic-access-key"), BoxReach::Write, false), // backups
+    row(Exact("restic-secret-key"), BoxReach::Write, false), // backups
+    row(Prefix("model-key-"), BoxReach::Write, false), // a model provider's key (`ozbox models`, the dashboard)
+    row(Prefix("ide-password-"), BoxReach::Write, false), // a box's web IDE password
+    row(Prefix("desktop-password-"), BoxReach::Write, false), // a box's desktop password
+    row(Prefix("ide-tunnel-token-"), BoxReach::Write, false), // another box's IDE connector token (`ozbox code`)
+    row(Prefix("dashboard-tunnel-token-"), BoxReach::Write, false), // what `ozbox dashboard install` keeps for a box
+    row(Prefix("dashboard-install-"), BoxReach::Write, false),      // the same install's settings
+    row(Prefix("mesh-authkey-"), BoxReach::Write, false), // a box's mesh join key (`ozbox mesh`)
     // the dashboard sends with these; this list shrinks as the credential broker takes each over
     row(Exact("email-api-key"), BoxReach::Read, true), // a notification channel's send key
     row(Exact("telegram-bot-token"), BoxReach::Read, true), // a notification channel's send key
@@ -168,7 +183,7 @@ pub fn box_reach(name: &str) -> BoxReach {
     BOX_REACH
         .iter()
         .find(|r| r.rule.matches(name))
-        .map_or(BoxReach::Write, |r| r.box_user)
+        .map_or(BoxReach::None, |r| r.box_user)
 }
 
 /// The store's own records that a module of this service keeps (approval keys and markers, audit keys, the ingress key, the
@@ -1003,7 +1018,9 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "mac") => match decode_std(&r.msg) {
+        // The tag of a token under the internal keys: the dashboard's own (sessions, setup codes, tickets). Never the box user's,
+        // not even with no supervisor socket: there the dashboard runs as the box user and keeps process-local keys instead.
+        (Policy::Supervisor | Policy::Admin, "mac") => match decode_std(&r.msg) {
             Some(m) => Resp {
                 tags: Some(mac.tags_hex(&m, crate::tokenmac::now_ms())),
                 ..Resp::ok()
@@ -2758,8 +2775,17 @@ mod tests {
         let r = ask(
             &s,
             &m,
-            Policy::Box,
+            Policy::Supervisor,
             json!({"op":"mac","msg": encode_std(b"token")}),
+        );
+        assert_eq!(
+            ask(
+                &s,
+                &m,
+                Policy::Box,
+                json!({"op":"mac","msg": encode_std(b"token")})
+            )["ok"],
+            false
         );
         assert_eq!(r["tags"].as_array().unwrap().len(), 1);
         let keys = s.get(crate::tokenmac::KEYS_SECRET).unwrap().unwrap();
@@ -2823,7 +2849,8 @@ mod tests {
         );
         c.set("restic-password", "pw-12345678").unwrap();
         assert!(c.get("restic-password").is_err());
-        assert_eq!(c.mac_tags(b"x").unwrap().unwrap().len(), 1);
+        // the tag of a token is the dashboard's own, never the box user's
+        assert!(c.mac_tags(b"x").is_err());
         c.delete("telegram-bot-token").unwrap();
         assert!(SocketSecrets::new(d.path().join("none.sock"))
             .get("a")

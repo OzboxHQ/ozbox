@@ -927,7 +927,7 @@ fn the_await_caps_hold_and_resolve_and_the_broker_still_answer_while_they_are_fu
     let ex = r.call(
         Policy::Box,
         Some(BOX_UID),
-        json!({"op":"exists","name":"nothing"}),
+        json!({"op":"exists","name":"email-api-key"}),
     );
     assert_eq!(ex["ok"], true);
     assert!(
