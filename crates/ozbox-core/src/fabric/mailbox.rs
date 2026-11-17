@@ -388,7 +388,14 @@ impl Mailboxes {
             self.sent
                 .values()
                 .filter(|s| s.msg.from == by.me && s.msg.thread == thread)
-                .map(|s| s.msg.clone()),
+                .map(|s| {
+                    // what the sender sees of its own message: the least advanced of its recipients' states
+                    let mut m = s.msg.clone();
+                    if let Some(st) = s.recipients.values().min() {
+                        m.state = *st;
+                    }
+                    m
+                }),
         );
         v.sort_by(|a, b| (a.sent_ms, &a.id).cmp(&(b.sent_ms, &b.id)));
         v.dedup_by(|a, b| a.id == b.id);
