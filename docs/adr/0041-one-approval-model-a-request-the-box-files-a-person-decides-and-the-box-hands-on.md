@@ -320,7 +320,7 @@ Unicode lookalikes, a field moved across a boundary. **This encoding is shared:*
 | `guard-override` (push) | repo path hash, remote URL hash | the **normalised remote URL**, the pushed `ref old..new` commit ids, the match list over their text | the hook (box user) |
 | `tunnel-token` | tunnel kind | `sha256(token)`, the kind, the decoded identity (cloudflared: account tag and tunnel id) | the root helper, which reads the token file first |
 | `import` | project, environment | project, environment, sorted names, per name the classification (public or secret) and `sha256(salt, value)`, the project's **store generation** | the service, over the rows presented |
-| `policy` | the box | sha256 of the canonical serialisation **of the parsed policy**, made by one function both sides use, and of the one it replaces. This is the digest a worker checks a declaration against: it receives the approved policy and its predecessor, recomputes `approval_subject`, and accepts only declarations contained in it (ADR 0042 §5) | the service |
+| `policy` | the box | sha256 of the canonical serialisation **of the parsed policy**, made by one function both sides use, and of the one it replaces, and the **project** it is for (since the B4-27 review fix: a new project's predecessor is the digest of nothing, the same for every project). This is the digest a worker checks a declaration against: it receives the approved policy and its predecessor, recomputes `approval_subject`, and accepts only declarations contained in it (ADR 0042 §5) | the service |
 | `box-secrets` | the declaration's address | the address and the change, or its removal, hashed from the fields | the root helper's script |
 | `host-guard` | the action | the action and the change's fields | the root helper |
 | `signer-enroll` | key fingerprint | key name, key type, public half, attestation digest, enrol or revoke | the service |
@@ -1501,3 +1501,24 @@ or file.
 authenticator code, the command going on by itself. Part 2: `ozbox env policy set decl.json --project app --box <box>`, `printf '%s\n' "$TOKEN" | ozbox dashboard
 install <box> ... --token-stdin` and `ozbox box-secrets <hetzner-box> --backend openbao ...`, each with no `--approval`, approved
 on the dashboard, each command going on by itself.
+
+### Review fix (2026-11-17): a declaration's approval is bound to its project, and two open questions settled
+
+- **Medium: an approved declaration request was not bound to its project.** The `policy` subject carried the declaration's digest,
+  the one it replaces and the sensitivity, never the project. A new project's predecessor is the digest of nothing, the same for
+  every project, so an approval for project `demo` could be spent on project `app` with the same text, and a test showed it. **Decision:**
+  the project is in the subject (encoded last, after the sensitivity; the golden vectors are regenerated) and the service puts it
+  there from the request, at filing and at the spend, never from a filer's fields. The card shows it as **Project**, a field derived from
+  the bound subject. A subject with no project, as an older program would file, is refused.
+- **Open question (a), settled: one authenticator code, one use.** The dashboard keeps the last accepted time step per person, and
+  sign-in and approval read and write that same record, so a code that signed someone in cannot approve a request, and a code that
+  approved one cannot sign anyone in. No change was needed; a test now holds it.
+- **Open question (b), settled: the box-secrets binding is the root helper's own.** The request carries no binding. The root
+  helper's script works it out (`d-` and 16 hex digits of the sha256 of the role, path, address and mount) from the very words it
+  then validates and writes, and asks the gate with it; it equals the laptop's `hetzner_binding` for the same declaration. No
+  change was needed; a test now holds it, including that another vault address is checked against another binding.
+
+**Tests.** The cross-project spend refused, with the approval kept for its own project and the card naming it (fails on the code
+before the fix: the spend was accepted); a code spent on a sign-in refused for an approval and one spent on an approval refused for a
+sign-in; the root helper's binding equal to the laptop's vector and following the address written; the golden vectors, now with the
+project.

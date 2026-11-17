@@ -113,7 +113,7 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    dashboard) and `ozbox box-secrets <name>` on Hetzner (the box's own secrets declaration) each file a request for exactly
    that change, say `Waiting for approval in your dashboard: ...`, and go on once you approve it there. These are approved
    **only on the dashboard** (passkey or authenticator code); this computer's key is never offered for them. The box binds
-   each request to what it approves: the declaration's own text, the token's digest (never the token), the declaration's
+   each request to what it approves: the declaration's own text and its project, the token's digest (never the token), the declaration's
    vault address. `env policy set` takes `--wait MINUTES`; the other two wait up to 30 minutes. A guard override filed on the
    box already waits for the dashboard ([ADR 0041](../adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on.md)).
    **Not yet:** the dashboard does not take a `.env` file itself (importing from the browser is planned); `ozbox tunnel setup`
