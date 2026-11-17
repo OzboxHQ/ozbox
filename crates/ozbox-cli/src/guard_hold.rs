@@ -1062,6 +1062,63 @@ mod tests {
         assert!(!m.contains(&key), "{m}");
     }
 
+    /// ADR 0029 Amendment 17: no approval of any kind gets a push past an outage. Not a code signed on the owner's laptop (the
+    /// service that would check and spend it is the one that is down), and not a request decided elsewhere: the request side is
+    /// never even asked, so an answer from anywhere (a socket that says "approved") cannot matter.
+    #[test]
+    fn a_laptop_signed_code_or_an_approved_request_never_lets_a_push_through_an_outage() {
+        let key = payment_key();
+        for files in [
+            vec![("notes.txt", "clean\n".to_string())],
+            vec![("config.txt", format!("{key}\n"))],
+        ] {
+            let f: Vec<(&str, &str)> = files.iter().map(|(a, b)| (*a, b.as_str())).collect();
+            let d = staged(&f);
+            let refs = pushed(d.path());
+            for scanner in [Err(no_socket()), Ok(Some(&Down as &dyn Scanner))] {
+                let stop = AtomicBool::new(false);
+                let asked = std::cell::Cell::new(0u32);
+                let mut call = |_: &Value| -> Result<Value, String> {
+                    asked.set(asked.get() + 1);
+                    Ok(
+                        json!({"request": {"id": "r1", "state": "approved"}, "approval": "ABCD-EFGH-JKMN-PQRS"}),
+                    )
+                };
+                let mut say = |_: &str| {};
+                let mut flow = Flow {
+                    call: &mut call,
+                    elapsed_ms: &|| 0,
+                    say: &mut say,
+                    stop: &stop,
+                    pause: &|_| {},
+                };
+                let out = pre_push_or_degrade(
+                    d.path(),
+                    "origin",
+                    URL,
+                    &refs,
+                    scanner,
+                    // the shape of a code `ozbox secrets approve` signs with the laptop's pinned key
+                    "ABCD-EFGH-JKMN-PQRS",
+                    Some(&mut flow),
+                )
+                .unwrap();
+                let Degraded::Stop(m) = out else {
+                    panic!("a push must be stopped during an outage, whatever approval is offered")
+                };
+                assert!(
+                    m.contains("not even one signed on the owner's own computer"),
+                    "{m}"
+                );
+                assert_eq!(
+                    asked.get(),
+                    0,
+                    "no request is filed or read during an outage"
+                );
+            }
+        }
+    }
+
     #[test]
     fn with_the_service_up_a_clean_push_goes_through() {
         let d = staged(&[("notes.txt", "clean\n")]);

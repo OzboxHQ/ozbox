@@ -42,6 +42,7 @@ mod guard;
 mod guard_cli;
 mod guard_diff;
 mod guard_hold;
+mod guard_outage;
 mod guard_scan;
 mod helper_refresh;
 mod host_guard_cli;

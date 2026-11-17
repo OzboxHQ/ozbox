@@ -191,15 +191,70 @@ fn blocked(msg: String) -> Result<(), CliError> {
 /// What `post-commit` prints when the box's secrets service did not answer (`why`): the check it can still do (shapes, file names,
 /// `.env` files), the commit taken back if it fails, and the plain statement that stored values were not looked for.
 pub(crate) fn post_commit_unscanned(repo: &Path, why: &str) -> String {
-    let mut out = match guard_hold::post_commit(repo, None) {
-        Ok(Some(m)) => m,
-        Ok(None) => String::new(),
-        Err(e) => format!("ozbox: the barrier could not check the commit just made ({e}).\n"),
+    post_commit_unscanned_journalled(repo, why, None).0
+}
+
+/// [`post_commit_unscanned`], and, when `journal` is given and the commit stands, the commit's line in the outage journal (ADR
+/// 0029 Amendment 17): the audit chain is written by the service that is down, so the line waits on the box until it is back.
+/// Returns what to print and whether a line was written.
+pub(crate) fn post_commit_unscanned_journalled(
+    repo: &Path,
+    why: &str,
+    journal: Option<(&Path, crate::guard_outage::Window)>,
+) -> (String, bool) {
+    let (mut out, stands) = match guard_hold::post_commit(repo, None) {
+        // a shape was found: the commit was taken back, so there is no commit to record
+        Ok(Some(m)) => (m, false),
+        Ok(None) => (String::new(), true),
+        Err(e) => (
+            format!("ozbox: the barrier could not check the commit just made ({e}).\n"),
+            true,
+        ),
     };
     out.push_str(&format!(
         "ozbox: stored keys were not checked in the commit just made ({why}); the push will check them again.\n"
     ));
-    out
+    let mut written = false;
+    if let (Some((path, window)), true) = (journal, stands) {
+        match crate::guard_outage::record(path, repo, window, crate::tokenmac::now_ms()) {
+            Ok(_) => {
+                written = true;
+                out.push_str(&crate::messages::t("commit_guard.outage_journalled", &[]));
+            }
+            Err(e) => out.push_str(&crate::messages::t(
+                "commit_guard.outage_not_journalled",
+                &[("why", &e)],
+            )),
+        }
+    }
+    (out, written)
+}
+
+/// Before a hook does anything else, while the service answers: hand the commits made during an outage to the audit chain
+/// (ADR 0029 Amendment 17). Never stops the hook: a failure is said, and the journal is kept for the next time.
+#[cfg(unix)]
+fn replay_outage_journal() {
+    let Some(path) = crate::guard_outage::journal_path() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    let sink = crate::guard_outage::ServiceSink::on_box(box_socket());
+    match crate::guard_outage::replay(&path, &sink) {
+        Ok(r) if r.commits > 0 => eprint!(
+            "{}",
+            crate::messages::t(
+                "commit_guard.outage_replayed",
+                &[("n", &r.commits.to_string())]
+            )
+        ),
+        Ok(_) => {}
+        Err(e) => eprint!(
+            "{}",
+            crate::messages::t("commit_guard.outage_replay_failed", &[("why", &e)])
+        ),
+    }
 }
 
 fn hook(name: &str, args: &[String]) -> Result<(), CliError> {
@@ -210,8 +265,20 @@ fn hook(name: &str, args: &[String]) -> Result<(), CliError> {
     // what it can (the shapes of keys, the names of files and `.env` files) and says the stored values were not checked; the
     // push will check them again. `pre-commit` and `pre-push` degrade as ADR 0029 Amendment 15 says (see `guard_hold`).
     if let (Err(e), "post-commit") = (&s, name) {
-        eprint!("{}", post_commit_unscanned(&repo, e));
+        let journal = crate::guard_outage::Window::of(e)
+            .and_then(|w| crate::guard_outage::journal_path().map(|p| (p, w)));
+        let (said, _) = post_commit_unscanned_journalled(
+            &repo,
+            e,
+            journal.as_ref().map(|(p, w)| (p.as_path(), *w)),
+        );
+        eprint!("{said}");
         return Ok(());
+    }
+    // the service is there: what was committed while it was down goes to the audit chain first, in order
+    #[cfg(unix)]
+    if matches!(&s, Ok(Some(_))) && guard::on_box() {
+        replay_outage_journal();
     }
     // A change the barrier cannot check is stopped rather than let through. A failure names what could not be read when it is a
     // file or a commit (trying again will not help); a service that is busy is a moment's wait.
@@ -247,6 +314,25 @@ fn hook(name: &str, args: &[String]) -> Result<(), CliError> {
             // never a quiet skip: the commit stands, and what could not be read is said (the push reads it again)
             Err(e) => {
                 eprintln!("ozbox: the barrier could not check the commit just made ({e}); the push will check it again.");
+                // the service went away half way: the commit is journalled like one made while it was down
+                if let (Some(w), Some(p)) = (
+                    crate::guard_outage::Window::of(&e),
+                    crate::guard_outage::journal_path(),
+                ) {
+                    match crate::guard_outage::record(&p, &repo, w, crate::tokenmac::now_ms()) {
+                        Ok(_) => eprint!(
+                            "{}",
+                            crate::messages::t("commit_guard.outage_journalled", &[])
+                        ),
+                        Err(why) => eprint!(
+                            "{}",
+                            crate::messages::t(
+                                "commit_guard.outage_not_journalled",
+                                &[("why", &why)]
+                            )
+                        ),
+                    }
+                }
                 Ok(())
             }
         },
