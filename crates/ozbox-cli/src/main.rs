@@ -80,6 +80,7 @@ mod messages_quiesce;
 mod messages_runs;
 mod messages_sched;
 mod messages_secrets;
+mod messages_tasks;
 mod messages_tunnel;
 mod messages_v1;
 mod metadata_guard;
@@ -142,6 +143,9 @@ mod sshconfig;
 mod state;
 #[cfg(test)]
 mod systemd_props_guard;
+mod tasks_cli;
+mod tasks_ops;
+mod tasks_service;
 mod telegram;
 mod telegram_store;
 mod telegram_transcript;

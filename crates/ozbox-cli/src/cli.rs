@@ -583,6 +583,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
+    /// Tasks between two endpoints (a laptop and a box, or two boxes): typed, signed, ordered, with a state and an audit record.
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
     /// Orchestrations: one agent hands features to worker boxes. Start, follow, answer, merge.
     Orch {
         #[command(subcommand)]
@@ -2150,6 +2155,137 @@ pub enum PolicyCommand {
     Show {
         #[arg(long)]
         project: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TasksCommand {
+    /// Create this endpoint's keys and name. Run once on each side.
+    Init {
+        #[arg(long)]
+        name: String,
+    },
+    /// Print this endpoint's public identity, to hand to the other side by a way you trust.
+    Identity,
+    /// Pin the other side's identity (shows fingerprints first). `--via-arg` is one word of the command that reaches its `ozbox`;
+    /// repeat it for each word (for example `--via-arg ssh --via-arg my-box --via-arg /usr/local/bin/ozbox`, naming the program by
+    /// its absolute path so nothing on the other side's `PATH` can stand in for it). It is run as an argument list, never through a shell.
+    Pin {
+        /// A file from `ozbox tasks identity`, or `-` for standard input.
+        file: std::path::PathBuf,
+        #[arg(long = "via-arg", allow_hyphen_values = true)]
+        via_arg: Vec<String>,
+        /// Change an existing pin (a new epoch after a restore, or new keys). Compare the fingerprints first.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Start a task for a pinned peer. It is held here and delivered on the next sync.
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// Read the text from standard input.
+        #[arg(long)]
+        stdin: bool,
+        /// A note: nothing is asked, nothing is expected back.
+        #[arg(long)]
+        note: bool,
+        /// Give up after this many minutes (default 1440).
+        #[arg(long)]
+        minutes: Option<u64>,
+    },
+    /// Ask the peer to push one commit to one branch. Acts that need an approval are refused until the passkey approval path
+    /// exists, and a Production act is refused outright.
+    PushRef {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        remote: String,
+        #[arg(long = "ref")]
+        r#ref: String,
+        #[arg(long)]
+        sha: String,
+        /// The environment the push is for (for example staging). Anything not known to be non-Production counts as Production.
+        #[arg(long)]
+        env: String,
+    },
+    /// What is waiting for you: tasks you received that are not finished, and anything with news.
+    Inbox {
+        #[arg(long)]
+        all: bool,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// One task with its messages, or (with no id) the pinned peers and what waits to be sent.
+    Status {
+        id: Option<String>,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// Answer a task, and optionally move its state (only the side that received it may).
+    Reply {
+        id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        /// working, input-required, completed, failed or canceled (the last also answers a cancel the other side asked for).
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Ask for a task to stop. A cancel is a request: the other side decides.
+    Cancel { id: String },
+    /// Why a task is where it is, and who acts next.
+    Why { id: String },
+    /// Send what is waiting and take what the peer has, once.
+    Sync {
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Keep syncing every few seconds and print what is new. It runs only while you keep it open.
+    Watch {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        every: u64,
+        #[arg(long, hide = true)]
+        rounds: Option<u64>,
+    },
+    /// The answering side of a sync (run by the other side through its `--via` command). Not for people.
+    #[command(hide = true)]
+    Exchange {
+        #[arg(long)]
+        peer: String,
+    },
+    /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
+    /// accepted; every peer must pin the new epoch. On a box this needs root.
+    Restored,
+    /// Set up the box's task router as root: a system user of its own, its socket directories and the unit that runs `tasks serve`
+    /// as that user. First-boot configuration runs it; safe to run again. The setup is carried in this program, not in user-data.
+    #[command(hide = true)]
+    RouterSetup,
+    /// Run the box's task router as a service of its own (a system user that agents cannot read as). Not for people: the unit that
+    /// `ozbox tasks router-setup` writes runs it.
+    #[command(hide = true)]
+    Serve {
+        /// The directory that holds the key, the state and the mesh audit log. Only the service user may enter it.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        agent_socket: std::path::PathBuf,
+        #[arg(long)]
+        relay_socket: std::path::PathBuf,
+        #[arg(long)]
+        admin_socket: std::path::PathBuf,
     },
 }
 

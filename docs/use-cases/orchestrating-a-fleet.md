@@ -192,9 +192,26 @@ boxes instead, and `worker: reuse` uses idle boxes you already have, if your set
 
 ---
 
+## 11. Main as the hub: handing a task to a worker over a channel (Preview)
+
+Today `main` reaches a worker through your computer's connection. The hub is the route that does not: a worker dials out to `main`,
+every message is signed and sealed, and no box is opened to the internet. **The first part is built and tested with fake boxes; no box
+has a hub yet, and none has run on a real cloud box.**
+
+- `task_start` takes `transport`: `ssh` (the default, as before) or `hub`. On a box with no hub, `hub` is refused by name and nothing is added.
+- Over the hub the task is handed to the worker at once, never started by the laptop route, and `task_status` shows what the worker
+  reported (accepted, working, the commit it finished with) beside the feature.
+- **A worker is never given a Production key in this release.** The hub refuses it, the worker refuses it again on its own, and the
+  off-box issuer refuses a worker too. There is no setting that turns this off. A task also never names keys: a conductor that tries
+  is refused and it is recorded. Keys for development and staging reach a worker only with the sealed key delivery, which is not built.
+- Every hand-off and every refusal is in the audit record, with names and never values.
+
+Design: [ADR 0042](../adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main.md).
+
 ## What is not done yet
 
 - **A real cloud box and a real agent.** Everything here is tested with fake boxes and a simulated agent.
+- **The worker channel's network side** (the listener, enrolment, sealed key delivery, test lanes). Section 11 is the part that is built.
 - **A message into a worker that is mid-turn.** It is typed in only when the worker's run is a conversation; otherwise the answer waits until the worker ends its turn, then resumes it from its branch.
 - **A claims check inside the engine** before each edit (an engine hook). The tool and the worker's instructions carry it today.
 - **The test-lane box** for the merge queue, and the **stdio** transport for the tools.
