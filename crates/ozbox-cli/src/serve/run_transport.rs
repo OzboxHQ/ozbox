@@ -114,6 +114,9 @@ impl BoxRunTransport {
     }
 }
 
+/// What a run that brings its own files is told when the box's daemon predates them (ADR 0055).
+const TOO_OLD_FILES: &str =
+    "this box's agent is too old to hand a run its sign-in; run `ozbox upgrade` on the box";
 const TOO_OLD_CONTROLLED: &str =
     "this box's agent is too old to keep a browser session to this server alone; run `ozbox upgrade` on the box";
 
@@ -143,7 +146,7 @@ impl RunTransport for BoxRunTransport {
             }
         }
         // The body holds the run's environment and prompt: it lives only for this call.
-        let body = json!({
+        let mut body = json!({
             "argv": launch.argv,
             "cwd": launch.cwd,
             "env": launch.env,
@@ -154,9 +157,18 @@ impl RunTransport for BoxRunTransport {
             "stdin": launch.stdin,
             "keep_stdin_open": launch.keep_stdin_open,
             "require_capability": launch.require_capability,
-        })
-        .to_string();
-        let mut body = zeroize::Zeroizing::new(body);
+        });
+        // a run's own files (ADR 0055), only when it has any, so an older box daemon is never sent a field it would drop
+        if !launch.files.is_empty() {
+            body["files"] = Value::Array(
+                launch
+                    .files
+                    .iter()
+                    .map(|f| json!({"dir_env": f.dir_env, "path": f.path, "contents": f.contents}))
+                    .collect(),
+            );
+        }
+        let mut body = zeroize::Zeroizing::new(body.to_string());
         let (status, v) = self
             .agent
             .runs(&rec, "POST", "", body.as_bytes())
@@ -168,6 +180,13 @@ impl RunTransport for BoxRunTransport {
                     .as_str()
                     .map(str::to_string)
                     .ok_or_else(|| "the box did not say which run it started".to_string())?;
+                // a daemon that did not write the run's files would start the engine without them: stop it and say why
+                if !launch.files.is_empty()
+                    && v["files"].as_u64() != Some(launch.files.len() as u64)
+                {
+                    let _ = self.agent.runs(&rec, "DELETE", &format!("/{id}"), &[]);
+                    return Err(TOO_OLD_FILES.into());
+                }
                 if launch.require_capability {
                     match v["capability"].as_str() {
                         Some(c) => {

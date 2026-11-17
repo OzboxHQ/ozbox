@@ -500,6 +500,7 @@ pub fn worker_launch(first_line: &str, run: &WorkerRun) -> Launch {
         stdin: Some(stdin),
         keep_stdin_open: true,
         require_capability: true,
+        files: Vec::new(),
     }
 }
 

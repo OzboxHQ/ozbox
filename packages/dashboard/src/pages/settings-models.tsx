@@ -22,6 +22,7 @@ import { SecretField } from '../components/secret-field';
 import { EnginesCard } from '../components/models/engines-card';
 import { LocalAiCard } from '../components/models/local-ai-card';
 import { PricesCard } from '../components/models/prices-card';
+import { SubscriptionsCard } from '../components/models/subscriptions-card';
 import { ModelList } from '../components/models/model-list';
 import { UsageCard } from '../components/models/usage-card';
 import { t } from '../lib/i18n';
@@ -362,6 +363,7 @@ export function ModelsSection() {
       )}
       <DefaultsCard settings={settings} save={save} reload={reload} />
       <EnginesCard settings={settings} save={save} reload={reload} />
+      <SubscriptionsCard />
       <PricesCard settings={settings} save={save} reload={reload} />
       <LocalAiCard reload={reload} />
       <UsageCard />

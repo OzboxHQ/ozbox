@@ -67,6 +67,7 @@ mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
 mod skills_routes;
+mod subscription_routes;
 mod telegram_bridge;
 mod telegram_link;
 #[cfg(test)]
@@ -379,6 +380,9 @@ pub struct App {
     cost: cost_routes::CostRt,
     #[cfg(unix)]
     terminals: terminal::Sessions,
+    /// Device sign-ins for a subscription an engine reads itself (ADR 0055), and what runs the vendor's command.
+    subs: crate::subscription_signin::Flows,
+    sign_in_runner: Arc<dyn crate::subscription_signin::DeviceSignIn>,
 }
 
 #[derive(Deserialize)]
@@ -521,6 +525,15 @@ impl App {
             cost: cost_routes::CostRt::default(),
             #[cfg(unix)]
             terminals: terminal::Sessions::default(),
+            subs: Arc::default(),
+            // the demo signs in with a stand-in that makes up a sign-in; anything else runs the vendor's own command
+            sign_in_runner: if simulated_metrics {
+                Arc::new(crate::subscription_signin::DemoSignIn {
+                    wait: std::time::Duration::from_millis(1500),
+                })
+            } else {
+                Arc::new(crate::subscription_signin::ProcessSignIn)
+            },
         }
     }
 
@@ -992,6 +1005,7 @@ impl App {
                 self.demo_telegram_sent()
             }
             ["models"] if get => self.models(),
+            ["models", "subscriptions", rest @ ..] => self.subscriptions_route(req, rest),
             ["models", "catalog"] if get => self.models_catalog(),
             ["models", "usage"] if get => self.models_usage(&req.query),
             ["models", "local"] if get => self.models_local(),

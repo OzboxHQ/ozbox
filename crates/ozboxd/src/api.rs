@@ -322,6 +322,8 @@ impl AppState {
             return Response::error(400, "invalid JSON body");
         };
         let controlled = rr.require_capability;
+        // a run's own files (ADR 0055) are said back by count, so a caller knows this daemon wrote them (an older one ignores them)
+        let files = rr.files.len();
         let result = if controlled {
             lock(&self.runs)
                 .start_controlled(rr)
@@ -335,11 +337,12 @@ impl AppState {
             // the capability is in this answer and nowhere else: the daemon keeps only its hash
             Ok((id, state, Some(cap))) => Response::json(
                 201,
-                &serde_json::json!({ "id": id, "state": state, "capability": cap }),
+                &serde_json::json!({ "id": id, "state": state, "capability": cap, "files": files }),
             ),
-            Ok((id, state, None)) => {
-                Response::json(201, &serde_json::json!({ "id": id, "state": state }))
-            }
+            Ok((id, state, None)) => Response::json(
+                201,
+                &serde_json::json!({ "id": id, "state": state, "files": files }),
+            ),
             Err(e) => {
                 let status = match e {
                     RunError::Invalid(_) => 400,

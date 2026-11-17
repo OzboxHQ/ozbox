@@ -119,6 +119,9 @@ pub fn valid_name(name: &str) -> bool {
         "tunnel-token-",
         "trigger-secret-",
         "approval-key-",
+        // a subscription sign-in an engine reads itself, and its opt-in (ADR 0055): the dashboard's alone
+        "subscription-login-",
+        "subscription-optin-",
     ]
     .iter()
     .any(|p| {
@@ -151,6 +154,8 @@ pub fn is_managed_secret(name: &str) -> bool {
             "trigger-secret-",
             "ide-password-",
             "desktop-password-",
+            // a subscription sign-in and its opt-in (ADR 0055): only the Settings -> Models sign-in writes them
+            "subscription-",
         ]
         .iter()
         .any(|p| name.starts_with(p))
@@ -208,6 +213,17 @@ pub fn check_record(value: &str) -> Result<(), SecretError> {
 #[derive(Default)]
 pub struct MemorySecrets {
     map: Mutex<BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+impl MemorySecrets {
+    /// Every name held, for tests that check nothing was left behind.
+    pub fn all_names(&self) -> Vec<String> {
+        self.map
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl SecretStore for MemorySecrets {

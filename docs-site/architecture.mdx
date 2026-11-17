@@ -69,6 +69,10 @@ A supervised agent run on a real box goes through that API (ADR 0019): the promp
 given a per-run token and the address of the credential broker, never a provider key. The broker runs in `ozbox serve` on the
 operator's computer, so a reverse forward (`ssh -R 127.0.0.1:<port>:127.0.0.1:<port>`) over the connection already open to the
 box makes that one port answer on the box's own loopback address only; no port is opened to anything else.
+The one exception is an engine that must read its own subscription sign-in, and only when the owner opted that engine in
+([ADR 0055](/adr/0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone)): the dashboard sends the sign-in file in that run's start request, the daemon writes it into a folder of
+that run in the box user's runtime directory (`/run/user/<uid>/ozbox-run-files/<run>/`, memory-backed, `0700`), points the
+engine's home variable at it, and removes it when the run ends. Such a run has its box to itself.
 
 ## The web dashboard
 
