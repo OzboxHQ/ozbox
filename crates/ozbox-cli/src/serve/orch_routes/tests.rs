@@ -447,10 +447,10 @@ fn the_person_agent_token_reaches_the_tools_over_a_real_loopback_socket_and_runs
         &mut a,
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     );
-    // the 18 orchestration tools, the 5 memory and skills tools, and the host and browser tools of a person's own agent
+    // the 18 orchestration tools, the 5 memory and skills tools, the 5 messaging tools, and the host and browser tools of a person's own agent
     assert_eq!(
         l["result"]["tools"].as_array().unwrap().len(),
-        23 + crate::host_tools::TOOLS.len() + crate::browser_tools::BROWSER_TOOLS.len()
+        28 + crate::host_tools::TOOLS.len() + crate::browser_tools::BROWSER_TOOLS.len()
     );
     // a box tool goes through the server's own plan-then-apply: a clone is made, inside the limits
     let c = rpc(
