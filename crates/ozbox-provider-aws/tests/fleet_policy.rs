@@ -129,7 +129,7 @@ fn fill(v: &str, a: &Ask) -> Option<String> {
     (!out.contains("${")).then_some(out)
 }
 
-const OPERATORS: [&str; 11] = [
+const OPERATORS: [&str; 12] = [
     "StringEquals",
     "StringNotEquals",
     "StringLike",
@@ -141,6 +141,7 @@ const OPERATORS: [&str; 11] = [
     "ForAllValues:StringEquals",
     "ForAnyValue:StringEquals",
     "DateLessThan",
+    "DateGreaterThan",
 ];
 
 fn condition_holds(op: &str, key: &str, want: &[String], a: &Ask) -> bool {
@@ -171,6 +172,9 @@ fn condition_holds(op: &str, key: &str, want: &[String], a: &Ask) -> bool {
             match op {
                 "StringEquals" | "ArnEquals" | "Bool" => want.iter().any(|w| w == h),
                 "StringLike" | "ArnLike" => want.iter().any(|w| glob(w, h, false)),
+                // UTC times in one fixed form compare as text
+                "DateGreaterThan" => want.iter().any(|w| h.as_str() > w.as_str()),
+                "DateLessThan" => want.iter().any(|w| h.as_str() < w.as_str()),
                 "NumericLessThanEquals" => {
                     let (Ok(x), true) = (h.parse::<f64>(), !want.is_empty()) else {
                         return false;
@@ -190,7 +194,12 @@ fn statement_applies(s: &Value, a: &Ask) -> bool {
     }
     // a trust policy names no resource: it is the role itself
     let resources = strings(s.get("Resource"));
-    if s.get("Resource").is_some() && !resources.iter().any(|p| glob(p, &a.resource, false)) {
+    // a policy variable in a resource (`${aws:PrincipalTag/ozbox-window-box}`) is filled from the request, like one in a condition
+    if s.get("Resource").is_some()
+        && !resources
+            .iter()
+            .any(|p| fill(p, a).is_some_and(|p| glob(&p, &a.resource, false)))
+    {
         return false;
     }
     let Some(cond) = s.get("Condition").and_then(Value::as_object) else {
@@ -1048,4 +1057,467 @@ fn every_managed_policy_fits_iams_size_limit() {
         let n = text.chars().filter(|c| !c.is_whitespace()).count();
         assert!(n <= 6144, "{d:?} is {n} characters");
     }
+}
+
+// ---- a window's session policy (Amendment 2) -----------------------------------------------------------------------------------
+//
+// IAM gives a session what the role AND its session policy both allow; an explicit deny in either wins. These tests render the
+// session policy the laptop would attach for one plan, evaluate it together with the role's documents, and prove that the
+// session can do what the plan does and nothing more.
+
+use ozbox_core::{BoxName, BoxSpec, Operation, Size};
+use ozbox_provider_aws::fleet_session::{self, rfc3339, WindowGrant, WindowRequest};
+
+const NOW: u64 = 1_800_000_000;
+
+fn grant_for(op: &Operation, machine_type: Option<&str>) -> WindowGrant {
+    fleet_session::grant(&WindowRequest {
+        operation: op,
+        account_id: ACCT,
+        plan_id: "p1",
+        person: "owner",
+        now_secs: NOW,
+        window_secs: 1800,
+        machine_type,
+    })
+    .unwrap()
+}
+
+fn session_of(g: &WindowGrant) -> Value {
+    serde_json::from_str(&g.session_policy).unwrap()
+}
+
+/// The session's decision: an explicit deny from the role or the session wins; an allow needs BOTH.
+fn effective(g: &WindowGrant, a: &Ask) -> Decision {
+    let sess = vec![session_of(g)];
+    let (r, s) = (decide(&change(), a), decide(&sess, a));
+    if r == Decision::ExplicitDeny || s == Decision::ExplicitDeny {
+        Decision::ExplicitDeny
+    } else if r == Decision::Allow && s == Decision::Allow {
+        Decision::Allow
+    } else {
+        Decision::ImplicitDeny
+    }
+}
+
+/// A request from inside the window of the plan's box, a minute after it opened.
+fn in_window(g: &WindowGrant, a: Ask) -> Ask {
+    let (k, v) = &g.tags[0];
+    a.with(&format!("aws:PrincipalTag/{k}"), v)
+        .with("aws:CurrentTime", &rfc3339(NOW + 60))
+}
+
+fn on_box(a: Ask, b: &str) -> Ask {
+    managed(a).with("aws:ResourceTag/ozbox-box", b)
+}
+
+fn n(s: &str) -> BoxName {
+    BoxName::new(s).unwrap()
+}
+
+#[test]
+fn a_destroy_window_destroys_that_box_and_nothing_else() {
+    let op = Operation::Destroy {
+        name: n("dev"),
+        final_snapshot: false,
+        keep_old_system_disks: false,
+    };
+    let g = grant_for(&op, None);
+    for act in ["ec2:TerminateInstances", "ec2:DeleteVolume"] {
+        let res = if act.contains("Volume") {
+            volume("vol-1")
+        } else {
+            instance("i-1")
+        };
+        assert_eq!(
+            effective(&g, &in_window(&g, on_box(ask(act, &res), "dev"))),
+            Decision::Allow,
+            "{act} on the plan's box"
+        );
+        // the role alone would allow another managed box: the session does not
+        assert!(
+            allowed(&change(), &on_box(ask(act, &res), "other")),
+            "the role's ceiling allows it"
+        );
+        assert_eq!(
+            effective(&g, &in_window(&g, on_box(ask(act, &res), "other"))),
+            Decision::ImplicitDeny,
+            "{act} on another box"
+        );
+        // and a resource with no box tag at all
+        assert_eq!(
+            effective(&g, &in_window(&g, managed(ask(act, &res)))),
+            Decision::ImplicitDeny,
+            "{act} untagged by box"
+        );
+    }
+    // acts the plan does not make: refused although the role allows each
+    for (act, res) in [
+        ("ec2:StopInstances", instance("i-1")),
+        ("ec2:StartInstances", instance("i-1")),
+        ("ec2:CreateSnapshot", volume("vol-1")),
+    ] {
+        let a = in_window(&g, on_box(ask(act, &res), "dev"));
+        assert!(allowed(&change(), &a), "the role allows {act}");
+        assert_eq!(
+            effective(&g, &a),
+            Decision::ImplicitDeny,
+            "{act} is not in a destroy plan"
+        );
+    }
+    // the box's state objects, and no other box's
+    let st = |b: &str| {
+        in_window(
+            &g,
+            ask(
+                "s3:DeleteObject",
+                &format!("arn:aws:s3:::ozbox-tfstate-managed-{ACCT}/ozbox/boxes/{b}/main.tfstate"),
+            ),
+        )
+    };
+    assert_eq!(effective(&g, &st("dev")), Decision::Allow);
+    assert_eq!(effective(&g, &st("other")), Decision::ImplicitDeny);
+}
+
+#[test]
+fn a_destroy_that_keeps_a_final_snapshot_may_snapshot_and_only_that_box() {
+    let op = Operation::Destroy {
+        name: n("dev"),
+        final_snapshot: true,
+        keep_old_system_disks: false,
+    };
+    let g = grant_for(&op, None);
+    let snap = |b: &str| in_window(&g, on_box(ask("ec2:CreateSnapshot", &volume("vol-1")), b));
+    assert_eq!(effective(&g, &snap("dev")), Decision::Allow);
+    assert_eq!(effective(&g, &snap("other")), Decision::ImplicitDeny);
+}
+
+#[test]
+fn a_pause_window_stops_that_box_and_cannot_start_or_destroy_it() {
+    let op = Operation::Pause { name: n("dev") };
+    let g = grant_for(&op, None);
+    let stop = |b: &str| in_window(&g, on_box(ask("ec2:StopInstances", &instance("i-1")), b));
+    assert_eq!(effective(&g, &stop("dev")), Decision::Allow);
+    assert_eq!(effective(&g, &stop("other")), Decision::ImplicitDeny);
+    for act in ["ec2:StartInstances", "ec2:TerminateInstances"] {
+        assert_eq!(
+            effective(
+                &g,
+                &in_window(&g, on_box(ask(act, &instance("i-1")), "dev"))
+            ),
+            Decision::ImplicitDeny,
+            "{act}"
+        );
+    }
+    // main stays protected by the role's own deny, whatever the session says
+    let main_tagged = in_window(
+        &g,
+        on_box(ask("ec2:StopInstances", &instance("i-main")), "dev")
+            .with("aws:ResourceTag/ozbox-fleet-manager", "true"),
+    );
+    assert_eq!(effective(&g, &main_tagged), Decision::ExplicitDeny);
+}
+
+#[test]
+fn a_resume_window_starts_that_box_and_cannot_stop_it() {
+    let op = Operation::Resume { name: n("dev") };
+    let g = grant_for(&op, None);
+    let a = |act: &str| in_window(&g, on_box(ask(act, &instance("i-1")), "dev"));
+    assert_eq!(effective(&g, &a("ec2:StartInstances")), Decision::Allow);
+    assert_eq!(
+        effective(&g, &a("ec2:StopInstances")),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn a_snapshot_window_snapshots_that_boxs_volume_and_tags_it_at_birth_only() {
+    let op = Operation::Snapshot { name: n("dev") };
+    let g = grant_for(&op, None);
+    assert_eq!(
+        effective(
+            &g,
+            &in_window(
+                &g,
+                on_box(ask("ec2:CreateSnapshot", &volume("vol-1")), "dev")
+            )
+        ),
+        Decision::Allow
+    );
+    // the new snapshot carries the box's tag at birth
+    let born = |b: &str| {
+        in_window(
+            &g,
+            ask("ec2:CreateSnapshot", &snapshot("*"))
+                .with("aws:RequestTag/ozbox-managed", "true")
+                .with("aws:RequestTag/ozbox-box", b),
+        )
+    };
+    assert_eq!(effective(&g, &born("dev")), Decision::Allow);
+    assert_eq!(effective(&g, &born("other")), Decision::ImplicitDeny);
+    assert_eq!(
+        effective(
+            &g,
+            &in_window(
+                &g,
+                on_box(ask("ec2:TerminateInstances", &instance("i-1")), "dev")
+            )
+        ),
+        Decision::ImplicitDeny
+    );
+}
+
+fn volume_make(size: &str) -> Ask {
+    ask("ec2:CreateVolume", &volume("*"))
+        .with("aws:RequestTag/ozbox-managed", "true")
+        .with("ec2:VolumeType", "gp3")
+        .with("ec2:Encrypted", "true")
+        .with("ec2:VolumeSize", size)
+        .with("ec2:VolumeIops", "3000")
+        .with("ec2:VolumeThroughput", "125")
+}
+
+#[test]
+fn a_create_window_launches_the_one_box_of_the_one_type_with_the_one_disk_size() {
+    let mut spec = BoxSpec::new(n("dev"), Size::S);
+    spec.work_disk_gb = 100;
+    let op = Operation::Create { spec };
+    let g = grant_for(&op, None);
+    let launch = |b: &str, ty: &str| {
+        in_window(
+            &g,
+            good_launch()
+                .with("ec2:InstanceType", ty)
+                .with("aws:RequestTag/ozbox-box", b),
+        )
+    };
+    assert_eq!(effective(&g, &launch("dev", "m7i.xlarge")), Decision::Allow);
+    // the role allows both of these; the session names neither
+    assert!(allowed(&change(), &launch("dev", "c7i.xlarge")));
+    assert_eq!(
+        effective(&g, &launch("dev", "c7i.xlarge")),
+        Decision::ImplicitDeny,
+        "another type"
+    );
+    assert_eq!(
+        effective(&g, &launch("other", "m7i.xlarge")),
+        Decision::ImplicitDeny,
+        "another box"
+    );
+    // the /work disk is at most the plan's size, and carries the plan's box
+    let vol =
+        |size: &str, b: &str| in_window(&g, volume_make(size).with("aws:RequestTag/ozbox-box", b));
+    assert_eq!(effective(&g, &vol("100", "dev")), Decision::Allow);
+    assert!(allowed(&change(), &vol("400", "dev")));
+    assert_eq!(
+        effective(&g, &vol("400", "dev")),
+        Decision::ImplicitDeny,
+        "a larger disk"
+    );
+    assert_eq!(effective(&g, &vol("100", "other")), Decision::ImplicitDeny);
+    // a create has no business destroying, stopping or snapshotting anything
+    for (act, res) in [
+        ("ec2:TerminateInstances", instance("i-1")),
+        ("ec2:StopInstances", instance("i-1")),
+        ("ec2:DeleteVolume", volume("vol-1")),
+        ("ec2:CreateSnapshot", volume("vol-1")),
+    ] {
+        assert_eq!(
+            effective(&g, &in_window(&g, on_box(ask(act, &res), "dev"))),
+            Decision::ImplicitDeny,
+            "{act}"
+        );
+    }
+}
+
+#[test]
+fn a_clone_window_reads_only_its_source_snapshots_and_launches_the_one_type() {
+    let op = Operation::Clone {
+        from: n("src"),
+        to: n("copy"),
+        snapshot: None,
+    };
+    let g = grant_for(&op, Some("m7i.xlarge"));
+    let from_snap = |b: &str| {
+        in_window(
+            &g,
+            ask("ec2:RunInstances", &snapshot("snap-1"))
+                .with("aws:ResourceTag/ozbox-managed", "true")
+                .with("aws:ResourceTag/ozbox-box", b),
+        )
+    };
+    assert_eq!(effective(&g, &from_snap("src")), Decision::Allow);
+    assert!(allowed(&change(), &from_snap("elsewhere")));
+    assert_eq!(
+        effective(&g, &from_snap("elsewhere")),
+        Decision::ImplicitDeny,
+        "another box's snapshot"
+    );
+    let launch = |ty: &str| {
+        in_window(
+            &g,
+            good_launch()
+                .with("ec2:InstanceType", ty)
+                .with("aws:RequestTag/ozbox-box", "copy"),
+        )
+    };
+    assert_eq!(effective(&g, &launch("m7i.xlarge")), Decision::Allow);
+    assert!(allowed(&change(), &launch("c7i.xlarge")));
+    assert_eq!(
+        effective(&g, &launch("c7i.xlarge")),
+        Decision::ImplicitDeny,
+        "another type"
+    );
+    // the new box is `copy` (the window's tag), never the source
+    assert_eq!(
+        g.tags,
+        vec![("ozbox-window-box".to_string(), "copy".to_string())]
+    );
+}
+
+#[test]
+fn a_resize_window_changes_one_boxs_type_to_the_one_planned_type_only() {
+    let op = Operation::Resize {
+        name: n("dev"),
+        size: Some(Size::XS),
+        work_disk_gb: None,
+    };
+    let g = grant_for(&op, None);
+    let attr = |b: &str, ty: &str| {
+        in_window(
+            &g,
+            on_box(ask("ec2:ModifyInstanceAttribute", &instance("i-1")), b)
+                .with("ec2:Attribute/InstanceType", ty),
+        )
+    };
+    // c7i.xlarge is XS: the plan's type
+    assert_eq!(effective(&g, &attr("dev", "c7i.xlarge")), Decision::Allow);
+    // the role allows the other type and the other box; the session names neither
+    assert!(allowed(&change(), &attr("dev", "m7i.xlarge")));
+    assert_eq!(
+        effective(&g, &attr("dev", "m7i.xlarge")),
+        Decision::ImplicitDeny,
+        "not the planned type"
+    );
+    assert_eq!(
+        effective(&g, &attr("other", "c7i.xlarge")),
+        Decision::ImplicitDeny,
+        "not the plan's box"
+    );
+    // stop and start belong to the resize; terminate does not
+    let a = |act: &str| in_window(&g, on_box(ask(act, &instance("i-1")), "dev"));
+    assert_eq!(effective(&g, &a("ec2:StopInstances")), Decision::Allow);
+    assert_eq!(effective(&g, &a("ec2:StartInstances")), Decision::Allow);
+    assert_eq!(
+        effective(&g, &a("ec2:TerminateInstances")),
+        Decision::ImplicitDeny
+    );
+}
+
+#[test]
+fn nothing_is_allowed_after_the_window_ends_and_nothing_before_it_for_another_plans_box() {
+    let op = Operation::Pause { name: n("dev") };
+    let g = grant_for(&op, None);
+    let stop = ask("ec2:StopInstances", &instance("i-1"));
+    let at = |secs: u64| {
+        on_box(stop.clone(), "dev")
+            .with("aws:PrincipalTag/ozbox-window-box", "dev")
+            .with("aws:CurrentTime", &rfc3339(secs))
+    };
+    assert_eq!(effective(&g, &at(NOW + 1799)), Decision::Allow);
+    assert_eq!(
+        effective(&g, &at(NOW + 1801)),
+        Decision::ExplicitDeny,
+        "after the expiry"
+    );
+    // even a read
+    let read = ask("ec2:DescribeInstances", "*")
+        .with("aws:PrincipalTag/ozbox-window-box", "dev")
+        .with("aws:CurrentTime", &rfc3339(NOW + 5000));
+    assert_eq!(effective(&g, &read), Decision::ExplicitDeny);
+    // a session whose tag names another box finds the policy's variable naming that box
+    let wrong = on_box(stop.clone(), "dev")
+        .with("aws:PrincipalTag/ozbox-window-box", "other")
+        .with("aws:CurrentTime", &rfc3339(NOW + 60));
+    assert_eq!(effective(&g, &wrong), Decision::ImplicitDeny);
+}
+
+#[test]
+fn no_plan_window_ever_reaches_iam_kms_secrets_a_shell_or_another_role() {
+    let ops = vec![
+        Operation::Pause { name: n("dev") },
+        Operation::Destroy {
+            name: n("dev"),
+            final_snapshot: true,
+            keep_old_system_disks: false,
+        },
+        Operation::Create {
+            spec: BoxSpec::new(n("dev"), Size::S),
+        },
+        Operation::Resize {
+            name: n("dev"),
+            size: Some(Size::XS),
+            work_disk_gb: Some(300),
+        },
+    ];
+    for op in ops {
+        let g = grant_for(&op, None);
+        for (act, res) in [
+            ("iam:CreateRole", "*"),
+            ("iam:AttachRolePolicy", "*"),
+            (
+                "iam:PassRole",
+                "arn:aws:iam::123456789012:role/obx/obx-main",
+            ),
+            (
+                "iam:PassRole",
+                "arn:aws:iam::123456789012:role/obx/obx-fleet-change",
+            ),
+            ("kms:Decrypt", "*"),
+            ("secretsmanager:GetSecretValue", "*"),
+            ("ssm:GetParameter", "*"),
+            ("ssm:StartSession", "*"),
+            ("ssm:SendCommand", "*"),
+            ("sts:AssumeRole", "*"),
+            ("ec2:DeleteSnapshot", "*"),
+            ("ec2:ModifyInstanceAttribute", "*"),
+            ("s3:GetObject", "arn:aws:s3:::someone-elses-bucket/x"),
+        ] {
+            let a = in_window(
+                &g,
+                ask(act, res)
+                    .with("aws:ResourceTag/ozbox-managed", "true")
+                    .with("aws:ResourceTag/ozbox-box", "dev"),
+            );
+            assert_ne!(
+                effective(&g, &a),
+                Decision::Allow,
+                "{} window: {act} on {res}",
+                op.verb()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_window_session_is_one_the_roles_trust_accepts_and_the_guard_reads() {
+    let op = Operation::Pause { name: n("dev") };
+    let g = grant_for(&op, None);
+    let trust = doc(Doc::ChangeTrust);
+    let st = &trust["Statement"][0];
+    assert!(st["Condition"]["StringLike"]["sts:RoleSessionName"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| glob(p.as_str().unwrap(), &g.role_session_name, false)));
+    assert!(glob(
+        st["Condition"]["StringLike"]["sts:SourceIdentity"]
+            .as_str()
+            .unwrap(),
+        &g.source_identity,
+        false
+    ));
+    assert!(g.role_arn.ends_with("/obx/obx-fleet-change"));
+    // the guard's attach rule reads the session tag the grant carries
+    assert_eq!(g.tags[0].0, "ozbox-window-box");
 }
