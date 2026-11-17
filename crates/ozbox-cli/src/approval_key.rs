@@ -1172,34 +1172,19 @@ mod tests {
         }
     }
 
-    /// The approval primitive signs a dashboard sign-in replacement for exactly one settings digest, with the binding the root helper
-    /// recomputes from the staged file. (No command makes this approval with the laptop key: it is made in the dashboard.)
+    /// Integration (RC 0.3.0-beta): B4-28 says a laptop's software key never decides who may approve on a box, so the pinned key's
+    /// code for replacing the dashboard's sign-in settings is refused when it is spent. (B4-30's earlier test had it approving.)
+    /// Only the dashboard (a passkey or authenticator) approves this change.
     #[test]
-    fn the_laptop_key_approves_a_dashboard_sign_in_replacement_for_one_settings_digest_only() {
+    fn the_laptop_key_does_not_approve_a_dashboard_sign_in_replacement() {
         let r = rig();
         let (seed, pk) = generate().unwrap();
         r.enroll("laptop", &pk).unwrap();
-        let (a, b) = ("ab".repeat(16), "cd".repeat(16));
-        let out = r
+        let a = "ab".repeat(16);
+        let e = r
             .approve(&seed, "laptop", "dashboard-auth", "", &a, NOW)
-            .unwrap();
-        let code = out["code"].as_str().unwrap().to_string();
-        assert!(r
-            .gates
-            .require(&r.store, "dashboard-auth", "", &b, &code, NOW + 5)
-            .is_err());
-        assert_eq!(
-            r.gates
-                .require(&r.store, "dashboard-auth", "", &a, &code, NOW + 6)
-                .unwrap(),
-            "laptop-key:laptop"
-        );
-        assert!(
-            r.gates
-                .require(&r.store, "dashboard-auth", "", &a, &code, NOW + 7)
-                .is_err(),
-            "single use"
-        );
+            .unwrap_err();
+        assert!(e.contains("never approves"), "{e}");
     }
 
     #[test]

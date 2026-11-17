@@ -4077,10 +4077,7 @@ mod tests {
         let none = g
             .require(&s, "import", "app", "production", "", 1)
             .unwrap_err();
-        assert!(
-            none.contains("needs a fresh approval from the dashboard"),
-            "{none}"
-        );
+        assert!(none.contains("needs a fresh approval"), "{none}");
         // and a laptop-key code for another environment is still not a Production approval
         let code = g
             .approvals

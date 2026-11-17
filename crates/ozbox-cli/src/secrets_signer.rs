@@ -182,6 +182,13 @@ mod tests {
             ("kek-export", "", false, false),
             ("box-secrets", "", false, false),
             ("host-guard", "", false, false),
+            // who may approve on the box: a software key never decides it (integration of the dashboard-auth scope with B4-28)
+            (
+                "dashboard-auth",
+                "0123456789abcdef0123456789abcdef",
+                false,
+                false,
+            ),
         ];
         for (scope, env, declared, want) in rows {
             assert_eq!(
