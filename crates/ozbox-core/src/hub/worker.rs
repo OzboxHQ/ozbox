@@ -8,7 +8,9 @@
 //! the hub, and queues what it says in that link's outbox, so a report is never lost to a gap in the session.
 
 use super::engine::{Assign, ResultBody, StatusBody};
-use super::refusal::{refuse_production, AUDIT_REFUSED};
+use super::refusal::{
+    refuse_production, AUDIT_REFUSED, CODE_UNSUPPORTED, CODE_VALUE_IN_DECLARATION,
+};
 use super::wire::{Ext, Kind, Transport, WireError, PROFILE};
 #[cfg(test)]
 use crate::audit::NewEvent;
@@ -158,12 +160,11 @@ impl WorkerEnd<'_> {
         }
         st.core.tick(now);
         let cx = self.cx();
-        let r = receive_round(&mut st.core, &PROFILE, &cx, &|_, _, _| Ok(()), now, &msgs);
+        let r = receive_round(&mut st.core, &PROFILE, &cx, &screen, now, &msgs);
         let mut applied = 0;
         for d in r.deliveries {
-            let kind = Kind::parse(&d.kind);
             let level_ok = Ext::decode(&d.ext).is_some_and(|e| e.level == 0 && e.via.is_empty());
-            let (Some(kind), Ok(plain), true) = (kind, d.body, level_ok) else {
+            let Some(kind) = Kind::parse(&d.kind).filter(|_| level_ok) else {
                 st.note(now, "worker.rejected", "reason=shape".to_string());
                 continue;
             };
@@ -175,26 +176,58 @@ impl WorkerEnd<'_> {
                 );
                 continue;
             }
+            let plain = match d.body {
+                Ok(p) => p,
+                Err(code) => {
+                    // refused by the screen: the content is gone, only the kind and the code are left
+                    if code == CODE_UNSUPPORTED {
+                        applied += 1;
+                        self.unsupported(st, now, kind);
+                    } else if code == CODE_VALUE_IN_DECLARATION {
+                        st.note(
+                            now,
+                            AUDIT_REFUSED,
+                            format!("side=worker worker={} task=- code={code}", self.me),
+                        );
+                        self.status(
+                            st,
+                            now,
+                            "-",
+                            "-",
+                            "refused",
+                            "an assignment's key declaration carried more than an environment and names, so it was refused",
+                        );
+                    } else {
+                        st.note(now, "worker.rejected", "reason=shape".to_string());
+                    }
+                    continue;
+                }
+            };
             applied += 1;
             match kind {
                 Kind::TaskAssign => self.assigned(st, now, &plain),
                 Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay => {
-                    // key delivery, pins and the laptop relay are not built in this release: said, never ignored
-                    st.note(now, "worker.unsupported", format!("kind={}", kind.name()));
-                    self.status(
-                        st,
-                        now,
-                        "-",
-                        "-",
-                        "unsupported",
-                        &format!("{} is not supported in this release", kind.name()),
-                    );
+                    // the screen refuses these first; kept so a screen that ever lets one through still answers
+                    self.unsupported(st, now, kind);
                 }
                 _ => {}
             }
         }
         self.flush(st, now);
         applied
+    }
+
+    /// Key delivery, pins and the laptop relay are not built in this release: said, never ignored.
+    fn unsupported(&self, st: &mut WorkerState, now: u64, kind: Kind) {
+        st.note(now, "worker.unsupported", format!("kind={}", kind.name()));
+        self.status(
+            st,
+            now,
+            "-",
+            "-",
+            "unsupported",
+            &format!("{} is not supported in this release", kind.name()),
+        );
     }
 
     fn assigned(&self, st: &mut WorkerState, now: u64, plain: &[u8]) {
@@ -271,5 +304,32 @@ impl WorkerEnd<'_> {
     #[cfg(test)]
     pub fn say_raw(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
         self.say(st, now, kind, plain);
+    }
+}
+
+/// The worker's screen, run on a body before it is held for a gap or applied. What this release builds no use for (a key value,
+/// pins, the laptop relay) is refused here, so its content is never written to the worker's state, even while it waits for an
+/// earlier message. An assignment's key declaration may hold its environment and names and nothing else.
+fn screen(kind: &str, _ext: &[u8], plain: &[u8]) -> Result<(), &'static str> {
+    match Kind::parse(kind) {
+        Some(Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay) => {
+            Err(CODE_UNSUPPORTED)
+        }
+        Some(Kind::TaskAssign) => declaration_is_names_only(plain),
+        _ => Ok(()),
+    }
+}
+
+fn declaration_is_names_only(plain: &[u8]) -> Result<(), &'static str> {
+    // a body that is not JSON is refused as malformed when it is applied; it carries no declaration to screen
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(plain) else {
+        return Ok(());
+    };
+    match v.get("keys") {
+        None => Ok(()),
+        Some(serde_json::Value::Object(m)) if m.keys().all(|k| k == "env" || k == "names") => {
+            Ok(())
+        }
+        Some(_) => Err(CODE_VALUE_IN_DECLARATION),
     }
 }
