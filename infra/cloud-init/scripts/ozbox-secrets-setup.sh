@@ -34,6 +34,14 @@ if ! id ozbox-supervisor >/dev/null 2>&1; then
   passwd --lock ozbox-supervisor >/dev/null 2>&1 || true
 fi
 
+# The hub daemon (ADR 0042) has a user of its own too, made here for the same reason: the socket directory below names its
+# group. The daemon itself is set up only on a box that is a hub (`ozbox-hub-setup.sh`); elsewhere the user owns nothing.
+if ! id ozbox-hub >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir /var/lib/ozbox-hub --no-create-home --shell /usr/sbin/nologin \
+    --comment "Oz Box hub daemon" ozbox-hub
+  passwd --lock ozbox-hub >/dev/null 2>&1 || true
+fi
+
 cat >/etc/sysctl.d/10-ozbox-yama.conf <<'EOF_SYSCTL'
 # the box user cannot attach to processes it did not start
 kernel.yama.ptrace_scope = 1
@@ -49,6 +57,7 @@ d /run/ozbox-secrets/admin    0700 ozbox-secrets ozbox-secrets -
 d /run/ozbox-secrets/import   0750 ozbox-secrets ozbox -
 d /run/ozbox-secrets/resolver 0700 ozbox-secrets ozbox-secrets -
 d /run/ozbox-secrets/supervisor 0750 ozbox-secrets ozbox-supervisor -
+d /run/ozbox-secrets/hub      0750 ozbox-secrets ozbox-hub -
 d /run/ozbox-secrets/memory   0700 ozbox-secrets ozbox-secrets -
 d /run/ozbox-runner           0750 root ozbox -
 d /run/ozbox-runner/env       0700 root root -
@@ -74,7 +83,7 @@ EnvironmentFile=/etc/ozbox/secrets.env
 EnvironmentFile=-/etc/ozbox/box-secrets.env
 EnvironmentFile=-/etc/ozbox/bao.env
 # Hosts the credential broker and runs restic; the four capabilities are what reading and restoring /work takes.
-ExecStart=/usr/local/bin/ozbox secrets serve --box-socket /run/ozbox-secrets/box/box.sock --broker-socket /run/ozbox-secrets/broker/broker.sock --admin-socket /run/ozbox-secrets/admin/admin.sock --import-socket /run/ozbox-secrets/import/import.sock --ingress-socket /run/ozbox-secrets/ingress/ingress.sock --runner-socket /run/ozbox-secrets/resolver/resolver.sock --supervisor-socket /run/ozbox-secrets/supervisor/supervisor.sock --memory-store /run/ozbox-secrets/memory/box-secrets.json --audit-dir /work/ozbox-audit --audit-anchor-dir /work/ozbox-secrets-private/audit-anchor --persist-dir /work/ozbox-secrets-private
+ExecStart=/usr/local/bin/ozbox secrets serve --box-socket /run/ozbox-secrets/box/box.sock --broker-socket /run/ozbox-secrets/broker/broker.sock --admin-socket /run/ozbox-secrets/admin/admin.sock --import-socket /run/ozbox-secrets/import/import.sock --ingress-socket /run/ozbox-secrets/ingress/ingress.sock --runner-socket /run/ozbox-secrets/resolver/resolver.sock --supervisor-socket /run/ozbox-secrets/supervisor/supervisor.sock --hub-socket /run/ozbox-secrets/hub/hub.sock --memory-store /run/ozbox-secrets/memory/box-secrets.json --audit-dir /work/ozbox-audit --audit-anchor-dir /work/ozbox-secrets-private/audit-anchor --persist-dir /work/ozbox-secrets-private
 Restart=on-failure
 RestartSec=5
 # Exit 78 means "not configured" (no key for the store, say): it is written where the box user can read it

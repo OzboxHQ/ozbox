@@ -227,6 +227,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
             ingress_socket,
             broker_socket,
             supervisor_socket,
+            hub_socket,
             memory_store,
             audit_dir,
             audit_anchor_dir,
@@ -239,7 +240,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
             import_socket.as_deref(),
             ingress_socket.as_deref(),
             broker_socket.as_deref(),
-            supervisor_socket.as_deref(),
+            (supervisor_socket.as_deref(), hub_socket.as_deref()),
             memory_store.as_deref(),
             audit_dir
                 .as_deref()
@@ -927,7 +928,7 @@ fn serve(
     import: Option<&std::path::Path>,
     ingress: Option<&std::path::Path>,
     broker_socket: Option<&std::path::Path>,
-    supervisor: Option<&std::path::Path>,
+    (supervisor, hub): (Option<&std::path::Path>, Option<&std::path::Path>),
     memory_store: Option<&std::path::Path>,
     audit: Option<(&std::path::Path, Option<&std::path::Path>)>,
     persist: Option<&std::path::Path>,
@@ -981,7 +982,7 @@ fn serve(
             import,
             ingress,
             broker_socket,
-            supervisor,
+            (supervisor, hub),
             memory_store,
             audit,
             persist,
@@ -1144,7 +1145,7 @@ fn serve_inner(
     import: Option<&std::path::Path>,
     ingress: Option<&std::path::Path>,
     broker_socket: Option<&std::path::Path>,
-    supervisor: Option<&std::path::Path>,
+    (supervisor, hub): (Option<&std::path::Path>, Option<&std::path::Path>),
     memory_store: Option<&std::path::Path>,
     audit: Option<(&std::path::Path, Option<&std::path::Path>)>,
     persist: Option<&std::path::Path>,
@@ -1258,6 +1259,10 @@ fn serve_inner(
     )];
     if let Some(p) = supervisor {
         ls.push((listen(p, 0o750).map_err(io)?, Policy::Supervisor));
+    }
+    // the hub daemon's own socket (ADR 0042): the folder belongs to `ozbox-hub`'s group
+    if let Some(p) = hub {
+        ls.push((listen(p, 0o750).map_err(io)?, Policy::Hub));
     }
     if let Some(p) = runner {
         ls.push((listen(p, 0o750).map_err(io)?, Policy::Runner));
@@ -1424,7 +1429,7 @@ fn serve(
     _: Option<&std::path::Path>,
     _: Option<&std::path::Path>,
     _: Option<&std::path::Path>,
-    _: Option<&std::path::Path>,
+    (_, _): (Option<&std::path::Path>, Option<&std::path::Path>),
     _: Option<&std::path::Path>,
     _: Option<(&std::path::Path, Option<&std::path::Path>)>,
     _: Option<&std::path::Path>,

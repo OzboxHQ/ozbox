@@ -3139,6 +3139,75 @@ fn the_daemon_starts_after_the_box_users_manager() {
 }
 
 #[test]
+fn the_hub_daemon_runs_as_its_own_user_from_a_socket_root_binds_and_reaches_no_network() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    // stand-ins: the hub's user exists (the secrets setup made it), and every call is recorded
+    for name in ["id", "systemctl", "systemd-tmpfiles"] {
+        let p = bin.join(name);
+        let body = if name == "id" {
+            "#!/bin/sh\nexit 0\n".to_string()
+        } else {
+            format!(
+                "#!/bin/sh\necho \"{name} $@\" >> '{}'\n",
+                d.path().join("calls.log").display()
+            )
+        };
+        fs::write(&p, body)?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = [
+        ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+        ("OZBOX_HUB_NO_SYSTEMCTL", "1"),
+        ("PATH", path.as_str()),
+    ];
+    // a box id that is not one is refused before anything is written
+    let bad = sh(&script("ozbox-hub-setup.sh"), &["x;id"], &env)?;
+    assert!(!bad.status.success());
+    assert!(!etc.join("systemd/system/ozbox-hubd.service").exists());
+    let out = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(out.status.success(), "{}", text(&out));
+    let tmpfiles = fs::read_to_string(etc.join("tmpfiles.d/ozbox-hub.conf"))?;
+    // the state is the hub user's alone; the socket's folder is root's, entered by the supervisor's group
+    assert!(tmpfiles.contains("d /var/lib/ozbox-hub          0700 ozbox-hub ozbox-hub"));
+    assert!(tmpfiles.contains("d /run/ozbox-hub/supervisor   0750 root ozbox-supervisor"));
+    let sock = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.socket"))?;
+    assert!(sock.contains("ListenStream=/run/ozbox-hub/supervisor/hubd.sock"));
+    assert!(
+        sock.contains("FileDescriptorName=ozbox-hubd.socket") && sock.contains("SocketMode=0660")
+    );
+    // a socket unit never listens on a port
+    assert!(!sock.contains("ListenStream=0") && !sock.contains(":"));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+    assert!(unit.contains("User=ozbox-hub") && unit.contains("--box-id main-1"));
+    assert!(unit.contains("--secrets-socket /run/ozbox-secrets/hub/hub.sock"));
+    assert!(unit.contains("RestrictAddressFamilies=AF_UNIX"));
+    assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
+    assert!(unit.contains("CapabilityBoundingSet=\n"));
+    // no registrar until the laptop pins one; an existing file is never overwritten
+    let regs = etc.join("ozbox/hub-registrars.json");
+    assert_eq!(fs::read_to_string(&regs)?.trim(), r#"{"registrars":[]}"#);
+    fs::write(
+        &regs,
+        r#"{"registrars":[{"provider":"aws","public":"00"}]}"#,
+    )?;
+    let again = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(fs::read_to_string(&regs)?.contains("aws"));
+    // carried in the program, never in user-data
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    assert!(!t.contains("ozbox-hub-setup.sh"));
+    Ok(())
+}
+
+#[test]
 fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mode() -> R {
     let d = tempfile::tempdir()?;
     let bin = d.path().join("bin");

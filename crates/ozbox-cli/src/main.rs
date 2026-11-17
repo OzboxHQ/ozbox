@@ -126,6 +126,7 @@ mod secrets_cli;
 mod secrets_enc;
 mod secrets_escrow;
 mod secrets_file;
+mod secrets_hub;
 mod secrets_ingress;
 mod secrets_persist;
 mod secrets_recover;

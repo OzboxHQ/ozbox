@@ -219,13 +219,20 @@ has a hub yet, and none has run on a real cloud box.**
   queue with that commit. With `test_lane_box: hub:<lane>` the tests run split across workers on that commit, and the lane is never
   green while a test has no passing result; a worker that stops answering has its tests moved to another. A conflict or failing tests go
   back to the worker. Your approval to merge is unchanged.
+- **The hub's own daemon and how a worker joins are built too** (Preview, tested with real keys in CI, never run on a real box).
+  `ozbox-hubd setup <box-id>` (as root, on `main`) sets up the hub daemon; `ozbox-hubd self-test` says what holds. A worker joins only
+  with a one-use invite, an attestation from a registrar your setup pinned, and proof that it holds the attested key; the hub then plans
+  the enrolment and applies it. A Production box, `main` itself, an unknown box, a replayed attestation or a key that is not the
+  attested one is refused. Message bodies are sealed to the worker's attested key and signed by keys the secrets service holds. **Until
+  a registrar is built, no worker can enrol on a real box** (the self-test says so).
 
 Design: [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
 
 ## What is not done yet
 
 - **A real cloud box and a real agent.** Everything here is tested with fake boxes and a simulated agent.
-- **The worker channel's network side** (the listener, enrolment, sealed key delivery). Section 11 is the part that is built.
+- **The worker channel's network side** (the transport a worker dials out on, sealed key delivery, test lanes) and the registrars that
+  vouch for a worker's keys. Section 11 is the part that is built.
 - **Over the hub:** a laptop's decision on a worker, an agent's own permission asks (only requests in the worker's request book travel),
   the lane's comparison of the test list with the base branch and its report merge, and a check that the merged branch still points at
   the commit the lane tested.

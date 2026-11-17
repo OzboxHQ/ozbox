@@ -1,0 +1,33 @@
+[package]
+name = "ozbox-hubd"
+description = "The hub daemon on main (ADR 0042): its socket, worker enrolment and key attestation, and the real signer and sealer behind the hub's traits."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ozbox_hubd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ozbox-hubd"
+path = "src/main.rs"
+
+[dependencies]
+ozbox-core.workspace = true
+ozbox-seal = { path = "../ozbox-seal" }
+ozbox-listenfd = { path = "../ozbox-listenfd" }
+serde.workspace = true
+serde_json.workspace = true
+ring = "0.17"
+zeroize = { version = "1", features = ["serde"] }
+getrandom = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

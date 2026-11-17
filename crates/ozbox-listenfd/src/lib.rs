@@ -145,6 +145,16 @@ fn close_fd(fd: RawFd) {
 /// named it, the socket unit's), it is returned close-on-exec; every other passed descriptor is closed, so none can leak
 /// into a run. A descriptor that is not what the unit passes is closed and refused.
 pub fn adopt_passed(fds: &[RawFd], names: Option<&str>) -> std::io::Result<UnixListener> {
+    adopt_passed_named(fds, names, SOCKET_NAME)
+}
+
+/// [`adopt_passed`] for a socket unit of another name (`ozbox-hubd.socket`): the same checks, with `want` as the name systemd
+/// must have given the first descriptor when it named them.
+pub fn adopt_passed_named(
+    fds: &[RawFd],
+    names: Option<&str>,
+    want: &str,
+) -> std::io::Result<UnixListener> {
     let Some((&first, extra)) = fds.split_first() else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -154,12 +164,12 @@ pub fn adopt_passed(fds: &[RawFd], names: Option<&str>) -> std::io::Result<UnixL
     for &fd in extra {
         close_fd(fd);
     }
-    let name_ok = names.is_none_or(|n| n.split(':').next() == Some(SOCKET_NAME));
+    let name_ok = names.is_none_or(|n| n.split(':').next() == Some(want));
     if !name_ok || !is_listening_unix_stream(first) {
         close_fd(first);
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "the descriptor passed is not the dashboard user's listening socket",
+            "the descriptor passed is not the listening socket this unit passes",
         ));
     }
     adopt(first)
@@ -219,6 +229,11 @@ pub fn take_tcp_listeners() -> Option<std::io::Result<Vec<std::net::TcpListener>
 /// The listening socket systemd handed this process, taken once. `None`: none was passed (the service was not started
 /// from a socket unit, or it is an older host). The environment variables are removed either way.
 pub fn take_unix_listener() -> Option<std::io::Result<UnixListener>> {
+    take_unix_listener_named(SOCKET_NAME)
+}
+
+/// [`take_unix_listener`] for a socket unit of another name (`ozbox-hubd.socket`).
+pub fn take_unix_listener_named(want: &str) -> Option<std::io::Result<UnixListener>> {
     let pid = std::env::var("LISTEN_PID").ok();
     let fds = std::env::var("LISTEN_FDS").ok();
     let names = std::env::var("LISTEN_FDNAMES").ok();
@@ -229,7 +244,7 @@ pub fn take_unix_listener() -> Option<std::io::Result<UnixListener>> {
     let n: u32 = fds.as_deref()?.trim().parse().ok()?;
     let n = n.min(MAX_FDS);
     let passed: Vec<RawFd> = (first..first + n as RawFd).collect();
-    Some(adopt_passed(&passed, names.as_deref()))
+    Some(adopt_passed_named(&passed, names.as_deref(), want))
 }
 
 #[cfg(test)]
@@ -324,6 +339,20 @@ mod tests {
         assert!(adopt_passed(&[ok], None).is_ok());
         let ok = listener(&d, "ok2");
         assert!(adopt_passed(&[ok], Some("ozboxd-supervisor.socket")).is_ok());
+    }
+
+    #[test]
+    fn another_units_socket_is_taken_only_under_its_own_name() {
+        let _g = FDS.lock().unwrap_or_else(|e| e.into_inner());
+        let d = tempfile::tempdir().unwrap();
+        // the hub daemon's socket unit: the dashboard's name is not its name, and the reverse
+        let a = listener(&d, "hub-a");
+        assert!(adopt_passed_named(&[a], Some(SOCKET_NAME), "ozbox-hubd.socket").is_err());
+        assert_eq!(cloexec(a), None, "a refused descriptor is closed");
+        let b = listener(&d, "hub-b");
+        assert!(adopt_passed(&[b], Some("ozbox-hubd.socket")).is_err());
+        let ok = listener(&d, "hub-ok");
+        assert!(adopt_passed_named(&[ok], Some("ozbox-hubd.socket"), "ozbox-hubd.socket").is_ok());
     }
 
     #[test]
