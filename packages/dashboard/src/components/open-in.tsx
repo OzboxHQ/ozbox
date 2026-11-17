@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -10,15 +9,11 @@ import { useApp } from '../App';
 import { openInReason } from '../lib/connect';
 import { fillSteps, WORK_PATH, type OpenInApp, OPEN_IN_APPS } from '../lib/open-in-apps';
 import { t } from '../lib/i18n';
+import { copyAndSay } from '../lib/copy-and-say';
 import { useAsync } from '../lib/use-async';
 
-async function copy(text: string, what: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.success(t('openin.copied', { what }));
-  } catch {
-    toast.error(t('openin.copy_failed', { what: what.toLowerCase() }));
-  }
+function copy(text: string, what: string) {
+  return copyAndSay(text, { done: t('openin.copied', { what }), failed: t('openin.copy_failed', { what: what.toLowerCase() }) });
 }
 
 function OpenInSheet({ box, app, onClose }: { box: BoxRecord; app: OpenInApp; onClose: () => void }) {
