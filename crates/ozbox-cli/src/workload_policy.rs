@@ -1766,6 +1766,8 @@ mod tests {
             r#","vars":{"NODE_OPTIONS":"--require=x"}"#,
             r#","vars":{"LD_PRELOAD":"x"}"#,
             r#","vars":{"HTTPS_PROXY":"x"}"#,
+            r#","vars":{"NODE_USE_ENV_PROXY":"0"}"#,
+            r#","pass":["NODE_USE_ENV_PROXY"]"#,
             r#","vars":{"PLAYWRIGHT_BROWSERS_PATH":"x"}"#,
             r#","pass":["HOME"]"#,
             r#","vars":{"npm_config_x":"y"}"#,

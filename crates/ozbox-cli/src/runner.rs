@@ -1284,6 +1284,10 @@ fn launch_inner(be: &dyn Backend, id: &str, line: &str) -> Value {
                 Zeroizing::new("localhost,127.0.0.1,::1".into()),
             ));
         }
+        // Node's fetch ignores HTTPS_PROXY without its opt-in (`egress::PROXY_OPT_INS`)
+        for (k, v) in crate::egress::PROXY_OPT_INS {
+            child_env.push((k.to_string(), Zeroizing::new(v.to_string())));
+        }
     }
     for (d, t) in &tunnels {
         for (k, v) in crate::egress::tunnel_env(d, t.port) {
@@ -2901,6 +2905,8 @@ mod tests {
         let body = f.env_text();
         assert!(body.contains("HTTPS_PROXY=http://run:") && body.contains("@127.0.0.1:"));
         assert!(body.contains("NO_PROXY=localhost,127.0.0.1,::1"));
+        // B4-30: Node's fetch uses the proxy only with this opt-in
+        assert!(body.contains("NODE_USE_ENV_PROXY=1"), "{body}");
         let pw = body
             .split("http://run:")
             .nth(1)
@@ -4127,6 +4133,7 @@ mod tests {
             "HTTPS_PROXY",
             "http_proxy",
             "ALL_PROXY",
+            "NODE_USE_ENV_PROXY",
             "NODE_EXTRA_CA_CERTS",
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
