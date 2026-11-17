@@ -359,7 +359,15 @@ that already ran and finished, or that had nothing to do because its start condi
 session when there is nothing to resume), counts as healthy while it is stopped; a service that should keep running, or one
 that failed, does not.
 
-**Status:** Preview (runs on real boxes; one check is being corrected in the next image).
+It also checks the steps a box's first boot runs on its own: adding the Oz Box tools to the coding agents' settings, letting
+the box user's services keep running (linger), and starting the box user's service manager. Each of these waits a bounded
+time and tries again a few times, with a growing pause, when the system is not ready yet, and never waits for ever. If one
+still did not finish, the self-test fails `first_boot_steps`, names the step, and gives the command that runs it again
+(`ozbox admin <box> -- ensure-supervisor` for the coding agents' tools, `ozbox admin <box> -- enable-linger` for the other
+two); running it clears the failure. A box made before this check has no record and is not asked.
+
+**Status:** Preview (runs on real boxes; one check is being corrected in the next image; the first-boot steps check is
+tested in CI and not yet seen on a real upgrade).
 
 ## 9. Fix a box without root
 

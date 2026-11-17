@@ -3160,6 +3160,7 @@ mod tests {
             name: name.clone(),
             final_snapshot: false,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         a.provider.apply(&p)?;
         create(&mut a, "dev")?;

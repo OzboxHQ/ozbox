@@ -55,6 +55,9 @@ pub struct SelfTestConfig {
     /// root's, or that others can write, is ignored by the secrets service, so root's setting does not hold: that fails the
     /// test (phase 2 re-check NL9). Empty off a box; absent files are fine (the setting is its default).
     pub approval_flag_files: Vec<PathBuf>,
+    /// First boot's record of the steps that can fail on their own (`/etc/ozbox/first-boot-steps`). `None` off a box; a box
+    /// without the file (made before the record) has no check.
+    pub first_boot_steps: Option<PathBuf>,
     /// The dashboard user's socket to this daemon, set only on a box that has a dashboard user.
     pub dashboard_socket: Option<DashboardSocket>,
     /// The cgroup root (`/sys/fs/cgroup`) to look for the box user's manager under, to check it has the memory and cpu
@@ -353,6 +356,7 @@ impl SelfTestConfig {
             secrets_state_file: None,
             box_secrets_declaration: None,
             approval_flag_files: Vec::new(),
+            first_boot_steps: None,
             dashboard_socket: None,
             user_cgroup_root: None,
             run_backend: None,
@@ -778,6 +782,30 @@ fn memory_guard_check(host: &dyn HostSource) -> Option<Check> {
     Some(pass(NAME))
 }
 
+/// The steps first boot records on their own (the agents' Oz Box tools, linger, the box user's manager). Only a box with the
+/// record has the check; the first failed step is named, with the command that runs it again.
+fn first_boot_steps_check(host: &dyn HostSource, path: &Path) -> Option<Check> {
+    use ozbox_core::first_boot::{failure_text, parse};
+    const NAME: &str = "first_boot_steps";
+    let text = host.read(&path.to_string_lossy()).ok()?;
+    let steps = parse(&text);
+    if steps.is_empty() {
+        return None;
+    }
+    let failed: Vec<_> = steps.iter().filter(|s| !s.ok).collect();
+    Some(match failed.first() {
+        None => pass(NAME),
+        Some(first) => {
+            let mut reason = failure_text(first);
+            if failed.len() > 1 {
+                let more: Vec<&str> = failed[1..].iter().map(|s| s.info.name).collect();
+                reason.push_str(&format!("; also failed: {}", more.join(", ")));
+            }
+            fail(NAME, first.info.name, reason)
+        }
+    })
+}
+
 /// Run every check. `sample_run` starts a trivial run in a cgroup and reports whether it worked.
 pub fn run(
     cfg: &SelfTestConfig,
@@ -966,6 +994,15 @@ pub fn run(
 
     // root's approval setting files, when there are any, are ones the service trusts
     if let Some(c) = approval_flags_check(&cfg.approval_flag_files) {
+        checks.push(c);
+    }
+
+    // the steps first boot records on their own finished (a failed one is named, with the command that repairs it)
+    if let Some(c) = cfg
+        .first_boot_steps
+        .as_deref()
+        .and_then(|p| first_boot_steps_check(host, p))
+    {
         checks.push(c);
     }
 
@@ -1419,6 +1456,55 @@ mod tests {
             }
             o => panic!("{o:?}"),
         }
+    }
+
+    /// B4-12: a first-boot step that failed on its own (the agents' Oz Box tools after an upgrade) fails the self-test, naming
+    /// the step and the command that repairs it; a box without the record, or one the test does not understand, has no check.
+    #[test]
+    fn a_first_boot_step_that_failed_fails_the_self_test_naming_the_step() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut cfg, h) = setup(d.path());
+        let at = Path::new(ozbox_core::first_boot::STEPS_FILE);
+        cfg.first_boot_steps = Some(at.to_path_buf());
+        let check = |h: &FakeHost| first_boot_steps_check(h, at).map(|c| c.outcome);
+        // no record (a box made before it): no check
+        assert_eq!(check(&h), None);
+        // a record of steps from a newer script only: no check, never a pass
+        h.set(ozbox_core::first_boot::STEPS_FILE, "a_new_step ok fine 1\n");
+        assert_eq!(check(&h), None);
+        h.set(
+            ozbox_core::first_boot::STEPS_FILE,
+            "agent_tools ok runuser 1\nenable_linger ok already-on 0\nuser_manager ok started 1\n",
+        );
+        assert_eq!(check(&h), Some(Outcome::Pass));
+        h.set(
+            ozbox_core::first_boot::STEPS_FILE,
+            "agent_tools failed switch-user-refused 4\nenable_linger failed login-manager-no-answer 5\nuser_manager ok started 1\n",
+        );
+        match check(&h) {
+            Some(Outcome::Fail { step, reason }) => {
+                assert_eq!(step, "agent_tools");
+                assert!(
+                    reason.contains("coding agents' settings")
+                        && reason.contains("ozbox admin <box> -- ensure-supervisor")
+                        && reason.contains("also failed: enable_linger"),
+                    "{reason}"
+                );
+            }
+            o => panic!("{o:?}"),
+        }
+        // and it is part of the self-test, failing it
+        let r = run(
+            &cfg,
+            &h,
+            &RecordingRunner::new(),
+            "/bin:/usr/bin",
+            &|| Ok(()),
+            0,
+        );
+        assert!(!r.ok);
+        assert!(r.checks.iter().any(|c| c.name == "first_boot_steps"
+            && matches!(&c.outcome, Outcome::Fail { step, .. } if step == "agent_tools")));
     }
 
     #[test]

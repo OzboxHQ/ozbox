@@ -23,7 +23,8 @@
 #
 # Environment (for tests): OZBOX_ETC, OZBOX_WORK, OZBOX_SYSTEMD_DIR, OZBOX_SYSTEMCTL, OZBOX_USERADD, OZBOX_USERMOD,
 # OZBOX_PASSWD, OZBOX_ID, OZBOX_CHOWN, OZBOX_RUNUSER, OZBOX_SHRED, OZBOX_BIN, OZBOX_GPASSWD, OZBOX_DAEMON_BIN, OZBOX_JOURNALCTL,
-# OZBOX_DASHBOARD_PROBE (a program that is given the port and succeeds when the dashboard answers), OZBOX_DASHBOARD_PROBE_S.
+# OZBOX_DASHBOARD_PROBE (a program that is given the port and succeeds when the dashboard answers), OZBOX_DASHBOARD_PROBE_S,
+# OZBOX_SYSTEMD_RUN, OZBOX_RETRY_DELAYS (the pauses between tries of the agent settings step, in seconds).
 set -euo pipefail
 
 etc="${OZBOX_ETC:-/etc}"
@@ -40,6 +41,8 @@ usermod_bin="${OZBOX_USERMOD:-usermod}"
 id_bin="${OZBOX_ID:-id}"
 chown_bin="${OZBOX_CHOWN:-chown}"
 runuser_bin="${OZBOX_RUNUSER:-runuser}"
+systemd_run_bin="${OZBOX_SYSTEMD_RUN:-systemd-run}"
+retry_delays="${OZBOX_RETRY_DELAYS:-2 4 8}"
 shred_bin="${OZBOX_SHRED:-shred}"
 gpasswd_bin="${OZBOX_GPASSWD:-gpasswd}"
 ozbox_bin="${OZBOX_BIN:-/usr/local/bin/ozbox}"
@@ -200,30 +203,77 @@ ensure_scoped_socket() {
   fi
 }
 
+# record STEP RESULT REASON ATTEMPTS: what a first-boot step ended as, in /etc/ozbox/first-boot-steps (one line per step,
+# `<step> <ok|failed> <reason> <attempts>`), which the box's self-test reads and fails on, naming the step. Every run
+# records again, so the action that repairs a step clears its failure. Best effort: no /etc/ozbox, no record.
+record() {
+  local f="$etc/ozbox/first-boot-steps" tmp
+  [ -d "$etc/ozbox" ] && [ ! -L "$etc/ozbox" ] || return 0
+  tmp="$f.tmp.$$"
+  { if [ -f "$f" ] && [ ! -L "$f" ]; then awk -v s="$1" '$1 != s' "$f"; fi
+    printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"; } >"$tmp" 2>/dev/null \
+    && chmod 0644 "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
 # Coding agents the box user starts (Claude Code, Codex, Gemini CLI, OpenCode) get the Oz Box tools by a static entry in their
 # own settings (ADR 0043). It holds no secret and never changes, and it is written AS the box user, on the box user's own files:
 # the dashboard cannot and must not reach them. Safe to run again; the person's other servers are never touched. Best effort:
 # an older program without the command, or a settings file the person made unreadable, leaves everything as it was.
+#
+# Two ways to become the box user, the first being the plain one. `runuser` switches user inside this process, which a
+# service's sandbox can refuse ("cannot set user id": seen at an upgrade's first boot). Then systemd itself starts the
+# command as the box user in a unit of its own (`systemd-run --uid`), which needs nothing of this process's privileges; a
+# systemd that is not answering yet is asked again a few times, with a growing pause, and never forever. A coding agent's
+# settings the program refused are not retried: that is the person's file, and the answer is shown.
+runuser_refused() { printf '%s' "$1" | grep -Eq 'runuser: (cannot set (user id|group id|groups)|cannot open session|cannot initialize)'; }
+systemd_not_ready() { printf '%s' "$1" | grep -Eq '^Failed to (start transient|connect to (bus|system scope bus)|create bus connection)'; }
 install_agent_settings() {
-  [ -x "$ozbox_bin" ] || { say "the Oz Box tools were not added to the coding agents' settings: the program $ozbox_bin is not installed"; return 0; }
-  local h out
+  [ -x "$ozbox_bin" ] || { say "the Oz Box tools were not added to the coding agents' settings: the program $ozbox_bin is not installed"; record agent_tools failed no-program 0; return 0; }
+  local h out tries pause
   h="$(getent passwd ozbox 2>/dev/null | cut -d: -f6 || true)"
   [ -n "$h" ] || h="$work/home/ozbox"
-  [ -d "$h" ] || { say "the Oz Box tools were not added to the coding agents' settings: the box user has no home folder ($h)"; return 0; }
+  [ -d "$h" ] || { say "the Oz Box tools were not added to the coding agents' settings: the box user has no home folder ($h)"; record agent_tools failed no-home 0; return 0; }
   # AS the box user, with no terminal and no input from this one (a box-user process must never share root's terminal), and
   # the answer kept: a refused engine is said, not swallowed
   local -a detach=()
   command -v setsid >/dev/null 2>&1 && detach=(setsid)
   if out="$(${detach[@]+"${detach[@]}"} "$runuser_bin" -u ozbox -- env "HOME=$h" "$ozbox_bin" agent-mcp install </dev/null 2>&1)"; then
     printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
-  else
-    printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
-    if printf '%s' "$out" | grep -q 'cannot set user id'; then
-      # the root helper's service is not allowed to switch to the box user: it says nothing about the dashboard or its settings
-      say "the root helper could not switch to the box user, so the Oz Box tools were not added to the coding agents' settings; the dashboard is not affected. Run as the box user: ozbox agent-mcp install"
-    else
-      say "the Oz Box tools were not added to every coding agent's settings (see above; run as the box user: ozbox agent-mcp install)"
+    record agent_tools ok runuser 1
+    return 0
+  fi
+  printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
+  if ! runuser_refused "$out"; then
+    say "the Oz Box tools were not added to every coding agent's settings (see above; run as the box user: ozbox agent-mcp install)"
+    record agent_tools failed agent-settings-refused 1
+    return 0
+  fi
+  if ! command -v "$systemd_run_bin" >/dev/null 2>&1; then
+    say "the Oz Box tools were not added to the coding agents' settings: this process may not switch to the box user, and there is no systemd-run to ask instead; the dashboard is not affected. Run as the box user: ozbox agent-mcp install"
+    record agent_tools failed switch-user-refused 1
+    return 0
+  fi
+  say "this process may not switch to the box user, so systemd is asked to run the step as the box user instead"
+  tries=0
+  for pause in 0 $retry_delays; do
+    [ "$pause" = 0 ] || { say "systemd did not start the step; trying again in ${pause}s"; sleep "$pause"; }
+    tries=$((tries + 1))
+    if out="$("$systemd_run_bin" --quiet --wait --pipe --collect --service-type=exec --uid=ozbox --gid=ozbox \
+      "--setenv=HOME=$h" --property=NoNewPrivileges=yes -- "$ozbox_bin" agent-mcp install </dev/null 2>&1)"; then
+      printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
+      record agent_tools ok systemd-run "$tries"
+      return 0
     fi
+    systemd_not_ready "$out" || break
+  done
+  printf '%s\n' "$out" | sed 's/^/ozbox-supervisor-setup: /'
+  if systemd_not_ready "$out"; then
+    # neither way could become the box user: it says nothing about the dashboard or its settings
+    say "the Oz Box tools were not added to the coding agents' settings: this process may not switch to the box user and systemd did not start the step after $tries tries; the dashboard is not affected. Run: ozbox admin <box> -- ensure-supervisor, or as the box user: ozbox agent-mcp install"
+    record agent_tools failed switch-user-refused "$tries"
+  else
+    say "the Oz Box tools were not added to every coding agent's settings (see above; run as the box user: ozbox agent-mcp install)"
+    record agent_tools failed agent-settings-refused "$tries"
   fi
 }
 

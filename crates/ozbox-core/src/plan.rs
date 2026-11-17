@@ -84,6 +84,10 @@ pub enum Operation {
         /// they are deleted with the box, since nothing can list them once it is gone. Additive: absent means false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_old_system_disks: bool,
+        /// Also delete the snapshots (backups) this box already has, in the same plan. Off by default: they are kept, and billed
+        /// until someone deletes them. Only snapshots tagged to this box are ever deleted. Additive: absent means false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        delete_snapshots: bool,
     },
     /// Replace the system disk from a newer image and keep `/work`. `image` is always a concrete image id: the
     /// words `latest` are resolved by the caller before the operation is built, so a plan stays reproducible.
@@ -264,6 +268,7 @@ mod tests {
                 name: name(),
                 final_snapshot: false,
                 keep_old_system_disks: false,
+                delete_snapshots: false,
             },
             provider: "fake".into(),
             changes: vec![Change::new(

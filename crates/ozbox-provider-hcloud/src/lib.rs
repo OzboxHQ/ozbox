@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use ozbox_core::{
     Backend, BoxName, BoxRecord, BoxSpec, BoxState, Capabilities, CommandRunner, DiskGb, Engine,
     Error, ImageInfo, MachineChoice, ModuleVars, Operation, ResizeMethod, Result, Size,
-    SnapshotInfo, SnapshotKind, TofuModule, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
+    SnapshotInfo, SnapshotKind, SnapshotPrice, TofuModule, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
 };
 
 use api::{ApiServer, HcloudApi};
@@ -883,6 +883,19 @@ impl Backend for HcloudBackend {
             .collect())
     }
 
+    fn check_delete_snapshots(&self, _rec: &BoxRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn snapshot_price(&self) -> Option<SnapshotPrice> {
+        // Hetzner bills a snapshot per GB (decimal) of its size, in euros; the rate is the list price and can change.
+        Some(SnapshotPrice {
+            per_gb_month: 0.012,
+            currency_prefix: "EUR ",
+            bytes_per_gb: 1_000_000_000,
+        })
+    }
+
     fn delete_snapshot(&self, rec: &BoxRecord, id: &str) -> Result<()> {
         // Only an image Oz Box labelled for THIS box is deleted; the id alone proves nothing.
         let found = self.list_snapshots(rec)?;
@@ -1597,6 +1610,7 @@ mod tests {
             name: n.clone(),
             final_snapshot: true,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         }) {
             Err(Error::Unsupported { why, .. }) => {
                 assert!(why.contains("cannot be snapshotted"), "{why}")
@@ -1608,6 +1622,7 @@ mod tests {
             name: n.clone(),
             final_snapshot: false,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         assert!(
             destroy
@@ -1807,6 +1822,7 @@ mod tests {
             name: n.clone(),
             final_snapshot: false,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         assert!(p.apply(&plan)?.is_none());
         let calls = sim.tofu_calls();
@@ -1855,6 +1871,7 @@ mod tests {
                 name: n.clone(),
                 final_snapshot: true,
                 keep_old_system_disks: false,
+                delete_snapshots: false,
             },
         ] {
             assert!(
@@ -1880,6 +1897,7 @@ mod tests {
                 name: n.clone(),
                 final_snapshot: true,
                 keep_old_system_disks: false,
+                delete_snapshots: false,
             },
         ] {
             let plan = p.plan(&op)?;

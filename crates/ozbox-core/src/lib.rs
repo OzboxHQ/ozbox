@@ -23,6 +23,7 @@ pub mod daemon_scope;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod first_boot;
 pub mod infra;
 pub mod memory_plan;
 pub mod metrics;
@@ -50,9 +51,9 @@ pub mod tool_gate;
 pub mod upgrade_kind;
 
 pub use engine::{
-    Backend, CapacityRequest, Engine, MachineChoice, APPROVER_LABEL, FIRST_BOOT_LABEL,
-    HOLD_SAFE_COPY_WAIT, INGRESS_LABEL, PRE_UPGRADE_COPY_LABEL, PRE_UPGRADE_ROOT_PURPOSE,
-    PURPOSE_LABEL, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
+    Backend, CapacityRequest, Engine, MachineChoice, SnapshotPrice, APPROVER_LABEL, BOX_LABEL,
+    FIRST_BOOT_LABEL, HOLD_SAFE_COPY_WAIT, INGRESS_LABEL, PRE_UPGRADE_COPY_LABEL,
+    PRE_UPGRADE_ROOT_PURPOSE, PURPOSE_LABEL, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
 };
 pub use error::{Error, Result};
 pub use exec::{CommandRunner, CommandSpec, Output, RecordingRunner, SystemRunner};

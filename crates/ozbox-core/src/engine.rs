@@ -6,6 +6,8 @@
 //! to nothing, impossible requests fail while planning, `apply` refuses a stale plan, transitional states block.
 //! That way the fake, Hetzner and AWS cannot drift apart on behaviour; they differ only in how a primitive runs.
 
+use std::collections::BTreeMap;
+
 use crate::{
     BoxName, BoxRecord, BoxSpec, BoxState, Capabilities, Change, DiskGb, Error, ImageInfo,
     OldWorkDisk, Operation, Plan, Provider, Result, Risk, Size, SnapshotInfo, SnapshotKind,
@@ -30,6 +32,19 @@ pub const INGRESS_LABEL: &str = "ozbox-ingress";
 pub const UPGRADE_TO_LABEL: &str = "ozbox-upgrade-to";
 
 /// What a snapshot Oz Box took is for, as the provider labels it. A snapshot with no such label is a backup of `/work`.
+pub const BOX_LABEL: &str = "ozbox-box";
+
+/// What a snapshot costs to keep, per GB of its size per month, at the provider's list price (an estimate: snapshots are
+/// billed on what they hold, which is at most the size listed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotPrice {
+    pub per_gb_month: f64,
+    /// `$` or `EUR `, as written before the amount.
+    pub currency_prefix: &'static str,
+    /// Bytes per GB the provider's size figures use.
+    pub bytes_per_gb: u64,
+}
+
 pub const PURPOSE_LABEL: &str = "ozbox-purpose";
 /// The purpose of the copy an upgrade keeps of the OLD system disk. It holds a disk (and, on a box whose store key is a file, that
 /// key), not `/work`: never a restore or clone source, and removed with the box unless the person keeps it.
@@ -257,6 +272,32 @@ pub trait Backend: Send + Sync {
         })
     }
 
+    /// Whether this provider can delete the snapshots of a box that is being destroyed (`destroy --delete-snapshots`). Called
+    /// while planning, so a provider that cannot refuses BEFORE anything changes. Read-only.
+    fn check_delete_snapshots(&self, rec: &BoxRecord) -> Result<()> {
+        Err(Error::Unsupported {
+            provider: self.id().to_string(),
+            what: format!("delete the snapshots of {} with the box", rec.spec.name),
+            why: "this provider cannot delete snapshots from here".into(),
+        })
+    }
+
+    /// What a snapshot costs to keep at the provider's list price, so a plan can show what deleting it saves. `None` = unknown
+    /// (the plan then shows sizes only, never a made-up amount).
+    fn snapshot_price(&self) -> Option<SnapshotPrice> {
+        None
+    }
+
+    /// For each of `snaps` (snapshots tagged to `rec`) that ANOTHER box still uses, the name of that box: a box cloned from it
+    /// keeps reading from it. Read-only. Providers whose boxes cannot be restored from a snapshot have none.
+    fn snapshots_used_by_other_boxes(
+        &self,
+        _rec: &BoxRecord,
+        _snaps: &[SnapshotInfo],
+    ) -> Result<BTreeMap<String, String>> {
+        Ok(BTreeMap::new())
+    }
+
     /// Whether `/work` of this (stopped) box can be replaced from `snap`, and what a person should know first. `Err`
     /// refuses the plan. Read-only.
     fn check_restore_work(&self, rec: &BoxRecord, _snap: &SnapshotInfo) -> Result<Vec<String>> {
@@ -341,6 +382,62 @@ impl<B: Backend> Engine<B> {
             state: rec.state,
             action,
         }
+    }
+
+    /// The snapshots `destroy --delete-snapshots` would delete: this box's own backups (never a copy of an old system disk: that
+    /// has its own switch). Refuses, naming the snapshot, when one is not tagged to this box, is the pre-upgrade copy of another
+    /// box, or another box still uses it (a clone's source).
+    fn snapshots_to_delete(
+        &self,
+        rec: &BoxRecord,
+        records: &[BoxRecord],
+    ) -> Result<Vec<SnapshotInfo>> {
+        let mine: Vec<SnapshotInfo> = self
+            .backend
+            .list_snapshots(rec)?
+            .into_iter()
+            .filter(SnapshotInfo::is_work_backup)
+            .collect();
+        let mut users = self.backend.snapshots_used_by_other_boxes(rec, &mine)?;
+        for other in records.iter().filter(|r| r.spec.name != rec.spec.name) {
+            if let Some(from) = &other.spec.from_snapshot {
+                users
+                    .entry(from.clone())
+                    .or_insert_with(|| other.spec.name.to_string());
+            }
+        }
+        for s in &mine {
+            if let Some(owner) = s.labels.get(BOX_LABEL) {
+                if owner != rec.spec.name.as_str() {
+                    return Err(Error::Config(format!(
+                        "snapshot {} is tagged to another box ({owner}), not {}: it is not deleted. Nothing was changed.",
+                        s.id, rec.spec.name
+                    )));
+                }
+            }
+            if let Some(user) = users.get(&s.id) {
+                return Err(Error::Config(format!(
+                    "snapshot {} of {} is still used by the box {user} (it was cloned from it), so it is not deleted. Destroy {user} first, or destroy {} without --delete-snapshots to keep it. Nothing was changed.",
+                    s.id, rec.spec.name, rec.spec.name
+                )));
+            }
+        }
+        for c in self
+            .backend
+            .list_snapshots(rec)?
+            .iter()
+            .filter(|s| s.is_old_system_disk_copy())
+        {
+            if let Some(owner) = c.labels.get(BOX_LABEL) {
+                if owner != rec.spec.name.as_str() {
+                    return Err(Error::Config(format!(
+                        "snapshot {} is the pre-upgrade copy of {owner}, a box that still exists: it is not deleted. Nothing was changed.",
+                        c.id
+                    )));
+                }
+            }
+        }
+        Ok(mine)
     }
 
     /// The copies of old system disks an upgrade kept for this box (never a `/work` backup).
@@ -958,6 +1055,7 @@ impl<B: Backend> Engine<B> {
                 name,
                 final_snapshot,
                 keep_old_system_disks,
+                delete_snapshots,
             } => {
                 if let Some(rec) = Self::find(records, name) {
                     let missing = rec.state == BoxState::InstanceMissing;
@@ -982,9 +1080,9 @@ impl<B: Backend> Engine<B> {
                     } else {
                         notes.push(
                             if missing {
-                                "No final snapshot: the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
                             } else {
-                                "No final snapshot: the /work disk and everything on it will be lost."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost."
                             }
                             .into(),
                         );
@@ -1023,9 +1121,55 @@ impl<B: Backend> Engine<B> {
                         },
                         Risk::High,
                     ));
-                    if !rec.snapshots.is_empty() {
+                    if *delete_snapshots {
+                        self.backend.check_delete_snapshots(&rec)?;
+                        let doomed = self.snapshots_to_delete(&rec, records)?;
+                        if doomed.is_empty() {
+                            notes.push(format!("{name} has no snapshots to delete."));
+                        } else {
+                            let price = self.backend.snapshot_price();
+                            let mut total_gb = 0.0;
+                            let mut lines = Vec::new();
+                            for s in &doomed {
+                                let gb = s.size_bytes.map(|b| {
+                                    b as f64 / price.as_ref().map_or(1e9, |p| p.bytes_per_gb as f64)
+                                });
+                                let size =
+                                    gb.map_or("size unknown".to_string(), |g| format!("{g:.1} GB"));
+                                let cost = match (&price, gb) {
+                                    (Some(p), Some(g)) => {
+                                        total_gb += g;
+                                        format!(
+                                            ", up to {}{:.2} a month",
+                                            p.currency_prefix,
+                                            g * p.per_gb_month
+                                        )
+                                    }
+                                    _ => String::new(),
+                                };
+                                lines.push(format!("{} ({size}{cost})", s.id));
+                            }
+                            let total = price.as_ref().filter(|_| total_gb > 0.0).map_or(String::new(), |p| {
+                                format!(" In all, up to {}{:.2} a month at list price (an estimate: you are billed for what a snapshot holds, at most its size).", p.currency_prefix, total_gb * p.per_gb_month)
+                            });
+                            changes.push(Change::new(
+                                "snapshot.delete",
+                                format!(
+                                    "Delete {} snapshot(s) of {name}, kept until now: {}. They cannot be brought back.{total}",
+                                    doomed.len(),
+                                    lines.join(", ")
+                                ),
+                                Risk::High,
+                            ));
+                            if *final_snapshot {
+                                notes.push("The final snapshot taken by this destroy is kept; only the snapshots listed above are deleted.".into());
+                            }
+                        }
+                    } else if !rec.snapshots.is_empty() {
+                        // kept snapshots are billed: say so, and how to keep nothing (a throwaway box), since once the box
+                        // is gone they can no longer be listed through it
                         notes.push(format!(
-                            "{} existing snapshot(s) are kept.",
+                            "{} existing snapshot(s) of {name} are kept, and billed until deleted. To delete them with the box, add --delete-snapshots; or first `ozbox backup list {name}`, then `ozbox backup delete {name} <id>`.",
                             rec.snapshots.len()
                         ));
                     }
@@ -1210,8 +1354,17 @@ impl<B: Backend> Engine<B> {
                 name,
                 final_snapshot,
                 keep_old_system_disks,
+                delete_snapshots,
             } => {
                 let rec = Self::require(records, name)?;
+                // Decided BEFORE the final snapshot exists, so the one this destroy takes is never among them. Checked again
+                // here (not only when planning): a snapshot that became a clone source since is refused with nothing changed.
+                let doomed = if *delete_snapshots {
+                    self.backend.check_delete_snapshots(&rec)?;
+                    self.snapshots_to_delete(&rec, records)?
+                } else {
+                    Vec::new()
+                };
                 if *final_snapshot {
                     self.backend.snapshot(&rec)?;
                 }
@@ -1221,6 +1374,9 @@ impl<B: Backend> Engine<B> {
                     for copy in self.old_system_copies(&rec)? {
                         self.backend.delete_snapshot(&rec, &copy.id)?;
                     }
+                }
+                for snap in &doomed {
+                    self.backend.delete_snapshot(&rec, &snap.id)?;
                 }
                 self.backend.destroy(&rec)?;
             }
