@@ -80,19 +80,119 @@ out=\"$d/oz.code-workspace\"
 /// changes nothing and a person's own file is never rewritten.
 ///
 /// Copying out of tmux: `set-clipboard on` makes tmux send what it copies (a mouse drag, or copy mode's Enter) to the
-/// terminal around it as an OSC 52 sequence, which the browser IDE's terminal and the dashboard's terminal turn into a
-/// write to the person's clipboard. tmux already does that for `xterm*` outer terminals; the `terminal-features` line adds
+/// terminal around it as an OSC 52 sequence, which the dashboard's terminal turns into a write to the person's clipboard.
+/// The browser IDE's terminal does not: its editor keeps an OSC 52 copy in a store of its own and never hands it to the
+/// browser (checked against the editor this was built with). So tmux also runs [`OZ_CLIP`] for each copy (its
+/// `copy-command`), which hands the text to the [`CLIP_EXTENSION_JS`] extension in the open IDE window, and that one puts it
+/// on the clipboard. The `copy-command` line is a no-op when the person set their own. tmux already sends OSC 52 for
+/// `xterm*` outer terminals; the `terminal-features` line adds
 /// the same for an outer tmux or screen (tmux on a laptop, then `ssh` to the box, then tmux here). A program inside tmux that
 /// asks to READ the clipboard (`OSC 52 ;?`) gets tmux's own copy buffer back, never the person's clipboard: tmux answers that
 /// itself. `allow-passthrough` is deliberately not set: OSC 52 does not need it, and it would let any program inside reach
 /// the outer terminal unfiltered.
-pub const TMUX_LINES: [&str; 5] = [
+pub const TMUX_LINES: [&str; 6] = [
     "set -g mouse on",
     "set -g history-limit 100000",
     "set -g default-terminal \"tmux-256color\"",
     "set -g set-clipboard on",
     "set -as terminal-features \",screen*:clipboard,tmux*:clipboard\"",
+    "if -F \"#{==:#{copy-command},}\" { set -s copy-command \"$HOME/.local/bin/oz-clip\" }",
 ];
+
+/// tmux's `copy-command`: reads what tmux copied on standard input and hands it to every open IDE window's extension
+/// (each decides whether it is the one in front). Removes a socket nobody listens on. Never reads the clipboard, and does
+/// nothing at all when no IDE window is open. A copy over the cap is dropped here (the extension says so for one it gets).
+pub const OZ_CLIP: &str = r#"#!/usr/bin/env python3
+import glob, os, socket, sys
+MAX_BYTES = 4 * 1000000
+data = sys.stdin.buffer.read(MAX_BYTES + 1)
+if not data or len(data) > MAX_BYTES:
+    sys.exit(0)
+d = os.path.join(os.path.expanduser("~"), ".local", "state", "ozbox", "clip")
+for p in glob.glob(os.path.join(d, "*.sock")):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1)
+    try:
+        s.connect(p)
+        s.sendall(data)
+    except (ConnectionRefusedError, FileNotFoundError):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    finally:
+        s.close()
+"#;
+
+/// The folder the IDE loads the clipboard extension from (code-server's own extensions folder; the version is in the name).
+pub const CLIP_EXTENSION_DIR: &str =
+    ".local/share/code-server/extensions/ozbox.terminal-clipboard-0.1.0";
+
+/// The extension's manifest. It runs beside the box's files (`workspace`), starts with the window, and asks for nothing.
+pub const CLIP_EXTENSION_PACKAGE: &str = r#"{
+  "name": "terminal-clipboard",
+  "displayName": "Oz Box terminal clipboard",
+  "description": "Puts what you copy in tmux in the browser IDE's terminal on your computer's clipboard.",
+  "version": "0.1.0",
+  "publisher": "ozbox",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.80.0" },
+  "extensionKind": ["workspace"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js"
+}
+"#;
+
+/// The extension: listens on its own socket in `~/.local/state/ozbox/clip/` (folder 0700, socket 0600), and puts a copy on the
+/// clipboard only while its window is the one in front with a terminal open, says so in the status bar every time, refuses
+/// more than 1,000,000 characters (the dashboard terminal's cap too), and never reads the clipboard. Trust: anything running as the box user can reach the
+/// socket, exactly as it can already make tmux copy; nothing else can.
+pub const CLIP_EXTENSION_JS: &str = r#"'use strict';
+const vscode = require('vscode');
+const fs = require('fs');
+const net = require('net');
+const os = require('os');
+const path = require('path');
+const MAX_CHARS = 1000000;
+function activate(context) {
+  const dir = path.join(os.homedir(), '.local', 'state', 'ozbox', 'clip');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  const sock = path.join(dir, process.pid + '.sock');
+  try { fs.unlinkSync(sock); } catch (e) {}
+  const server = net.createServer((c) => {
+    const parts = [];
+    let n = 0;
+    c.on('data', (d) => {
+      n += d.length;
+      if (n > MAX_CHARS * 4) { c.destroy(); return; }
+      parts.push(d);
+    });
+    c.on('end', () => deliver(Buffer.concat(parts).toString('utf8')));
+    c.on('error', () => {});
+  });
+  server.on('error', () => {});
+  const old = process.umask(0o177);
+  server.listen(sock, () => process.umask(old));
+  context.subscriptions.push({ dispose() { server.close(); try { fs.unlinkSync(sock); } catch (e) {} } });
+}
+function deliver(text) {
+  if (!text) return;
+  if (!vscode.window.state.focused || !vscode.window.activeTerminal) return;
+  if (text.length > MAX_CHARS) {
+    vscode.window.setStatusBarMessage('Not copied: ' + text.length + ' characters is more than ' + MAX_CHARS + ' at once', 5000);
+    return;
+  }
+  vscode.env.clipboard.writeText(text).then(
+    () => vscode.window.setStatusBarMessage('Copied ' + text.length + ' characters from the terminal', 3000),
+    () => vscode.window.setStatusBarMessage('The browser did not allow the copy', 5000),
+  );
+}
+function deactivate() {}
+module.exports = { activate, deactivate };
+"#;
 
 /// Editor settings that make terminals survive: the default profile is the tmux one, with a plain one beside it, and the
 /// editor restores windows and terminals after a disconnect. `home` is the box user's home (the profile needs a full path).
@@ -192,7 +292,11 @@ pub fn terminal_fragment() -> String {
          cat > \"$HOME/.local/bin/oz-term\" <<'__OZBOX_EOF__'\n{OZ_TERM}__OZBOX_EOF__\n\
          cat > \"$HOME/.local/bin/oz-workspace\" <<'__OZBOX_EOF__'\n{OZ_WORKSPACE}__OZBOX_EOF__\n\
          cat > \"$HOME/.local/bin/oz-merge-json\" <<'__OZBOX_EOF__'\n{OZ_MERGE_JSON}__OZBOX_EOF__\n\
-         chmod 0755 \"$HOME/.local/bin/oz-term\" \"$HOME/.local/bin/oz-workspace\" \"$HOME/.local/bin/oz-merge-json\"\n\
+         cat > \"$HOME/.local/bin/oz-clip\" <<'__OZBOX_EOF__'\n{OZ_CLIP}__OZBOX_EOF__\n\
+         chmod 0755 \"$HOME/.local/bin/oz-term\" \"$HOME/.local/bin/oz-workspace\" \"$HOME/.local/bin/oz-merge-json\" \"$HOME/.local/bin/oz-clip\"\n\
+         mkdir -p \"$HOME/{CLIP_EXTENSION_DIR}\"\n\
+         cat > \"$HOME/{CLIP_EXTENSION_DIR}/package.json\" <<'__OZBOX_EOF__'\n{CLIP_EXTENSION_PACKAGE}__OZBOX_EOF__\n\
+         cat > \"$HOME/{CLIP_EXTENSION_DIR}/extension.js\" <<'__OZBOX_EOF__'\n{CLIP_EXTENSION_JS}__OZBOX_EOF__\n\
          touch \"$HOME/.tmux.conf\"\n\
          {tmux}\
          cat > \"$HOME/.config/ozbox/defaults/settings.json\" <<__OZBOX_EOF__\n{settings}__OZBOX_EOF__\n\
@@ -464,7 +568,7 @@ pub fn status_script() -> String {
     // "yes" only when the helpers are there AND the key bindings set up are this version's, so a box set up by an older
     // Oz Box (whose Ctrl+V binding did not paste) is brought up to date the next time its IDE is opened.
     s.push_str(&format!(
-        "if [ -x \"$HOME/.local/bin/oz-term\" ] && [ -f \"$k\" ] && [ \"$(sha256sum \"$k\" | cut -d' ' -f1)\" = {want} ]; then echo terminals=yes; else echo terminals=no; fi\n",
+        "if [ -x \"$HOME/.local/bin/oz-term\" ] && [ -x \"$HOME/.local/bin/oz-clip\" ] && [ -f \"$HOME/{CLIP_EXTENSION_DIR}/extension.js\" ] && [ -f \"$k\" ] && [ \"$(sha256sum \"$k\" | cut -d' ' -f1)\" = {want} ]; then echo terminals=yes; else echo terminals=no; fi\n",
         want = sha256_hex(KEYBINDINGS.as_bytes()),
     ));
     for svc in ALL {
@@ -1148,6 +1252,137 @@ esac
         for r in retired.as_array().unwrap() {
             assert!(!ours.as_array().unwrap().contains(r), "{r}");
         }
+    }
+
+    /// Most text one terminal copy carries (written into the extension and the helper).
+    const CLIP_MAX_CHARS: usize = 1_000_000;
+    /// Where the IDE window's clipboard extension listens.
+    const CLIP_SOCKET_DIR: &str = ".local/state/ozbox/clip";
+
+    #[test]
+    fn a_tmux_copy_reaches_every_listening_ide_window_and_nothing_else() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let (code, out) = sh(&terminal_fragment(), d.path(), &[]);
+        assert_eq!(code, 0, "{out}");
+        let clip = d.path().join(".local/bin/oz-clip");
+        assert!(clip.exists());
+        let dir = d.path().join(CLIP_SOCKET_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // an IDE window listening, and a socket left behind by one that closed
+        let live = std::os::unix::net::UnixListener::bind(dir.join("1.sock")).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(dir.join("2.sock")).unwrap());
+        let run = |input: &[u8]| {
+            let mut c = std::process::Command::new("python3")
+                .arg(&clip)
+                .env("HOME", d.path())
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            c.stdin.take().unwrap().write_all(input).unwrap();
+            assert!(c.wait().unwrap().success());
+        };
+        let text = "héllo\nfrom tmux";
+        run(text.as_bytes());
+        let (mut conn, _) = live.accept().unwrap();
+        let mut got = String::new();
+        conn.read_to_string(&mut got).unwrap();
+        assert_eq!(got, text);
+        assert!(
+            !dir.join("2.sock").exists(),
+            "a socket nobody listens on is removed"
+        );
+        // more than the cap is never sent
+        live.set_nonblocking(true).unwrap();
+        run(&vec![b'a'; 4 * CLIP_MAX_CHARS + 1]);
+        assert!(live.accept().is_err(), "nothing was sent");
+    }
+
+    #[test]
+    fn the_ide_extension_is_installed_runs_on_the_box_asks_for_nothing_and_never_reads_the_clipboard(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        sh(&terminal_fragment(), d.path(), &[]);
+        let ext = d.path().join(CLIP_EXTENSION_DIR);
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ext.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(m["extensionKind"], serde_json::json!(["workspace"]));
+        assert_eq!(
+            m["activationEvents"],
+            serde_json::json!(["onStartupFinished"])
+        );
+        assert!(
+            m.get("contributes").is_none(),
+            "no commands, settings or permissions"
+        );
+        assert!(CLIP_EXTENSION_DIR.ends_with(&format!(
+            "{}.{}-{}",
+            m["publisher"].as_str().unwrap(),
+            m["name"].as_str().unwrap(),
+            m["version"].as_str().unwrap()
+        )));
+        let js = std::fs::read_to_string(ext.join("extension.js")).unwrap();
+        assert_eq!(js, CLIP_EXTENSION_JS);
+        assert!(!js.contains("readText"), "it never reads the clipboard");
+        assert!(js.contains(&format!("MAX_CHARS = {CLIP_MAX_CHARS}")));
+        assert!(
+            js.contains("0o700") && js.contains("umask(0o177)"),
+            "folder 0700, socket 0600"
+        );
+        // only in the window in front, with a terminal, and it says so every time
+        assert!(js.contains("window.state.focused") && js.contains("window.activeTerminal"));
+        assert!(js.contains("setStatusBarMessage('Copied "));
+        assert!(OZ_CLIP.contains(".local\", \"state\", \"ozbox\", \"clip\""));
+    }
+
+    #[test]
+    fn tmux_copies_go_to_the_helper_unless_the_person_has_a_copy_command_of_their_own() {
+        let Ok(o) = std::process::Command::new("tmux").arg("-V").output() else {
+            return; // no tmux on this machine: the line itself is checked below
+        };
+        if !o.status.success() {
+            return;
+        }
+        let line = TMUX_LINES[5];
+        assert!(line.contains("copy-command") && line.contains("oz-clip"));
+        let d = tempfile::tempdir().unwrap();
+        let ask = |conf: &str, n: &str| {
+            let f = d.path().join(format!("{n}.conf"));
+            std::fs::write(&f, conf).unwrap();
+            let sock = format!("ozbox-test-{}-{n}", std::process::id());
+            let out = std::process::Command::new("tmux")
+                .args(["-L", &sock, "-f"])
+                .arg(&f)
+                .args([
+                    "new-session",
+                    "-d",
+                    "sleep 5",
+                    ";",
+                    "show",
+                    "-sv",
+                    "copy-command",
+                    ";",
+                    "kill-server",
+                ])
+                .env("HOME", d.path())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(
+            ask(&format!("{line}\n"), "ours"),
+            format!("{}/.local/bin/oz-clip", d.path().display())
+        );
+        assert_eq!(
+            ask(
+                &format!("set -s copy-command 'xclip -i'\n{line}\n"),
+                "theirs"
+            ),
+            "xclip -i"
+        );
     }
 
     #[test]
