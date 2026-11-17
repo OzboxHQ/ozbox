@@ -2,7 +2,9 @@ import { useCallback, useEffect, useReducer } from 'react';
 
 import { ApiError, type ApiClient } from '../api/client';
 import type { Operation, PlanResponse } from '../api/types';
-import { askStepUp, STEP_UP_CODE } from './step-up';
+import { applyWithGates } from './fleet-apply';
+import { askStepUp } from './step-up';
+import { getPasskey } from './webauthn';
 import { applyRequest, flowReducer, idle, type FlowAction, type FlowState } from './plan-flow';
 
 function describe(e: unknown): { message: string; code: string; detail?: string } {
@@ -42,17 +44,10 @@ export function usePlanFlow(client: ApiClient, onApplied: () => void) {
     if (!req) return;
     let live = true;
     // Behind a sign-in, an irreversible change first needs a fresh passkey; when it is shown, the same plan is tried again.
-    const attempt = (): Promise<void> =>
-      client.apply(req).then((response) => {
+    applyWithGates(req, { apply: (r) => client.apply(r), askStepUp, fleetChallenge: (id) => client.fleetChallenge(id), getPasskey })
+      .then((response) => {
         if (live) dispatch({ type: 'applied', response });
         onApplied();
-      });
-    attempt()
-      .catch((e: unknown) => {
-        if (e instanceof ApiError && e.code === STEP_UP_CODE) {
-          return askStepUp().then((ok) => (ok ? attempt() : Promise.reject(e)));
-        }
-        return Promise.reject(e);
       })
       .catch((e: unknown) => {
         if (live) dispatch({ type: 'failed', ...describe(e) });

@@ -41,6 +41,20 @@ each with a "what is not covered" list), the [shared responsibility](docs/shared
 [hardening checklist](docs/hardening-checklist.md). Oz Box describes controls; it makes no claim of certification or
 compliance.
 
+## Managing the fleet from a box's dashboard (ADR 0040, Preview, not turned on)
+
+A box has no cloud credentials by design, so a box's dashboard cannot change the fleet. ADR 0040 designs how it could, and its
+first part is built but not turned on in any release: the cloud roles, and a gate in front of every change. The roles may change
+only boxes Oz Box manages, never the box the dashboard runs on, and never who may do what (no IAM, no direct key use, no secrets,
+no shell). The change role cannot be used from the box at all: it trusts only your own sign-in on your computer, for one plan at
+a time. Every change from the dashboard is planned and shown first, and then needs a change window for that plan and your passkey
+over that exact plan; an authenticator code, a computer's key or another plan's confirmation is refused. The agents on the box
+never hold the credentials: they reach neither the instance's metadata service nor the dashboard's change step. A box the change
+role launches can only be in Oz Box's own subnets, even when the launch names an existing network interface; no disk can be
+attached to the managing box or taken from it, and a change attaches only its own box's disks; the managing box is protected by
+its name as well as its tag, so its older snapshots cannot be cloned. **Security review required before this is turned on.** Its
+open limits are in the ADR's "Amendment 1".
+
 ## What a chat app can and cannot do (Telegram, Preview)
 
 Telegram is not private: bot messages are not end to end encrypted, and the vendor has no data agreement with the project. Never type

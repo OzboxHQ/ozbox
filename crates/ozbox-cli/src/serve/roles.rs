@@ -562,6 +562,8 @@ mod tests {
             "events",
             "demo",
             "code",
+            // a box's dashboard that manages the fleet: the plan-bound passkey challenge is an owner's (ADR 0040)
+            "fleet",
             "boxes",
             // named by sub-route in the table (a test message, a model's list or test, a push device); anything else under
             // them is an owner's

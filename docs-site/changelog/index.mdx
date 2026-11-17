@@ -8,6 +8,17 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Preview: managing the fleet from a box's dashboard">
+  ## The first part of managing your fleet from a box's own dashboard (Preview)
+
+  A box's dashboard shows only that box, because a box holds no cloud credentials. This release adds the first part of letting it manage your other boxes, built and tested but **not turned on yet**.
+
+  - **Cloud roles that can only touch Oz Box's own boxes.** An administrator can set up two roles: one that reads the fleet, and one that can create, resize, pause, resume, snapshot, clone and destroy Oz Box's boxes, never the box the dashboard runs on and never who may do what.
+  - **Every change is confirmed for that exact plan.** The dashboard plans and shows each change as it does today; applying it then needs a change window opened from your own computer and your passkey over that plan. An authenticator code or a computer's key is not accepted.
+  - **Boxes stay in your own network, and the managing box stays out of reach.** A box made this way can only be placed in Oz Box's own subnets, a change can attach only its own box's disks, and nothing can be attached to, started on, or cloned from the box that manages the fleet, including from its older backups.
+  - **Known limit.** The part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the fleet is not connected. See ADR 0040.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

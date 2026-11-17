@@ -2,6 +2,7 @@ import type { AlertSummary, TestRun } from './alert-types';
 import type {
   ApplyJob,
   ApplyRequest,
+  FleetChallenge,
   ApplyStarted,
   AppsStatus,
   CostResponse,
@@ -186,6 +187,8 @@ export interface ApiClient {
   localAiApply(box: string, plan: LocalAiPlan, signal?: AbortSignal, install?: boolean): Promise<{ provider_id: string; endpoint: string; model: string }>;
   /** Applies a plan this server issued. */
   apply(request: ApplyRequest, signal?: AbortSignal): Promise<ApplyResponse>;
+  /** On a box's dashboard that manages the fleet: the passkey request for one issued plan (ADR 0040). */
+  fleetChallenge(planId: string, signal?: AbortSignal): Promise<FleetChallenge>;
 }
 
 /** The most times an apply asks again while the box gets ready (about ten minutes). */
@@ -336,6 +339,7 @@ export function createApiClient(opts: ClientOptions): ApiClient {
         s,
       ),
     apply: (r, s) => applyAndWait(r, s),
+    fleetChallenge: (id, s) => request('POST', `/v1/fleet/plans/${encodeURIComponent(id)}/challenge`, {}, s),
     cost: (s) => request('GET', '/v1/cost', undefined, s),
     refreshPrices: (s) => request('POST', '/v1/cost/refresh', {}, s),
     apps: (s) => request('GET', '/v1/apps', undefined, s),
