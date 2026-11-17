@@ -1,4 +1,4 @@
-import type { BoxRecord, EngineInfo, ModelKind, ModelPrice, ModelProvider, UsageRow } from '../api/types';
+import type { BoxRecord, EngineInfo, ModelKind, ModelPrice, ModelProvider, SubscriptionInfo, UsageRow } from '../api/types';
 import type { MessageKey } from './i18n';
 
 /** The provider types in the order a person picks from them. */
@@ -86,4 +86,44 @@ export function barPercent(row: UsageRow, rows: UsageRow[]): number {
 /** Boxes that have a GPU: their size is a `{ Gpu: ... }` object. */
 export function gpuBoxes(boxes: BoxRecord[]): BoxRecord[] {
   return boxes.filter((b) => typeof b.spec.size === 'object');
+}
+
+/** The status of a subscription sign-in (ADR 0054), as catalogue keys. */
+export const SUB_STATUS_LABEL: Record<SubscriptionInfo['status'], MessageKey> = {
+  available: 'models.sub_status_available',
+  planned: 'models.sub_status_planned',
+  not_offered: 'models.sub_status_not_offered',
+};
+
+export const SUB_SIGNIN_LABEL: Record<SubscriptionInfo['sign_in'], MessageKey> = {
+  device_code: 'models.sub_signin_device_code',
+  browser_only: 'models.sub_signin_browser_only',
+  not_documented: 'models.sub_signin_not_documented',
+  none: 'models.sub_signin_none',
+};
+
+function inCatalogue(key: string, has: (k: string) => boolean): MessageKey | null {
+  return has(key) ? (key as MessageKey) : null;
+}
+
+/**
+ * The rows to show, each with its message keys. A row the catalogue has no words for (a newer server) is left out rather
+ * than shown without its reason: a status with no explanation could read as permission. Only https vendor links are kept.
+ */
+export function subscriptionRows(subs: SubscriptionInfo[] | undefined, has: (k: string) => boolean): { sub: SubscriptionInfo; plan: MessageKey; reason: MessageKey; links: string[] }[] {
+  const out: { sub: SubscriptionInfo; plan: MessageKey; reason: MessageKey; links: string[] }[] = [];
+  for (const sub of subs ?? []) {
+    const plan = inCatalogue(`models.sub_plan_${sub.id}`, has);
+    const reason = inCatalogue(`models.sub_reason_${sub.reason}`, has);
+    if (!plan || !reason || !(sub.status in SUB_STATUS_LABEL)) continue;
+    const links = sub.sources.filter((u) => {
+      try {
+        return new URL(u).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    });
+    out.push({ sub, plan, reason, links });
+  }
+  return out;
 }

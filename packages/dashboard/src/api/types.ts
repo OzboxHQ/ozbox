@@ -508,10 +508,26 @@ export interface EngineInfo {
   kinds: ModelKind[];
 }
 
+/** Whether an engine can run on a person's own subscription instead of an API key (ADR 0054). Ids, codes and links only. */
+export interface SubscriptionInfo {
+  id: string;
+  engine: string;
+  engine_label: string;
+  kind: 'subscription';
+  status: 'available' | 'planned' | 'not_offered';
+  sign_in: 'device_code' | 'browser_only' | 'not_documented' | 'none';
+  reason: string;
+  /** The vendor's own documentation and terms the status rests on. */
+  sources: string[];
+  checked_on: string;
+}
+
 export interface ModelsCatalog {
   kinds: ModelKindInfo[];
   engines: EngineInfo[];
   price_table_as_of: string;
+  /** Added with ADR 0054; an older server leaves it out. */
+  subscriptions?: SubscriptionInfo[];
 }
 
 /** A price in US dollars per million tokens. Always an estimate. */

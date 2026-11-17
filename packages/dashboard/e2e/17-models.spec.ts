@@ -190,3 +190,28 @@ for (const width of WIDTHS) {
     }
   });
 }
+
+// ADR 0054: whether each engine can run on a person's own subscription. Read only and honest: every row says Planned or
+// Not offered with the reason and the vendor's own pages, and nothing offers to connect one.
+for (const width of WIDTHS) {
+  test(`subscriptions at ${width}px: honest status, vendor links, no connect button`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page, '/settings/models');
+    const card = page.getByTestId('model-subscriptions');
+    await card.scrollIntoViewIfNeeded();
+    await expect(card.getByRole('heading', { name: 'Use a subscription instead of a key' })).toBeVisible();
+    await expect(card).toContainText('None can be connected yet');
+    const claude = card.getByTestId('subscription-claude-code-claude');
+    await expect(claude).toContainText('Not offered');
+    await expect(claude).toContainText("Anthropic's terms");
+    await expect(card.getByTestId('subscription-codex-chatgpt')).toContainText('Planned');
+    await expect(card.getByText('Available', { exact: true })).toHaveCount(0);
+    await expect(card.getByRole('button')).toHaveCount(0);
+    for (const href of await card.getByRole('link').evaluateAll((as) => as.map((a) => a.getAttribute('href') ?? ''))) {
+      expect(href.startsWith('https://')).toBe(true);
+    }
+    if (width < 1024) await expectTouchTargets(page, card);
+    await expectNoSidewaysScroll(page);
+    await axeClean(page, 'model-subscriptions');
+  });
+}
