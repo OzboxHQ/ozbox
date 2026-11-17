@@ -26,8 +26,9 @@ and not yet blocking the upgrade (that comes with phase 5). The plan's line and 
 from what is done: `upgrade_kind` is `\{"called_for": "live" | "replace" | "in_place" | "undecided", "carried_out": "replace",
 "reason": ...\}`. `carried_out` is `replace` in every release until the one that carries out a live update, and a reader keys on
 `carried_out`, never on `called_for`: a plan that says "called for live" must never read as a live update having happened.
-`upgrade-policy.json` supplies exactly `work_format` and `work_format_reads` to the signed record, and nothing else from that file
-is read.
+`upgrade-policy.json` supplies exactly `work_format`, `work_format_reads` and (since 2026-11-17) `secrets_keys` to the signed
+record, and nothing else from that file is read. `secrets_keys` lists the store keys the release's secrets service opens by itself;
+the upgrade plan refuses a box on the fleet's KMS key an image that does not list `kms` (ADR 0029 Amendment 17).
 
 **Build status.** Part 2 of the build plan (section 9), *runs out of the daemon*, is built and **Preview**: CI covers it with a
 fake of the box user's manager (the real shim, its socket, log and status file, and real programs; no systemd). Not yet run
@@ -157,7 +158,7 @@ differ: "release 0.3.2 on a disk from 0.3.0" is the normal state after one. So, 
 - each rule has a test.
 
 **3. The record's keys are fixed.** The signed record is built by `infra/packer/ozbox-image/upgrade-record.jq`, which takes
-exactly `work_format` and `work_format_reads` from the policy file; a test runs that same file against a policy file that tries
+exactly `work_format`, `work_format_reads` and `secrets_keys` from the policy file; a test runs that same file against a policy file that tries
 to set `disk_generation` or `live_from` and checks that nothing changed.
 
 ### Decisions of 2026-11-13

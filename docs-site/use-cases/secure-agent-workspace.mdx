@@ -113,6 +113,16 @@ brokered yet, so a run that needs one waits with that reason. A laptop has no se
 separation there is weaker than on a box.
 **Status:** Preview.
 
+**When the box's secrets service is down.** The box's git hooks compare a commit with the secrets the box stores, and that
+needs the service. While it is not running, a commit is still read for key shapes, file names and `.env` files, and a clean
+one goes through with a note that says what was not checked. The commit is noted on the box, and once the service is back the
+next commit or push adds it to the box's audit trail, marked as made in the outage window (a line such as
+`guard.commit-unscanned … outage-window window=not-listening`). **A push stays stopped for the whole outage**, and no approval
+opens it, not even one signed on your own computer; once the service is back the push reads every commit the remote lacks.
+**Limits:** the note is in a file the box user owns, so an agent that means harm can delete it before it is sent: it records
+accidents. A commit that is never followed by another commit or push on the box is not sent. **Status:** Preview (tested with
+the service stopped in tests, not yet on a real box).
+
 ## 3. A network that only reaches what you declared
 
 **You want:** a poisoned test, or a prompt-injected agent running your tests, to be unable to send your data anywhere.
