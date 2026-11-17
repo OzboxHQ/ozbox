@@ -65,7 +65,7 @@ pub const SEALED_OPS: &[&str] = &[
 ];
 
 pub fn is_reserved(name: &str) -> bool {
-    name == KEY_NAME || name == SETUP_WINDOW_CLOSED
+    name == KEY_NAME || name == SETUP_WINDOW_CLOSED || name == SETUP_WINDOW_STARTED
 }
 
 /// The store's record that the dashboard's first-day window is closed (a person enrolled a passkey or an authenticator in the
@@ -73,11 +73,54 @@ pub fn is_reserved(name: &str) -> bool {
 /// write nor delete it (a reserved name), and nothing in this program removes it: the window never reopens.
 pub const SETUP_WINDOW_CLOSED: &str = "setup-code-window-closed";
 
-/// Whether the first-day window is open: the dashboard has not yet said anyone enrolled a passkey or an authenticator. While it
-/// is open the first-time code is read through the sealed ingress route with no approval (ADR 0041, Amendment of 2026-11-17,
-/// "first-day window"). A store that cannot be read counts as closed.
-pub fn setup_window_open(store: &dyn SecretStore) -> bool {
-    matches!(store.exists(SETUP_WINDOW_CLOSED), Ok(false))
+/// When the first-day window started: the milliseconds of the box's first secrets-service start, kept in the encrypted store
+/// (a reserved name, so a restart never resets it and the box user cannot write it). Only root's `setup_window_extend` moves it.
+pub const SETUP_WINDOW_STARTED: &str = "setup-code-window-started-ms";
+
+/// How long the first-day window stays open after the box's first secrets-service start: the first day (ADR 0041).
+pub const SETUP_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Why the first-day window is not open, as a message key; `None` while it is open.
+pub fn setup_window_refusal(store: &dyn SecretStore, now: u64) -> Option<&'static str> {
+    match store.exists(SETUP_WINDOW_CLOSED) {
+        Ok(false) => {}
+        _ => return Some("ingress.setup_window_closed"),
+    }
+    // an approver of any kind already enrolled (a laptop key `ozbox create` pinned, or a passkey): the code needs its approval
+    match store.exists(crate::secrets_approval::ENROLLED_MARKER) {
+        Ok(false) => {}
+        _ => return Some("ingress.setup_window_approver"),
+    }
+    match start_time(store, now) {
+        Some(t) if now < t.saturating_add(SETUP_WINDOW_MS) => None,
+        _ => Some("ingress.setup_window_expired"),
+    }
+}
+
+/// The recorded start, made now the first time it is asked for. A store that cannot be read or written counts as expired.
+fn start_time(store: &dyn SecretStore, now: u64) -> Option<u64> {
+    match store.get(SETUP_WINDOW_STARTED) {
+        Ok(Some(v)) => v.trim().parse().ok(),
+        Ok(None) => store
+            .set(SETUP_WINDOW_STARTED, &now.to_string())
+            .ok()
+            .map(|_| now),
+        Err(_) => None,
+    }
+}
+
+/// Record the window's start at the service's first start (a no-op on every later one).
+pub fn start_setup_window(store: &dyn SecretStore, now: u64) {
+    let _ = start_time(store, now);
+}
+
+/// Whether the first-day window is open: nobody has enrolled a passkey or an authenticator, no approver of any kind is
+/// enrolled, and it is within a day of the box's first service start. While it is open the first-time code is read through the
+/// sealed ingress route with no approval (ADR 0041, Amendment of 2026-11-17, "first-day window"). A store that cannot be read
+/// counts as closed.
+#[cfg(test)]
+pub fn setup_window_open(store: &dyn SecretStore, now: u64) -> bool {
+    setup_window_refusal(store, now).is_none()
 }
 
 /// The service key, the box it speaks for, and the ids it has already opened.
@@ -1148,6 +1191,106 @@ mod tests {
         assert_eq!(ask(r#"{"op":"names","prefix":""}"#)["ok"], false);
     }
 
+    /// Review fix: the window is open only while NO approver of any kind is enrolled (a pinned laptop key counts), and only for
+    /// a day after the box's first service start; a restart never resets that clock, and only root extends it.
+    #[test]
+    fn the_first_day_window_is_refused_when_an_approver_is_enrolled_or_after_a_day_and_a_restart_keeps_the_clock(
+    ) {
+        use crate::secrets_service::{handle_from, Policy};
+        const CODE: &str = "SENTL-B428X";
+        let (_d, store, gates) = service();
+        let mac = mac(&store);
+        let ing = gates.ingress.get().unwrap().clone();
+        let t0 = crate::tokenmac::now_ms();
+        let day = SETUP_WINDOW_MS;
+        let ask = |g: &Gates, id: &str| -> Value {
+            let r = req(&ing, json!({"op": "setup_code", "approval": ""}), id, t0).to_string();
+            serde_json::from_str(&handle_from(&store, &mac, g, Policy::Ingress, None, &r)).unwrap()
+        };
+        let put = |g: &Gates| {
+            let line = json!({"op":"setup_code_put","value":CODE,"msg":(t0 + 60_000).to_string()})
+                .to_string();
+            assert!(
+                handle_from(&store, &mac, g, Policy::Supervisor, None, &line)
+                    .contains("\"ok\":true")
+            );
+        };
+        // the service's first start records the clock once; a later start never moves it
+        start_setup_window(store.as_ref(), t0);
+        start_setup_window(store.as_ref(), t0 + 5 * day);
+        assert!(setup_window_open(store.as_ref(), t0 + day - 1));
+        assert_eq!(
+            setup_window_refusal(store.as_ref(), t0 + day),
+            Some("ingress.setup_window_expired")
+        );
+        // a restart (fresh gates, same store) keeps the same clock
+        let again = Gates::default();
+        let _ = again.ingress.set(ing.clone());
+        assert!(!setup_window_open(store.as_ref(), t0 + day + 1));
+        put(&again);
+        // pinned key: an approver exists, so no window even on the first minute
+        store
+            .set(crate::secrets_approval::ENROLLED_MARKER, "1")
+            .unwrap();
+        assert_eq!(
+            setup_window_refusal(store.as_ref(), t0),
+            Some("ingress.setup_window_approver")
+        );
+        put(&gates);
+        let r = ask(&gates, &format!("f1{:030}", 1));
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(!r.to_string().contains(CODE));
+        // the box user, the dashboard and the sealed route cannot extend the clock; root can, once only before an enrolment
+        let ext = r#"{"op":"setup_window_extend"}"#;
+        for p in [
+            Policy::Box,
+            Policy::BoxLocked,
+            Policy::Supervisor,
+            Policy::Import,
+            Policy::Ingress,
+        ] {
+            assert!(
+                handle_from(&store, &mac, &gates, p, None, ext).contains("\"ok\":false"),
+                "{p:?}"
+            );
+        }
+        store
+            .delete(crate::secrets_approval::ENROLLED_MARKER)
+            .unwrap();
+        let before = store.get(SETUP_WINDOW_STARTED).unwrap();
+        assert!(handle_from(&store, &mac, &gates, Policy::Admin, None, ext).contains("\"ok\":true"));
+        assert_ne!(store.get(SETUP_WINDOW_STARTED).unwrap(), before);
+        assert!(setup_window_open(store.as_ref(), crate::tokenmac::now_ms()));
+        // the first enrolment still closes it for good, and root cannot extend it back open
+        assert!(handle_from(
+            &store,
+            &mac,
+            &gates,
+            Policy::Supervisor,
+            None,
+            r#"{"op":"setup_code_close"}"#
+        )
+        .contains("\"ok\":true"));
+        assert!(
+            handle_from(&store, &mac, &gates, Policy::Admin, None, ext).contains("\"ok\":false")
+        );
+        assert!(!setup_window_open(
+            store.as_ref(),
+            crate::tokenmac::now_ms()
+        ));
+        // the box socket cannot write or delete the clock
+        for line in [
+            json!({"op":"set","name":SETUP_WINDOW_STARTED,"value":"1"}).to_string(),
+            json!({"op":"delete","name":SETUP_WINDOW_STARTED}).to_string(),
+        ] {
+            let _ = handle_from(&store, &mac, &gates, Policy::Box, None, &line);
+        }
+        assert_ne!(
+            store.get(SETUP_WINDOW_STARTED).unwrap().as_deref(),
+            Some("1")
+        );
+    }
+
     /// The first-day window (ADR 0041, Amendment of 2026-11-17): while nobody has enrolled a passkey or an authenticator in the
     /// dashboard, the sealed ingress route reads the first-time code with no approval, even on a box whose laptop key is pinned
     /// (a second factor exists). The supervisor's close call, and nothing else, ends it for good: the code is forgotten, a
@@ -1180,10 +1323,7 @@ mod tests {
             .to_string();
             serde_json::from_str(&handle_from(&store, &mac, g, Policy::Ingress, None, &r)).unwrap()
         };
-        // `ozbox create` pinned a laptop key: a second factor exists, but the dashboard has nobody enrolled
-        store
-            .set(crate::secrets_approval::ENROLLED_MARKER, "1")
-            .unwrap();
+        // a fresh box: nobody enrolled, no pinned key, inside the first day
         put(&gates);
         let open = ask(&gates, "", &format!("e1{:030}", 1));
         assert_eq!(
@@ -1218,7 +1358,7 @@ mod tests {
             }
         }
         assert!(
-            setup_window_open(store.as_ref()),
+            setup_window_open(store.as_ref(), crate::tokenmac::now_ms()),
             "still open: only the supervisor closes it"
         );
         // the box user cannot even sealed-ask for the close (it is not a sealed operation)
@@ -1233,12 +1373,15 @@ mod tests {
             handle_from(&store, &mac, &gates, Policy::Ingress, None, &sealed_close)
                 .contains("\"ok\":false")
         );
-        assert!(setup_window_open(store.as_ref()));
+        assert!(setup_window_open(store.as_ref(), crate::tokenmac::now_ms()));
 
         // the dashboard's first enrolment closes it: the code is gone and the route without an approval is refused
         let o = handle_from(&store, &mac, &gates, Policy::Supervisor, None, close);
         assert!(o.contains("\"ok\":true"), "{o}");
-        assert!(!setup_window_open(store.as_ref()));
+        assert!(!setup_window_open(
+            store.as_ref(),
+            crate::tokenmac::now_ms()
+        ));
         // neither the box user nor the dashboard can remove the record to reopen it
         for p in [
             Policy::Box,
@@ -1249,7 +1392,7 @@ mod tests {
             let line = json!({"op":"delete","name":SETUP_WINDOW_CLOSED}).to_string();
             let _ = handle_from(&store, &mac, &gates, p, None, &line);
             assert!(
-                !setup_window_open(store.as_ref()),
+                !setup_window_open(store.as_ref(), crate::tokenmac::now_ms()),
                 "{p:?} reopened the window"
             );
         }
@@ -1275,6 +1418,10 @@ mod tests {
         let none = ask(&gates, &dash, &format!("e4{:030}", 1));
         assert_eq!(none["ok"], false);
         assert!(!none.to_string().contains(CODE));
+        // the dashboard's enrolment also marks an approver enrolled (the same call path in a real box)
+        store
+            .set(crate::secrets_approval::ENROLLED_MARKER, "1")
+            .unwrap();
         // a code put in later (a dashboard restarted with every approver removed by hand) still needs an approval
         put(&gates);
         assert_eq!(ask(&gates, "", &format!("e5{:030}", 1))["ok"], false);
@@ -1296,7 +1443,10 @@ mod tests {
         let again = Gates::default();
         let _ = again.ingress.set(ing.clone());
         put(&again);
-        assert!(!setup_window_open(store.as_ref()));
+        assert!(!setup_window_open(
+            store.as_ref(),
+            crate::tokenmac::now_ms()
+        ));
         assert_eq!(ask(&again, "", &format!("e7{:030}", 1))["ok"], false);
 
         // sentinel: the code is in no file the service wrote (the store is sealed; the code is held in memory only)

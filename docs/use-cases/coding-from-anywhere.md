@@ -176,8 +176,8 @@ reports success only once the dashboard runs that way; it never runs as the box 
 old way (the one the box's image carries when its hash is in the image release's signed manifest, otherwise the release's
 signed program) is kept only as a fallback. Read the first-time setup code on your own computer with `ozbox secrets ingress setup-code --box ops`
 (it is handed to the box's secrets service and sent back through the sealed route, so it is not in a log the box user can read; on a
-box made before the ingress account, `ozbox upgrade` it first) and sign in at once. It works with no approval until someone enrols a
-passkey or an authenticator in the dashboard; from then on it is refused for good, and you sign in with what you enrolled. No process
+box made before the ingress account, `ozbox upgrade` it first) and sign in at once. It works with no approval only on a box with no approver yet, for its first 24 hours, and until someone enrols a
+passkey or an authenticator in the dashboard (from then on it is refused for good; a box with a pinned laptop key needs that key's touch), and you sign in with what you enrolled. No process
 on the box can read the code this way: the route is a separate account only your computer's ingress key opens (on AWS, through your
 AWS sign-in too). A box made before this release does not know the helper's new check
 and the install stops there, with the dashboard staged but not running: upgrade the box first (an upgrade on Hetzner now replaces the

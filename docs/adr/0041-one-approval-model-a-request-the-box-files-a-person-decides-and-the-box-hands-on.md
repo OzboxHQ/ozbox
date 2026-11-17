@@ -1393,7 +1393,7 @@ refused for a staging-only declaration as for a Production one; a software key's
 named live or production, a `sk_live_` value or a production address, nothing stored and the code left good for an ordinary import;
 the set of scopes a software key never decides is the same on both paths, read from `RULES`.
 
-### First-day window (2026-11-17): the first-time dashboard code through the sealed route, until the first enrolment
+### First-day window (2026-11-17): the first-time dashboard code through the sealed route, until the first enrolment or a day
 
 **Why.** The review fix leaves a box made by `ozbox create` with one approver, the computer's software key, which never approves
 `setup-code`. The dashboard's first-time code is how the first passkey or authenticator is enrolled, so the owner could not set the
@@ -1403,9 +1403,18 @@ and root writes its answer where the box user reads it, so any agent on the box 
 
 **Decision.**
 
-1. While the dashboard has **no passkey and no authenticator** enrolled, the secrets service answers the sealed `setup_code` request
-   with no approval, whatever else the box has (a pinned laptop key included). The audit line says `via=ingress-first-day`; it never
-   holds the code.
+1. The window is open only while **no approver of any kind is enrolled** (no passkey, no authenticator, and no laptop key that
+   `ozbox create` pinned: the enrolled marker is absent) **and** it is within **24 hours of the box's first secrets-service start**.
+   While it is open the secrets service answers the sealed `setup_code` request with no approval. The audit line says
+   `via=ingress-first-day`; it never holds the code. (Second independent review, Medium: the first version had no time limit and
+   ignored a pinned key, so a stolen ingress key could read the code on a box whose pinned key used to have to approve it.)
+   On a box with a pinned laptop key the window is never open: `setup-code` needs that key's approval as before, and it must be a key
+   whose touch was proved (a plain software key stays refused, review H1).
+   The start time is kept in the encrypted store under a reserved name, written once at the service's first start; a restart never
+   resets it, and the box user's sockets and the dashboard cannot write or remove it. Only **root** (the admin socket,
+   `setup_window_extend`) can start the day again, audited as `secrets.setup-code.window-extended`, and never after an enrolment has
+   closed the window for good. After 24 hours the request with no approval is refused with the sentence that says to sign in to the
+   dashboard or approve from the computer that holds the key.
 2. The dashboard tells the service on **every** enrolment, passkey or authenticator, and at every start once anyone is enrolled, through
    a new call, `setup_code_close`, on the supervisor's own socket only (a folder only the supervisor's user may enter). The service
    records the window closed in its encrypted store under a reserved name and forgets the code it holds. The record survives restarts;
@@ -1430,10 +1439,14 @@ and root writes its answer where the box user reads it, so any agent on the box 
   can reach the route**, so no agent on the box can read the code through it.
 
 **Residual risk.** During the window only, a program on the owner's computer that holds the ingress key (and, on AWS, can use the AWS
-sign-in) can read the code and enrol its own passkey first. The owner then finds the code refused when they use it. The window ends at
-the first enrolment, and the code lasts 30 minutes.
+sign-in) can read the code and enrol its own passkey first. The owner then finds the code refused when they use it. The window ends
+at the first enrolment or 24 hours after the box's first service start, whichever is first, and the code lasts 30 minutes. A box
+with a pinned laptop key has no window at all, so this risk is absent there. A box left unenrolled for a day needs an approval
+(or root's extension) to get the code.
 
-**Tests.** The window open: the code read through the sealed route with no approval on a box with a pinned laptop key. Only the
+**Tests.** The window open: the code read through the sealed route with no approval on a fresh box. Refused when an approver is
+enrolled (a pinned key), and after 24 hours (a clock passed in); a restart keeps the clock; the box user, the dashboard and the sealed
+route cannot move or write it, root can extend it before an enrolment and never after. Only the
 supervisor closes it (the box, locked box, import, runner, broker, ingress, unsealed and admin sockets cannot, and a sealed close is
 refused). Neither the box user nor the dashboard can write or remove the record. After the close the code is gone, the read with no
 approval is refused, a software key's code is refused (none is made, one that exists is refused), and a fresh service on the same store
