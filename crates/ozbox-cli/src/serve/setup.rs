@@ -82,6 +82,8 @@ struct FinishBody {
 fn finding(f: &Finding) -> Resp {
     let status = match f.code.as_str() {
         "command_failed" | "apply_failed" | "plugin_download_failed" | "plan_failed" => 502,
+        // AWS itself did not answer (an outage, throttling, no network): not the person's login, and not a bad request
+        "aws_unavailable" | "aws_throttled" | "aws_unreachable" => 503,
         _ => 422,
     };
     let body = serde_json::to_vec(&json!({
@@ -209,6 +211,7 @@ impl App {
             latency: &latency,
             paths: paths.clone(),
             retry_delay: Duration::from_secs(3),
+            preview_without_state: false,
         };
         f(&init)
     }
@@ -459,6 +462,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("modules/aws-box")).unwrap();
         std::fs::create_dir_all(dir.path().join("modules/aws-network")).unwrap();
+        crate::init::write_test_lock(&dir.path().join("work"));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7878);
         let paths = InitPaths {
             config: dir.path().join("config.toml"),

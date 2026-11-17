@@ -1,0 +1,10 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "ReadOnly", "Effect": "Allow", "Action": "ec2:Describe*", "Resource": "*" },
+    { "Sid": "SendOnlyTheAdoptDocument", "Effect": "Allow", "Action": ["ssm:SendCommand"], "Resource": ["arn:aws:ssm:us-east-1:123456789012:document/ozbox-adopt-ozbox"] },
+    { "Sid": "ToBoxesOzBoxManages", "Effect": "Allow", "Action": "ssm:SendCommand", "Resource": "arn:aws:ec2:us-east-1:123456789012:instance/*", "Condition": { "StringEquals": { "ssm:resourceTag/ozbox-managed": "true" } } },
+    { "Sid": "NeverGrantAccessOrOpenInbound", "Effect": "Deny", "Action": ["ec2:AuthorizeSecurityGroupIngress"], "Resource": "*" },
+    { "Sid": "ReadACommandThatWasSent", "Effect": "Allow", "Action": ["ssm:GetCommandInvocation"], "Resource": ["*"] }
+  ]
+}

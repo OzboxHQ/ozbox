@@ -59,3 +59,81 @@ pub fn statements_named(policy: &Value, sids: &[&str]) -> Vec<Value> {
         })
         .unwrap_or_default()
 }
+
+/// What [`merge_statements`] did with each statement it was given, by `Sid` (a statement with no `Sid` is named by its position,
+/// `#1` for the first one given).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MergeReport {
+    /// Statements the policy did not have, appended in the order given.
+    pub added: Vec<String>,
+    /// Statements whose `Sid` the policy had with different content: the given version took its place, where it was.
+    pub replaced: Vec<String>,
+    /// Statements the policy already held exactly (`"ssm:SendCommand"` and `["ssm:SendCommand"]` are the same).
+    pub unchanged: Vec<String>,
+}
+
+/// A statement with its one-value lists written as plain values, so the two ways IAM accepts the same statement compare equal.
+fn normal(v: &Value) -> Value {
+    match v {
+        Value::Array(a) if a.len() == 1 => normal(&a[0]),
+        Value::Array(a) => Value::Array(a.iter().map(normal).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), normal(v))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// A statement's content without its `Sid`: how a statement given without one is matched.
+fn content(v: &Value) -> Value {
+    let mut n = normal(v);
+    if let Some(o) = n.as_object_mut() {
+        o.remove("Sid");
+    }
+    n
+}
+
+/// Merge `extra` statements (another step's output, such as the adopt step's operator statements) into `policy`, so the person
+/// gets ONE complete policy and never merges JSON by hand. Pure: nothing is read or written.
+///
+/// * **Order-stable.** The policy's own statements keep their order; a statement it already has (same `Sid`) is replaced
+///   where it stands; new ones are appended in the order given.
+/// * **De-duplicated.** A `Sid` given twice is taken once (the first); a statement without a `Sid` that the policy already
+///   holds with the same content (whatever its `Sid`) is not added again.
+/// * **Idempotent.** Merging the result with the same statements again changes nothing.
+///
+/// Everything outside `Statement` (the `Version`) is kept as it is.
+pub fn merge_statements(policy: &Value, extra: &[Value]) -> (Value, MergeReport) {
+    let mut out = policy.clone();
+    let mut list: Vec<Value> = policy["Statement"].as_array().cloned().unwrap_or_default();
+    let mut report = MergeReport::default();
+    let mut seen: Vec<String> = Vec::new();
+    for (i, s) in extra.iter().enumerate() {
+        let sid = s["Sid"].as_str().filter(|x| !x.is_empty());
+        let name = sid.map_or_else(|| format!("#{}", i + 1), str::to_string);
+        if let Some(sid) = sid {
+            if seen.iter().any(|x| x == sid) {
+                continue;
+            }
+            seen.push(sid.to_string());
+            match list.iter().position(|x| x["Sid"].as_str() == Some(sid)) {
+                Some(at) if normal(&list[at]) == normal(s) => report.unchanged.push(name),
+                Some(at) => {
+                    list[at] = s.clone();
+                    report.replaced.push(name);
+                }
+                None => {
+                    list.push(s.clone());
+                    report.added.push(name);
+                }
+            }
+        } else if list.iter().any(|x| content(x) == content(s)) {
+            report.unchanged.push(name);
+        } else {
+            list.push(s.clone());
+            report.added.push(name);
+        }
+    }
+    if let Some(o) = out.as_object_mut() {
+        o.insert("Statement".into(), Value::Array(list));
+    }
+    (out, report)
+}
