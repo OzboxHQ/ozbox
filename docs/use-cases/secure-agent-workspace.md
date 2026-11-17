@@ -61,8 +61,8 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    ozbox models add work --kind anthropic --key-stdin
    ```
 2. Import the project's **non-production** `.env` keys into the box's encrypted store. Run it first without `--yes` to see
-   the names and fingerprints (never values); add `--yes` to store them. If the box's dashboard has a second factor, it also
-   needs the one-time `--approval` code the dashboard gives you after your passkey. The file is read the way a `.env` file is normally read (like python-dotenv and Docker Compose): quotes around a value are removed, `export` is accepted, a trailing ` # comment` is ignored, and a quoted value may run over several lines (a PEM key, a JSON document). **Any value can be stored: spaces, quotes, backslashes, JSON, several lines, non-English text.** `ozbox env run` hands the program exactly what the file said. A value the plain format cannot hold is stored encoded (the preview marks it `stored encoded`); a value that is plain stays as it was, so nothing already stored changes. Only a blank value, one with a NUL byte, one over 96 KB, or a quote that is never closed is skipped, and listed with the reason by name only; a name that is not a valid variable name is shown as `line N`. Every key is checked before any is stored, so a skipped key never leaves the others half imported; if the disk itself refuses part-way, run the import again (the same names are simply written again). A box made from an older image cannot take encoded values: the import says which keys need `ozbox upgrade` first. A `--dry-run` shows the preview and sends or stores nothing, even with `--yes`.
+   the names and fingerprints (never values); add `--yes` to store them. If the box's dashboard has a second factor, the
+   import asks for its own approval (see **Approving an import** below): nothing to copy. The file is read the way a `.env` file is normally read (like python-dotenv and Docker Compose): quotes around a value are removed, `export` is accepted, a trailing ` # comment` is ignored, and a quoted value may run over several lines (a PEM key, a JSON document). **Any value can be stored: spaces, quotes, backslashes, JSON, several lines, non-English text.** `ozbox env run` hands the program exactly what the file said. A value the plain format cannot hold is stored encoded (the preview marks it `stored encoded`); a value that is plain stays as it was, so nothing already stored changes. Only a blank value, one with a NUL byte, one over 96 KB, or a quote that is never closed is skipped, and listed with the reason by name only; a name that is not a valid variable name is shown as `line N`. Every key is checked before any is stored, so a skipped key never leaves the others half imported; if the disk itself refuses part-way, run the import again (the same names are simply written again). A box made from an older image cannot take encoded values: the import says which keys need `ozbox upgrade` first. A `--dry-run` shows the preview and sends or stores nothing, even with `--yes`.
    ```
    ozbox secrets import .env.staging --project shop --env staging --box main
    ```
@@ -80,11 +80,30 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    with `--allow-live-all` (the two cannot be used together). Either way the keys are listed first, a person at a terminal
    types the project's name to confirm, and a script is refused with the exact command to run yourself. The keys stay flagged and
    no agent's command is ever given them.
-   **The approval for a production file comes from the dashboard.** On a box with a second factor, an import into a Production
-   environment (any environment other than `dev`, `development`, `staging`, `test` or `e2e`) needs the `--approval` code the
-   dashboard gives you after your passkey or authenticator code. A code made with this computer's own key (`ozbox secrets
-   approve`) never approves Production: the box refuses to make one, and refuses one at import, and says to use the dashboard.
-   The same holds for a declaration whose commands take secrets from a Production environment.
+
+   **Approving an import (Preview).** On a box whose dashboard has a second factor, `ozbox secrets import --box ... --yes`
+   does not need a code. It files an approval request on the box for exactly these keys (names and salted digests, never the
+   values), prints `Waiting for approval in your dashboard: ...`, and waits:
+   1. Open **Approvals** in the box's dashboard (a push or chat message says a request is waiting, if you set one up; a chat
+      app never approves). The card lists the project, the environment and every key name.
+   2. Tap **Approve with passkey**, or, if your account has no passkey, **Use an authenticator code** and type the six digits.
+   3. The waiting command goes on by itself and stores exactly what was approved. A key changed after the approval is refused.
+
+   For a **non-Production** environment (`dev`, `development`, `staging`, `test` or `e2e`) the command also asks
+   `Approve it now? [y/N]` when this computer holds an approval key: answer `y` and the key approves it here instead. A
+   **Production** import (any other environment, or a key whose name says production) is approved **only on the dashboard**,
+   with your passkey or authenticator code: the command does not offer this computer's key, and the box refuses that key if
+   it is tried anyway. The same holds for a declaration whose commands take secrets from a Production environment.
+   `--wait MINUTES` (1 to 30, default 30) limits the wait. Ctrl-C or running out of time stores nothing and changes nothing;
+   the request expires by itself, and running the command again files a new one.
+
+   **The fallback: an approval code.** `--approval CODE` still works: ask the dashboard for a code (**Settings**, **Secrets**,
+   after your passkey or authenticator) and pass it. A code made with this computer's own key (`ozbox secrets approve`) never
+   approves Production: the box refuses to make one, and refuses one at import, and says where to approve instead. A box from
+   before approval requests answers the import with that same sentence; `ozbox upgrade` it to get the flow above.
+   **Not yet:** the dashboard does not take a `.env` file itself (importing from the browser is planned); the tunnel token,
+   a declaration, the box's own secrets and a guard override from your computer still use a code. A guard override filed
+   on the box already waits for the dashboard ([ADR 0041](../adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on.md)).
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used

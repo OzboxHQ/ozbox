@@ -1,6 +1,6 @@
 # 0041 — One approval model: the box files a request, a person decides it where they are, and the box hands the decision to the waiting operation
 
-**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
+**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** **Amended 2026-11-17 (B4-27): a change made from a computer files a request and waits for it, so no code is copied between commands; a person with no passkey may approve on the dashboard with an authenticator code, checked by the secrets service itself (see "Amendment of 2026-11-17 (B4-27)"; owner to confirm the authenticator part).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
 0 Critical, 6 High, 12 Medium, 6 Low, and the owner's decisions of the same day. This text is one current design that answers the
 review. **Phases 1 and 2 are built (see the notes below); phase 3 and the rest are not.** It amends ADR 0028 (item 4 and Amendments 1 to 3: the approval gate, codes and the laptop
 key), ADR 0023 (the commit barrier's override) and ADR 0029 Amendment 6 §3 and §6 (the ingress account and who may approve), and
@@ -177,7 +177,10 @@ parity test as `APPROVAL_SCOPES` has. A scope that is not in it is refused every
   ADR 0040's `ozbox-fleet-apply-v1`; the verification function is the same code, used by the supervisor, the service, ADR 0040's
   credential holder and the issuer.
 - **An authenticator code never decides.** It still protects sign-in and the step-up for settings (ADR 0039). It does not satisfy
-  `decide`, for any scope, and a code can be relayed through a lookalike page where a passkey cannot.
+  `decide`, for any scope, and a code can be relayed through a lookalike page where a passkey cannot. **Amended 2026-11-17
+  (B4-27):** a person **with no passkey** may now approve on the dashboard with an authenticator code, checked by the secrets
+  service itself and recorded as `authenticator`; a person with a passkey still approves only with it. See "Amendment of
+  2026-11-17 (B4-27)" for the conditions and what this costs.
 - **Laptop key.** An enrolled key (ADR 0028 item 4) with a recorded **key type**: `ed25519` (a software key, the only kind
   today), or a FIDO2 key (`sk-ssh-ed25519`, `ecdsa-sk`, or a WebAuthn P-256 credential). Its **presence class** is recorded on
   enrolment and on every decision: `laptop-key:<id>` for a key that is proved to need user presence, and
@@ -696,6 +699,18 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
 - **The issuer's laptop presence is still declared.** The issuer refuses a laptop key whose record says it does not ask the
   person, and no setting changes that any more, but whether a key asks the person is still what its pinned record says, not a
   verified attestation (pending phase 2, as above).
+- **An authenticator decision is weaker than a passkey decision** (Amendment of 2026-11-17, B4-27): it is not bound to the
+  request, so a lookalike page that relays a code, or a supervisor that swaps the request behind one, can turn one code into one
+  approval of something else. It is offered only to a person with no passkey.
+- **The box user can read and replace an authenticator secret today.** `totp-` is among the names the box socket may read back
+  (`BOX_GET_PREFIXES`, for the dashboard) and is not refused for a write there, so a process of the box user can make a valid
+  code for anyone with an authenticator, or set one it knows. It still needs that person's signed-in dashboard session to approve
+  with one (the same holds for the step-up behind a legacy dashboard code), but until that name is the supervisor's only, an
+  authenticator protects less than this ADR assumes. Moving it is the next fix, and it must not strand a dashboard that still
+  reaches its store over the box socket.
+- **Only an import from a computer files and waits so far.** A tunnel token, a declaration, the box's own secrets and a host
+  guard change sent from a computer still take a code (`--approval`); a dashboard-native import (a `.env` file chosen in the
+  browser) is Planned.
 - Not proven on a real box. Every part is Planned.
 
 ## Delegated decisions and fixes (2026-11-12, overnight)
@@ -1340,3 +1355,71 @@ set.
 
 **Not proven on a real box.** Planned: a laptop's `ozbox secrets approve --scope import --env production` against a real box,
 refused with the sentence above, and a dashboard code for the same import accepted.
+
+## Amendment of 2026-11-17 (B4-27): a change made from a computer files a request and waits, and an authenticator code may approve
+
+**What was wrong.** From a computer, a gated change took steps across two places: ask the dashboard for a code, copy it, paste it
+into `--approval`, and, for Production, type a confirmation before the code expired. A code made with the computer's own key was
+refused for Production (as it should be, above), with little to say what to do instead. The request path this ADR describes (§6,
+"the box hands the decision to the waiting operation") was built for the guard hook only.
+
+**Decision.**
+
+1. **An import from a computer files a request and waits.** `ozbox secrets import --box <box> --yes` with no `--approval` sends
+   the import as before. When the box answers that it needs an approval (the sentence it has always used, so an older box is
+   recognised too) and keeps requests, the program files an `import` request over the sealed route for exactly the rows it sent:
+   each name, as a secret, with `sha256("ozbox-import-value-v1", salt, value)` under a fresh 16-byte salt, and Production as the box
+   computes it (`is_production_environment`). It prints one line (`Waiting for approval in your dashboard: ...`, the request id, how
+   long it waits, and that Ctrl-C changes nothing), waits in long polls, checks that the approved digest is the one it filed, and
+   sends the import again with the request id and the salt. The box recomputes the subject from the rows it received and spends the
+   request (§4); a row changed after the approval is refused. Nothing is copied, typed or pasted, and no value is in the request.
+2. **The wait is bounded and stopping is safe.** `--wait MINUTES` (1 to 30, default 30, a request's pending life). Running out or
+   Ctrl-C stores nothing and changes nothing; the request is left to expire (not cancelled). Running the command again files a new
+   request under a new salt.
+3. **This computer's key approves only what it may, inline, after asking.** For a subject that is not Production, and only when
+   this computer holds a key and a person is at a terminal, the program asks `Approve it now? [y/N]` and on `y` decides the request
+   with that key (the same signature over the service's challenge as `ozbox secrets ingress requests approve`). Whether the key may
+   decide is still the box's rule (`software_cell`, the amendment above); the program only leaves the offer out where the box would
+   refuse it. A refusal is printed and the command keeps waiting for the dashboard.
+4. **Production is approved on the dashboard only.** For a Production subject the waiting line says so and the key is never
+   offered. The box refuses a software key's decision of it, and its refusal now names the dashboard (Approvals) with a passkey or an
+   authenticator code, a laptop key that needs a touch, or root. The catalogue sentence for a refused code says to run the import
+   again without `--approval`.
+5. **An authenticator code may approve, on the dashboard, for a person with no passkey** (this reverses "An authenticator code
+   never decides" in §3 for that person; owner to confirm). The dashboard's approve sheet offers **Use an authenticator code**, which
+   posts `POST /v1/approvals/requests/<id>/approve-authenticator` with the code.
+   - The dashboard refuses a person who has a passkey (they approve with it, as the step-up does), one with no authenticator, a
+     viewer, and more than 30 attempts in its window. It checks the code as at sign-in, so the same code cannot sign anyone in later.
+   - It passes the code to `areq_decide` with `factor: authenticator`. **The secrets service checks the code itself**, against the
+     person's authenticator secret in its own store (`totp-<person>`, the name the dashboard keeps it under), with one step of clock
+     drift. Evidence on the wire is ignored: the decision's evidence is the time step the service checked, never the code.
+   - The step is the person's counter in the journal: one step decides once, and an older one is refused.
+   - The role and scope rules are the passkey's (`dashboard_cell`): an owner-only change needs an owner. The record says
+     `authenticator`, never `passkey`, with the authority of a passkey decision of the same role, and a person who is removed or
+     demoted voids what they approved with either factor.
+6. **Additive contract.** `--approval CODE` keeps working and is now the documented fallback; no flag or `--json` field was renamed
+   or removed. `--wait` is new. The route and the `authenticator` factor word are additions.
+
+**Not done in this amendment** (each still takes a code, and says so): the tunnel token, a declaration, the box's own secrets and a
+host guard change sent from a computer. Their path is the same flow with their own subject: the service already files
+`tunnel-token` and `box-secrets` from the root helper, and refuses to file `policy` until it can derive the declaration's
+sensitivity itself. **A dashboard-native import** (Secrets, Import: a `.env` file chosen in the browser, names and fingerprints
+only, the values sealed in the browser to the service key and relayed, a Production switch with the typed confirmation on the
+page) is Planned. It needs HPKE in the browser from an audited library (the suite uses ChaCha20-Poly1305, which WebCrypto does not
+have) and a relay of a sealed line on the supervisor socket, a new path into the service that needs its own decision.
+
+**Tests.** In process, against the real service: the box's refusal of an import with no approval is one the program recognises; a
+Production import filed over the sealed route's dispatch, approved on the supervisor socket with an owner's authenticator code,
+the waiting flow going on and the import stored once, with the value in no request line, answer, printed line, dashboard card or
+file beside the store, and the code in no record; a wrong code, a replayed time step, a person with no authenticator, a viewer,
+forged evidence and a laptop-route attempt refused; a software laptop key's decision of a Production import refused with the
+dashboard named, and the flow never offering the key for Production; a non-Production import approved by the inline key, and a
+refused key leaving the wait on the dashboard; the wait timing out cleanly with the request still pending and nothing stored; a
+Production-looking value in a non-Production import refused before filing. The dashboard's own check of the code: spent once, a
+wrong code refused, nobody signed in refused.
+
+**Benchmark.** None: the approval gate, the import and the dashboard's approval sheet are not on a measured path.
+
+**Not proven on a real box.** Planned (Preview until then): `ozbox secrets import .env.production --project app --env production
+--box <box> --allow-live-all --yes` against a real box with a second factor, approved on the dashboard with a passkey and with an
+authenticator code, the command going on by itself.

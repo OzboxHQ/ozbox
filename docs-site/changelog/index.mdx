@@ -8,6 +8,20 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Approve an import in the dashboard, with nothing to copy">
+  ## Approve an import in your dashboard while the command waits, with no code to copy
+
+  Importing keys into a box with a second factor used to mean asking the dashboard for a code, copying it into `--approval` and running the import again before it expired. Now the import asks for its own approval and waits.
+
+  - **Run the import, then approve it.** `ozbox secrets import <file> --project <p> --env <e> --box <box> --yes` prints `Waiting for approval in your dashboard`. Open **Approvals**, check the names, and approve with your passkey. The command goes on by itself and stores exactly what you approved.
+  - **No passkey? Use your authenticator.** The approval sheet has **Use an authenticator code** for an account that has an authenticator app and no passkey.
+  - **Production is approved in the dashboard only.** For a non-Production environment the command also offers to approve with your computer's approval key (`Approve it now? [y/N]`); for Production it never does, and says so.
+  - **Waiting is safe to stop.** `--wait MINUTES` (up to 30) limits the wait. Ctrl-C or a timeout stores nothing, and the request expires by itself.
+  - **`--approval CODE` still works**, as the fallback and for a box from before this release. The tunnel token, a declaration and the box's own secrets still take a code for now; importing a `.env` file from the dashboard itself is planned.
+
+  This is Preview until it has run on a real box. **How to get it.** `ozbox upgrade <box>` to the release that carries this, and update `ozbox` on your computer. See [Secure agent workspace](/use-cases/secure-agent-workspace).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="Production approvals come from the dashboard">
   ## A key kept on your computer can no longer approve Production
 
