@@ -2235,8 +2235,12 @@ pub enum TasksCommand {
     /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
     /// accepted; every peer must pin the new epoch. On a box this needs root.
     Restored,
+    /// Set up the box's task router as root: a system user of its own, its socket directories and the unit that runs `tasks serve`
+    /// as that user. First-boot configuration runs it; safe to run again. The setup is carried in this program, not in user-data.
+    #[command(hide = true)]
+    RouterSetup,
     /// Run the box's task router as a service of its own (a system user that agents cannot read as). Not for people: the unit that
-    /// `ozbox-mesh-setup` writes runs it.
+    /// `ozbox tasks router-setup` writes runs it.
     #[command(hide = true)]
     Serve {
         /// The directory that holds the key, the state and the mesh audit log. Only the service user may enter it.

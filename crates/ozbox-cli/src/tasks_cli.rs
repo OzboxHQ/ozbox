@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use crate::cli::TasksCommand;
 use crate::messages::t;
 use crate::runs_cli::Flags;
-use crate::tasks_ops::{self as ops, dispatch, Ends, Offer, Policy};
+use crate::tasks_ops::{self as ops, dispatch, Ends, KeyHome, Offer, Policy};
 use crate::tasks_service as service;
 
 fn cfg(key: &str, args: &[(&str, &str)]) -> Error {
@@ -59,11 +59,14 @@ impl Backend {
         {
             return Ok(Backend::Service(root));
         }
+        // On a box the channel's keys belong to the router's own user. Without the router they would sit in the box user's reach
+        // (an agent's), so the in-process endpoint is refused there unless a store was named on purpose (a test, or a person
+        // who chose one).
+        if ozbox_core::audit_remote::on_a_box() && std::env::var_os("OZBOX_SECRET_STORE").is_none()
+        {
+            return Err(cfg("tasks.no_router", &[]));
+        }
         Ok(Backend::Local(dir()?))
-    }
-
-    fn is_service(&self) -> bool {
-        matches!(self, Backend::Service(_))
     }
 
     /// Run one operation. `owner` operations need the admin socket (root) when there is a service.
@@ -73,7 +76,8 @@ impl Backend {
         }
         match self {
             Backend::Local(d) => {
-                let ends = Ends::open(d).map_err(|e| map_err(&e))?;
+                let keys = local_keys();
+                let ends = Ends::open(d, KeyHome::Store(keys.as_ref())).map_err(|e| map_err(&e))?;
                 // on a laptop the store is the person's own file, and so is any agent's that runs as the person
                 dispatch(&ends, Policy::Admin, &args, true).map_err(|e| map_err(&e))
             }
@@ -314,7 +318,8 @@ fn sync_once(
     runner: &dyn CommandRunner,
     json: bool,
 ) -> Result<()> {
-    let ends = Ends::open(dir).map_err(|e| map_err(&e))?;
+    let keys = local_keys();
+    let ends = Ends::open(dir, KeyHome::Store(keys.as_ref())).map_err(|e| map_err(&e))?;
     let st = ends.state().map_err(|e| map_err(&e))?;
     if !st.core.links.contains_key(peer) {
         return Err(cfg("tasks.unknown_peer", &[("name", peer)]));
@@ -395,7 +400,44 @@ pub fn run(cmd: &TasksCommand, f: &Flags) -> Result<()> {
     run_with(cmd, f, &SystemRunner)
 }
 
+/// Where an endpoint run in this process keeps its private keys: the secret store this run uses (the keychain on a laptop).
+fn local_keys() -> std::sync::Arc<dyn crate::secrets::SecretStore> {
+    crate::secrets_file::select()
+}
+
+/// The task router's setup (its user, socket directories and unit), carried in the program so first-boot configuration does not
+/// have to carry it: a box's user-data has a hard size limit (32 KiB on Hetzner).
+pub const ROUTER_SETUP: &str =
+    include_str!("../../../infra/cloud-init/scripts/ozbox-mesh-setup.sh");
+
+/// Run [`ROUTER_SETUP`] with bash, as the caller (root on a box), through the runner: an argv, with the script on stdin.
+pub fn router_setup(runner: &dyn CommandRunner) -> Result<()> {
+    let spec = CommandSpec {
+        program: "bash".into(),
+        args: vec!["-s".into(), "--".into()],
+        cwd: None,
+        env: Default::default(),
+        stdin: Some(ROUTER_SETUP.as_bytes().to_vec()),
+        timeout_secs: Some(120),
+    };
+    let out = runner.run(&spec)?;
+    if !out.stdout.is_empty() {
+        print!("{}", out.stdout);
+    }
+    if !out.stderr.is_empty() {
+        eprint!("{}", out.stderr);
+    }
+    if out.status == Some(0) {
+        Ok(())
+    } else {
+        Err(cfg("tasks.router_setup_failed", &[]))
+    }
+}
+
 pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Result<()> {
+    if let TasksCommand::RouterSetup = cmd {
+        return router_setup(runner);
+    }
     if let TasksCommand::Serve {
         dir,
         agent_socket,
@@ -418,20 +460,14 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
             }
             match &be {
                 Backend::Local(d) => {
-                    ops::init(d, name).map_err(|e| map_err(&e))?;
+                    let keys = local_keys();
+                    ops::init(d, name, KeyHome::Store(keys.as_ref())).map_err(|e| map_err(&e))?;
                 }
                 Backend::Service(_) => {
                     be.call("init", json!({"name": name}), true)?;
                 }
             }
             println!("{}", t("tasks.inited", &[("name", name)]));
-            if !be.is_service()
-                && cfg!(target_os = "linux")
-                && std::path::Path::new("/usr/local/bin/ozbox").exists()
-            {
-                // a box without the router service: the keys sit where an agent that runs as this user can read them
-                println!("{}", t("tasks.service_gap", &[]));
-            }
             Ok(())
         }
         TasksCommand::Identity => print_json(&be.call("identity", json!({}), false)?),
@@ -706,7 +742,9 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
                     r["outbound"].as_str().unwrap_or("[]").to_string()
                 }
                 Backend::Local(d) => {
-                    let ends = Ends::open(d).map_err(|e| map_err(&e))?;
+                    let keys = local_keys();
+                    let ends =
+                        Ends::open(d, KeyHome::Store(keys.as_ref())).map_err(|e| map_err(&e))?;
                     let r = dispatch(
                         &ends,
                         Policy::Relay,
@@ -720,7 +758,7 @@ pub fn run_with(cmd: &TasksCommand, f: &Flags, runner: &dyn CommandRunner) -> Re
             println!("{out}");
             Ok(())
         }
-        TasksCommand::Serve { .. } => Ok(()),
+        TasksCommand::Serve { .. } | TasksCommand::RouterSetup => Ok(()),
         TasksCommand::Restored => {
             let r = be.call("restored", json!({}), true)?;
             println!(
@@ -752,4 +790,39 @@ fn read_big_stdin() -> Result<String> {
 #[allow(dead_code)]
 fn _hex_helpers_are_used(a: &str) -> Option<(String, Vec<u8>)> {
     Some((normalize_hex(a)?, unhex(a)?))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod router_setup_tests {
+    use super::*;
+    use ozbox_core::{Output, RecordingRunner};
+
+    #[test]
+    fn router_setup_runs_the_carried_script_as_an_argv_with_the_script_on_stdin() {
+        let r = RecordingRunner::new();
+        router_setup(&r).unwrap();
+        let calls = r.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "bash");
+        assert_eq!(calls[0].args, ["-s", "--"]);
+        assert!(calls[0].env.is_empty());
+        let stdin = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+        assert_eq!(stdin, ROUTER_SETUP);
+        assert!(
+            stdin.contains("User=ozbox-mesh")
+                && stdin.contains("tasks serve --dir /var/lib/ozbox-mesh")
+        );
+    }
+
+    #[test]
+    fn a_failed_router_setup_is_an_error_that_says_how_to_run_it_again() {
+        let r = RecordingRunner::new();
+        r.reply(Output {
+            status: Some(1),
+            ..Output::default()
+        });
+        let e = router_setup(&r).unwrap_err().to_string();
+        assert!(e.contains("ozbox tasks router-setup"), "{e}");
+    }
 }

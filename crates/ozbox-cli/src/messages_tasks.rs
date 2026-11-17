@@ -48,5 +48,6 @@ pub const EN: &[(&str, &str)] = &[
     ("tasks.service_denied", "This user may not reach the task service."),
     ("tasks.service_down", "The task service is not running. Start it with `systemctl start ozbox-mesh`."),
     ("tasks.not_allowed_here", "That is not offered on this socket."),
-    ("tasks.service_gap", "Note: this box has no separate task service, so the key and the state sit where an agent that runs as your user can read them. Nothing that arrives is acted on, but a task you read here cannot be told apart from one an agent wrote into the file. Run `ozbox-mesh-setup.sh` as root to give the channel a user of its own."),
+    ("tasks.no_router", "This box has no task router, so the channel's keys would sit where an agent that runs as your user can read them. Set it up once, as root: `ozbox tasks router-setup`."),
+    ("tasks.router_setup_failed", "The task router could not be set up; what went wrong is above. Run `ozbox tasks router-setup` as root again once it is fixed."),
 ];

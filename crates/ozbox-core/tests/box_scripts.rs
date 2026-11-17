@@ -3191,9 +3191,12 @@ fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mod
         unit.contains("User=ozbox-mesh") && unit.contains("tasks serve --dir /var/lib/ozbox-mesh")
     );
     assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
-    // written by the template, run once at first boot
+    // carried in the program (user-data has a hard size limit), run once at first boot through it
     let t = read("infra/cloud-init/box.yaml.tftpl");
-    assert!(written_file(&t, "/usr/local/sbin/ozbox-mesh-setup.sh").contains("ozbox-mesh-setup.sh"));
-    assert!(t.contains("/usr/local/sbin/ozbox-mesh-setup.sh ||"));
+    assert!(
+        !t.contains("ozbox-mesh-setup.sh"),
+        "the router's setup is not in user-data"
+    );
+    assert!(t.contains("/usr/local/bin/ozbox tasks router-setup ||"));
     Ok(())
 }

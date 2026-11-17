@@ -31,9 +31,16 @@ impl End {
         let mut c = Command::new(env!("CARGO_BIN_EXE_ozbox"));
         c.env("OZBOX_TASKS_DIR", &self.dir)
             .env("HOME", self.home.path())
-            .env("OZBOX_SECRET_STORE", "memory")
+            // the keys live in the secret store, which must outlive one process: the encrypted file store stands in for the keychain
+            .env("OZBOX_SECRET_STORE", "file")
+            .env("OZBOX_SECRET_FILE", self.secrets_file())
+            .env("OZBOX_SECRET_KEK", "file")
             .write_stdin("");
         c
+    }
+
+    fn secrets_file(&self) -> std::path::PathBuf {
+        self.home.path().join("secrets.enc")
     }
 
     fn ok(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
@@ -64,22 +71,11 @@ fn pair() -> Result<(End, End), Box<dyn std::error::Error>> {
     std::fs::write(&lf, laptop.ok(&["tasks", "identity"])?)?;
     std::fs::write(&bf, boxx.ok(&["tasks", "identity"])?)?;
     let via = via_args(&boxx);
-    laptop.ok(&[
-        "--yes",
-        "tasks",
-        "pin",
-        bf.to_str().unwrap_or_default(),
-        &via[0],
-        &via[1],
-        &via[2],
-        &via[3],
-        &via[4],
-        &via[5],
-        &via[6],
-        &via[7],
-        &via[8],
-        &via[9],
-    ])?;
+    {
+        let mut args: Vec<&str> = vec!["--yes", "tasks", "pin", bf.to_str().unwrap_or_default()];
+        args.extend(via.iter().map(String::as_str));
+        laptop.ok(&args)?;
+    }
     boxx.ok(&["--yes", "tasks", "pin", lf.to_str().unwrap_or_default()])?;
     Ok((laptop, boxx))
 }
@@ -90,7 +86,9 @@ fn via_args(boxx: &End) -> Vec<String> {
         "env".to_string(),
         format!("OZBOX_TASKS_DIR={}", boxx.dir.display()),
         format!("HOME={}", boxx.home.path().display()),
-        "OZBOX_SECRET_STORE=memory".to_string(),
+        "OZBOX_SECRET_STORE=file".to_string(),
+        format!("OZBOX_SECRET_FILE={}", boxx.secrets_file().display()),
+        "OZBOX_SECRET_KEK=file".to_string(),
         env!("CARGO_BIN_EXE_ozbox").to_string(),
     ];
     words
@@ -105,6 +103,31 @@ fn first_id(inbox: &str) -> String {
         .nth(1)
         .unwrap_or_default()
         .to_string()
+}
+
+#[test]
+fn an_endpoint_run_by_the_command_keeps_its_private_keys_in_the_secret_store_not_in_its_files(
+) -> TestResult {
+    let e = End::new()?;
+    e.ok(&["tasks", "init", "--name", "laptop"])?;
+    let id = std::fs::read_to_string(e.dir.join("identity.json"))?;
+    assert!(
+        !id.contains("sign_pkcs8") && !id.contains("seal_secret") && id.contains("key_id"),
+        "{id}"
+    );
+    // nothing in the channel's directory is key-shaped: only public halves and the store's own records
+    for f in std::fs::read_dir(&e.dir)? {
+        let text = String::from_utf8_lossy(&std::fs::read(f?.path())?).into_owned();
+        assert!(
+            !text.contains(concat!("PRIVATE", " KEY")) && !text.contains("pkcs8"),
+            "{text}"
+        );
+    }
+    assert!(
+        e.secrets_file().exists(),
+        "the keys went to the secret store"
+    );
+    Ok(())
 }
 
 #[test]
@@ -216,22 +239,11 @@ fn an_unpinned_endpoint_is_not_heard_and_init_never_overwrites() -> TestResult {
     let bf = boxx.home.path().join("main2.json");
     std::fs::write(&bf, boxx.ok(&["tasks", "identity"])?)?;
     let via = via_args(&boxx);
-    stranger.ok(&[
-        "--yes",
-        "tasks",
-        "pin",
-        bf.to_str().unwrap_or_default(),
-        &via[0],
-        &via[1],
-        &via[2],
-        &via[3],
-        &via[4],
-        &via[5],
-        &via[6],
-        &via[7],
-        &via[8],
-        &via[9],
-    ])?;
+    {
+        let mut args: Vec<&str> = vec!["--yes", "tasks", "pin", bf.to_str().unwrap_or_default()];
+        args.extend(via.iter().map(String::as_str));
+        stranger.ok(&args)?;
+    }
     stranger.ok(&[
         "tasks",
         "send",

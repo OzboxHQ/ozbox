@@ -21,6 +21,9 @@ use ozbox_core::fence::{fenced, random_fence};
 use ozbox_seal::ServiceKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::secrets::SecretStore;
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -40,12 +43,55 @@ pub enum Policy {
     Admin,
 }
 
-/// The key file. Mode 0600, in a directory of mode 0700.
+/// The identity file. Mode 0600, in a directory of mode 0700. In the router's own directory (a user agents cannot read as) it holds
+/// the private keys. On a laptop it holds only `key_id`: the private keys are in the operating system's keychain (the secret store),
+/// under `tasks-sign-<key_id>` and `tasks-seal-<key_id>`, read when the channel is opened and never kept on disk.
 #[derive(Serialize, Deserialize)]
 struct IdentityFile {
     name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     sign_pkcs8: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     seal_secret: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    key_id: String,
+}
+
+/// Where an endpoint's private keys live.
+#[derive(Clone, Copy)]
+pub enum KeyHome<'a> {
+    /// In the identity file, in a directory only the router's own user may enter (`tasks serve` on a box).
+    RouterFile,
+    /// In the secret store (the keychain on a laptop). An identity file that still holds keys is moved into it when opened.
+    Store(&'a dyn SecretStore),
+}
+
+/// The secret-store names of an endpoint's two private keys.
+pub fn key_names(key_id: &str) -> (String, String) {
+    (
+        format!("tasks-sign-{key_id}"),
+        format!("tasks-seal-{key_id}"),
+    )
+}
+
+fn new_key_id() -> Result<String, String> {
+    let mut b = [0u8; 12];
+    getrandom::getrandom(&mut b).map_err(|_| err("no random numbers"))?;
+    Ok(hex(&b))
+}
+
+fn store_keys(st: &dyn SecretStore, key_id: &str, sign: &str, seal: &str) -> Result<(), String> {
+    let (sn, en) = key_names(key_id);
+    st.set(&sn, sign)
+        .and_then(|()| st.set(&en, seal))
+        .map_err(|e| {
+            let _ = st.delete(&sn);
+            err(format!(
+                "the channel's keys could not be kept in {}: {}",
+                st.label(),
+                e.0
+            ))
+        })
 }
 
 /// What is shared with the other side. Public halves only, in lower-case hex, with the fingerprints a person compares.
@@ -131,19 +177,73 @@ fn err(m: impl Into<String>) -> String {
 }
 
 impl Ends {
-    /// Open an initialised channel directory.
-    pub fn open(dir: &Path) -> Result<Ends, String> {
+    /// Open an initialised channel directory, reading the private keys from where `home` says they live.
+    pub fn open(dir: &Path, home: KeyHome<'_>) -> Result<Ends, String> {
         let store: Store<State> = Store::new(dir);
         if !store.exists() {
             return Err(err("not-initialised"));
         }
-        let raw = std::fs::read(dir.join("identity.json"))
-            .map_err(|_| err("the identity file could not be read"))?;
-        let id: IdentityFile =
+        let path = dir.join("identity.json");
+        let raw = std::fs::read(&path).map_err(|_| err("the identity file could not be read"))?;
+        let mut id: IdentityFile =
             serde_json::from_slice(&raw).map_err(|_| err("the identity file is damaged"))?;
-        let signer =
-            RingSigner::from_pkcs8(&unhex(&id.sign_pkcs8).unwrap_or_default()).map_err(err)?;
-        let key = ServiceKey::from_secret_bytes(&unhex(&id.seal_secret).unwrap_or_default())
+        let (sign, seal) = match (home, id.key_id.is_empty()) {
+            (KeyHome::RouterFile, true) => (
+                Zeroizing::new(id.sign_pkcs8.clone()),
+                Zeroizing::new(id.seal_secret.clone()),
+            ),
+            (KeyHome::RouterFile, false) => {
+                return Err(err(
+                    "this channel's keys are in a secret store, not in the router's directory",
+                ))
+            }
+            (KeyHome::Store(st), false) => {
+                let (sn, en) = key_names(&id.key_id);
+                let get = |n: &str| {
+                    st.get(n)
+                        .map_err(|e| {
+                            err(format!(
+                                "the channel's keys could not be read from {}: {}",
+                                st.label(),
+                                e.0
+                            ))
+                        })?
+                        .map(Zeroizing::new)
+                        .ok_or_else(|| {
+                            err(format!(
+                                "the channel's keys are not in {}; this endpoint cannot be used",
+                                st.label()
+                            ))
+                        })
+                };
+                (get(&sn)?, get(&en)?)
+            }
+            (KeyHome::Store(st), true) => {
+                // an identity written before the keys moved to the secret store: move them, then rewrite the file without them
+                let key_id = new_key_id()?;
+                store_keys(st, &key_id, &id.sign_pkcs8, &id.seal_secret)?;
+                let moved = IdentityFile {
+                    name: id.name.clone(),
+                    sign_pkcs8: String::new(),
+                    seal_secret: String::new(),
+                    key_id,
+                };
+                replace_private(
+                    &path,
+                    &serde_json::to_vec(&moved).map_err(|e| e.to_string())?,
+                )?;
+                (
+                    Zeroizing::new(id.sign_pkcs8.clone()),
+                    Zeroizing::new(id.seal_secret.clone()),
+                )
+            }
+        };
+        drop(Zeroizing::new(raw));
+        id.sign_pkcs8.zeroize();
+        id.seal_secret.zeroize();
+        let signer = RingSigner::from_pkcs8(&Zeroizing::new(unhex(&sign).unwrap_or_default()))
+            .map_err(err)?;
+        let key = ServiceKey::from_secret_bytes(&Zeroizing::new(unhex(&seal).unwrap_or_default()))
             .map_err(|_| err("the sealing key is not valid"))?;
         Ok(Ends {
             store,
@@ -183,8 +283,8 @@ impl Ends {
     }
 }
 
-/// Create an endpoint's identity in `dir`. Refuses to replace one.
-pub fn init(dir: &Path, name: &str) -> Result<Value, String> {
+/// Create an endpoint's identity in `dir`, its private keys where `home` says. Refuses to replace one.
+pub fn init(dir: &Path, name: &str, home: KeyHome<'_>) -> Result<Value, String> {
     if !word_ok(name) {
         return Err(err("bad-name"));
     }
@@ -194,10 +294,25 @@ pub fn init(dir: &Path, name: &str) -> Result<Value, String> {
     }
     let (pkcs8, sign_public) = generate().map_err(err)?;
     let key = ServiceKey::generate().map_err(|_| err("no random numbers"))?;
-    let file = IdentityFile {
-        name: name.to_string(),
-        sign_pkcs8: hex(&pkcs8),
-        seal_secret: hex(&key.secret_bytes()[..]),
+    let sign = Zeroizing::new(hex(&pkcs8));
+    let seal = Zeroizing::new(hex(&key.secret_bytes()[..]));
+    let file = match home {
+        KeyHome::RouterFile => IdentityFile {
+            name: name.to_string(),
+            sign_pkcs8: sign.to_string(),
+            seal_secret: seal.to_string(),
+            key_id: String::new(),
+        },
+        KeyHome::Store(st) => {
+            let key_id = new_key_id()?;
+            store_keys(st, &key_id, &sign, &seal)?;
+            IdentityFile {
+                name: name.to_string(),
+                sign_pkcs8: String::new(),
+                seal_secret: String::new(),
+                key_id,
+            }
+        }
     };
     #[cfg(unix)]
     {
@@ -222,6 +337,14 @@ pub fn init(dir: &Path, name: &str) -> Result<Value, String> {
         ))
         .map_err(|e| e.to_string())?;
     Ok(json!({"name": name}))
+}
+
+/// Replace a private file atomically: a new 0600 file beside it, then a rename over it.
+fn replace_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("json.new");
+    let _ = std::fs::remove_file(&tmp);
+    write_private(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -552,5 +675,106 @@ pub fn dispatch(
             Ok(json!({"epoch": ends.state()?.epoch()}))
         }
         _ => Err(err("unknown-op")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod key_home_tests {
+    use super::*;
+    use crate::secrets::MemorySecrets;
+
+    /// Every file under `dir`, as text, for a sentinel check.
+    fn everything_in(dir: &Path) -> String {
+        let mut all = String::new();
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_file() {
+                all.push_str(&String::from_utf8_lossy(&std::fs::read(&p).unwrap()));
+            }
+        }
+        all
+    }
+
+    fn keys_of(st: &MemorySecrets, dir: &Path) -> (String, String) {
+        let id: IdentityFile =
+            serde_json::from_slice(&std::fs::read(dir.join("identity.json")).unwrap()).unwrap();
+        assert!(!id.key_id.is_empty());
+        let (sn, en) = key_names(&id.key_id);
+        (st.get(&sn).unwrap().unwrap(), st.get(&en).unwrap().unwrap())
+    }
+
+    #[test]
+    fn on_a_laptop_the_private_keys_are_in_the_secret_store_and_in_no_file_or_answer() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("channel");
+        let st = MemorySecrets::default();
+        init(&dir, "laptop", KeyHome::Store(&st)).unwrap();
+        let (sign, seal) = keys_of(&st, &dir);
+        assert!(sign.len() > 64 && seal.len() == 64);
+        let ends = Ends::open(&dir, KeyHome::Store(&st)).unwrap();
+        // what the endpoint keeps about itself is public halves only (an answer is built from it)
+        let said = serde_json::to_string(&ends.state().unwrap()).unwrap();
+        let files = everything_in(&dir);
+        for v in [&sign, &seal] {
+            assert!(
+                !files.contains(v.as_str()),
+                "a private key is in a file of the channel"
+            );
+            assert!(
+                !said.contains(v.as_str()),
+                "a private key is in the endpoint's state"
+            );
+        }
+        assert!(!files.contains("sign_pkcs8") && !files.contains("seal_secret"));
+    }
+
+    #[test]
+    fn a_laptop_identity_written_with_its_keys_in_the_file_is_moved_to_the_store_and_the_file_loses_them(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("channel");
+        // the old shape: the keys in the file (what every laptop endpoint had before)
+        init(&dir, "laptop", KeyHome::RouterFile).unwrap();
+        let old: IdentityFile =
+            serde_json::from_slice(&std::fs::read(dir.join("identity.json")).unwrap()).unwrap();
+        let (sign, seal) = (old.sign_pkcs8.clone(), old.seal_secret.clone());
+        assert!(!sign.is_empty() && !seal.is_empty());
+        let st = MemorySecrets::default();
+        let before = Ends::open(&dir, KeyHome::Store(&st)).unwrap();
+        let ident = serde_json::to_string(&before.state().unwrap()).unwrap();
+        // the same keys, now only in the store
+        assert_eq!(keys_of(&st, &dir), (sign.clone(), seal.clone()));
+        let files = everything_in(&dir);
+        assert!(!files.contains(sign.as_str()) && !files.contains(seal.as_str()));
+        assert!(!dir.join("identity.json.new").exists());
+        // and it opens again from the store, as the same endpoint
+        let after = Ends::open(&dir, KeyHome::Store(&st)).unwrap();
+        assert_eq!(
+            serde_json::to_string(&after.state().unwrap()).unwrap(),
+            ident
+        );
+    }
+
+    #[test]
+    fn keys_missing_from_the_store_are_a_refusal_never_a_new_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("channel");
+        let st = MemorySecrets::default();
+        init(&dir, "laptop", KeyHome::Store(&st)).unwrap();
+        let other = MemorySecrets::default();
+        assert!(Ends::open(&dir, KeyHome::Store(&other)).is_err());
+        // the router's directory never reads keys from a store, and a store identity is not opened as a router file
+        assert!(Ends::open(&dir, KeyHome::RouterFile).is_err());
+    }
+
+    #[test]
+    fn a_store_that_cannot_keep_the_keys_leaves_no_identity_behind() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("channel");
+        let st = crate::secrets::UnavailableSecrets("no keychain");
+        assert!(init(&dir, "laptop", KeyHome::Store(&st)).is_err());
+        assert!(!dir.join("identity.json").exists());
+        assert!(!Store::<State>::new(&dir).exists());
     }
 }

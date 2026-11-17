@@ -41,6 +41,12 @@ Each endpoint has a name, an Ed25519 signing key and an X25519 sealing key (`ozb
 **pinned** by a person who compared fingerprints by a way that is not this channel (`ozbox tasks pin`). Changing a pin is explicit
 (`--replace`). Every task names an explicit target. A box is the unit of trust; a per-agent id is a courtesy and never a boundary.
 
+**Where the private keys live.** On a laptop they are in the secret store (the operating system's keychain), under
+`tasks-sign-<id>` and `tasks-seal-<id>`; the identity file holds only the id and the public halves, and an older file that still holds
+keys has them moved into the store when it is next opened. On a box they are the router's: in its own directory, which only the
+`ozbox-mesh` user may enter. The command line refuses to run an endpoint of its own on a box (that would put the keys in the box
+user's reach) unless a store was named on purpose.
+
 ### 2. The envelope
 
 The mesh is a **profile of the shared channel** (`ozbox_core::channel`, which the worker channel of ADR 0042 uses too), not an envelope of its
@@ -131,9 +137,10 @@ disk has not been measured.
 ## What is not covered
 
 - **The router's key and state, on a box without the service.** On a box the channel runs as the system user `ozbox-mesh` (`ozbox tasks
-  serve`, set up by `ozbox-mesh-setup.sh`): agents reach it only through an agent socket (submit, reply, inbox, status, why, cancel), the
-  keyless relay a laptop's `ssh` reaches, and an admin socket for root (`init`, `pin`, `restored`). Where that service is absent the keys
-  sit where the box user can read them; `tasks init` says so and every JSON task carries `store_writable_by_agents: true`. **Proven on a
+  serve`, set up at first boot by `ozbox tasks router-setup`, which carries its setup in the program rather than in user-data): agents reach it only through an agent socket (submit, reply, inbox, status, why, cancel), the
+  keyless relay a laptop's `ssh` reaches, and an admin socket for root (`init`, `pin`, `restored`). Where that service is absent the command line
+  refuses to make or open an endpoint of its own, so no key sits where the box user can read it, unless a store is named on purpose
+  (`OZBOX_SECRET_STORE`, used by tests); such an endpoint's JSON tasks carry `store_writable_by_agents: true`. **Proven on a
   real box: not yet**, so the channel is not recommended on `main` and has no approval path until it is.
 - **The relay can capture and replay, not only drop or delay.** The process that reaches the relay socket sees the sealed envelopes of
   each round, so it can keep them and push them back later. The channel refuses a replay (stale, or a nonce already seen) and counts

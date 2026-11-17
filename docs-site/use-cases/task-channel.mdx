@@ -25,7 +25,8 @@ and results.
 
 **You want:** your computer and a box to trust each other, and nobody else.
 
-On each side, make an identity (a name and two keys; the private halves stay in a file only you can read):
+On each side, make an identity (a name and two keys). On your computer the private halves go into your keychain, never into a file;
+on a box they belong to the box's task router, a user of its own that your agents cannot read as:
 
 ```sh
 ozbox tasks init --name laptop        # on your computer
@@ -45,7 +46,9 @@ ozbox tasks pin laptop.json                             # on the box
 `--via-arg` is one word of the command that runs `ozbox` on the other side; repeat it for each word. It is run as an argument list, never through a shell, and a word may contain spaces. Name the program by its absolute path so nothing on the other side's `PATH` can stand in for it. On a box the channel runs as its own service user (`ozbox-mesh`), so agents there use the same commands but cannot read its keys.
 Use whatever reaches the box already: `ssh`, `aws ssm`, or `env OZBOX_TASKS_DIR=... ozbox` for a local test.
 
-**Limit:** on the box, the key file is readable by the box user. Run the channel as a user your agents cannot reach.
+On a box with no task router (one set up before it existed), `ozbox tasks` refuses rather than put the keys where an agent could read
+them, and says how to add it, once, as root: `ozbox tasks router-setup`. An identity made on your computer by an older version, with
+its keys in its file, has them moved into your keychain the next time it is used, and the file no longer holds them.
 
 ## 2. Ask a question and get the answer
 

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use ozbox_core::{Error, Result};
 use serde_json::{json, Value};
 
-use crate::tasks_ops::{dispatch, init, Ends, Policy};
+use crate::tasks_ops::{dispatch, init, Ends, KeyHome, Policy};
 
 /// The most a request may carry: the relay's holds a whole round of sealed envelopes, JSON-escaped inside a JSON line.
 /// (the channel's transport cap, and half as much again for the JSON escaping around it).
@@ -64,12 +64,16 @@ fn answer(dir: &Path, policy: Policy, line: &str) -> Value {
     let outcome = if req.get("op").and_then(Value::as_str) == Some("init") {
         // the one operation that runs before there is anything to open, and only for the owner
         if policy == Policy::Admin {
-            init(dir, req.get("name").and_then(Value::as_str).unwrap_or(""))
+            init(
+                dir,
+                req.get("name").and_then(Value::as_str).unwrap_or(""),
+                KeyHome::RouterFile,
+            )
         } else {
             Err("not-allowed-here".to_string())
         }
     } else {
-        Ends::open(dir).and_then(|ends| dispatch(&ends, policy, &req, false))
+        Ends::open(dir, KeyHome::RouterFile).and_then(|ends| dispatch(&ends, policy, &req, false))
     };
     match outcome {
         Ok(v) => json!({"ok": true, "result": v}),
