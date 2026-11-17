@@ -29,6 +29,7 @@ const SCOPE_CHOICE: Record<ApprovalScope, MessageKey> = {
   'kek-export': 'secrets.scope_kek_export',
   'box-secrets': 'secrets.scope_box_secrets',
   'host-guard': 'secrets.scope_host_guard',
+  'dashboard-auth': 'secrets.scope_dashboard_auth',
 };
 
 const SCOPE_NAME: Record<string, MessageKey> = {
@@ -41,6 +42,7 @@ const SCOPE_NAME: Record<string, MessageKey> = {
   'kek-export': 'secrets.scope_name_kek_export',
   'box-secrets': 'secrets.scope_name_box_secrets',
   'host-guard': 'secrets.scope_name_host_guard',
+  'dashboard-auth': 'secrets.scope_name_dashboard_auth',
 };
 
 /** The scopes this form makes a code for. A laptop key is never added with a code made here: the box's service refuses it, so the
@@ -207,7 +209,7 @@ export function SecretApprovalsSection() {
               <div className="space-y-1">
                 <Label htmlFor="sa-env">{t('secrets.env')}</Label>
                 <Input id="sa-env" className="max-lg:h-11" autoComplete="off" value={env} onChange={(e) => setEnv(e.target.value.trim())} />
-                <p className="text-xs text-muted-foreground">{t('secrets.env_hint')}</p>
+                <p className="text-xs text-muted-foreground">{t(scope === 'dashboard-auth' ? 'secrets.dashboard_auth_hint' : 'secrets.env_hint')}</p>
               </div>
             ) : null}
             {scope === 'host-guard' ? (

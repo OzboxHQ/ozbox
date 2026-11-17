@@ -969,6 +969,21 @@ pub const RULES: &[Rule] = &[
         spend_by: SpendBy::NotApplicable,
         bootstrap: Boot::Refused,
     },
+    // Replacing the dashboard's kept sign-in settings (who may approve on this box). Decided by a single-use approval CODE the root
+    // helper's `replace-dashboard-auth` spends at the admin socket (a passkey or authenticator code in the dashboard, or the laptop's
+    // pinned key), bound to the sha256 of the new settings; it is never filed as a request, so there is no `Scope` and no subject.
+    // Refused with no second factor, since the box user would be naming its own approver (ADR 0028 Amendment 1).
+    Rule {
+        key: "dashboard-auth",
+        journal: false,
+        filers: &[],
+        dashboard: Dash::OwnStore,
+        laptop_presence: true,
+        software: Soft::NotApplicable,
+        telegram: Telegram::NotifyOnly,
+        spend_by: SpendBy::AdminSocket,
+        bootstrap: Boot::Refused,
+    },
     // the supervisor's permission engine and tool requests keep their stores; the envelope, table, inbox and audit words are shared
     Rule {
         key: "agent-action",

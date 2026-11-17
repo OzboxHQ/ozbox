@@ -4,7 +4,7 @@
 
 // The same scopes the box's secrets service accepts (crates/ozbox-cli/src/secrets_approval.rs SCOPES): a Rust test compares
 // the two lists, so a scope added there is offered here.
-export const APPROVAL_SCOPES = ['import', 'policy', 'tunnel-token', 'guard-override', 'signer-enroll', 'setup-code', 'kek-export', 'box-secrets', 'host-guard'] as const;
+export const APPROVAL_SCOPES = ['import', 'policy', 'tunnel-token', 'guard-override', 'signer-enroll', 'setup-code', 'kek-export', 'box-secrets', 'host-guard', 'dashboard-auth'] as const;
 export type ApprovalScope = (typeof APPROVAL_SCOPES)[number];
 
 export interface ApprovalUse {

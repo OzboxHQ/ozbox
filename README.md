@@ -167,7 +167,8 @@ at any time; `--access` answers it without a prompt.
 | `ozbox serve` | Serve the web dashboard on this computer only (loopback, with a random access token in the address) |
 | `ozbox tunnel setup\|status\|remove` | The outbound tunnel that reaches the dashboard from outside, with your own account |
 | `ozbox auth init` | The sign-in settings for a dashboard on a shared machine |
-| `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
+| `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user); it survives `ozbox upgrade` |
+| `ozbox dashboard retire-legacy-tunnel <name>` | Remove an old tunnel and token file the box user could read, once the box's own tunnel is up |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |

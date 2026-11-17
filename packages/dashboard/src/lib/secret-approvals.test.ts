@@ -39,4 +39,15 @@ describe('secret approvals', () => {
     expect(formError({ ...base, scope: 'box-secrets', vaultWhat: 'bao-token', digest: '' })).toBeNull();
     expect(formError({ ...base, env: '' })).toBe('secrets.err_env');
   });
+
+  // Replacing the dashboard's sign-in settings (who may approve) is approved for exactly those settings: the 32-digit binding
+  // `ozbox dashboard install` prints goes in the environment field, the project is empty.
+  it('binds a dashboard sign-in replacement to the 32 digits of the new settings and refuses anything else', () => {
+    const binding = '0123456789abcdef0123456789abcdef';
+    expect(APPROVAL_SCOPES).toContain('dashboard-auth');
+    expect(mintBody({ ...base, scope: 'dashboard-auth', env: binding })).toEqual({ scope: 'dashboard-auth', project: '', env: binding });
+    expect(formError({ ...base, scope: 'dashboard-auth', env: binding })).toBeNull();
+    expect(formError({ ...base, scope: 'dashboard-auth', env: 'staging' })).toBe('secrets.err_binding');
+    expect(formError({ ...base, scope: 'dashboard-auth', env: binding.slice(1) })).toBe('secrets.err_binding');
+  });
 });
