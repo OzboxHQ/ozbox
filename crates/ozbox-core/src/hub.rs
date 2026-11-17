@@ -20,8 +20,11 @@
 //!   a signed handshake under its own tag on each connection; order, retransmission, a replay window, back-pressure and honest
 //!   reachability at the transport layer. It carries sealed envelopes and never opens one.
 //! * [`conformance`]: what any transport must let the hub and its workers do; the in-memory and the network transport both pass it.
+//! * [`keys`]: keys to a worker **by name**, released through the issuer path and sealed to the worker's attested key, refused for
+//!   Production on the hub, in front of the issuer and on the worker, and deleted on revoke, task end and loss of the hub.
 //!
-//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery, the
+//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation (the [`keys::Attestations`]
+//! seam), the issuer's and the worker's service implementations (the [`keys::KeyIssuer`] and [`keys::DeliveryStore`] seams), the
 //! merge queue over the channel, test lanes, and the approval path. Signing and sealing are traits ([`wire::Signer`],
 //! [`wire::Sealer`]); the real ones are the secrets service's operations and `ozbox-seal`, wired in the next slice. A fleet role
 //! (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and that is the transport's job.
@@ -29,6 +32,7 @@
 #[doc(hidden)]
 pub mod conformance;
 pub mod engine;
+pub mod keys;
 pub mod mem;
 pub mod net;
 pub mod refusal;
