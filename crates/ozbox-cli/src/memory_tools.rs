@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use ozbox_core::fabric::{NewProposal, Reach, SharedNote, Walls};
 use ozbox_memory::bundled::bundled;
 use ozbox_memory::memory::{
     AgentCtx, Caller, Entry, Filter, MemError, Memory, NewEntry, Scope, ScopeKind,
@@ -40,6 +41,24 @@ impl MemoryHost {
         let memory = Memory::open(dir.join("memory")).map_err(|e| e.to_string())?;
         let skills = SkillStore::open(dir.join("skills"), bundled()).map_err(|e| e.to_string())?;
         Ok(MemoryHost { memory, skills })
+    }
+}
+
+/// The hub's memory and skills, as the fabric reads them for the workers' walls (ADR 0056): approved notes and approved skills of
+/// one wall, and a worker agent's proposal filed pending for a person here.
+impl ozbox_core::fabric::walls::WallSource for MemoryHost {
+    fn approved(&self, scope: &str, now: u64) -> Vec<SharedNote> {
+        ozbox_memory::fabric::approved_notes(&self.memory, scope, now)
+    }
+    fn skills(&self, scope: &str) -> Vec<ozbox_core::fabric::SharedSkill> {
+        ozbox_memory::fabric::approved_skills(&self.skills, scope)
+    }
+    fn propose(
+        &self,
+        p: &ozbox_core::fabric::walls::Proposal,
+        now: u64,
+    ) -> Result<String, ozbox_core::fabric::FabricError> {
+        ozbox_memory::fabric::file_proposal(&self.memory, p, now)
     }
 }
 
@@ -127,12 +146,15 @@ pub fn tool_def(name: &str) -> Value {
 }
 
 /// What a session is bound to, from the task store: never from anything the agent says.
-struct Bound {
-    ctx: AgentCtx,
-    skills: Vec<InstallScope>,
+pub(crate) struct Bound {
+    pub(crate) ctx: AgentCtx,
+    pub(crate) skills: Vec<InstallScope>,
+    /// On the fabric (ADR 0056): the participants this session's orchestration puts in its reach (a conductor's workers, a
+    /// worker's conductor).
+    pub(crate) delegated: Vec<ozbox_core::fabric::Address>,
 }
 
-fn bind(tools: &Tools, s: &Session) -> Bound {
+pub(crate) fn bind(tools: &Tools, s: &Session) -> Bound {
     let mut ctx = AgentCtx {
         person: s.person.clone(),
         run: None,
@@ -140,6 +162,11 @@ fn bind(tools: &Tools, s: &Session) -> Bound {
         projects: Vec::new(),
         box_name: None,
         origin: None,
+    };
+    let mut delegated = Vec::new();
+    let agent_at = |b: &str, t: &Option<String>| {
+        t.as_deref()
+            .and_then(|t| ozbox_core::fabric::Address::parse(&format!("agent:{b}/{t}")))
     };
     let book = tools.store.load().ok();
     if let Some(book) = &book {
@@ -154,6 +181,7 @@ fn bind(tools: &Tools, s: &Session) -> Bound {
                                 ctx.projects.push(r.clone());
                             }
                         }
+                        delegated.extend(agent_at(&f.box_name, &f.task_id));
                     }
                 }
             }
@@ -168,6 +196,9 @@ fn bind(tools: &Tools, s: &Session) -> Bound {
                         ctx.projects.push(r.clone());
                     }
                 }
+                if let Some(o) = book.orchestration(orch) {
+                    delegated.extend(agent_at(&o.conductor_box, &o.conductor_task));
+                }
             }
             // a plain run and a person's own agent are not bound to an orchestration's box or run here
             Role::Person | Role::Agent => {}
@@ -178,7 +209,11 @@ fn bind(tools: &Tools, s: &Session) -> Bound {
         skills.push(InstallScope::Box(b.clone()));
     }
     skills.extend(ctx.projects.iter().cloned().map(InstallScope::Project));
-    Bound { ctx, skills }
+    Bound {
+        ctx,
+        skills,
+        delegated,
+    }
 }
 
 fn s<'a>(a: &'a Value, k: &str) -> Option<&'a str> {
@@ -197,11 +232,20 @@ fn short(e: &Entry) -> Value {
 pub fn call(
     tools: &Tools,
     sess: &Session,
-    who: Option<&str>,
+    scope_of_door: Option<&crate::mcp::HostScope>,
     name: &str,
     a: &Value,
     now: u64,
 ) -> Result<Value, ToolError> {
+    let who = scope_of_door
+        .and_then(|h| h.code.as_deref())
+        .map(|c| format!("terminal-{c}"));
+    let who = who.as_deref();
+    // on a worker the walls the hub carried over the fabric are read beside (or instead of) this box's own memory (ADR 0056)
+    let walls = tools.fabric.as_ref().and_then(|f| f.api.walls());
+    if walls.is_some() {
+        return worker_call(tools, sess, scope_of_door, walls, name, a, now);
+    }
     let host = tools
         .memory
         .as_ref()
@@ -314,6 +358,144 @@ pub fn call(
                 .read(name, s(a, "file"), &bound.skills)
                 .map_err(skill_err)?;
             Ok(json!({ "name": name, "text": text }))
+        }
+        _ => Err(ToolError::NotFound(format!("there is no tool {name}"))),
+    }
+}
+
+fn shared_short(n: &SharedNote) -> Value {
+    let excerpt: String = n.body.chars().take(240).collect();
+    json!({ "id": n.id, "scope": n.scope, "title": n.title, "excerpt": excerpt, "tags": n.tags,
+            "updated_ms": n.updated_ms, "written_on": n.written_box })
+}
+
+/// The five tools on a worker: the walls the hub carried, read with the agent caller's rule, and proposals forwarded to the hub,
+/// where a person reviews them. The scoping is the hub's: what this box was sent is only what its agents may read.
+fn worker_call(
+    tools: &Tools,
+    sess: &Session,
+    door: Option<&crate::mcp::HostScope>,
+    walls: Option<Walls>,
+    name: &str,
+    a: &Value,
+    now: u64,
+) -> Result<Value, ToolError> {
+    let walls = walls.unwrap_or_default();
+    let Some(fab) = tools.fabric.as_ref() else {
+        return Err(ToolError::Failed("memory is not set up on this box".into()));
+    };
+    let bound = bind(tools, sess);
+    let mut projects = bound.ctx.projects.clone();
+    if let Some(run) = door.and_then(|h| h.run_id.as_deref()) {
+        projects.extend(crate::fabric_tools::run_facts(tools, run).project);
+    }
+    let reach = Reach {
+        me: ozbox_core::fabric::Address::person(&sess.person),
+        person: sess.person.clone(),
+        projects,
+        box_name: Some(
+            door.and_then(|h| h.box_name.clone())
+                .or(bound.ctx.box_name.clone())
+                .unwrap_or_else(|| fab.box_name.clone()),
+        ),
+        delegated: Vec::new(),
+    };
+    let named = s(a, "scope").map(str::to_string);
+    if let Some(sc) = &named {
+        if !reach.reads_wall(sc) {
+            return Err(ToolError::Refused(format!(
+                "{sc} is not bound to this session"
+            )));
+        }
+    }
+    match name {
+        "memory_search" => {
+            let limit = a
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(8)
+                .clamp(1, 25) as usize;
+            let hits: Vec<Value> = walls
+                .search(&reach, s(a, "query").unwrap_or(""), 100)
+                .iter()
+                .filter(|n| named.as_ref().is_none_or(|sc| &n.scope == sc))
+                .take(limit)
+                .map(shared_short)
+                .collect();
+            Ok(json!({ "notes": hits, "note": DATA_NOTE }))
+        }
+        "memory_read" => {
+            let id = s(a, "id").ok_or_else(|| ToolError::Invalid("id is required".into()))?;
+            let n = walls
+                .note(&reach, id)
+                .ok_or_else(|| ToolError::NotFound("there is no such note".into()))?;
+            Ok(
+                json!({ "id": n.id, "scope": n.scope, "title": n.title, "body": n.body, "tags": n.tags,
+                       "updated_ms": n.updated_ms, "written_by": n.written_by, "written_on": n.written_box,
+                       "reviewed_by": n.reviewed_by, "note": DATA_NOTE }),
+            )
+        }
+        "memory_write" => {
+            let (r, me) = crate::fabric_tools::reach_of(tools, fab, sess, door)?;
+            fab.api
+                .register(me, now)
+                .map_err(crate::fabric_tools::fab_err)?;
+            let scope = named.unwrap_or_else(|| {
+                reach
+                    .box_name
+                    .as_ref()
+                    .map(|b| format!("box:{b}"))
+                    .unwrap_or_else(|| format!("person:{}", sess.person))
+            });
+            let tags: Vec<String> = a
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let expires_ms = a
+                .get("expires_days")
+                .and_then(Value::as_u64)
+                .map(|d| now.saturating_add(d.min(3650) * 86_400_000));
+            let id = fab
+                .api
+                .propose(
+                    &r,
+                    NewProposal {
+                        scope: scope.clone(),
+                        title: s(a, "title").unwrap_or("").to_string(),
+                        body: s(a, "body").unwrap_or("").to_string(),
+                        tags,
+                        expires_ms,
+                    },
+                    now,
+                )
+                .map_err(crate::fabric_tools::fab_err)?;
+            Ok(json!({ "id": id, "scope": scope, "state": "pending",
+                       "message": "Proposed to the hub. A person will review it there; it is not readable by agents until they approve it." }))
+        }
+        "skills_list" => Ok(
+            json!({ "skills": walls.skills(&reach).iter().map(|x| json!({
+            "name": x.name, "description": x.description, "version": x.version })).collect::<Vec<_>>() }),
+        ),
+        "skills_read" => {
+            let name = s(a, "name").ok_or_else(|| ToolError::Invalid("name is required".into()))?;
+            if s(a, "file").is_some_and(|f| f != "SKILL.md") {
+                return Err(ToolError::NotFound(
+                    "only a skill's SKILL.md travels to other boxes; its other files are on the hub".into(),
+                ));
+            }
+            let k = walls
+                .skills(&reach)
+                .into_iter()
+                .find(|k| k.name == name)
+                .ok_or_else(|| ToolError::Refused(
+                    "that skill is not installed here, or no person has approved its current files".into(),
+                ))?;
+            Ok(json!({ "name": name, "text": k.text }))
         }
         _ => Err(ToolError::NotFound(format!("there is no tool {name}"))),
     }

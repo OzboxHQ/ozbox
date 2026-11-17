@@ -38,6 +38,7 @@ mod dashboard_cli;
 mod dashboard_keep;
 mod egress;
 mod egress_guard;
+mod fabric_tools;
 mod guard;
 mod guard_cli;
 mod guard_diff;

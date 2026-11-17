@@ -136,6 +136,8 @@ pub fn tool_names(role: &Role) -> Vec<&'static str> {
     };
     // Every role can read approved memory and skills and propose a note (crate::memory_tools).
     v.extend(crate::memory_tools::MEMORY_TOOLS);
+    // Every role can message the participants in its reach (crate::fabric_tools, ADR 0056).
+    v.extend(crate::fabric_tools::FABRIC_TOOLS);
     v
 }
 
@@ -190,6 +192,7 @@ pub fn tool_defs(role: &Role) -> Vec<Value> {
             "worker_ask" => def("worker_ask", "Ask the conductor (or the person) a question you need answered before you go on. Then write down where you stopped, commit, and end your turn: you are resumed with the answer.", vec![("question", prop("string", "The question.")), ("for_person", prop("boolean", "Only the person may answer (a risky decision)."))], &["question"]),
             "worker_status" => def("worker_status", "Report progress, and read the messages sent to you since last time.", vec![("text", prop("string", "A short progress note, optional.")), ("since", prop("integer", "Only messages after this number."))], &[]),
             "worker_done" => def("worker_done", "Say the feature is complete and its tests pass. It joins the merge queue when the conductor queues it.", vec![("summary", prop("string", "What was built."))], &[]),
+            other if crate::fabric_tools::FABRIC_TOOLS.contains(&other) => crate::fabric_tools::tool_def(other),
             other => crate::memory_tools::tool_def(other),
         }
     };
@@ -238,6 +241,9 @@ pub struct Tools {
     /// The hub (ADR 0042), when this box has a channel to workers. None on every box today: `transport: hub` is then refused
     /// by name, and `ssh` (the laptop-driven route) is the only one.
     pub hub: Option<Arc<ozbox_core::hub::engine::HubService>>,
+    /// The conversation fabric (ADR 0056), when this box has one: the five messaging tools of `crate::fabric_tools`, and on a
+    /// worker the memory walls and skills the hub carried.
+    pub fabric: Option<Arc<crate::fabric_tools::FabricHost>>,
 }
 
 /// Copy hub-channel events into the book by (source epoch, number): the high-water mark moves in the same change as the records,
@@ -309,6 +315,7 @@ impl Tools {
             ops,
             memory: None,
             hub: None,
+            fabric: None,
         }
     }
 
@@ -316,6 +323,13 @@ impl Tools {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_hub(mut self, hub: Option<Arc<ozbox_core::hub::engine::HubService>>) -> Self {
         self.hub = hub;
+        self
+    }
+
+    // the server attaches the fabric once the hub's daemon runs it (H2); until then only the tests do
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_fabric(mut self, fabric: Option<Arc<crate::fabric_tools::FabricHost>>) -> Self {
+        self.fabric = fabric;
         self
     }
 
@@ -387,10 +401,6 @@ impl Tools {
         if !tool_names(&s.role).contains(&name) {
             return Err(ToolError::NotFound(format!("there is no tool {name}")));
         }
-        let who = host
-            .and_then(|h| h.code.as_deref())
-            .map(|c| format!("terminal-{c}"));
-        let who = who.as_deref();
         self.permit(s, host, name, now)?;
         match name {
             "fleet_boxes" => self.fleet_boxes(s, a),
@@ -413,7 +423,10 @@ impl Tools {
             "worker_status" => self.worker_status(s, a, now),
             "worker_done" => self.worker_done(s, a, now),
             n if crate::memory_tools::MEMORY_TOOLS.contains(&n) => {
-                crate::memory_tools::call(self, s, who, name, a, now)
+                crate::memory_tools::call(self, s, host, name, a, now)
+            }
+            n if crate::fabric_tools::FABRIC_TOOLS.contains(&n) => {
+                crate::fabric_tools::call(self, s, host, name, a, now)
             }
             _ => Err(ToolError::NotFound(format!("there is no tool {name}"))),
         }
@@ -438,7 +451,7 @@ impl Tools {
                 | "approvals_pending"
                 | "merge_status"
                 | "budget_status"
-        );
+        ) && !crate::fabric_tools::FABRIC_READS.contains(&name);
         let (orchestration, actor) = match &s.role {
             Role::Conductor { orch } | Role::Worker { orch, .. } => (
                 Some(orch.clone()),
