@@ -138,6 +138,7 @@ mod settings;
 mod ssh_limits;
 mod sshconfig;
 mod state;
+mod subscription_signin;
 #[cfg(test)]
 mod systemd_props_guard;
 mod telegram;

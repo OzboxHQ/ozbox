@@ -90,6 +90,7 @@ impl App {
         self.start_pending_tools(now_ms);
         self.tick_orchestrations(now_ms);
         self.tick_runs(now_ms);
+        self.tick_subscriptions();
         self.tick_chat(now_ms);
         if !self.schedule.housekeeping_busy {
             let agent = Arc::clone(&self.agent);

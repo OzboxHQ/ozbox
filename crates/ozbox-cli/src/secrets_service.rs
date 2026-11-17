@@ -123,6 +123,13 @@ pub fn user_name_count(store: &EncryptedSecrets) -> Option<u32> {
     u32::try_from(names.iter().filter(|n| !is_system_name(n)).count()).ok()
 }
 
+/// Names only the dashboard's own user (the supervisor socket) and the root helper may touch: a subscription sign-in and its
+/// opt-in (ADR 0055). The box user's socket neither reads, writes, deletes, asks about nor lists them. When the box user's
+/// reach becomes one table (ADR 0018 Amendment 1), this is its row: no reach for the box user, read back by the supervisor.
+pub fn supervisor_only(name: &str) -> bool {
+    crate::subscription_signin::is_subscription_secret(name)
+}
+
 pub fn box_may_get(name: &str) -> bool {
     BOX_GET_PREFIXES.iter().any(|p| name.starts_with(p))
 }
@@ -776,9 +783,13 @@ pub fn handle_from(
     let denied = || Resp::fail("that is not allowed on this socket");
     // a workload secret and a project's declaration are never the box socket's to read, write or list
     let boxy = |name: &str| !name.starts_with("workload");
+    // a subscription sign-in is the supervisor's and the root helper's alone, whatever else the socket may do
+    let reach =
+        |name: &str| !supervisor_only(name) || matches!(policy, Policy::Supervisor | Policy::Admin);
     let resp = match (policy, r.op.as_str()) {
         (Policy::Box | Policy::Supervisor | Policy::Admin, "set")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
+            if (boxy(&r.name) && box_may_write(&r.name) && reach(&r.name))
+                || policy == Policy::Admin =>
         {
             let stored = if r.value_b64.is_empty() {
                 store.set(&r.name, &r.value)
@@ -810,7 +821,9 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists") => {
+        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists")
+            if reach(&r.name) =>
+        {
             match store.exists(&r.name) {
                 Ok(b) => Resp {
                     flag: Some(b),
@@ -820,7 +833,8 @@ pub fn handle_from(
             }
         }
         (Policy::Box | Policy::Supervisor | Policy::Admin, "delete")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
+            if (boxy(&r.name) && box_may_write(&r.name) && reach(&r.name))
+                || policy == Policy::Admin =>
         {
             match store.delete(&r.name) {
                 Ok(()) => {
@@ -853,6 +867,7 @@ pub fn handle_from(
                             .filter(|n| {
                                 policy == Policy::Admin
                                     || (boxy(n)
+                                        && reach(n)
                                         && n != crate::secrets_approval::ENROLLED_MARKER
                                         && !crate::audit_service::is_audit_secret(n)
                                         && !crate::approval_key::is_reserved(n))
@@ -870,6 +885,13 @@ pub fn handle_from(
                 ..Resp::ok()
             },
             None => Resp::fail("that request is not valid"),
+        },
+        (Policy::Supervisor, "get") if supervisor_only(&r.name) => match store.get(&r.name) {
+            Ok(v) => Resp {
+                value: v,
+                ..Resp::ok()
+            },
+            Err(e) => Resp::fail(&e.0),
         },
         (Policy::Box | Policy::Supervisor, "get") if box_may_get(&r.name) => {
             match store.get(&r.name) {
@@ -2916,6 +2938,50 @@ mod tests {
             "local_endpoint":false,"monthly_cap_usd":null}),
         )
         .unwrap()
+    }
+
+    /// ADR 0055: a subscription sign-in and its opt-in are the dashboard's own user's. The box user (every agent) can neither
+    /// read, write, delete, ask about nor list them, on its socket or a locked one; the supervisor and the root helper can.
+    #[test]
+    fn the_box_user_cannot_reach_a_subscription_sign_in() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, m) = svc(d.path());
+        let login = "subscription-login-codex-chatgpt-0";
+        let r = ask(
+            &s,
+            &m,
+            Policy::Supervisor,
+            json!({"op":"set","name":login,"value":SENTINEL}),
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        for p in [Policy::Box, Policy::BoxLocked] {
+            for op in [
+                json!({"op":"get","name":login}),
+                json!({"op":"exists","name":login}),
+                json!({"op":"set","name":login,"value":"agent-wrote-this"}),
+                json!({"op":"delete","name":login}),
+                json!({"op":"set","name":"subscription-optin-codex-chatgpt","value":"1"}),
+            ] {
+                let r = ask(&s, &m, p, op.clone());
+                assert_eq!(r["ok"], false, "{p:?} {op}");
+                assert!(!r.to_string().contains(SENTINEL));
+            }
+            let r = ask(&s, &m, p, json!({"op":"names","prefix":""}));
+            assert!(!r.to_string().contains("subscription-"), "{p:?} {r}");
+            let r = ask(&s, &m, p, json!({"op":"names","prefix":"subscription-"}));
+            assert!(!r.to_string().contains("subscription-login"), "{p:?} {r}");
+        }
+        // still there, unchanged, and the supervisor reads it back
+        let r = ask(&s, &m, Policy::Supervisor, json!({"op":"get","name":login}));
+        assert_eq!(r["value"], SENTINEL);
+        let r = ask(
+            &s,
+            &m,
+            Policy::Supervisor,
+            json!({"op":"delete","name":login}),
+        );
+        assert_eq!(r["ok"], true);
+        assert!(supervisor_only(login) && !box_may_get(login));
     }
 
     #[test]

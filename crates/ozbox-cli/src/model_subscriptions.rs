@@ -1,8 +1,10 @@
 //! Subscription sign-ins: whether each agent engine can run on a person's own subscription (a chat plan or a coding
 //! plan) instead of an API key, and why not where it cannot (ADR 0054).
 //!
-//! This is a catalogue, not a credential path. **No sign-in adapter is built**, so nothing here stores, reads or hands
-//! over a login, and no row may say `available` until one is (a test holds that). Each row names the vendor pages its
+//! This is a catalogue, not a credential path: the one engine whose sign-in can be handed to its runs, on the owner's
+//! opt-in, is in `subscription_signin` (ADR 0055), and its row says `opt_in`. No row says `available` (the sign-in held
+//! by the service and reached only through a per-run token, ADR 0054 rule 4), because no vendor documents that today; a
+//! test holds both. Each row names the vendor pages its
 //! status rests on, so the dashboard can link them and never imply that a use is allowed when the vendor's terms forbid
 //! it or do not address it. The pages were read on [`CHECKED_ON`]; terms change, so re-read them before building an
 //! adapter.
@@ -22,6 +24,9 @@ pub enum Status {
     /// part of the answer's contract so a client handles it before the first adapter ships.
     #[allow(dead_code)]
     Available,
+    /// The engine must read the sign-in itself, so it is handed to that engine's runs only after the owner turns it on, with
+    /// a warning, and an agent in such a run can read it (ADR 0055).
+    OptIn,
     /// The vendor documents something close, but an adapter, or a rule in ADR 0054, is still missing.
     Planned,
     /// The vendor's terms forbid it, or the engine has no subscription to sign in with.
@@ -80,9 +85,9 @@ pub const SUBSCRIPTIONS: &[Subscription] = &[
     Subscription {
         id: "codex-chatgpt",
         engine: "codex",
-        status: Status::Planned,
+        status: Status::OptIn,
         sign_in: SignIn::DeviceCode,
-        reason: "engine_must_hold_login",
+        reason: "opt_in_engine_reads_login",
         sources: &[CODEX_AUTH, CODEX_CI],
     },
     Subscription {
@@ -139,7 +144,7 @@ pub const SUBSCRIPTIONS: &[Subscription] = &[
 #[cfg(test)]
 const REASONS: &[&str] = &[
     "terms_forbid_storing",
-    "engine_must_hold_login",
+    "opt_in_engine_reads_login",
     "no_remote_sign_in",
     "terms_forbid_other_tools",
     "login_location_not_documented",
@@ -159,6 +164,8 @@ pub struct Row {
     pub reason: &'static str,
     pub sources: &'static [&'static str],
     pub checked_on: &'static str,
+    /// Whether this row has an opt-in in Settings, Models (ADR 0055). Added in 0.3.0; an older server leaves it out.
+    pub opt_in: bool,
 }
 
 pub fn rows() -> Vec<Row> {
@@ -174,6 +181,7 @@ pub fn rows() -> Vec<Row> {
             reason: s.reason,
             sources: s.sources,
             checked_on: CHECKED_ON,
+            opt_in: crate::subscription_signin::adapter(s.id).is_some(),
         })
         .collect()
 }
@@ -184,10 +192,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nothing_claims_to_be_available_while_no_sign_in_adapter_exists() {
-        // ADR 0054: `available` needs a built adapter and a vendor that documents remote use. There is no adapter yet,
-        // so a row that says otherwise would tell a person something is allowed and wired when it is not.
+    fn nothing_claims_to_be_available_and_only_a_built_adapter_says_opt_in() {
+        // ADR 0054: `available` needs the sign-in held by the service and reached by a per-run token, which no vendor
+        // documents. ADR 0055: `opt_in` needs a built adapter, and a row has an opt-in exactly when it says so.
         assert!(SUBSCRIPTIONS.iter().all(|s| s.status != Status::Available));
+        for r in rows() {
+            assert_eq!(r.opt_in, r.status == Status::OptIn, "{}", r.id);
+        }
+        assert_eq!(
+            rows()
+                .iter()
+                .filter(|r| r.opt_in)
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec!["codex-chatgpt"]
+        );
     }
 
     #[test]
@@ -234,6 +253,7 @@ mod tests {
             "engine_label",
             "id",
             "kind",
+            "opt_in",
             "reason",
             "sign_in",
             "sources",
