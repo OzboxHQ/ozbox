@@ -1364,6 +1364,9 @@ fn aws_config(config: &Config, force_s3: bool) -> Result<ozbox_provider_aws::Aws
         }
         cfg.session_log_bucket = s.session_log_bucket.clone();
         cfg.patch_group = s.patch_group.clone();
+        cfg.notify_send_grants = s.notify_send_grants.unwrap_or(false);
+        cfg.notify_ses_identity_arn = s.notify_ses_identity_arn.clone().filter(|a| !a.is_empty());
+        cfg.notify_sns_topic_arn = s.notify_sns_topic_arn.clone().filter(|a| !a.is_empty());
         if let Some(r) = &s.release_repo {
             cfg.release_repo = r.clone();
         }

@@ -190,6 +190,52 @@ resource "aws_iam_role_policy_attachment" "session_logs" {
   policy_arn = data.aws_iam_policy.session_logs[0].arn
 }
 
+# Alerts sent from the box's dashboard (B4-9), off by default: the account's ozbox-box-notify policy, which names one SES sender
+# identity and one SNS topic in full. The box module only attaches it, and only after checking that the policy grants exactly
+# ses:SendEmail on notify_ses_identity_arn and sns:Publish on notify_sns_topic_arn, so the box never gets more than its own
+# variables say, whatever the account's policy was made with.
+data "aws_iam_policy" "notify" {
+  count = var.notify_send_grants ? 1 : 0
+  arn   = "${local.policy_arn_prefix}/ozbox-box-notify"
+}
+
+locals {
+  # every (action, resource) pair the account's policy allows, whether IAM wrote each as a string or a list
+  notify_grants = var.notify_send_grants ? toset(flatten([
+    for st in try(jsondecode(data.aws_iam_policy.notify[0].policy).Statement, []) : [
+      for a in flatten([st.Action]) : [
+        for r in flatten([st.Resource]) : "${try(st.Effect, "")} ${a} ${r}"
+      ]
+    ]
+  ])) : toset([])
+  notify_expected = toset([
+    "Allow ses:SendEmail ${coalesce(var.notify_ses_identity_arn, "-")}",
+    "Allow sns:Publish ${coalesce(var.notify_sns_topic_arn, "-")}",
+  ])
+  # nothing but those two pairs, and no statement with a condition, a NotAction or a NotResource
+  notify_policy_exact = var.notify_send_grants && local.notify_grants == local.notify_expected && alltrue([
+    for st in try(jsondecode(data.aws_iam_policy.notify[0].policy).Statement, [{ NotAction = "-" }]) :
+    try(st.Condition, null) == null && try(st.NotAction, null) == null && try(st.NotResource, null) == null
+  ])
+}
+
+resource "aws_iam_role_policy_attachment" "notify" {
+  count      = var.notify_send_grants ? 1 : 0
+  role       = aws_iam_role.box.name
+  policy_arn = data.aws_iam_policy.notify[0].arn
+
+  lifecycle {
+    precondition {
+      condition     = var.notify_ses_identity_arn != null && var.notify_sns_topic_arn != null
+      error_message = "notify_send_grants needs both notify_ses_identity_arn and notify_sns_topic_arn."
+    }
+    precondition {
+      condition     = local.notify_policy_exact
+      error_message = "the account's ozbox-box-notify policy must allow exactly ses:SendEmail on notify_ses_identity_arn and sns:Publish on notify_sns_topic_arn, and nothing else. Run `ozbox init` with the same two ARNs."
+    }
+  }
+}
+
 resource "aws_iam_instance_profile" "box" {
   name_prefix = local.iam_prefix
   role        = aws_iam_role.box.name
@@ -261,6 +307,7 @@ resource "aws_instance" "box" {
     aws_iam_role_policy_attachment.parameters,
     aws_iam_role_policy_attachment.parameters_key,
     aws_iam_role_policy_attachment.session_logs,
+    aws_iam_role_policy_attachment.notify,
   ]
 
   ami                         = var.image_id

@@ -177,6 +177,8 @@ impl AwsBackend {
                 "aws_iam_role_policy_attachment.parameters_key[0]"
             } else if arn.ends_with(":policy/ozbox-box-session-logs") {
                 "aws_iam_role_policy_attachment.session_logs[0]"
+            } else if arn.ends_with(":policy/ozbox-box-notify") {
+                "aws_iam_role_policy_attachment.notify[0]"
             } else if arn.contains(":policy/ozbox-box-fleet-key-") {
                 "aws_iam_role_policy_attachment.fleet_key[0]"
             } else {

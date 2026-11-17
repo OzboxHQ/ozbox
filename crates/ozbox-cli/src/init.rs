@@ -2158,6 +2158,23 @@ impl Init<'_> {
                 },
             });
         }
+        // alerts sent from a box (B4-9): one SES sender identity and one SNS topic, both or neither, from `[aws]`. A box attaches
+        // the policy only when it is made with `notify_send_grants` on and the same two ARNs.
+        if let (Some(ses), Some(sns)) = (
+            rec.get("notify_ses_identity_arn").filter(|v| ok_word(v)),
+            rec.get("notify_sns_topic_arn").filter(|v| ok_word(v)),
+        ) {
+            extra.push_str(&format!(
+                "  notify_ses_identity_arn = \"{ses}\"\n  notify_sns_topic_arn    = \"{sns}\"\n"
+            ));
+            adoptables.push(adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.notify[0]".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-notify".into(),
+                },
+            });
+        }
         let dir = self.paths.work.join("box-policy").join(&region);
         self.module_root(
             &self.paths.box_policy_dir(),
@@ -5218,6 +5235,53 @@ mod tests {
         assert!(tf.contains("to = module.policy.aws_iam_policy.fleet_key[0]"));
         assert!(tf.contains("to = module.policy.aws_iam_policy.session_logs[0]"));
         assert!(tf.contains("policy/ozbox-box-fleet-key-ozbox"));
+    }
+
+    /// B4-9: the account's notify policy is made only when `[aws]` names both the SES identity and the SNS topic, and both
+    /// reach the module.
+    #[test]
+    fn the_notify_policy_is_made_only_with_both_arns_and_passes_them_to_the_module() {
+        let ses = "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com";
+        let sns = "arn:aws:sns:us-east-1:123456789012:ozbox-alerts";
+        let e = policy_env();
+        e.init()
+            .persist(&target(), &[("notify_ses_identity_arn", ses)])
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..2 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 2, "one ARN alone makes no notify policy");
+        let e = policy_env();
+        e.init()
+            .persist(
+                &target(),
+                &[
+                    ("notify_ses_identity_arn", ses),
+                    ("notify_sns_topic_arn", sns),
+                ],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..3 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 3);
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.notify[0]"));
+        assert!(tf.contains("policy/ozbox-box-notify"));
+        let root = std::fs::read_dir(e.dir.path().join("work/box-policy/us-east-1"))
+            .unwrap()
+            .filter_map(|f| std::fs::read_to_string(f.unwrap().path()).ok())
+            .collect::<String>();
+        assert!(root.contains(&format!("notify_ses_identity_arn = \"{ses}\"")));
+        assert!(root.contains(&format!("notify_sns_topic_arn    = \"{sns}\"")));
     }
 
     #[test]

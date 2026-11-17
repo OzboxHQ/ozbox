@@ -347,6 +347,12 @@ pub struct AwsConfig {
     pub session_log_bucket: Option<String>,
     /// The Patch Manager patch group the box joins (the `Patch Group` tag), when patching is on.
     pub patch_group: Option<String>,
+    /// Off by default. On: the box's role attaches the account's `ozbox-box-notify` policy, so its dashboard may send alert
+    /// email from `notify_ses_identity_arn` and publish alert texts to `notify_sns_topic_arn`, those two only. The module
+    /// refuses it without both ARNs, and refuses an account policy that grants anything else.
+    pub notify_send_grants: bool,
+    pub notify_ses_identity_arn: Option<String>,
+    pub notify_sns_topic_arn: Option<String>,
     /// How often, and how many times, to look at a growing volume before giving up.
     pub poll_interval: std::time::Duration,
     pub volume_wait_polls: u32,
@@ -400,6 +406,9 @@ impl Default for AwsConfig {
             root_disk_gb: None,
             session_log_bucket: None,
             patch_group: None,
+            notify_send_grants: false,
+            notify_ses_identity_arn: None,
+            notify_sns_topic_arn: None,
             poll_interval: std::time::Duration::from_secs(5),
             volume_wait_polls: 60,
             snapshot_wait_polls: 360,
@@ -1827,6 +1836,16 @@ impl AwsBackend {
         }
         if let Some(g) = &self.cfg.patch_group {
             extra.insert("patch_group".to_string(), g.clone());
+        }
+        // alerts sent from the box's dashboard (B4-9), off unless asked for; the module checks both ARNs are there
+        if self.cfg.notify_send_grants {
+            extra.insert("notify_send_grants".to_string(), "true".to_string());
+            if let Some(a) = &self.cfg.notify_ses_identity_arn {
+                extra.insert("notify_ses_identity_arn".to_string(), a.clone());
+            }
+            if let Some(a) = &self.cfg.notify_sns_topic_arn {
+                extra.insert("notify_sns_topic_arn".to_string(), a.clone());
+            }
         }
         // how many agent runs the box daemon runs at once: the same cap the dashboard's supervisor applies for the size
         extra.insert(
@@ -6310,6 +6329,12 @@ Usage: ozbox secrets <COMMAND>",
                     kms_key_arn: full
                         .then(|| "arn:aws:kms:us-east-1:123456789012:key/abc".to_string()),
                     root_disk_gb: full.then_some(80),
+                    notify_send_grants: full,
+                    notify_ses_identity_arn: full.then(|| {
+                        "arn:aws:ses:us-east-1:123456789012:identity/alerts.example.com".to_string()
+                    }),
+                    notify_sns_topic_arn: full
+                        .then(|| "arn:aws:sns:us-east-1:123456789012:ozbox-alerts".to_string()),
                     ..AwsConfig::default()
                 },
             )
@@ -6330,6 +6355,15 @@ Usage: ozbox secrets <COMMAND>",
                 *has_default || always.contains(d),
                 "module variable {d} has no default and is not passed"
             );
+        }
+        // B4-9: the alert-sending grant is passed only when it is on, with its two ARNs
+        for v in [
+            "notify_send_grants",
+            "notify_ses_identity_arn",
+            "notify_sns_topic_arn",
+        ] {
+            assert!(all.iter().any(|a| a == v), "{v} is passed when on");
+            assert!(!always.iter().any(|a| a == v), "{v} is not passed when off");
         }
         Ok(())
     }

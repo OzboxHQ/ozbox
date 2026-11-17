@@ -226,3 +226,31 @@ variable "session_policy_name" {
     error_message = "session_policy_name must start with ozbox-box- (the operator role may attach only a policy of that name)."
   }
 }
+
+variable "notify_send_grants" {
+  type        = bool
+  default     = false
+  description = "Off by default. On: the box's role attaches the account's ozbox-box-notify policy (made by `ozbox init`, the aws-box-policy module), so the box's dashboard may send alert email from notify_ses_identity_arn (ses:SendEmail) and publish alert texts to notify_sns_topic_arn (sns:Publish), those two resources only. Both ARNs are required, and the plan refuses an account policy that grants anything else."
+}
+
+variable "notify_ses_identity_arn" {
+  type        = string
+  default     = null
+  description = "With notify_send_grants: the one Amazon SES sender identity the box may send from. Ignored when notify_send_grants is off."
+
+  validation {
+    condition     = var.notify_ses_identity_arn == null || can(regex("^arn:aws[a-z-]*:ses:[a-z0-9-]+:[0-9]{12}:identity/[A-Za-z0-9._@+-]+$", coalesce(var.notify_ses_identity_arn, "-")))
+    error_message = "notify_ses_identity_arn must be one SES identity ARN (arn:aws:ses:<region>:<account>:identity/<domain or address>), with no wildcard."
+  }
+}
+
+variable "notify_sns_topic_arn" {
+  type        = string
+  default     = null
+  description = "With notify_send_grants: the one Amazon SNS topic the box may publish to. Ignored when notify_send_grants is off."
+
+  validation {
+    condition     = var.notify_sns_topic_arn == null || can(regex("^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]{1,256}$", coalesce(var.notify_sns_topic_arn, "-")))
+    error_message = "notify_sns_topic_arn must be one SNS topic ARN (arn:aws:sns:<region>:<account>:<topic>), with no wildcard."
+  }
+}
