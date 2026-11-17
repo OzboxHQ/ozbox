@@ -393,6 +393,8 @@ pub struct EngineRow {
     pub id: &'static str,
     pub label: &'static str,
     pub kinds: Vec<&'static str>,
+    /// Whether Oz Box can start this engine as a run on a box (an adapter exists, ADR 0056). `false` is Planned.
+    pub runs: bool,
 }
 
 pub fn rows() -> Vec<EngineRow> {
@@ -402,6 +404,8 @@ pub fn rows() -> Vec<EngineRow> {
             id: e.id,
             label: e.label,
             kinds: e.kinds.iter().map(|k| kind_id(*k)).collect(),
+            runs: ozbox_core::engine_turn::capabilities_of(e.id)
+                .is_some_and(|c| c.headless.is_yes()),
         })
         .collect()
 }

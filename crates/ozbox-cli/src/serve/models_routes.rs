@@ -581,6 +581,15 @@ mod tests {
             .iter()
             .any(|k| k["id"] == "bedrock" && k["own_cloud"] == true));
         assert_eq!(v["engines"].as_array().unwrap().len(), 5);
+        // the engines with an adapter run on a box; the others say they do not yet (ADR 0056)
+        let runs: Vec<&str> = v["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["runs"] == true)
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(runs, ["claude-code", "codex", "gemini-cli"]);
     }
 
     #[test]
