@@ -29,6 +29,8 @@ fn vars() -> FleetVars {
         window_principal_arn: format!(
             "arn:aws:iam::{ACCT}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_OzboxFleetWindow_*"
         ),
+        subnet_ids: vec![OZBOX_SUBNET.into()],
+        fleet_manager_box: MAIN_BOX.into(),
     }
 }
 
@@ -114,15 +116,17 @@ fn glob(pattern: &str, s: &str, case_insensitive: bool) -> bool {
     go(&p, &s)
 }
 
-/// IAM policy variables in a condition VALUE (`${aws:userid}`), filled from the request.
-fn fill(v: &str, a: &Ask) -> String {
+/// IAM policy variables in a condition VALUE (`${aws:userid}`), filled from the request. `None` when one names a key the
+/// request does not have: IAM then evaluates that condition as not matching (so a Deny on it does nothing, which is why a
+/// fail-closed rule pairs it with a `Null` Deny; ADR 0040 §15 fact 4).
+fn fill(v: &str, a: &Ask) -> Option<String> {
     let mut out = v.to_string();
     for (k, vals) in &a.ctx {
         if let Some(first) = vals.first() {
             out = out.replace(&format!("${{{k}}}"), first);
         }
     }
-    out
+    (!out.contains("${")).then_some(out)
 }
 
 const OPERATORS: [&str; 11] = [
@@ -140,7 +144,13 @@ const OPERATORS: [&str; 11] = [
 ];
 
 fn condition_holds(op: &str, key: &str, want: &[String], a: &Ask) -> bool {
-    let want: Vec<String> = want.iter().map(|w| fill(w, a)).collect();
+    let Some(want) = want
+        .iter()
+        .map(|w| fill(w, a))
+        .collect::<Option<Vec<String>>>()
+    else {
+        return false;
+    };
     let have = a.ctx.get(key);
     match op {
         "Null" => {
@@ -844,6 +854,8 @@ fn the_setup_module_fills_exactly_the_tokens_render_fills() {
         "\\\"$${regions}\\\"",
         "\\\"$${sizes}\\\"",
         "\\\"$${image_ids}\\\"",
+        "\\\"$${subnet_arns}\\\"",
+        "$${fleet_manager_box}",
         "$${account_id}",
         "$${max_volume_gb}",
         "$${max_iops}",
@@ -859,5 +871,167 @@ fn the_setup_module_fills_exactly_the_tokens_render_fills() {
             "the module does not read {}",
             d.file()
         );
+    }
+}
+
+// ---- review findings M3, L1, L2 (2026-11-17) -------------------------------------------------------------------------------
+
+/// The fleet manager's box name the setup module is given (`fleet_manager_box`).
+const MAIN_BOX: &str = "main";
+/// A subnet the setup module is given as Oz Box's own (`subnet_ids`), and one it is not.
+const OZBOX_SUBNET: &str = "subnet-0123456789abcdef0";
+const FOREIGN_SUBNET: &str = "subnet-0fffffffffffffff0";
+
+fn subnet_arn(id: &str) -> String {
+    format!("arn:aws:ec2:{REGION}:{ACCT}:subnet/{id}")
+}
+
+fn interface(id: &str) -> String {
+    format!("arn:aws:ec2:{REGION}:{ACCT}:network-interface/{id}")
+}
+
+/// M3: a launch that names an EXISTING network interface takes that interface's subnet and groups, so the interface itself
+/// must be in one of Oz Box's subnets (`ec2:Subnet`), and an interface tagged as someone else's is refused outright.
+#[test]
+fn a_launch_on_an_existing_interface_in_a_foreign_network_is_refused() {
+    let eni = |id: &str, subnet: &str| {
+        ask("ec2:RunInstances", &interface(id)).with("ec2:Subnet", &subnet_arn(subnet))
+    };
+    assert!(
+        allowed(&change(), &eni("*", OZBOX_SUBNET)),
+        "the launch's own new interface, in an Oz Box subnet"
+    );
+    assert!(
+        !allowed(&change(), &eni("eni-0fffffffffffffff0", FOREIGN_SUBNET)),
+        "an existing interface in a foreign subnet"
+    );
+    assert!(
+        !allowed(
+            &change(),
+            &ask("ec2:RunInstances", &interface("eni-0fffffffffffffff0"))
+        ),
+        "an interface whose subnet is not in the request"
+    );
+    assert_eq!(
+        decide(
+            &change(),
+            &eni("eni-0eeeeeeeeeeeeeee0", OZBOX_SUBNET).with("aws:ResourceTag/ozbox-managed", "false")
+        ),
+        Decision::ExplicitDeny,
+        "an interface tagged as someone else's, even inside an Oz Box subnet"
+    );
+}
+
+/// L1: nothing may be attached to `main`, `main` is never started by a fleet role, and a plan window attaches only its own
+/// box's disks to its own box's machine.
+#[test]
+fn nothing_is_attached_to_main_and_a_window_attaches_only_its_own_boxs_disks() {
+    let main_tagged = |a: Ask| managed(a).with("aws:ResourceTag/ozbox-fleet-manager", "true");
+    for act in ["ec2:AttachVolume", "ec2:StartInstances", "ec2:DetachVolume"] {
+        assert_eq!(
+            decide(&change(), &main_tagged(ask(act, &instance("i-main")))),
+            Decision::ExplicitDeny,
+            "{act} on main"
+        );
+    }
+    assert_eq!(
+        decide(
+            &change(),
+            &main_tagged(ask("ec2:AttachVolume", &volume("vol-main")))
+        ),
+        Decision::ExplicitDeny,
+        "main's disk to another box"
+    );
+    let attach = |res: String, owner: &str, window: Option<&str>| {
+        let a = managed(ask("ec2:AttachVolume", &res)).with("aws:ResourceTag/ozbox-box", owner);
+        match window {
+            Some(w) => a.with("aws:PrincipalTag/ozbox-window-box", w),
+            None => a,
+        }
+    };
+    assert!(allowed(&change(), &attach(volume("vol-b"), "b", Some("b"))));
+    assert!(allowed(&change(), &attach(instance("i-b"), "b", Some("b"))));
+    assert_eq!(
+        decide(&change(), &attach(volume("vol-a"), "a", Some("b"))),
+        Decision::ExplicitDeny,
+        "box a's detached disk, in box b's window"
+    );
+    assert_eq!(
+        decide(&change(), &attach(instance("i-a"), "a", Some("b"))),
+        Decision::ExplicitDeny,
+        "onto box a's machine, in box b's window"
+    );
+    assert_eq!(
+        decide(&change(), &attach(volume("vol-b"), "b", None)),
+        Decision::ExplicitDeny,
+        "a plan window that does not name its box attaches nothing"
+    );
+}
+
+/// L2: `main`'s snapshots taken before it was marked (and every snapshot the CLI makes, which carries `ozbox-box` but not the
+/// fleet manager's tag), and its system disk (whose tags are never rewritten in place), are protected by its box NAME too.
+#[test]
+fn main_is_protected_by_its_name_as_well_as_its_tag() {
+    let mains = |a: Ask| managed(a).with("aws:ResourceTag/ozbox-box", MAIN_BOX);
+    for act in ["ec2:RunInstances", "ec2:CreateVolume"] {
+        assert_eq!(
+            decide(&change(), &mains(ask(act, &snapshot("snap-old-main")))),
+            Decision::ExplicitDeny,
+            "{act} from a snapshot of main taken before the mark"
+        );
+    }
+    for act in [
+        "ec2:CreateSnapshot",
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:DeleteVolume",
+        "ec2:ModifyVolume",
+    ] {
+        assert_eq!(
+            decide(&change(), &mains(ask(act, &volume("vol-main-root")))),
+            Decision::ExplicitDeny,
+            "{act} on main's unmarked system disk"
+        );
+    }
+    for act in [
+        "ec2:StopInstances",
+        "ec2:StartInstances",
+        "ec2:TerminateInstances",
+    ] {
+        assert_eq!(
+            decide(&change(), &mains(ask(act, &instance("i-main")))),
+            Decision::ExplicitDeny,
+            "{act} on main by name"
+        );
+    }
+    // and nothing new may be named main
+    assert_eq!(
+        decide(
+            &change(),
+            &good_launch().with("aws:RequestTag/ozbox-box", MAIN_BOX)
+        ),
+        Decision::ExplicitDeny,
+        "a launch named like main"
+    );
+    // another box's snapshot still clones
+    assert!(allowed(
+        &change(),
+        &managed(ask("ec2:RunInstances", &snapshot("snap-dev"))).with("aws:ResourceTag/ozbox-box", "dev")
+    ));
+}
+
+/// Each managed policy stays under IAM's managed-policy size (6,144 characters, whitespace not counted), with room for the
+/// longest values the setup module accepts, so a guard statement added later cannot make the setup refuse at apply.
+#[test]
+fn every_managed_policy_fits_iams_size_limit() {
+    let mut v = vars();
+    v.regions = vec!["ap-southeast-3".into(), "us-east-1".into(), "eu-west-1".into()];
+    v.subnet_ids = (0..6).map(|i| format!("subnet-0123456789abcdef{i}")).collect();
+    v.image_ids = (0..4).map(|i| format!("ami-0123456789abcdef{i}")).collect();
+    v.fleet_manager_box = "a".repeat(40);
+    for d in [Doc::Read, Doc::Cost, Doc::Change, Doc::ChangeGuard, Doc::MainAssume] {
+        let text = fleet_policy::render(d, &v).unwrap().to_string();
+        let n = text.chars().filter(|c| !c.is_whitespace()).count();
+        assert!(n <= 6144, "{d:?} is {n} characters");
     }
 }

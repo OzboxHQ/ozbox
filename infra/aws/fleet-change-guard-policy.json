@@ -5,9 +5,11 @@
       "Sid": "NeverTouchTheFleetManager",
       "Effect": "Deny",
       "Action": [
+        "ec2:StartInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances",
         "ec2:RebootInstances",
+        "ec2:AttachVolume",
         "ec2:DeleteVolume",
         "ec2:DetachVolume",
         "ec2:ModifyInstanceAttribute",
@@ -27,6 +29,33 @@
       }
     },
     {
+      "Sid": "NeverTouchTheFleetManagerByName",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:RebootInstances",
+        "ec2:AttachVolume",
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyVolume",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:CreateSnapshot",
+        "ec2:CreateVolume",
+        "ec2:RunInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-box": "${fleet_manager_box}"
+        }
+      }
+    },
+    {
       "Sid": "NeverMarkAnythingAsTheFleetManager",
       "Effect": "Deny",
       "Action": [
@@ -41,6 +70,64 @@
           "aws:TagKeys": [
             "ozbox-fleet-manager"
           ]
+        }
+      }
+    },
+    {
+      "Sid": "NeverNameAnythingAsTheFleetManager",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume",
+        "ec2:CreateSnapshot",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-box": "${fleet_manager_box}"
+        }
+      }
+    },
+    {
+      "Sid": "NeverLaunchOnAnotherOwnersInterface",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:${account_id}:network-interface/*",
+      "Condition": {
+        "Null": {
+          "aws:ResourceTag/ozbox-managed": "false"
+        },
+        "StringNotEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "AttachOnlyTheWindowsOwnBox",
+      "Effect": "Deny",
+      "Action": "ec2:AttachVolume",
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:instance/*",
+        "arn:aws:ec2:*:${account_id}:volume/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/ozbox-box": "${aws:PrincipalTag/ozbox-window-box}"
+        }
+      }
+    },
+    {
+      "Sid": "APlanWindowNamesItsBoxBeforeItAttaches",
+      "Effect": "Deny",
+      "Action": "ec2:AttachVolume",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "aws:userid": "*:plan-*"
+        },
+        "Null": {
+          "aws:PrincipalTag/ozbox-window-box": "true"
         }
       }
     },

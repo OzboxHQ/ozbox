@@ -23,6 +23,54 @@ variables {
   machine_types         = ["m7i.xlarge", "c7i.xlarge"]
   image_ids             = ["ami-0123456789abcdef0"]
   window_permission_set = "OzboxFleetWindow"
+  subnet_ids            = ["subnet-0123456789abcdef0"]
+  fleet_manager_box     = "main"
+}
+
+# Review finding M3: a launch's network interface, new or existing, is held to Oz Box's subnets.
+run "a_launchs_interface_is_held_to_ozbox_subnets" {
+  command = apply
+
+  assert {
+    condition = one([
+      for st in jsondecode(aws_iam_policy.change.policy).Statement : st.Condition.ArnLike["ec2:Subnet"]
+      if st.Resource == "arn:aws:ec2:*:123456789012:network-interface/*"
+    ]) == ["arn:aws:ec2:*:123456789012:subnet/subnet-0123456789abcdef0"]
+    error_message = "the network-interface statement names exactly the given subnets"
+  }
+}
+
+# Review findings L1 and L2: main is denied by its box name as well as by its tag, attach included.
+run "main_is_denied_by_its_name" {
+  command = apply
+
+  assert {
+    condition = length([
+      for st in jsondecode(aws_iam_policy.change_guard.policy).Statement : st
+      if st.Effect == "Deny" && try(st.Condition.StringEquals["aws:ResourceTag/ozbox-box"], "") == "main" && try(contains(st.Action, "ec2:AttachVolume"), false)
+    ]) == 1
+    error_message = "the guard denies everything carrying main's box name, attaching a disk included"
+  }
+}
+
+run "a_subnet_that_is_not_a_subnet_id_is_refused" {
+  command = plan
+
+  variables {
+    subnet_ids = ["subnet-0123456789abcdef0", "*"]
+  }
+
+  expect_failures = [var.subnet_ids]
+}
+
+run "a_fleet_manager_name_that_could_widen_the_deny_is_refused" {
+  command = plan
+
+  variables {
+    fleet_manager_box = "m*"
+  }
+
+  expect_failures = [var.fleet_manager_box]
 }
 
 run "both_roles_are_in_the_reserved_namespace_the_operator_cannot_touch" {

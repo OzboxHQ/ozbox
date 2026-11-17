@@ -20,6 +20,11 @@ locals {
   main_role_arn        = "arn:aws:iam::${local.account}:role/obx/obx-main"
   window_principal_arn = "arn:aws:iam::${local.account}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${var.window_permission_set}_*"
 
+  # A launch's network interface must be in one of these (ec2:Subnet on the network-interface resource of RunInstances), so a
+  # launch that names an existing interface cannot bring a foreign subnet and security groups with it. Subnet ids are unique
+  # across regions. The key: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html
+  subnet_arns = [for s in var.subnet_ids : "arn:aws:ec2:*:${local.account}:subnet/${s}"]
+
   files = {
     read         = "fleet-read-policy.json"
     cost         = "fleet-cost-policy.json"
@@ -31,11 +36,13 @@ locals {
   }
 
   rendered = {
-    for k, f in local.files : k => replace(replace(replace(replace(replace(replace(replace(replace(replace(
+    for k, f in local.files : k => replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
       file("${local.docs}/${f}"),
       "\"$${regions}\"", jsonencode(var.regions)),
       "\"$${sizes}\"", jsonencode(var.machine_types)),
       "\"$${image_ids}\"", jsonencode(var.image_ids)),
+      "\"$${subnet_arns}\"", jsonencode(local.subnet_arns)),
+      "$${fleet_manager_box}", var.fleet_manager_box),
       "$${account_id}", local.account),
       "$${max_volume_gb}", tostring(var.max_volume_gb)),
       "$${max_iops}", tostring(var.max_iops)),

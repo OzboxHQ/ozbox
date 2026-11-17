@@ -103,13 +103,16 @@
       }
     },
     {
-      "Sid": "TheLaunchsOwnNetworkInterface",
+      "Sid": "TheLaunchsInterfaceIsInAnOzboxSubnet",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": "arn:aws:ec2:*:${account_id}:network-interface/*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": "${regions}"
+        },
+        "ArnLike": {
+          "ec2:Subnet": "${subnet_arns}"
         }
       }
     },

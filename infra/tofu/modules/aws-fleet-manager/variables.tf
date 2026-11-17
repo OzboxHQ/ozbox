@@ -76,3 +76,23 @@ variable "read_costs" {
   default     = false
   description = "Let the read role read the bill. Turn on only in an account that holds nothing but Oz Box and is a member account (Cost Explorer cannot be limited by tag, so the account is the boundary)."
 }
+
+variable "subnet_ids" {
+  type        = list(string)
+  description = "Oz Box's own subnets. A box's dashboard may launch only into these: a launch's network interface, new or existing, must be in one of them."
+
+  validation {
+    condition     = length(var.subnet_ids) > 0 && alltrue([for s in var.subnet_ids : can(regex("^subnet-[0-9a-f]{8,17}$", s))])
+    error_message = "subnet_ids must be one or more subnet ids."
+  }
+}
+
+variable "fleet_manager_box" {
+  type        = string
+  description = "The name of the box that manages the fleet (main). Everything carrying that box name (its machine, its disks, and every snapshot of it, including ones taken before it was marked) is denied to the change role, and nothing new may be given that name."
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,39}$", var.fleet_manager_box))
+    error_message = "fleet_manager_box must be a box name (lowercase letters, digits and hyphens, starting with a letter, at most 40)."
+  }
+}

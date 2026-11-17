@@ -78,7 +78,9 @@ pub const READ_ROLE: &str = "obx-fleet-read";
 pub const CHANGE_ROLE: &str = "obx-fleet-change";
 /// `main`'s own role, made by the setup identity, outside the pool and never passable.
 pub const MAIN_ROLE: &str = "obx-main";
-/// The tag that marks `main`'s machine, its `/work` volume and its snapshots: nothing a fleet role does may touch them.
+/// The tag that marks `main`'s machine and its disks: nothing a fleet role does may touch them. Snapshots do not carry it (the
+/// CLI tags a snapshot with its box's name), and neither does a system disk made before the mark, so the guard also denies
+/// everything carrying `main`'s box name ([`FleetVars::fleet_manager_box`]).
 pub const FLEET_MANAGER_TAG: &str = "ozbox-fleet-manager";
 
 /// The values a rendered document is made of. Every one is checked, so a value can never carry a `"` or a `${`.
@@ -96,6 +98,17 @@ pub struct FleetVars {
     /// The owner's Identity Center role for fleet windows (`arn:aws:iam::<acct>:role/aws-reserved/sso.amazonaws.com/...`).
     /// A trailing `*` is allowed after the permission set's name (the suffix changes when the role is recreated).
     pub window_principal_arn: String,
+    /// Oz Box's own subnets (`subnet-...`). A launch's network interface must be in one of them (`ec2:Subnet`), so a launch
+    /// that names an EXISTING interface, which brings that interface's subnet and security groups with it, cannot put a box in
+    /// a foreign network. `ec2:Subnet` is a documented condition key of the `network-interface` resource of `RunInstances`
+    /// (AWS Service Authorization Reference, "Actions, resources, and condition keys for Amazon EC2":
+    /// <https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonec2.html>; AWS's own example of it:
+    /// <https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html>).
+    pub subnet_ids: Vec<String>,
+    /// The fleet manager's box name (`main`). Everything carrying `ozbox-box` with this name is denied to the change role as well
+    /// as everything carrying `ozbox-fleet-manager`: snapshots of `main` taken before it was marked, and its system disk (whose
+    /// tags are never rewritten in place), carry the name but not the mark.
+    pub fleet_manager_box: String,
 }
 
 fn is_plain(s: &str, ok: impl Fn(char) -> bool) -> bool {
@@ -138,6 +151,28 @@ pub fn render(doc: Doc, v: &FleetVars) -> Result<Value, String> {
             (8..=17).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit())
         })
     })?;
+    let subnets: Vec<String> = v
+        .subnet_ids
+        .iter()
+        .map(|id| {
+            let ok = id.strip_prefix("subnet-").is_some_and(|h| {
+                (8..=17).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit())
+            });
+            // subnet ids are unique across regions, so any region of this account
+            ok.then(|| format!("arn:aws:ec2:*:{acct}:subnet/{id}"))
+        })
+        .collect::<Option<_>>()
+        .ok_or("subnets: a value is not a subnet id")?;
+    let subnets = list(&subnets, "subnets", |_| true)?;
+    let fm = &v.fleet_manager_box;
+    let fm_ok = fm.len() <= 40
+        && fm.starts_with(|c: char| c.is_ascii_lowercase())
+        && is_plain(fm, |c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+        });
+    if !fm_ok {
+        return Err("the fleet manager's box name is not a box name".into());
+    }
     if v.max_volume_gb == 0 || v.max_volume_gb > 16_384 {
         return Err("the largest volume must be between 1 and 16384 GB".into());
     }
@@ -164,6 +199,8 @@ pub fn render(doc: Doc, v: &FleetVars) -> Result<Value, String> {
         .replace("\"${regions}\"", &regions)
         .replace("\"${sizes}\"", &sizes)
         .replace("\"${image_ids}\"", &images)
+        .replace("\"${subnet_arns}\"", &subnets)
+        .replace("${fleet_manager_box}", fm)
         .replace("${account_id}", acct)
         .replace("${max_volume_gb}", &v.max_volume_gb.to_string())
         .replace("${max_iops}", &v.max_iops.to_string())
@@ -193,6 +230,8 @@ mod tests {
             window_principal_arn:
                 "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_OzboxFleetWindow_*"
                     .into(),
+            subnet_ids: vec!["subnet-0123456789abcdef0".into()],
+            fleet_manager_box: "main".into(),
         }
     }
 
@@ -237,6 +276,18 @@ mod tests {
         bad.push(v);
         let mut v = vars();
         v.max_volume_gb = 0;
+        bad.push(v);
+        let mut v = vars();
+        v.subnet_ids = Vec::new();
+        bad.push(v);
+        let mut v = vars();
+        v.subnet_ids = vec!["subnet-*".into()];
+        bad.push(v);
+        let mut v = vars();
+        v.fleet_manager_box = "main\"".into();
+        bad.push(v);
+        let mut v = vars();
+        v.fleet_manager_box = "*".into();
         bad.push(v);
         for v in bad {
             assert!(render(Doc::Change, &v).is_err(), "{v:?}");
