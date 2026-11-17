@@ -329,11 +329,6 @@ impl WorkerAgent {
         };
         let assign = self.state.tasks.iter().find(|t| task_id(t) == id).cloned();
         for t in turns {
-            self.withheld_log.push(format!(
-                "turn {id}: {}",
-                format!("{t:?}").chars().take(30).collect::<String>()
-            ));
-            self.withheld_log.truncate(40);
             let mut turn = t;
             // a finished task reports the commit its branch points at: that is what the merge queue merges
             if let (Turn::Result(o), Some(a)) = (&mut turn, &assign) {
@@ -344,13 +339,11 @@ impl WorkerAgent {
             match to_hub(id, &turn) {
                 Ok(HubOut::Send(kind, body)) => {
                     end_of(&self.s).send_body(&mut self.state, now, kind, &body);
-                    if kind == Kind::Result
+                    let ends = kind == Kind::Result
                         || matches!(&turn, Turn::State(RunState::Failed, _))
-                        || (kind == Kind::Status && matches!(&turn, Turn::Result(_)))
-                    {
-                        if self.done.insert(id.to_string()) {
-                            rep.finished.push(id.to_string());
-                        }
+                        || (kind == Kind::Status && matches!(&turn, Turn::Result(_)));
+                    if ends && self.done.insert(id.to_string()) {
+                        rep.finished.push(id.to_string());
                     }
                 }
                 Ok(HubOut::Approval(action)) => rep.approval_asks.push((id.to_string(), action)),

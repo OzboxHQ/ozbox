@@ -165,7 +165,7 @@ fn main() -> ExitCode {
                             loop {
                                 pump.pump(now_ms());
                                 tick += 1;
-                                if tick % 20 == 0 {
+                                if tick.is_multiple_of(20) {
                                     let _ = pump.sync_roster();
                                 }
                                 std::thread::sleep(std::time::Duration::from_millis(100));

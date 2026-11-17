@@ -264,7 +264,6 @@ impl BoxOps for NoFleet {
 struct Worker {
     name: String,
     end: End,
-    hub_end: End,
     agent: WorkerAgent,
     net: Arc<NetWorker>,
     fabric: Arc<BoxFabric>,
@@ -519,7 +518,6 @@ impl Fleet {
         self.workers.push(Worker {
             name: name.into(),
             end: wend,
-            hub_end: self.hub.clone(),
             agent,
             net,
             fabric,
@@ -937,7 +935,7 @@ fn a_workers_request_reaches_the_fleet_inbox_and_the_owners_passkey_is_verified_
         .with_task_store(Some(dir.path().join("tasks.json")));
     a.attach_hub_fleet(f.att.clone(), Default::default())
         .unwrap();
-    let mut http = |a: &mut super::App, method: &str, path: &str, body: Value| -> (u16, Value) {
+    let http = |a: &mut super::App, method: &str, path: &str, body: Value| -> (u16, Value) {
         let mut headers = HashMap::new();
         headers.insert("host".to_string(), "127.0.0.1:7878".to_string());
         headers.insert("authorization".to_string(), "Bearer tok".to_string());
