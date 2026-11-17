@@ -526,13 +526,19 @@ impl Gates {
             line("refused", "none why=codes-off");
             return Err(CODES_REFUSED.to_string());
         }
-        match self
-            .approvals
-            .consume_then_tiered(approval, scope, project, env, declared, now_ms, |via| {
+        match self.approvals.consume_then_tiered(
+            approval,
+            scope,
+            project,
+            env,
+            declared,
+            now_ms,
+            |via| {
                 let out = effect(via)?;
                 line("allowed", via);
                 Ok(out)
-            }) {
+            },
+        ) {
             Ok(out) => Ok(out),
             Err(ConsumeThen::Effect(e)) => {
                 line("kept", "none");

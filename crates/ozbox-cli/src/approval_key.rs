@@ -1385,7 +1385,14 @@ mod tests {
         let code = r
             .gates
             .approvals
-            .mint("signer-enroll", "mine", "", &crate::secrets_signer::Signer::Dashboard, NOW, 60_000)
+            .mint(
+                "signer-enroll",
+                "mine",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                NOW,
+                60_000,
+            )
             .unwrap();
         let v = r.call(Policy::Unsealed, json!({"op":"approval_key_enroll","key_id":"mine","public_key":pk2,"approval":code}), NOW + 2).unwrap();
         assert_eq!(v["via"], "dashboard-stepup");
