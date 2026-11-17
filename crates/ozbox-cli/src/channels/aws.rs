@@ -364,6 +364,7 @@ mod tests {
                     to: &to,
                     subject: "s",
                     text: "t",
+                    html: None,
                     now_secs: 0,
                 },
             )
@@ -374,13 +375,14 @@ mod tests {
             region: Some("us-east-1".into()),
             ..Default::default()
         };
+        let note = crate::notice::Notice::new(crate::notice::NoticeKind::Alert, "T", "b");
         // a box: credentials from its role, so natively, and no program is started
         let g = rig_with_aws(&f.imds);
         g.http.reply(200, r#"{"MessageId":"m"}"#);
         g.http.reply(200, "<MessageId>x</MessageId>");
         assert_eq!(mail(&g), Ok("sent".into()));
         assert_eq!(
-            crate::channels::sms::send(&g.ctx, &sms, "+15005550009", "T", "b"),
+            crate::channels::sms::send(&g.ctx, &sms, "+15005550009", &note),
             Ok("sent".into())
         );
         assert_eq!(g.http.requests().len(), 2);
@@ -401,7 +403,7 @@ mod tests {
             .any(|w| w == ["--profile", "work"]));
         // no credentials to sign with (a laptop on its default profile): the aws command is tried, nothing is sent natively
         let g = crate::channels::testing::rig();
-        let _ = crate::channels::sms::send(&g.ctx, &sms, "+15005550009", "T", "b");
+        let _ = crate::channels::sms::send(&g.ctx, &sms, "+15005550009", &note);
         assert!(g.http.requests().is_empty());
         assert_eq!(g.runner.calls()[0].program, "aws");
     }
