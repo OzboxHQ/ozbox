@@ -156,6 +156,15 @@ On a box where the dashboard runs as its own user, the worker, its Chromium and 
 hands the connection to it as its input and output, so the sealed channel is still the only way in and nothing new listens.
 The profiles are in a folder only that user opens; the recordings and released documents are readable by the box's group.
 
+**Agents talk to each other and to people (ADR 0056, Preview).** The same tool server offers every agent five messaging tools
+(`messages_post`, `messages_get`, `messages_thread`, `messages_ack`, `participants_list`). Messages wait in ordered mailboxes held by
+the hub (`main`), one per participant (`agent:<box>/<session>`, `person:<id>`, `group:`, `fleet:`). A worker box keeps a replica of its
+own agents' mailboxes and queues their posts; the two talk over the hub's transport as their own profile of the signed, sealed channel,
+under a `<box>.fabric` endpoint. The hub also sends each worker the approved memory notes and approved skills its agents may read, and
+takes their memory proposals back for a person to review. A chat gateway posts a person's message in as that person and collects the
+agents' replies. A message is data: nothing in the fabric approves, grants or releases anything. The fabric is not attached to a box's
+server until the hub's daemon runs it.
+
 ## Secrets
 
 Anything that must stay secret (provider keys, channel tokens, the tunnel token, backup credentials, internal token keys,

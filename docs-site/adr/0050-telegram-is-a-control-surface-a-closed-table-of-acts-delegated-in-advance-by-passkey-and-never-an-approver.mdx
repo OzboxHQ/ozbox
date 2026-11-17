@@ -545,3 +545,12 @@ that follows it.
   does not read a real tunnel's log. Closing it needs the harness to start a loopback reverse proxy whose address is the passkey origin,
   with the server on another port, and to assert on that proxy's log; and, on a real box, the owner's tier C run reading the tunnel's
   actual log.
+
+## Amendment (2026-11-17): a chat is a participant of the conversation fabric (ADR 0056, Preview)
+
+After the gateway resolves `@agent`, `@box`, `@group` or `@fleet` under the person's delegation, it can post the message into the
+fabric as the person (`fabric::bridge::post_from_chat`), and the chat is subscribed to replies. `pull_replies` hands the gateway
+each agent's reply, attributed by the fabric's registry (never by the agent's own words) and addressed to every chat the person
+hears in, and the gateway renders it with its notice model as a reply. Delivery states and threads are the fabric's, the same on
+every channel. Nothing here widens the closed table of acts: a chat message is data, approves nothing, and reaches only the
+person's own participants. The gateway's call into the bridge is B4-32's to wire.
