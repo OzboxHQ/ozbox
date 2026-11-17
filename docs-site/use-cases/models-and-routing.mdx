@@ -147,14 +147,28 @@ hold that sign-in for runs on a remote machine. It keeps the sign-in in the secr
 lets a run use it only through the credential broker
 ([ADR 0054](/adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach)).
 
-Today none can be connected:
+What each plan can do today:
 
+- **On your opt-in:** Codex CLI with a ChatGPT plan. Codex reads its sign-in from a file, so Oz Box hands it to Codex runs
+  only if you turn this on ([ADR 0055](/adr/0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone)):
+  1. In the Codex row, read the warning. An agent in that run, and any program running as the box user on that box during
+     the run, can read the sign-in and copy it, and a copy works until you revoke it at OpenAI.
+  2. Type `codex-chatgpt` and choose **Turn on** (you confirm with your passkey; you must be an owner).
+  3. Choose **Sign in with ChatGPT**, open the OpenAI page it links, sign in there and type the one-time code. Device code
+     sign-in must be turned on in your ChatGPT security settings first.
+  4. Codex runs on your boxes are now handed the sign-in, one at a time, each alone on its box, and it is removed when the
+     run ends. Every hand-off is in the audit log.
+  5. **Revoke and turn off** deletes it from Oz Box. Then revoke it at OpenAI too, from the link the dashboard shows.
+
+  Use this only on boxes you alone work on, with repositories you trust, and never for a public or open-source project. The
+  dashboard must run as its own user on a box, or on your own computer; a dashboard that runs as the box user refuses it.
 - **Not offered:** Claude plans (Anthropic's terms do not let another product store or pass on the sign-in), Claude or Google
-  sign-ins through OpenCode, and Aider (API keys only).
-- **Planned:** ChatGPT with Codex CLI or OpenCode, Gemini CLI with a Google account, and GitHub Copilot with OpenCode. Each
-  row says what is missing.
+  sign-ins through OpenCode, and Aider (API keys only). These have no opt-in.
+- **Planned:** ChatGPT or GitHub Copilot with OpenCode (OpenCode does not document where it keeps the sign-in), and Gemini CLI
+  with a Google account. Each row says what is missing.
 
 You can still sign an engine in yourself, in a terminal on a box, with the engine's own login command. Oz Box does not hold
 that sign-in, and any agent on that box can read it, so do this only on a box you alone work on.
 
-**Status:** Planned (the status page is built; no sign-in is).
+**Status:** Preview for Codex with a ChatGPT plan (built and tested with fakes; no real sign-in has been tried, and Codex runs on
+a real box need the Codex engine, which is not built yet). The status page for every other plan is built.

@@ -4,6 +4,10 @@
 built.** Not one vendor today documents a way for a tool like Oz Box to hold a subscription sign-in and give a run only a
 short-lived token, which ADR 0017 requires. So every engine shows **Planned** or **Not offered**, with the reason.
 
+**Amended by [ADR 0055](0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone.md)** (owner, 2026-11-17): rule 4 now allows an engine that must read its own sign-in, per engine and
+only on the owner's opt-in, with the controls that ADR lists. Codex with a ChatGPT plan is the one such engine, shown as **On your
+opt-in**; the table's other rows are unchanged.
+
 **Context.** A person may already pay for a coding or chat plan (Claude Pro or Max, a ChatGPT plan, Gemini Code Assist, GitHub
 Copilot) and want their agents to use it instead of an API key. A subscription sign-in is not an API key:
 
