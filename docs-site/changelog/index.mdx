@@ -16,7 +16,11 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Address who you mean.** `@main fix the test`, `@main/t3 and add a test`, `@web git status` for a group, or `@fleet` for every box you may reach. Every reply names its box and session; a box that is not running is named as unreachable, and boxes you may not reach are counted and left out. `/to` makes a target stick, `/who` shows it, `/boxes` and `/fleets` list what you may reach.
   - **Box power from your phone, inside limits you set with a passkey.** `/box resume`, `/box pause` (only when the box is idle), `/box extend`, `/box create` (at a size or from a saved profile) and `/box resize`. Each shows its plan and a link to the dashboard first, and is done only inside the size, money and count limits you allowed; a box started from chat pauses again after four hours. Never on a Production box.
   - **Agent replies are safer in a chat.** Secrets (also when encoded), links and markup are removed before a reply is shortened, and an owner chooses per box whether a chat sees the reply, a summary or only that it answered.
-  - **`ozbox chat lock` and `ozbox chat unlink`** on the computer that runs the dashboard.
+  - **`/run <box> <what to do>`** starts a session; `/session pause` stops one.
+  - **Slack and WhatsApp** understand the same addresses and follow the same rules (box power stays Telegram's).
+  - **Replies to a message sent to several boxes are threaded under it**, in Telegram and Slack, and box-power messages carry an **Open in dashboard** button.
+  - **Agents on worker boxes** answer over the agent mesh when your dashboard runs on your computer.
+  - **`ozbox chat lock` and `ozbox chat unlink`**, on the dashboard's computer or from yours with `--box`.
 
   Preview: tested against a test Telegram, never yet with a real phone. See [Control your boxes from Telegram](/use-cases/telegram-control).
 </Update>

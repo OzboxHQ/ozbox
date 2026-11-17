@@ -171,7 +171,7 @@ at any time; `--access` answers it without a prompt.
 | `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
-| `ozbox chat lock\|unlink --link <id>` (or `--all`) | On the computer or box that runs the dashboard: lock a Telegram link so it can only read, or cut it. Shows the plan first; the dashboard applies it within seconds |
+| `ozbox chat lock\|unlink --link <id>` (or `--all`) [`--box <box>`] | Lock a Telegram link so it can only read, or cut it: on the computer that runs the dashboard, or for a dashboard on a box with `--box` over the sealed route. Shows the plan first; the dashboard applies it within seconds |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
 
 ## The dashboard

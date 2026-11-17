@@ -40,7 +40,7 @@ and it is a task on the board. Each message is one more turn of the same convers
 
 | Message | Does |
 |---|---|
-| `/new <box> <what to do>` | start a session and follow it |
+| `/run <box> <what to do>` (or `/new`) | start a session and follow it; `/run <what to do>` uses the box this chat follows |
 | plain text | the next turn of the session this chat follows |
 | `/status`, `/log` | where it is, and its last log lines |
 | `/pause`, `/resume` | save its work and stop it; continue the same conversation later |
@@ -56,9 +56,9 @@ and it is a task on the board. Each message is one more turn of the same convers
 
 **In Telegram, talking to an agent is something you allow in the dashboard first**, with a passkey, for each box and for a few days
 at a time: see [Control your boxes from Telegram](/use-cases/telegram-control). Reading (`/status`, `/fleet`, `/tasks`, `/log`) needs nothing
-beyond a link. Addressing a box, a session, a group or the fleet, and box power, are Telegram's for now
-([sections 3a and 3b there](/use-cases/telegram-control#3a-talk-to-a-box-an-agent-or-a-fleet)). In Slack and WhatsApp the rules are the ones
-described here.
+beyond a link. Slack and WhatsApp go through the same rules, and also understand `@<box>`, `@<box>/<session>`, `@<group>`, `@fleet`, `/to`, `/who`,
+`/boxes`, `/fleets` and `/run` ([section 3a there](/use-cases/telegram-control#3a-talk-to-a-box-an-agent-or-a-fleet)); box power is
+Telegram's only.
 
 **Status:** Preview.
 

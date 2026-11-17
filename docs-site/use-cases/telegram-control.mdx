@@ -47,10 +47,10 @@ is not in the table is refused.
 | Kind | Messages | Needs |
 |---|---|---|
 | Look | `/status`, `/fleet`, `/box list`, `/tasks`, `/log`, `/sessions`, `/whoami`, `/help` | a link |
-| Talk to an agent | plain text, `/new <box> <what to do>`, `/pause`, `/resume`, `/switch`, `/detach`, `/attach`, `/adopt` | **chat delegation** for that box |
+| Talk to an agent | plain text, `/run [box] <what to do>` (or `/new`), `/session pause`, `/session resume`, `/switch`, `/detach`, `/attach`, `/adopt` | **chat delegation** for that box |
 | Talk to a box, a session, a group or every box | `@<box>`, `@<box>/<session>`, `@<group>`, `@fleet`, `/to`, `/who`, `/boxes`, `/fleets` | **chat delegation** for each box reached (section 3a) |
 | Start, pause or extend a box, create or resize one | `/box resume`, `/box pause`, `/box extend`, `/box create`, `/box resize` | a **box power** delegation for that box, inside its caps (section 3b) |
-| Run one catalogue command | `/run` | **not in this release**: a delegation to it is not accepted yet |
+| Run one catalogue command | `/check` | **not in this release**: a delegation to it is not accepted yet |
 | Sent to the dashboard | clone, snapshot, destroy a box; anything above what you delegated | a passkey in the dashboard |
 | Refused | approve, deny, cancel, `/stop`, `/budget`, secrets, policy, people, roles, links, limits, tunnels, sending outbound messages, pushing to a protected branch, **every act on a Production box** | never |
 
@@ -102,8 +102,11 @@ confirm with your passkey. Then `/new main fix the flaky test` from your phone s
 - An owner names groups and sets how much of an agent's reply a box sends to a chat (`full`, `summary` or `metadata`, `full` by
   default) with the dashboard's `PUT /v1/telegram/marks` (fields `groups` and `detail`, a passkey shown a moment ago); **the screen
   for it is not built yet**. A Production box is never reached, by name, by group or with `@fleet`, and always shows `metadata`.
-- **Boxes of another hub (worker boxes) are not reachable yet**: the chat side is built and tested, and the hub channel it needs is
-  not in this release.
+- **Worker boxes** are reached over the agent mesh ([A task channel](/use-cases/task-channel)): a dashboard on your computer uses its own task
+  channel, and a reply from a worker is shown as a summary at most. **A dashboard on a box cannot reach worker boxes yet** (the hub's
+  daemon and transport are not in this release).
+- A reply to a message sent to several boxes is threaded under your message (Telegram and Slack).
+- Slack and WhatsApp follow the same rules and understand the same addresses; box power is Telegram's only.
 
 **Status:** Preview.
 
@@ -139,9 +142,9 @@ dashboard's own access, through the same permission rules as a click in the dash
 - **`/lock`** in the chat makes this link read-only until you lift the lock with a passkey. **`/unlink`** cuts it. Anyone linked may
   send either, because they only make Telegram less able. The Account page has **Lock**, **Unlink** and an owner's **Lock every link**.
   A revoke takes effect on the next message, and ends everything delegated to the link.
-- On the computer or box that runs the dashboard, as its own user, the command line does the same:
-  `ozbox chat lock --link <id>` (or `--all`) and `ozbox chat unlink --link <id>` (or `--all`). Each shows its plan first; the
-  dashboard applies it within a few seconds and records it. From your laptop for a dashboard on a box, that is not built yet.
+- The command line does the same, and shows its plan first: `ozbox chat lock --link <id>` (or `--all`) and `ozbox chat unlink`
+  on the computer that runs the dashboard, or from your computer for a dashboard on a box with `--box <box>` (sent over the sealed
+  route your computer pinned, like `ozbox ingress requests`). The dashboard applies it within a few seconds and records it.
 - When something needs a passkey, the chat sends **one link to the dashboard** and does nothing else. The link is a pointer, not a
   credential: ten minutes, only for you, with the dashboard's own host named in the message, the token in the address's fragment (so no
   tunnel or proxy ever logs it), and opening it changes nothing. The bot deletes that message when the link lapses.
@@ -178,9 +181,8 @@ the hub that runs the dashboard and the bridge. Changing it needs a passkey show
 
 ## 7. What is not built yet
 
-`/run` (the catalogue of read-only commands), `/box pause <box> when-idle`, the box's own four-hour timer, the narrow cloud role for
-box power, reaching boxes of another hub (worker boxes), Telegram's own reply threads for a fan-out, and `ozbox chat lock` from a
-laptop for a dashboard on a box. Until they are built, an act the policy would allow but that has no executor answers with a link to
+`/check` (the catalogue of read-only commands), `/box pause <box> when-idle`, the box's own four-hour timer, the narrow cloud role
+for box power, a screen for groups and detail levels, and reaching worker boxes from a dashboard that runs on a box. Until they are built, an act the policy would allow but that has no executor answers with a link to
 the dashboard ("this version cannot do it from a chat yet"). Your links and permissions carry over when they arrive. The design is
 [ADR 0050](/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver).
 

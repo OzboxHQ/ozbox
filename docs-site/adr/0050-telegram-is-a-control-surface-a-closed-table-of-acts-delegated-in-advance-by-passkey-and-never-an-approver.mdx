@@ -674,3 +674,49 @@ for the person who received it. What changes:
   after the question was decided or lapsed.
 
 What this does not cover: a webhook never gets a link made for a person. The real-phone check of the new message is an owner run.
+
+## Amendment, 2026-11-17 (second pass): one gateway for every chat app, `/run`, threads, worker boxes over the mesh
+
+**Status: built and Preview** (CI only, with a fake Telegram, the fake provider, the simulated engine, and two real mesh endpoints
+with real signing and sealing over a loopback transport). **This branch stacks on the agent mesh and the hub (#17, which contains
+#16).**
+
+- **`/run [box] <what to do>` starts a session** (owner, 2026-11-17), the same start as `/new` and an address; with no box it uses
+  the box this chat follows or its `/to` target. It is a converse act (act key `run.session`). The catalogue of read-only inspectors
+  of §4 keeps its permanent act key `run` and is now written **`/check`**; it is still not built. A session is stopped from chat
+  with `/session pause` (resumable); `/stop` stays refused (ADR 0041 note 50) and help says both.
+- **Slack and WhatsApp go through the same gateway.** A paired person's message is parsed into the same `ChatAct` and put to the same
+  `decide`, with that app's ceiling (converse) and no delegation (they pair with a one-time code, not a passkey), then reaches the
+  same executors: addressing, `/to`, `/who`, `/boxes`, `/fleets`, `/run` work there; box power is refused by the ceiling. The adapters
+  verify the vendor, find the person, and say whether a message is someone else's words; nothing below them knows the app
+  (`serve::telegram_acts::chat_gate`, `chat_ctx`).
+- **Threads.** A reply to a message sent to several boxes, and the fan-out's closing line, answer the person's own message: Telegram
+  `reply_parameters`, Slack `thread_ts`. The notice model carries this as routing only (`Notice::thread`, never serialised).
+- **Box-power and hand-off messages are structured notices** with one **Open in dashboard** URL button: a pointer link made for that
+  person (§2), never a callback. With no public address the page is named in words.
+- **Worker boxes over the agent mesh.** `chat::mesh_agents::MeshAgents` implements the delivery interface on the mesh's own node: a
+  message becomes a signed, sealed question task to the worker's endpoint, carrying the words, the message id, the session and a
+  reference to the signed delegation (its digest's first 16 hex characters: the full digest reads as key-shaped to the mesh's
+  screen); the worker's messages on the task come back as replies, which the gateway treats as **untrusted** (summary at most).
+  A dashboard on a laptop uses its own task channel; **a dashboard on a box reaches workers through the hub daemon and transport,
+  which are not built yet**, so it has no worker boxes. The worker's own check of the delegation and its chat profile are not built.
+- **One delivery seam.** `serve::telegram_acts::fabric_deliver` is the one place a copy of a message is handed to an agent (the
+  supervisor for a box this dashboard runs, `RemoteAgents` for a worker). The hub's conversation fabric (participants
+  `agent:<box>/<session>`, `person:<id>`, `group:`/`fleet:`; mailboxes; its chat-participant bridge) replaces that one function and
+  the reply pump (`tg_remote_pump`); nothing above it changes. **The fabric was not committed when this was written; the switch is
+  not made.**
+- **`ozbox chat lock|unlink --box <box>`** from the owner's computer: the plan names the request; once confirmed it goes over the
+  sealed ingress route (ADR 0029 Amendment 9) as a new sealed operation, `chat_link_request`, whose value is only `lock:<link>`,
+  `unlink:<link>`, `lock:*` or `unlink:*`. The secrets service holds it (at most 50) and records it; the dashboard takes it from the
+  supervisor socket (`chat_link_take`) every five seconds and applies it. It needs no approval, because it only makes a chat less
+  able.
+
+**Still not built:** the box's own deadline timer, `/box pause … when-idle`, the power-only cloud role, the groups and detail-level
+screen (API only), the catalogue (`/check`), the worker side of a chat message (its delegation check and chat profile), the hub
+route for a dashboard on a box, and the switch to the fabric.
+
+**The switch to the fabric, when it lands** (the hub contract's "Fabric API" and "Chat participant bridge"): `fabric_deliver` calls
+`fabric::bridge::post_from_chat` with the targets already expanded and judged here, mapped by `chat_policy::address::fabric_target`
+(`agent:<box>/<session>`) and `fabric_group` (`group:<name>`, `fleet:<person>`); `tg_remote_pump` becomes `bridge::pull_replies`, each
+`ChatReply` rendered as `Notice::reply` with its attribution, box, reference and thread, then cut by `chat_policy::reply`. The address
+mapping is built and tested; the calls wait for the fabric's code.
