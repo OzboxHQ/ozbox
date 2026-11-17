@@ -10,6 +10,8 @@
 //! * `enable-linger`: let the box user's own services start at boot and keep running after logout.
 //! * `ensure-supervisor [finish|rollback]`: give the dashboard a user of its own (ADR 0023).
 //! * `configure-box-secrets`: read the box's secrets declaration again.
+//! * `replace-tunnel-token`: a flow of this computer's rather than one request (see `tunnel_rotate`): a new tunnel token is handed
+//!   over, watched, and the old one put back if the new tunnel is not healthy.
 //!
 //! There is no way through here to a shell, a path or a command. It is a change to a machine, so it is shown first and
 //! confirmed like every other change (`--dry-run` stops after the description, `--yes` skips the question).

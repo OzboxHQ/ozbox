@@ -203,7 +203,9 @@ pub enum Command {
     /// Run one allow-listed action as root on a box: reown, reinstall-ozboxd, restart-services, collect-logs, enable-linger,
     /// ensure-supervisor, configure-box-secrets, recover-secrets or host-guard. There is no shell: the box user has no sudo, and
     /// this is the only root path, recorded on the box. recover-secrets is approved by the key this computer pinned when it
-    /// made the box.
+    /// made the box. `replace-tunnel-token cloudflare|ngrok|ide --token-stdin|--token-from-store NAME
+    /// [--approve-with-laptop-key]` puts a new tunnel token on the box, keeps the old one until the new tunnel is healthy and
+    /// puts it back if it is not; the token is never an argument.
     Admin {
         #[arg(value_parser = parse_name)]
         name: BoxName,
