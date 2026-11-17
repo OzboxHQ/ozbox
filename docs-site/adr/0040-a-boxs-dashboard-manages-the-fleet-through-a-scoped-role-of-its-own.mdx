@@ -566,6 +566,12 @@ Confirmed in the IAM policy simulator, or on a canary where stated, or from prov
 20. An IAM-authenticated function URL passes the caller's `userId` (carrying the role session name) to the function, and EventBridge sees `RunInstances` within seconds of the call.
 21. A snapshot copied under a customer key can be shared to another account and copied again under that account's key.
 22. An SCP denying actions to a role's sessions applies to sessions already issued (the early end of a window).
+23. `RunInstances` naming an EXISTING network interface: the interface's own subnet is in the request context as `ec2:Subnet`
+    on the `network-interface` resource (so `TheLaunchsInterfaceIsInAnOzboxSubnet` refuses an interface in a foreign subnet),
+    and its tags are there as `aws:ResourceTag/*` (Amendment 1, review finding M3).
+24. A Deny whose `StringNotEquals` value is `${aws:PrincipalTag/ozbox-window-box}` does nothing when the session has no such tag,
+    and the `Null` Deny beside it then refuses a `plan-*` session's `AttachVolume` (finding L1).
+25. `ec2:AttachVolume` is evaluated against both the instance and the volume, each with its own `aws:ResourceTag/ozbox-box`.
 
 ## Consequences
 
@@ -782,6 +788,30 @@ and nothing in a released program turns it on: a box's dashboard still says "Fle
 5. **The dashboard** says on its fleet pages, in managed mode, what each change needs, and when the server asks for the fleet
    passkey it fetches that plan's challenge, asks the browser for the passkey, and applies the same plan once with it.
 
+**Review findings fixed (2026-11-17).** An independent review of the roles found one medium and three low findings. Each
+fix has a policy test that failed on the earlier documents and passes now (`crates/ozbox-provider-aws/tests/fleet_policy.rs`).
+
+- **M3, a launch on an existing network interface.** The network-interface statement of `RunInstances` allowed any interface
+  in the region. A launch that names an existing interface takes that interface's subnet and security groups, so it could have
+  put a box in a foreign network past the subnet and group statements. Now the interface must be in one of Oz Box's own subnets
+  (`ec2:Subnet`, a documented condition key of that resource; the setup module's new `subnet_ids`), and an interface tagged
+  `ozbox-managed` with any value but `true` is denied outright. This corrects §3.3, which held interfaces to the tag alone: a
+  new interface has no tags until it exists, so the tag cannot be the wall.
+- **L1, attaching a disk.** The fleet-manager deny now covers `AttachVolume` and `StartInstances` too (it already covered
+  `DetachVolume`), so no disk can be attached to `main` and `main`'s disks cannot be attached elsewhere. And a plan window
+  attaches only a disk and a machine whose `ozbox-box` tag equals the window's `ozbox-window-box` session tag: box A's detached
+  disk cannot be attached to box B in B's window. A `plan-*` window without that session tag attaches nothing.
+- **L2, `main`'s older snapshots.** The fleet-manager tag is on `main`'s machine and disks, but not on its snapshots (the CLI
+  tags a snapshot with its box's name), and not on a system disk made before the mark (its tags are never rewritten in place).
+  So everything carrying `main`'s box name (the setup module's new `fleet_manager_box`) is denied exactly as the tag is, which
+  covers every snapshot of `main` ever taken, including the pre-upgrade copy of its system disk that holds the store key; and
+  nothing new may be given that name. This was chosen over tagging the old snapshots: it changes nothing in the account and
+  does not depend on every snapshot path copying a tag.
+- **L3, the spent-plan list** is kept in the dashboard's memory only: see the next list.
+
+A size test holds each managed policy under IAM's limit (6,144 characters without whitespace) with the longest values the
+setup accepts.
+
 **What is not covered (yet), said plainly.**
 
 - **No credential holder, apply unit or window delivery** (§1, §2, §6: the build plan's P1). So the gate is set only in tests,
@@ -796,10 +826,24 @@ and nothing in a released program turns it on: a box's dashboard still says "Fle
 - **No pool roles, claim service, managed state bucket or SCPs** (§4, §6, §3.1's SCP): the change policy names them so it is
   complete, but they are not made. Without the pool, a create from `main` cannot pass a role, so it would fail at launch.
 - **No batch window** (orchestrations, ADR 0042) and **no Hetzner** fleet role (§9).
+- **The spent-plan list is in memory** (the last 4,096 plan ids; review finding L3). A dashboard restart forgets it. What still
+  holds after a restart: the passkey signed that one plan's challenge, the window was opened for that one plan from your own
+  computer and lasts at most an hour, and `apply` refuses a plan whose recorded state no longer matches (ADR 0002), which is the
+  usual case once the plan has been applied. Keeping it durably, in the spent ledger ADR 0041 keeps beside its journal, is part
+  of the credential holder's build.
+- **The window must carry its box.** The window command (not built) must set the `ozbox-window-box` session tag to the plan's
+  box. A batch window (`orch-*`, not built) spans several boxes, so the attach rule above does not bind it; its session policy
+  must name the boxes before batch windows exist.
+- **An untagged interface already in an Oz Box subnet** passes the interface rule: it would bring its own security groups. The
+  change role cannot create interfaces, so only an administrator or the operator could have made one; the one-time preflight
+  (§3.3) lists what is in Oz Box's subnets.
 - **Not proven in AWS's own policy simulator.** The evaluator here is ours; the facts of §15 (above all fact 1, whether
-  `ec2:Attribute/InstanceType` is in the request context for a resize, and fact 2, an encrypted launch under the KMS deny) are
+  `ec2:Attribute/InstanceType` is in the request context for a resize, fact 2, an encrypted launch under the KMS deny, and fact
+  23, that an existing interface in a foreign subnet is refused) are
   an owner run with a read-only identity. If fact 1 fails, `ResizeChangesTheInstanceTypeOnly` is removed and resize stays a
-  laptop action.
+  laptop action. The simulator answers only for the context it is given, so it shows how the documents decide; whether AWS
+  really sends a key (fact 1) and whether an encrypted launch succeeds under the KMS deny (fact 2) are settled only by a dry run
+  under the change role and a canary launch, a separate owner decision with its cost stated first.
 - **The dashboard's own flow is not run end to end in a browser with a real passkey**; the browser test checks the notice at
   390, 820 and 1440 px, and the flow is tested through fakes and the server's own end-to-end test with a software
   authenticator.
