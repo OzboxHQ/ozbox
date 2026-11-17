@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use ozbox_catalog::model::{safe_rel, Extract};
 use ozbox_catalog::verify::{
-    digest_for, fingerprints_match, names_matching, same_digest, single_digest, wildcard_capture,
+    digest_for, fingerprints_match, names_matching, primary_fingerprints, same_digest,
+    single_digest, wildcard_capture,
 };
 use ozbox_catalog::{Action, HOME_TOKEN};
 
@@ -205,6 +206,28 @@ fn run_apt(
     exit_ok(code, what)
 }
 
+/// The `gpg` that lists a downloaded key's fingerprints, with a home folder of its own inside the step's scratch directory.
+///
+/// gpg will not start without a home folder it can write. The root helper runs with `ProtectHome=true`, which hides
+/// `/root`, so with the default home gpg stopped (code 2, "can't create directory '/root/.gnupg'") before it read the key,
+/// and the step reported a vendor key that matches its pin as "not the one its vendor publishes" (packer, 2026-11-17: the
+/// key at <https://apt.releases.hashicorp.com/gpg> is D55C0D1AC78A8D8126CB631CFC9CA96ACA026560, exactly the pin). A
+/// throwaway home also keeps a vendor key out of any keyring that is used for anything else.
+fn gpg_show_keys(ctx: &Ctx, name: &str, key: &Path) -> Result<Vec<String>, String> {
+    let home = ctx.tmp.join(format!("{name}.gnupg"));
+    ctx.sys.create_dir_all(&home).map_err(io_err)?;
+    Ok(vec![
+        s("gpg"),
+        s("--homedir"),
+        home.display().to_string(),
+        s("--batch"),
+        s("--no-autostart"),
+        s("--show-keys"),
+        s("--with-colons"),
+        key.display().to_string(),
+    ])
+}
+
 /// Run one root-class step. Called only by the privileged helper.
 pub fn run_root_action(ctx: &Ctx, action: &Action) -> Result<(), String> {
     let env = env_for(&ctx.home);
@@ -236,19 +259,20 @@ pub fn run_root_action(ctx: &Ctx, action: &Action) -> Result<(), String> {
         } => {
             let key_tmp = ctx.tmp.join(format!("{name}.key"));
             let key = download(ctx, key_url, &key_tmp, MAX_SMALL)?;
-            let (code, listing) = ctx.sys.capture(
-                &[
-                    s("gpg"),
-                    s("--batch"),
-                    s("--show-keys"),
-                    s("--with-colons"),
-                    key_tmp.display().to_string(),
-                ],
-                &env,
-            )?;
-            if code != 0 || !fingerprints_match(&listing, fingerprints) {
+            let (code, listing) = ctx
+                .sys
+                .capture(&gpg_show_keys(ctx, name, &key_tmp)?, &env)?;
+            if code != 0 {
                 return Err(format!(
-                    "the signing key for {name} is not the one its vendor publishes; nothing was installed"
+                    "the signing key for {name} could not be read (gpg stopped with code {code}), so it could not be checked against the one its vendor publishes; nothing was installed"
+                ));
+            }
+            if !fingerprints_match(&listing, fingerprints) {
+                let found = primary_fingerprints(&listing);
+                return Err(format!(
+                    "the signing key for {name} is not the one its vendor publishes (the key file holds {}, the catalog pins {}); nothing was installed",
+                    if found.is_empty() { "no primary key".to_string() } else { found.join(", ") },
+                    fingerprints.join(", ")
                 ));
             }
             let armored = key.starts_with(b"-----BEGIN PGP");

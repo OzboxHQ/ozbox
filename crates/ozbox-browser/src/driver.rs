@@ -1945,10 +1945,9 @@ impl Driver {
             }
         }
         let m = self.device.metrics();
-        let scale = if m.width > 700 { 0.7 } else { 1.0 };
-        let r = self.capture(
-            json!({ "format": "jpeg", "quality": 45, "clip": { "x": 0, "y": 0, "width": m.width, "height": m.height, "scale": scale } }),
-        )?;
+        // a picture of what is on screen: where the page is scrolled to is asked each time (see `frame_clip`)
+        let layout = self.send("Page.getLayoutMetrics", json!({}))?;
+        let r = self.capture(json!({ "format": "jpeg", "quality": 45, "clip": frame_clip(&layout, m.width, m.height) }))?;
         let bytes =
             crate::b64::decode(r["data"].as_str().unwrap_or("")).map_err(|e| bad("failed", e))?;
         let page = crate::record::page_of(&self.url());
@@ -2105,9 +2104,67 @@ pub fn sanitize_name(n: &str) -> String {
     }
 }
 
+/// The live view's clip: the part of the page that is on screen, scaled down on a wide page.
+///
+/// `Page.captureScreenshot` reads a clip in PAGE coordinates, not screen ones. A clip at (0, 0) is the top of the page, so once
+/// the page was scrolled it pictured the part above the screen, which is not drawn: the live view showed a blank white
+/// picture. The visual viewport's place on the page (`cssVisualViewport.pageX`/`pageY`, CSS pixels) is added, so the
+/// picture is what a person would see. An answer without it (an older browser) keeps the top of the page.
+pub fn frame_clip(layout: &Value, width: u32, height: u32) -> Value {
+    let vv = if layout["cssVisualViewport"].is_object() {
+        &layout["cssVisualViewport"]
+    } else {
+        &layout["visualViewport"]
+    };
+    let at = |k: &str| {
+        vv[k]
+            .as_f64()
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    };
+    let scale = if width > 700 { 0.7 } else { 1.0 };
+    json!({ "x": at("pageX"), "y": at("pageY"), "width": width, "height": height, "scale": scale })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_live_view_pictures_where_the_page_is_scrolled_to() {
+        let scrolled = json!({ "cssVisualViewport": { "pageX": 0.0, "pageY": 1840.5, "clientWidth": 1280, "clientHeight": 800 },
+            "visualViewport": { "pageX": 0.0, "pageY": 3681.0 } });
+        let c = frame_clip(&scrolled, 1280, 800);
+        assert_eq!(c["y"], 1840.5, "CSS pixels, not device pixels");
+        assert_eq!(c["x"], 0.0);
+        assert_eq!(
+            (c["width"].as_u64(), c["height"].as_u64()),
+            (Some(1280), Some(800))
+        );
+        assert_eq!(c["scale"], 0.7);
+        // the top of the page, a phone, an older browser's answer, and nonsense
+        assert_eq!(
+            frame_clip(
+                &json!({ "cssVisualViewport": { "pageX": 0, "pageY": 0 } }),
+                390,
+                844
+            )["scale"],
+            1.0
+        );
+        assert_eq!(
+            frame_clip(
+                &json!({ "visualViewport": { "pageX": 12, "pageY": 300 } }),
+                390,
+                844
+            )["y"],
+            300.0
+        );
+        assert_eq!(frame_clip(&json!({}), 1280, 800)["y"], 0.0);
+        assert_eq!(
+            frame_clip(&json!({ "cssVisualViewport": { "pageY": -5 } }), 1280, 800)["y"],
+            0.0
+        );
+    }
 
     #[test]
     fn keys_become_press_and_release_events() {

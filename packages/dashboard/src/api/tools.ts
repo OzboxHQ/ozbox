@@ -90,11 +90,20 @@ export type JobState = 'queued' | 'running' | 'succeeded' | 'failed';
 export interface JobStep {
   index: number;
   title: string;
-  state: 'pending' | 'running' | 'ok' | 'failed';
+  /** `skipped`: not run, because its tool (or a tool it needs) did not install. A server older than this value never sends it. */
+  state: 'pending' | 'running' | 'ok' | 'failed' | 'skipped';
+}
+
+/** How one tool of a finished job ended. One tool failing does not stop the others. */
+export interface ToolOutcome {
+  id: string;
+  state: 'ok' | 'failed' | 'skipped';
+  error?: string;
 }
 
 export interface ToolJob {
-  job: { id: string; state: JobState; steps: JobStep[]; error: string | null; started_ms: number | null; ended_ms: number | null };
+  /** `outcomes` is filled when the job ends. A server older than this field sends none. */
+  job: { id: string; state: JobState; steps: JobStep[]; error: string | null; started_ms: number | null; ended_ms: number | null; outcomes?: ToolOutcome[] };
   tools: PlanTool[] | null;
   requested_by: string | null;
   log: string[];

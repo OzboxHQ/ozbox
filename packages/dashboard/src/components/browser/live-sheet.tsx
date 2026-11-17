@@ -11,7 +11,7 @@ import { TAP_ACTION_DEFAULT } from '@/components/ui/tap-target';
 import { useApp } from '../../App';
 import { ApiError } from '../../api/client';
 import type { Frame, SessionStatus } from '../../api/browser';
-import { keyName, toPagePoint } from '../../lib/browser';
+import { isBlankPage, keyName, toPagePoint } from '../../lib/browser';
 import { withStepUp } from '../perm/with-step-up';
 import { t } from '../../lib/i18n';
 import { useCan } from '../../lib/use-can';
@@ -92,7 +92,7 @@ export function LiveSheet({ session, onClose }: { session: string; onClose: () =
       <PanelSheetContent data-testid="browser-live-sheet">
         <PanelSheetHeader>
           <PanelSheetTitle>{t('browser.live_heading')}</PanelSheetTitle>
-          <PanelSheetDescription>{frame ? frame.page : t('browser.live_waiting')}</PanelSheetDescription>
+          <PanelSheetDescription>{frame ? (isBlankPage(frame.page) ? t('browser.live_blank_short') : frame.page) : t('browser.live_waiting')}</PanelSheetDescription>
         </PanelSheetHeader>
         <PanelSheetBody className="space-y-3">
           {lost ? (
@@ -144,7 +144,11 @@ export function LiveSheet({ session, onClose }: { session: string; onClose: () =
             </Alert>
           ) : null}
           {mine ? <p className="text-xs text-muted-foreground">{t('browser.you_have_hint')}</p> : null}
-          {frame ? (
+          {frame && isBlankPage(frame.page) ? (
+            <p className="rounded-md border bg-muted p-4 text-sm" role="status" data-testid="browser-blank-page">
+              {t('browser.live_blank')}
+            </p>
+          ) : frame ? (
             <div className="overflow-hidden rounded-md border bg-muted">
               <img
                 ref={img}

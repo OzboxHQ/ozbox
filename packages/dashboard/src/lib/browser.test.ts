@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseBrowserApproval } from './browser';
+import { isBlankPage, parseBrowserApproval } from './browser';
 
 describe('a browser approval as a person reads it', () => {
   it('shows where a form goes, the check of what was shown, and the fields', () => {
@@ -24,5 +24,13 @@ describe('a browser approval as a person reads it', () => {
     // the worker turns `=` and `, ` inside a name into `_`, so there is one field, not two
     const b = parseBrowserApproval('browser.browser_click: this would submit a form on a.example: click [a_b_ c_d=x]');
     expect(b?.fields).toEqual([{ name: 'a_b_ c_d', value: 'x', masked: false }]);
+  });
+});
+
+describe('the browser start page', () => {
+  it('is told apart from a real page', () => {
+    expect(isBlankPage('about:')).toBe(true);
+    expect(isBlankPage('about:blank')).toBe(true);
+    for (const p of ['app.example/login', 'data:', 'blob:', '', undefined]) expect(isBlankPage(p), String(p)).toBe(false);
   });
 });

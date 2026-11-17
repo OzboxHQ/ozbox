@@ -312,14 +312,48 @@ pub fn change(
         println!("{}", t("tools.job_ok", &[]));
         Ok(())
     } else {
+        // One line per tool, so a tool that failed does not hide the ones that installed (or were not tried).
+        let lines = outcome_lines(&outcome["job"]);
+        if lines.is_empty() {
+            return msg(t(
+                "tools.job_failed",
+                &[(
+                    "error",
+                    outcome["job"]["error"].as_str().unwrap_or("unknown"),
+                )],
+            ));
+        }
+        for l in &lines {
+            println!("{l}");
+        }
+        let total = lines.len().to_string();
+        let bad = outcome["job"]["outcomes"]
+            .as_array()
+            .map_or(0, |o| o.iter().filter(|x| x["state"] != "ok").count())
+            .to_string();
         msg(t(
-            "tools.job_failed",
-            &[(
-                "error",
-                outcome["job"]["error"].as_str().unwrap_or("unknown"),
-            )],
+            "tools.job_partly_failed",
+            &[("failed", bad.as_str()), ("total", total.as_str())],
         ))
     }
+}
+
+/// How each tool of a finished job ended, one line each. A status from an older daemon has no outcomes: no lines.
+pub fn outcome_lines(job: &Value) -> Vec<String> {
+    job["outcomes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|o| {
+            let id = o["id"].as_str().unwrap_or("");
+            let error = o["error"].as_str().unwrap_or("");
+            match o["state"].as_str() {
+                Some("ok") => t("tools.outcome_ok", &[("id", id)]),
+                Some("skipped") => t("tools.outcome_skipped", &[("id", id), ("error", error)]),
+                _ => t("tools.outcome_failed", &[("id", id), ("error", error)]),
+            }
+        })
+        .collect()
 }
 
 fn follow(agent: &dyn BoxAgent, rec: &BoxRecord, id: &str, f: &Flags) -> Result<Value> {
@@ -332,13 +366,12 @@ fn follow(agent: &dyn BoxAgent, rec: &BoxRecord, id: &str, f: &Flags) -> Result<
             for s in v["job"]["steps"].as_array().into_iter().flatten() {
                 let idx = s["index"].as_u64().unwrap_or(0) as usize;
                 if s["state"] != "pending" && idx >= shown {
-                    println!(
-                        "{}",
-                        t(
-                            "tools.step_line",
-                            &[("line", s["title"].as_str().unwrap_or(""))]
-                        )
-                    );
+                    let key = if s["state"] == "skipped" {
+                        "tools.step_skipped_line"
+                    } else {
+                        "tools.step_line"
+                    };
+                    println!("{}", t(key, &[("line", s["title"].as_str().unwrap_or(""))]));
                     shown = idx + 1;
                 }
             }
@@ -705,6 +738,25 @@ pub fn profile_delete(name: &str, f: &Flags) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_finished_job_says_how_each_tool_ended() {
+        let job = serde_json::json!({ "state": "failed", "outcomes": [
+            { "id": "packer", "state": "failed", "error": "Add the hashicorp package source: the signing key could not be read" },
+            { "id": "codex", "state": "skipped", "error": "not tried, because node (which it needs) failed" },
+            { "id": "ripgrep", "state": "ok" },
+        ]});
+        let lines = super::outcome_lines(&job);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("packer: failed: Add the hashicorp"));
+        assert!(lines[1].contains("codex: not tried"));
+        assert_eq!(lines[2].trim(), "ripgrep: done");
+        // an older daemon's status has no outcomes
+        assert!(super::outcome_lines(&serde_json::json!({ "state": "failed" })).is_empty());
+        for k in ["tools.step_skipped_line", "tools.job_partly_failed"] {
+            assert!(crate::messages::keys().contains(&k), "{k}");
+        }
+    }
+
     #[test]
     fn every_message_key_used_here_exists() {
         let src = include_str!("tools_cli.rs");

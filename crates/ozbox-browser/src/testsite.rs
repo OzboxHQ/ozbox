@@ -61,6 +61,7 @@ fn route(
         // redirects: to a site not on the list, and to a page robots.txt keeps out
         ("GET", "/redir-out") => to("far.localhost", "/"),
         ("GET", "/redir-secret") => to("blocked.localhost", "/secret/page"),
+        ("GET", "/tall") => html(page("Tall", "<h1>Tall</h1><div style=\"height:4000px;background:linear-gradient(#c00,#00c)\"></div>")),
         ("GET", "/") => html(page("Home", "<h1>Test site</h1><p>Welcome.</p><a href=\"/login\">Log in</a> <a href=\"/form\">Contact form</a> <a href=\"/checkout\">Checkout</a> <a href=\"/data\">Data</a> <a href=\"/downloads\">Downloads</a> <a href=\"https://elsewhere.invalid/\">Elsewhere</a> <a href=\"/secret/page\">Secret</a>")),
         ("GET", "/login") => html(page("Log in", "<h1>Log in</h1><form method=post action=/login><label>Username <input name=username type=text></label><label>Password <input name=password type=password></label><button type=submit>Sign in</button></form>")),
         ("POST", "/login") => html(page("Welcome", "<h1>Signed in</h1><p id=ok>Welcome back.</p>")),

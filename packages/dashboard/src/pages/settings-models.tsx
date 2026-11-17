@@ -20,6 +20,7 @@ import type { ModelJob, ModelKind, ModelListResult, ModelProvider, ModelTestResu
 import { useApp } from '../App';
 import { SecretField } from '../components/secret-field';
 import { EnginesCard } from '../components/models/engines-card';
+import { ADD_PROVIDER_ID, NeedsProviderNote } from '../components/models/needs-provider-note';
 import { LocalAiCard } from '../components/models/local-ai-card';
 import { PricesCard } from '../components/models/prices-card';
 import { ModelList } from '../components/models/model-list';
@@ -202,8 +203,9 @@ function DefaultsCard({ settings, save, reload }: { settings: Settings; save: (s
     <Card className="space-y-3 p-4" data-testid="model-defaults">
       <div className="flex items-start justify-between gap-2">
         <h2 className="text-sm font-semibold">{t('models.defaults_title')}</h2>
-        <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} onClick={() => { setDraft(initial()); setErr(null); setOpen(true); }}>{t('common.edit')}</Button>
+        <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} aria-describedby={providers.length === 0 ? 'defaults-needs-provider' : undefined} onClick={() => { setDraft(initial()); setErr(null); setOpen(true); }}>{t('common.edit')}</Button>
       </div>
+      {providers.length === 0 ? <NeedsProviderNote id="defaults-needs-provider" /> : null}
       <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {JOBS.map((j) => {
           const c = settings.models.defaults[j];
@@ -305,7 +307,7 @@ export function ModelsSection() {
       <Card className="space-y-1 p-4">
         <div className="flex items-start justify-between gap-2">
           <h2 className="text-sm font-semibold">{t('models.title')}</h2>
-          <Button size="sm" className="max-lg:h-11" onClick={() => { setEditing(null); setSheet(true); }}>{t('models.add_provider')}</Button>
+          <Button id={ADD_PROVIDER_ID} size="sm" className="max-lg:h-11" onClick={() => { setEditing(null); setSheet(true); }}>{t('models.add_provider')}</Button>
         </div>
         <p className="text-xs text-muted-foreground" data-testid="models-note">{t('models.intro', { store: status.data.store })}</p>
         <p className="text-xs text-muted-foreground">{status.data.spend_note}</p>
