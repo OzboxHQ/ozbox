@@ -88,6 +88,34 @@ pub fn bootstrap_refusal(scope: &str) -> String {
 
 /// Why the first approver cannot come from inside the box, and the ways it can come.
 pub const NO_APPROVER: &str = "this box has no approver yet, and the first one cannot be enrolled from the box: a process on the box could enrol its own key that way. Make the box with `ozbox create` from a computer with a keychain (it pins this computer's key; `ozbox upgrade` pins it on a box that has none), or enrol a passkey in the dashboard, then enrol this key with an approval from it (Settings, Secret approvals, scope signer-enroll)";
+/// The rule a refused Production import is told (ADR 0041 §3: a key kept on a computer never decides Production). The same
+/// sentence is in the message catalogue (`approval_key.production_needs_dashboard`), which `ozbox secrets approve` uses to refuse
+/// before it makes a code; a test keeps the two equal.
+pub const PRODUCTION_IMPORT_RULE: &str = "Production imports need an approval from the dashboard (passkey or authenticator), not this computer's key";
+
+/// Whether an approval for `scope` in `env` is one this computer's key may never make: an import into Production (any
+/// environment that is not a listed non-Production one, see `is_production_environment`). Only for a name the person gave: an
+/// empty environment is not a Production import, it is a request with no environment.
+pub fn laptop_key_never_covers(scope: &str, env: &str) -> bool {
+    scope == "import"
+        && !env.is_empty()
+        && ozbox_core::approval_subject::is_production_environment(env)
+}
+
+/// What a person is told when a code is refused as not valid (the gate's own wording, [`NOT_VALID`]): for a Production import it
+/// also names the rule that most often explains it, since a code made with this computer's own key never covers Production.
+/// Any other refusal, and any other scope or environment, is returned as it was.
+pub fn refusal_with_rule(scope: &str, env: &str, refusal: String) -> String {
+    if refusal == NOT_VALID && laptop_key_never_covers(scope, env) {
+        format!("that approval is not valid, has been used, or has expired. {PRODUCTION_IMPORT_RULE}: ask for a new one there")
+    } else {
+        refusal
+    }
+}
+
+/// How the gate words a code it does not accept (unknown, spent, expired, or for another scope, project or environment).
+pub const NOT_VALID: &str =
+    "that approval is not valid, has been used, or has expired: ask for a new one in the dashboard";
 pub const DEFAULT_TTL_MS: u64 = 5 * 60_000;
 const MAX_TTL_MS: u64 = 10 * 60_000;
 const MAX_LIVE: usize = 16;
@@ -255,7 +283,7 @@ impl ApprovalGate {
         env: &str,
         now_ms: u64,
     ) -> Result<String, String> {
-        let wrong = "that approval is not valid, has been used, or has expired: ask for a new one in the dashboard";
+        let wrong = NOT_VALID;
         // No code at all is a person who has not asked yet, not a guess.
         if normalise(code).is_empty() {
             return Err(wrong.into());
@@ -287,7 +315,7 @@ impl ApprovalGate {
         now_ms: u64,
         effect: impl FnOnce(&str) -> Result<T, String>,
     ) -> Result<T, ConsumeThen> {
-        let wrong = "that approval is not valid, has been used, or has expired: ask for a new one in the dashboard";
+        let wrong = NOT_VALID;
         if normalise(code).is_empty() {
             return Err(ConsumeThen::Approval(wrong.into()));
         }

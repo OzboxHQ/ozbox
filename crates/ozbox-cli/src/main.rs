@@ -51,6 +51,7 @@ mod infra_cli;
 mod ingress_cli;
 mod ingress_client;
 mod ingress_guard;
+mod ingress_repin;
 mod init;
 mod init_cli;
 mod local_ai;

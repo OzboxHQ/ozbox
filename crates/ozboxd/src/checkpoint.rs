@@ -313,8 +313,8 @@ pub const MAX_UNTRACKED_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_AGE_DAYS: u64 = 14;
 /// At most this many oversize files are named to `git add`; more than that and the repository is reported, not saved.
 const MAX_EXCLUDES: usize = 200;
-/// Folders and files that mean "this is somebody's home, or holds credentials": a repository whose top level has one is not
-/// snapshotted, whatever its name.
+/// Folders and files that hold credentials. A repository with one at its top level that git would copy into a snapshot (it is
+/// neither tracked nor ignored) is not snapshotted, whatever its name; see `not_saved_reason`.
 const CREDENTIAL_PATHS: [&str; 12] = [
     ".ssh",
     ".aws",
@@ -437,7 +437,7 @@ impl Checkpointer {
                     .push(format!("{rel}: skipped, the time limit was reached"));
                 continue;
             }
-            if let Some(why) = self.not_saved_reason(&repo) {
+            if let Some(why) = self.not_saved_reason(&b, &repo) {
                 rep.skipped.push(format!("{rel}: not saved: {why}"));
                 continue;
             }
@@ -500,20 +500,55 @@ impl Checkpointer {
         })
     }
 
-    /// Why a repository is not snapshotted at all, or `None`: its top level is the box user's home folder, or it holds a
-    /// credential folder at its top level.
-    fn not_saved_reason(&self, repo: &Path) -> Option<&'static str> {
+    /// Why a repository is not snapshotted at all, or `None`. Exactly two things stop one:
+    ///
+    /// 1. its top level **is** the box user's home folder (a dotfiles repository: everything in a home folder is untracked,
+    ///    so a snapshot would copy keys and history into the git directory); or
+    /// 2. one of [`CREDENTIAL_PATHS`] sits **directly at its top level** (`<repo>/.aws`, never `<repo>/docs/aws`) and
+    ///    `git status` reports it as changed (untracked, or a tracked file edited since the last commit): that is what a
+    ///    snapshot would copy into the git directory. A credentials path the repository already tracks and has not edited is
+    ///    already in its history, and an ignored one is never copied, so neither is a reason to leave a person's work unsaved.
+    ///    A normal project may track a `.npmrc` or a `.docker` folder.
+    ///
+    /// Nothing below the top level is looked at, and a name that merely contains `aws` or starts like `.github` never matches.
+    /// When git cannot answer, the repository is left unsaved (fail closed) and the report says so.
+    fn not_saved_reason(&self, b: &Bound, repo: &Path) -> Option<String> {
         let is_home = self.cfg.home_dir.as_ref().is_some_and(|h| {
             match (fs::canonicalize(h), fs::canonicalize(repo)) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => h == repo,
             }
         });
-        if is_home || CREDENTIAL_PATHS.iter().any(|c| repo.join(c).exists()) {
-            Some("home/dotfiles repo")
-        } else {
-            None
+        if is_home {
+            return Some("home/dotfiles repo".into());
         }
+        for c in CREDENTIAL_PATHS {
+            if fs::symlink_metadata(repo.join(c)).is_err() {
+                continue;
+            }
+            let listed = self.out(
+                &self.hgit(
+                    b,
+                    repo,
+                    &["status", "--porcelain", "--ignore-submodules=all", "--", c],
+                ),
+                "status",
+            );
+            match listed {
+                Ok(l) if l.is_empty() => {}
+                Ok(_) => {
+                    return Some(format!(
+                        "holds an untracked or edited credentials path ({c})"
+                    ));
+                }
+                Err(_) => {
+                    return Some(format!(
+                        "could not check whether {c} is untracked, so it was left alone"
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// The untracked files over [`MAX_UNTRACKED_BYTES`], as repository-relative paths.
@@ -1821,7 +1856,8 @@ mod tests {
     }
 
     #[test]
-    fn a_home_or_credential_repository_is_not_saved_and_says_so_and_a_huge_new_file_is_left_out() {
+    fn a_home_or_untracked_credential_repository_is_not_saved_and_says_so_and_a_huge_new_file_is_left_out(
+    ) {
         let d = tempfile::tempdir().unwrap();
         // the box user's home is a dotfiles repository
         let home = d.path().join("home").join("ozbox");
@@ -1865,9 +1901,8 @@ mod tests {
             rep.skipped
         );
         assert!(
-            rep.skipped
-                .iter()
-                .any(|s| s == "repos/odd: not saved: home/dotfiles repo"),
+            rep.skipped.iter().any(|s| s
+                == "repos/odd: not saved: holds an untracked or edited credentials path (.aws)"),
             "{:?}",
             rep.skipped
         );
@@ -1890,6 +1925,129 @@ mod tests {
             "{tree}"
         );
         assert_eq!(git(&web, &["show", &format!("{}:a.txt", r[0])]), "edited");
+    }
+
+    /// Ordinary project repositories were reported "not saved: home/dotfiles repo" at two upgrades. A project may carry a committed
+    /// `.npmrc` or `.docker` (clean), a credential-looking name below its top (`docs/ops/aws/`), `.github/`, or an ignored `.aws`;
+    /// none of those puts a key into a snapshot, so each repository below is saved. The ones that do (an untracked `.aws`, an
+    /// untracked or edited `.npmrc`) are still left alone, and the home folder itself is too.
+    #[test]
+    fn a_real_project_repository_is_saved_whatever_its_tracked_config_and_nested_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home").join("ozbox");
+        repo(&home);
+        fs::write(home.join("a.txt"), "edited\n").unwrap();
+
+        // a project the way a real one looks: tracked .npmrc and .docker, .github, deep aws/ and .ssh-looking names
+        let proj = d.path().join("repos").join("webapp");
+        repo(&proj);
+        fs::write(proj.join(".npmrc"), "registry=https://registry.example/\n").unwrap();
+        fs::create_dir_all(proj.join(".docker")).unwrap();
+        fs::write(proj.join(".docker").join("config.json"), "{}\n").unwrap();
+        fs::create_dir_all(proj.join(".github").join("workflows")).unwrap();
+        fs::write(
+            proj.join(".github").join("workflows").join("ci.yml"),
+            "on: push\n",
+        )
+        .unwrap();
+        fs::create_dir_all(proj.join("docs").join("infra").join("aws")).unwrap();
+        fs::write(
+            proj.join("docs")
+                .join("infra")
+                .join("aws")
+                .join("README.md"),
+            "x\n",
+        )
+        .unwrap();
+        fs::create_dir_all(proj.join("docs").join(".ssh")).unwrap();
+        fs::write(proj.join("docs").join(".ssh").join("notes.md"), "x\n").unwrap();
+        git(&proj, &["add", "-A"]);
+        git(&proj, &["commit", "-q", "-m", "project"]);
+        fs::write(proj.join("a.txt"), "edited\n").unwrap();
+        // the same project one folder deeper, as /work/repos/tools/webapp
+        let nested = d.path().join("repos").join("tools").join("webapp");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        repo(&nested);
+        fs::write(
+            nested.join(".npmrc"),
+            "registry=https://registry.example/\n",
+        )
+        .unwrap();
+        git(&nested, &["add", "-A"]);
+        git(&nested, &["commit", "-q", "-m", "project"]);
+        fs::write(nested.join("a.txt"), "edited\n").unwrap();
+        // an ignored .aws is never copied by a snapshot, so it is no reason to skip the repository
+        let ign = d.path().join("repos").join("ignored-aws");
+        repo(&ign);
+        fs::write(ign.join(".gitignore"), ".aws/\n").unwrap();
+        git(&ign, &["add", "-A"]);
+        git(&ign, &["commit", "-q", "-m", "ignore"]);
+        fs::create_dir_all(ign.join(".aws")).unwrap();
+        fs::write(ign.join(".aws").join("credentials"), "secret\n").unwrap();
+        fs::write(ign.join("a.txt"), "edited\n").unwrap();
+        // an untracked .npmrc (it may hold a token) is left alone
+        let tok = d.path().join("repos").join("untracked-npmrc");
+        repo(&tok);
+        fs::write(tok.join(".npmrc"), "//registry.example/:_authToken=x\n").unwrap();
+        fs::write(tok.join("a.txt"), "edited\n").unwrap();
+
+        // a committed .npmrc that someone then edited (a token pasted in) is a change a snapshot would copy: left alone
+        let edited = d.path().join("repos").join("edited-npmrc");
+        repo(&edited);
+        fs::write(
+            edited.join(".npmrc"),
+            "registry=https://registry.example/\n",
+        )
+        .unwrap();
+        git(&edited, &["add", "-A"]);
+        git(&edited, &["commit", "-q", "-m", "npmrc"]);
+        fs::write(edited.join(".npmrc"), "//registry.example/:_authToken=x\n").unwrap();
+        fs::write(edited.join("a.txt"), "edited\n").unwrap();
+
+        let mut cfg = CheckpointConfig::new(d.path().join("repos"));
+        cfg.snapshot_root = Some(d.path().to_path_buf());
+        cfg.home_dir = Some(home.clone());
+        let c = Checkpointer::new(
+            cfg,
+            BoxName::new("dev-1").unwrap(),
+            Arc::new(SystemRunner),
+            Arc::new(FakeClock::new(T0)),
+        );
+        let rep = c.snapshot_all_hidden(&hidden_opts());
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(
+            refs(&edited).is_empty(),
+            "an edited credentials file is not copied"
+        );
+        for saved in [&proj, &nested, &ign] {
+            assert_eq!(
+                refs(saved).len(),
+                1,
+                "{} was not saved: {:?}",
+                saved.display(),
+                rep.skipped
+            );
+        }
+        let tree = git(&ign, &["ls-tree", "-r", "--name-only", &refs(&ign)[0]]);
+        assert!(
+            !tree.contains(".aws"),
+            "an ignored folder stays out of the snapshot: {tree}"
+        );
+        assert!(refs(&home).is_empty() && refs(&tok).is_empty());
+        assert!(
+            rep.skipped.iter().any(|s| s == "home/ozbox: not saved: home/dotfiles repo")
+                && rep.skipped.iter().any(|s| s
+                    == "repos/untracked-npmrc: not saved: holds an untracked or edited credentials path (.npmrc)"),
+            "{:?}",
+            rep.skipped
+        );
+        assert!(
+            rep.skipped
+                .iter()
+                .all(|s| !s.contains("webapp") && !s.contains("ignored-aws")),
+            "no real project is reported as unsaved: {:?}",
+            rep.skipped
+        );
     }
 
     #[test]

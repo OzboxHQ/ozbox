@@ -687,6 +687,18 @@ pub(super) fn command(
         println!("{out}");
     }
     finish(f, &name, &action, true, false, Some(ok), Some(&out), &notes)?;
+    // a new store has a new service key: say how to pin it (never changed without the typed confirmation)
+    if ok && action == AdminAction::RecoverSecrets && !f.json {
+        if let Some(step) = crate::ingress_repin::after_new_store(
+            &ozbox_core::SystemRunner,
+            &crate::ingress_client::FilePins(crate::ingress_client::FilePins::default_path()),
+            name.as_str(),
+            !f.yes && crate::ingress_repin::at_a_terminal(),
+            &mut crate::ingress_repin::confirm_on_terminal(name.as_str()),
+        ) {
+            println!("{}", step.detail);
+        }
+    }
     if ok {
         Ok(())
     } else {

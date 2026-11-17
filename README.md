@@ -143,7 +143,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 
 | Command | What it does |
 |---|---|
-| `ozbox secrets` | Report on the encrypted secret store (names and ages, never values), rotate its keys, import a project's `.env` keys. `ozbox secrets ingress pin\|escrow\|setup-code --box <name>`: the sealed route to a box's secrets service ([ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md)) |
+| `ozbox secrets` | Report on the encrypted secret store (names and ages, never values), rotate its keys, import a project's `.env` keys. `ozbox secrets ingress pin\|escrow\|setup-code --box <name>`: the sealed route to a box's secrets service ([ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md)) A Production import needs an approval from the dashboard, not this computer's key: `secrets approve --scope import --env production` says so and makes no code. |
 | `ozbox env run\|policy` | Run a named command with only the secrets a project declared it may receive, on a closed network except the hosts it declared |
 | `ozbox guard install` | Git hooks that stop a commit or push containing a key |
 | `ozbox box-secrets <name>` | Declare which non-production keys a box reads from your cloud's parameter store, into memory only |

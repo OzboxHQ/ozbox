@@ -144,7 +144,7 @@ run "labels_on_every_taggable_resource" {
         aws_security_group.box.tags,
         aws_iam_role.box.tags,
         aws_iam_instance_profile.box.tags,
-        aws_instance.box.root_block_device[0].tags,
+        aws_instance.box.volume_tags,
       ] : t["ozbox-box"] == "dev-1" && t["ozbox-managed"] == "true" && t["team"] == "example"
     ])
     error_message = "every taggable resource needs ozbox-box, ozbox-managed and the caller's labels"
@@ -156,13 +156,15 @@ run "labels_on_every_taggable_resource" {
 run "the_system_disk_is_ours_from_the_moment_it_is_created" {
   command = apply
 
+  # the launch's own volume tag specification, which AWS applies while it creates the disk (the only moment the operator's role
+  # may put a first tag on a volume); the block's own tags are not used, the provider applies those with a later call
   assert {
     condition = (
-      aws_instance.box.root_block_device[0].tags["ozbox-managed"] == "true" &&
-      aws_instance.box.root_block_device[0].tags["ozbox-box"] == "dev-1" &&
-      aws_instance.box.root_block_device[0].tags["ozbox-role"] == "root"
+      aws_instance.box.volume_tags["ozbox-managed"] == "true" &&
+      aws_instance.box.volume_tags["ozbox-box"] == "dev-1" &&
+      aws_instance.box.volume_tags["ozbox-role"] == "root"
     )
-    error_message = "the system disk must carry ozbox-managed, ozbox-box and its role in the tags it is created with"
+    error_message = "the launch must tag the volumes it creates (volume_tags) with ozbox-managed, ozbox-box and the role, so the system disk is ours from its first moment"
   }
 }
 

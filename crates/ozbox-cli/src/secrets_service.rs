@@ -539,7 +539,7 @@ impl Gates {
                 Err(if approval.is_empty() {
                     "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
                 } else {
-                    e
+                    crate::secrets_approval::refusal_with_rule(scope, env, e)
                 })
             }
         }
@@ -606,7 +606,7 @@ impl Gates {
                 Err(Refusal::Approval(if approval.is_empty() {
                     "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
                 } else {
-                    e
+                    crate::secrets_approval::refusal_with_rule(scope, env, e)
                 }))
             }
         }
@@ -3534,6 +3534,64 @@ mod tests {
         let _ = g.requests_failed.set(());
         assert!(!ok(&mint(&g, &s, &m, "signer-enroll")));
         assert!(ok(&mint(&g, &s, &m, "import")));
+    }
+
+    /// A Production import refused for a code that is not good names the rule (a code made with this computer's own key never
+    /// covers Production, ADR 0041 §3); a non-Production import and every other scope keep the plain wording. The refusal is
+    /// the same refusal: only its words differ.
+    #[test]
+    fn a_refused_production_import_names_the_rule_and_a_staging_one_does_not() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _m) = svc_enrolled(d.path());
+        let g = Gates::default();
+        let prod = g
+            .require(&s, "import", "app", "production", "ABCD-EFGH-JKMN-PQRS", 1)
+            .unwrap_err();
+        assert!(
+            prod.contains(crate::secrets_approval::PRODUCTION_IMPORT_RULE)
+                && prod.contains("not valid, has been used, or has expired"),
+            "{prod}"
+        );
+        // the same for the effect-taking gate
+        let then = g
+            .require_then(
+                &s,
+                "import",
+                "app",
+                "production",
+                "ABCD-EFGH-JKMN-PQRS",
+                1,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(
+            then.contains(crate::secrets_approval::PRODUCTION_IMPORT_RULE),
+            "{then}"
+        );
+        let staging = g
+            .require(&s, "import", "app", "staging", "ABCD-EFGH-JKMN-PQRS", 1)
+            .unwrap_err();
+        assert_eq!(staging, crate::secrets_approval::NOT_VALID);
+        let other = g
+            .require(&s, "policy", "app", "production", "ABCD-EFGH-JKMN-PQRS", 1)
+            .unwrap_err();
+        assert_eq!(other, crate::secrets_approval::NOT_VALID);
+        // no code at all keeps its own sentence
+        let none = g
+            .require(&s, "import", "app", "production", "", 1)
+            .unwrap_err();
+        assert!(
+            none.contains("needs a fresh approval from the dashboard"),
+            "{none}"
+        );
+        // and a laptop-key code for another environment is still not a Production approval
+        let code = g
+            .approvals
+            .mint("import", "app", "staging", "laptop-key:laptop", 1, 60_000)
+            .unwrap();
+        assert!(g
+            .require(&s, "import", "app", "production", &code, 2)
+            .is_err());
     }
 
     #[test]

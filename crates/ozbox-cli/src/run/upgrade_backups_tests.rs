@@ -191,6 +191,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
             restore_dashboard: &|_, _| None,
             memory_guard: &|_, _| None,
             refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+            secrets_pin: &|_| None,
             review_signers: &|_| None,
             place_escrow: &|_, _| None,
             first_boot: FirstBootOpts {

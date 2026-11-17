@@ -2099,9 +2099,17 @@ impl Backend for AwsBackend {
         let name = &rec.spec.name;
         let vol = self.root_volume(rec)?;
         if tag(&vol.tags, "ozbox-managed") != Some("true") {
+            let region = rec
+                .spec
+                .region
+                .as_deref()
+                .or(self.cfg.region.as_deref())
+                .filter(|r| r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+                .map(|r| format!(" --region {r}"))
+                .unwrap_or_default();
             return Err(Error::Config(format!(
-                "the system disk of {name} ({}) is not tagged ozbox-managed, so this program's AWS permissions cannot snapshot it. Nothing was changed. Pass --no-pre-upgrade-snapshot to go on without a copy of the old system disk, or snapshot it yourself first and keep the id.",
-                vol.volume_id
+                "the system disk of {name} ({id}) is not tagged ozbox-managed, so this program's AWS permissions cannot snapshot it (a disk made by an older version has no tags, and only an account administrator can tag a disk that exists). Nothing was changed. Two ways forward: have an account administrator tag it once (`aws ec2 create-tags --resources {id} --tags Key=ozbox-managed,Value=true Key=ozbox-box,Value={name}{region}`, with an administrator profile) and run the upgrade again, so its copy is taken and shown by `ozbox backup list`; or pass --no-pre-upgrade-snapshot to go on without any copy of the old system disk. The new system disk this upgrade makes is tagged from the start, so later upgrades can keep their own copy.",
+                id = vol.volume_id
             )));
         }
         // Fail closed: a disk the provider does not say is encrypted is treated as not (an answer without the field is not a yes).
@@ -6630,6 +6638,17 @@ Usage: ozbox secrets <COMMAND>",
                 .ok_or("expected a refusal")?
                 .to_string();
             assert!(why.contains("--no-pre-upgrade-snapshot"), "{plain}: {why}");
+            if !plain {
+                // the person is told how to recover from an untagged disk: the administrator's one tagging command for the volume, and
+                // that the next system disk is tagged
+                assert!(
+                    why.contains("aws ec2 create-tags --resources vol-")
+                        && why.contains("Key=ozbox-managed,Value=true")
+                        && why.contains("administrator")
+                        && why.contains("tagged from the start"),
+                    "{why}"
+                );
+            }
             // asking for no copy still plans
             assert!(p
                 .plan(&upgrade_keeping_the_old_disk(&before.spec.name, false))
