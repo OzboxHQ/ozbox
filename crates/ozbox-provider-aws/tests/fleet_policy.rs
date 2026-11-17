@@ -1505,11 +1505,9 @@ fn a_window_session_is_one_the_roles_trust_accepts_and_the_guard_reads() {
     let g = grant_for(&op, None);
     let trust = doc(Doc::ChangeTrust);
     let st = &trust["Statement"][0];
-    assert!(st["Condition"]["StringLike"]["sts:RoleSessionName"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|p| glob(p.as_str().unwrap(), &g.role_session_name, false)));
+    let names = strings(st["Condition"]["StringLike"].get("sts:RoleSessionName"));
+    assert_eq!(names, vec!["plan-*".to_string()], "plan windows only");
+    assert!(names.iter().any(|p| glob(p, &g.role_session_name, false)));
     assert!(glob(
         st["Condition"]["StringLike"]["sts:SourceIdentity"]
             .as_str()
