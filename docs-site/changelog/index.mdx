@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "CLI", "Security"]} description="0.3.0-beta: talk to any box or the whole fleet from Telegram, and start or pause boxes from your phone">
+  ## Talk to a box, a session or the whole fleet from Telegram, and start or pause boxes from your phone
+
+  A linked Telegram chat could talk to one coding session at a time and could not wake or pause a box. Now:
+
+  - **Address who you mean.** `@main fix the test`, `@main/t3 and add a test`, `@web git status` for a group, or `@fleet` for every box you may reach. Every reply names its box and session; a box that is not running is named as unreachable, and boxes you may not reach are counted and left out. `/to` makes a target stick, `/who` shows it, `/boxes` and `/fleets` list what you may reach.
+  - **Box power from your phone, inside limits you set with a passkey.** `/box resume`, `/box pause` (only when the box is idle), `/box extend`, `/box create` (at a size or from a saved profile) and `/box resize`. Each shows its plan and a link to the dashboard first, and is done only inside the size, money and count limits you allowed; a box started from chat pauses again after four hours. Never on a Production box.
+  - **Agent replies are safer in a chat.** Secrets (also when encoded), links and markup are removed before a reply is shortened, and an owner chooses per box whether a chat sees the reply, a summary or only that it answered.
+  - **`ozbox chat lock` and `ozbox chat unlink`** on the computer that runs the dashboard.
+
+  Preview: tested against a test Telegram, never yet with a real phone. See [Control your boxes from Telegram](/use-cases/telegram-control).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

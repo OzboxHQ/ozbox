@@ -170,6 +170,7 @@ at any time; `--access` answers it without a prompt.
 | `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
+| `ozbox chat lock\|unlink --link <id>` (or `--all`) | On the computer or box that runs the dashboard: lock a Telegram link so it can only read, or cut it. Shows the plan first; the dashboard applies it within seconds |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
 
 ## The dashboard
@@ -235,7 +236,7 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration, schedules and triggers, chat, linking Telegram with a passkey, and from a linked chat talking to a box, a session, a group or the whole fleet and starting, pausing, extending, creating or resizing boxes inside limits you allowed with a passkey ([ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); `/run` and worker boxes of another hub are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 

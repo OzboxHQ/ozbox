@@ -44,11 +44,16 @@ and it is a task on the board. Each message is one more turn of the same convers
 | `/tasks`, `/switch <task>` | your sessions; follow another one |
 | `/sessions`, `/attach <session>`, `/adopt <session>`, `/detach` | agents in your own terminals (see 5) |
 | `/fleet`, `/box list`, `/whoami`, `/help` | Telegram: the boxes and their state, who this link is and what it may do, and what a chat can do |
+| `@<box> <message>`, `@<box>/<session> <message>`, `@<group> …`, `@fleet …` | Telegram: talk to the agent on a box, one session, a group of boxes or every box you may reach; each reply names its box and session |
+| `/to <address>`, `/who`, `/boxes`, `/fleets` | Telegram: where plain messages go from now on, where they go now, and what you may reach |
+| `/box resume`, `/box pause`, `/box extend`, `/box create`, `/box resize` | Telegram: box power, planned first and done only inside the limits you allowed with a passkey |
 | `/lock`, `/unlink` | Telegram: make this link read-only until a passkey lifts the lock, or cut it. Anyone linked may; they only make Telegram less able |
 
 **In Telegram, talking to an agent is something you allow in the dashboard first**, with a passkey, for each box and for a few days
 at a time: see [Control your boxes from Telegram](telegram-control.md). Reading (`/status`, `/fleet`, `/tasks`, `/log`) needs nothing
-beyond a link. In Slack and WhatsApp the rules are the ones described here.
+beyond a link. Addressing a box, a session, a group or the fleet, and box power, are Telegram's for now
+([sections 3a and 3b there](telegram-control.md#3a-talk-to-a-box-an-agent-or-a-fleet)). In Slack and WhatsApp the rules are the ones
+described here.
 
 **Status:** Preview.
 
