@@ -38,6 +38,9 @@ pub enum Failure {
 
 type TokenSource = Arc<dyn Fn() -> Option<Zeroizing<String>> + Send + Sync>;
 
+/// A secret's string fields, values zeroized when dropped.
+pub type Fields = Vec<(String, Zeroizing<String>)>;
+
 /// A client for one vault address. Cheap to clone; it holds no secret.
 #[derive(Clone)]
 pub struct Bao {
@@ -208,11 +211,7 @@ impl Bao {
     }
 
     /// The newest version of the secret at `path`, as its string fields; `None` when there is none (or it was deleted).
-    pub fn read(
-        &self,
-        mount: &str,
-        path: &str,
-    ) -> Result<Option<Vec<(String, Zeroizing<String>)>>, Failure> {
+    pub fn read(&self, mount: &str, path: &str) -> Result<Option<Fields>, Failure> {
         let url = self.url("data", mount, path)?;
         let body = match self.send("GET", &url, None) {
             Ok(b) => b,
