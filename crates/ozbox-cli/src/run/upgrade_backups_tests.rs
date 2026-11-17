@@ -184,6 +184,7 @@ fn upgrade(agent: &BackupBox, holds: bool, accept: bool) -> std::result::Result<
                 detail: "test".into(),
             },
             accept_new_store: accept,
+            fleet_key: false,
             old_disk: OldDisk::NotOffered,
             recover: &|_, _| None,
             restore_backups: &|ag, rec| restore_with(&settings, ag, rec, &secrets),

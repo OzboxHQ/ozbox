@@ -113,7 +113,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox infra` | The box modules and first-boot configuration this program renders: its version, their hashes and the folder in use |
 | `ozbox adopt-fleet-key <name>` | Move an AWS box's secrets store from a key kept in a file to your fleet's KMS key, in place, so an upgrade keeps it (the box re-wraps its own store; nothing is entered again) |
 | `ozbox adopt <name>` | Rebuild a box's OpenTofu state from its cloud resources when the state is missing (AWS) |
-| `ozbox admin <name> -- <action>` | The one root path: a short allow-list of actions, each recorded on the box. The box user has no `sudo` |
+| `ozbox admin <name> -- <action>` | The one root path: a short allow-list of actions, each recorded on the box. The box user has no `sudo`. `-- replace-tunnel-token cloudflare --token-stdin` rotates a tunnel token and puts the old one back if the new tunnel is not healthy |
 | `ozbox backup` | List, run, restore and schedule backups of `/work` |
 | `ozbox tools` · `ozbox profile` | Install tools from the catalogue; save a box's tools and settings as a profile |
 

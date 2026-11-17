@@ -23,6 +23,7 @@ mod backup;
 mod box_guard;
 mod box_secrets;
 mod state;
+mod tunnel_rotate;
 pub(crate) mod upgrade;
 
 /// What the CLI reports. Core errors print as they are; the rest are the CLI's own refusals.
@@ -911,6 +912,28 @@ pub fn run(cli: Cli) -> Result<()> {
                 &deps,
                 name.as_str(),
                 cancel,
+                &flags(cli.yes, cli.dry_run, json),
+            )
+        }
+        // rotating a tunnel token is a flow of this computer's (read the token, hand it over, watch, put the old one back), not
+        // one request to the box's helper
+        Command::Admin { name, action }
+            if action.first().map(String::as_str) == Some("replace-tunnel-token") =>
+        {
+            let rec = p
+                .get(&name)?
+                .ok_or_else(|| ozbox_core::Error::NotFound(name.to_string()))?;
+            if rec.state != ozbox_core::BoxState::Running {
+                return Err(CliError::Msg(crate::messages::t(
+                    "admin.err_not_running",
+                    &[("box", name.as_str()), ("state", &rec.state.to_string())],
+                )));
+            }
+            tunnel_rotate::command(
+                &ozbox_core::SystemRunner,
+                kind == ProviderKind::Fake,
+                name,
+                &action[1..],
                 &flags(cli.yes, cli.dry_run, json),
             )
         }

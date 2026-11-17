@@ -56,3 +56,13 @@ inside the agent's own ask-before-acting rules**: a taken-over Telegram account 
 on that box until the link is revoked. The redaction of what an agent writes back is a net, not a wall: it does not stop a
 prompt-injected agent from encoding what it can read into its replies. Lock a link with `/lock` or from the dashboard, and cut it
 with `/unlink`.
+
+## When a box's secrets service is down (the commit barrier, Preview)
+
+The secrets service records approvals and writes the audit trail, so while it is down nothing can be approved. A box's git hooks
+then still read commits for key shapes, file names and `.env` files, and a clean commit goes through with a note. Each such commit
+is noted on the box and added to the audit trail, marked as made in the outage, once the service is back. **A push stays stopped
+for the whole outage, and no approval opens it**, not even one signed on the owner's own computer: the push is read in full once
+the service is back. The note is kept in a file the box user owns, so it records accidents, not an attacker who is the box user;
+the hooks are a barrier against accident (see [ADR 0029](/adr/0029-production-secrets-have-no-standing-access),
+Amendments 15 and 18).

@@ -658,7 +658,7 @@ fn a_policy_file_cannot_inject_live_from_or_override_the_disk_generation() {
     // the real, tracked policy file
     let real = upgrade_record_for(&repo_file("infra/packer/ozbox-image/upgrade-policy.json"));
     let hostile = upgrade_record_for(
-        r#"{"work_format": 1, "work_format_reads": [1],
+        r#"{"work_format": 1, "work_format_reads": [1], "secrets_keys": ["file", "kms"],
             "disk_generation": {"amd64": "0000000000000000000000000000000000000000000000000000000000000000"},
             "disk_parts": {"first_boot": "x"},
             "live_from": "0.0.1", "upgrade": {"live_from": "0.0.1"}, "anything": true}"#,
@@ -672,10 +672,13 @@ fn a_policy_file_cannot_inject_live_from_or_override_the_disk_generation() {
         [
             "disk_generation",
             "disk_parts",
+            "secrets_keys",
             "work_format",
             "work_format_reads"
         ]
     );
+    // the tracked policy says this release's secrets service opens a store on the fleet's KMS key by itself
+    assert_eq!(hostile["secrets_keys"], serde_json::json!(["file", "kms"]));
     assert!(hostile.get("live_from").is_none());
     assert_eq!(hostile["disk_generation"]["amd64"], h('a'));
     assert_eq!(hostile["disk_generation"]["arm64"], h('c'));
@@ -760,7 +763,8 @@ fn nothing_writes_live_from_until_the_adr_rules_hold() {
         serde_json::from_str(&repo_file("infra/packer/ozbox-image/upgrade-policy.json")).unwrap();
     let mut keys: Vec<_> = policy.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    assert_eq!(keys, ["work_format", "work_format_reads"]);
+    // the `/work` format, and the store keys the release's secrets service opens (ADR 0029 Amendment 18); never live_from
+    assert_eq!(keys, ["secrets_keys", "work_format", "work_format_reads"]);
     // the rules are written down where the next person looks
     let adr =
         repo_file("docs/adr/0038-upgrades-keep-the-box-up-live-update-or-blue-green-replace.md");

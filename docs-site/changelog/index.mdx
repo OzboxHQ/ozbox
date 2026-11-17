@@ -98,6 +98,12 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **`ozbox upgrade` takes the newer signed release.** An Oz image in your own account no longer keeps a box on an older release when a newer signed public release exists; the plan names your image as passed over. A public image that does not verify never replaces yours.
   - **`ozbox secrets import --box` names every key the box did not store, with its reason**, so the count always adds up. A `.env` file saved with Windows line endings or a byte-order mark is read correctly.
   - **The dashboard tunnel no longer warns about ping on every start.** New boxes let the tunnel open its ping socket; `ozbox upgrade` brings it to an existing box.
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Safer upgrades, tunnel tokens and outages">
+  ## Rotate a tunnel token with a way back, and an outage leaves a record
+
+  - **Rotate a tunnel token safely.** `ozbox admin <box> -- replace-tunnel-token cloudflare --token-stdin` puts the new token on the box, waits for the tunnel to stay up, and puts the old token back if it does not. The token is never typed on the command line.
+  - **Commits made while a box's secrets service is down are recorded.** Once the service is back they are added to the box's audit trail, marked as made in the outage. A push stays stopped for the whole outage, and no approval opens it.
+  - **An upgrade will not strand a store on your fleet's key.** Upgrading such a box to an image older than 0.2.0-beta.3 is refused in the plan, before anything changes.
 </Update>
 
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">

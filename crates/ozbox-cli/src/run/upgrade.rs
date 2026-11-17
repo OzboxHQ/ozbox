@@ -1174,6 +1174,102 @@ pub fn kind_report(
     }
 }
 
+/// The first release whose secrets service opens a store on the fleet's KMS key by itself (ADR 0029 Amendment 13). An older
+/// image's service reached KMS through the `aws` command, which no image carries, so it cannot open such a store at all.
+pub const KMS_NATIVE_SINCE: &str = "0.2.0-beta.3";
+
+/// Whether the target image's secrets service can open a store sealed by the fleet's KMS key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KmsSupport {
+    /// It can; the words say how that is known.
+    Yes(String),
+    /// It cannot; the words say how that is known.
+    No(String),
+    /// It cannot be told (the provider does not say which release the image carries, or the release is not a version).
+    Unknown(String),
+}
+
+/// What the target image's SIGNED manifest says about the store keys its secrets service opens (`upgrade.secrets_keys`), else
+/// what its release version says: every release from [`KMS_NATIVE_SINCE`] on can, every one before it cannot. Pure.
+pub fn target_opens_kms(info: Option<&ImageInfo>) -> KmsSupport {
+    use ozbox_core::upgrade_kind::Version;
+    let Some(info) = info else {
+        return KmsSupport::Unknown(t("upgrade.kms_target_unknown_image", &[]));
+    };
+    // only a verified manifest is read into `upgrade`, so a list here is the release's signed word
+    if let Some(ozbox_core::UpgradeRecord::Present(b)) = &info.upgrade {
+        if !b.secrets_keys.is_empty() {
+            let has = b.secrets_keys.iter().any(|k| k == "kms");
+            let why = t(
+                "upgrade.kms_target_manifest",
+                &[("keys", &b.secrets_keys.join(", "))],
+            );
+            return if has {
+                KmsSupport::Yes(why)
+            } else {
+                KmsSupport::No(why)
+            };
+        }
+    }
+    let release = info.release.as_deref().map(str::trim).unwrap_or("");
+    let (Some(v), Some(since)) = (Version::parse(release), Version::parse(KMS_NATIVE_SINCE)) else {
+        return KmsSupport::Unknown(t(
+            "upgrade.kms_target_unknown_release",
+            &[("release", release)],
+        ));
+    };
+    // a dated release (2026.11.0) is not on the same line as 0.x: nothing is assumed about it
+    if v.major >= 1000 {
+        return KmsSupport::Unknown(t(
+            "upgrade.kms_target_unknown_release",
+            &[("release", release)],
+        ));
+    }
+    let args = [("release", release), ("since", KMS_NATIVE_SINCE)];
+    if v >= since {
+        KmsSupport::Yes(t("upgrade.kms_target_version_yes", &args))
+    } else {
+        KmsSupport::No(t("upgrade.kms_target_version_no", &args))
+    }
+}
+
+/// A box whose new machine is given the fleet's KMS key (its record names the key, or `--use-fleet-key`) may only be upgraded to an
+/// image whose secrets service can open a store on it. A downgrade onto an older image would leave the store unopenable on a
+/// box whose system disk is already gone, so it is refused in the plan, before anything is confirmed, and no flag lifts it:
+/// `--accept-new-secrets-store` would not help (the new store would be on the same key). An image that cannot be told is
+/// refused too, naming what to pass instead. `Ok` carries the plan's note; `Err` the refusal. Pure.
+pub fn kms_target_gate(
+    name: &str,
+    image: &str,
+    uses_fleet_key: bool,
+    info: Option<&ImageInfo>,
+) -> std::result::Result<Option<String>, String> {
+    if !uses_fleet_key {
+        return Ok(None);
+    }
+    match target_opens_kms(info) {
+        KmsSupport::Yes(why) => Ok(Some(t("upgrade.kms_target_ok", &[("why", &why)]))),
+        KmsSupport::No(why) => Err(t(
+            "upgrade.err_kms_target_no",
+            &[
+                ("box", name),
+                ("image", image),
+                ("why", &why),
+                ("since", KMS_NATIVE_SINCE),
+            ],
+        )),
+        KmsSupport::Unknown(why) => Err(t(
+            "upgrade.err_kms_target_unknown",
+            &[
+                ("box", name),
+                ("image", image),
+                ("why", &why),
+                ("since", KMS_NATIVE_SINCE),
+            ],
+        )),
+    }
+}
+
 /// Decide whether an image may be upgraded to, from what is known about where it came from. `Ok` carries lines for the
 /// plan's notes (what was verified, or the warning when an unverified image is used on request); `Err` is a refusal in
 /// words a person reads. Only an image whose signature COULD be checked and was not is refused: a provider that has no
@@ -1379,6 +1475,7 @@ pub(super) fn command(
                 }
             },
             accept_new_store,
+            fleet_key: use_fleet_key,
             old_disk: OldDisk::choose(p.id(), no_old_disk_snapshot, use_fleet_key),
             place_escrow: &|ag, rec| Some(place_escrow_step(ag, rec, keys.as_ref(), waits)),
             recover: &|ag, rec| Some(recover_store_step(ag, rec, keys.as_ref(), waits)),
@@ -1452,6 +1549,8 @@ pub(super) struct Around<'a> {
     pub store_check: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> StoreCheck,
     /// The person accepted a new store (`--accept-new-secrets-store`).
     pub accept_new_store: bool,
+    /// `--use-fleet-key`: the new machine is given the fleet's KMS key even though the record does not name it yet.
+    pub fleet_key: bool,
     /// Whether a copy of the old system disk is kept when the store's key cannot be shown to survive.
     pub old_disk: OldDisk,
     /// After the reboot, for a store kept by this computer's keychain: put the key back through the ingress route.
@@ -2337,6 +2436,17 @@ pub(super) fn execute(
             Ok(notes) => plan.notes.extend(notes),
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
+        // A store on the fleet's KMS key opens only under an image whose secrets service can reach the key by itself: a
+        // downgrade onto an older one is refused here, before anything is confirmed (ADR 0029 Amendment 18).
+        let uses_fleet_key = around.fleet_key
+            || rec
+                .spec
+                .labels
+                .contains_key(ozbox_provider_aws::SECRETS_KEY_LABEL);
+        match kms_target_gate(name.as_str(), &target, uses_fleet_key, info.as_ref()) {
+            Ok(note) => plan.notes.extend(note),
+            Err(refusal) => return Err(CliError::Msg(refusal)),
+        }
         // The image and this program must render the same first boot (one version, ADR 0036).
         match first_boot_gate(
             info.as_ref(),
@@ -2832,6 +2942,7 @@ mod tests {
             &Around {
                 store_check: &store,
                 accept_new_store: false,
+                fleet_key: false,
                 old_disk: OldDisk::NotOffered,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
@@ -2934,6 +3045,7 @@ mod tests {
                     detail: "the store's key is in a file on the system disk".into(),
                 },
                 accept_new_store: accept,
+                fleet_key: false,
                 old_disk,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
@@ -3963,6 +4075,102 @@ mod tests {
         }
     }
 
+    /// A signed manifest as the image workflow writes it, with or without the `secrets_keys` it learnt in ADR 0029 Amendment 18.
+    fn fixture_manifest(keys: Option<&str>) -> String {
+        let gen = "a".repeat(64);
+        let keys = keys
+            .map(|k| format!(r#", "secrets_keys": {k}"#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"version": "x", "images": [], "upgrade": {{"disk_generation": {{"amd64": "{gen}"}}, "work_format": 1, "work_format_reads": [1]{keys}}}}}"#
+        )
+    }
+
+    fn signed_image(release: &str, keys: Option<&str>) -> ImageInfo {
+        ImageInfo {
+            upgrade: Some(ozbox_core::upgrade_kind::upgrade_record(
+                &fixture_manifest(keys),
+                Some("amd64"),
+            )),
+            ..with_release(release)
+        }
+    }
+
+    /// B4-15: the plan reads the TARGET image, never only the box. A box on the fleet's KMS key cannot be moved onto an image whose
+    /// secrets service cannot open such a store (a release before native KMS, or a manifest that leaves KMS out): refused in the
+    /// plan, before anything is confirmed, whatever else was said.
+    #[test]
+    fn a_downgrade_onto_an_image_that_cannot_open_a_kms_store_is_refused_in_the_plan() {
+        // the releases that shipped before this field: decided by their version
+        for (release, ok) in [
+            ("0.2.0-beta.1", false),
+            ("0.2.0-beta.2", false),
+            ("0.1.4", false),
+            ("0.2.0-beta.3", true),
+            ("0.2.0", true),
+            ("0.3.1", true),
+        ] {
+            let info = signed_image(release, None);
+            let got = kms_target_gate("dev", "ami-1", true, Some(&info));
+            assert_eq!(got.is_ok(), ok, "{release}: {got:?}");
+            if let Err(m) = got {
+                assert!(
+                    m.contains("Refused") && m.contains("Nothing was changed"),
+                    "{m}"
+                );
+                assert!(
+                    m.contains(KMS_NATIVE_SINCE) && m.contains("no flag lifts this"),
+                    "{m}"
+                );
+            }
+        }
+        // a manifest that says: its word wins over the version, both ways
+        let says_no = signed_image("0.3.0", Some(r#"["file"]"#));
+        assert!(matches!(
+            target_opens_kms(Some(&says_no)),
+            KmsSupport::No(_)
+        ));
+        assert!(kms_target_gate("dev", "ami-1", true, Some(&says_no)).is_err());
+        let says_yes = signed_image("0.3.0", Some(r#"["file", "kms"]"#));
+        let note = kms_target_gate("dev", "ami-1", true, Some(&says_yes))
+            .unwrap()
+            .unwrap();
+        assert!(
+            note.contains("signed manifest") && note.contains("kms"),
+            "{note}"
+        );
+        // an image that cannot be told is refused too, never guessed
+        for info in [
+            None,
+            Some(with_release("not-a-version")),
+            Some(with_release("2026.11.0")),
+        ] {
+            let e = kms_target_gate("dev", "ami-1", true, info.as_ref()).unwrap_err();
+            assert!(e.contains("could not be told"), "{e}");
+        }
+        // a box that is not on the fleet's key is not affected: a file-kept store opens on every image
+        assert_eq!(
+            kms_target_gate(
+                "dev",
+                "ami-1",
+                false,
+                Some(&signed_image("0.2.0-beta.1", None))
+            ),
+            Ok(None)
+        );
+    }
+
+    /// The tracked policy file the image workflow signs into every manifest says the release opens KMS stores, so a future
+    /// downgrade check reads the manifest, not the version.
+    #[test]
+    fn the_release_policy_declares_the_store_keys_this_release_opens() {
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../infra/packer/ozbox-image/upgrade-policy.json"
+        ))
+        .unwrap();
+        assert_eq!(policy["secrets_keys"], serde_json::json!(["file", "kms"]));
+    }
+
     #[test]
     fn an_image_from_a_different_minor_version_is_refused_and_a_different_patch_is_not() {
         let me = env!("CARGO_PKG_VERSION");
@@ -4068,6 +4276,7 @@ mod tests {
                     live_from: live_from.map(str::to_string),
                     work_format: Some(1),
                     work_format_reads: vec![1],
+                    secrets_keys: vec![],
                 },
             )),
             ..with_release(release)
@@ -4713,6 +4922,7 @@ mod tests {
                         detail: String::new(),
                     },
                     accept_new_store: false,
+                    fleet_key: false,
                     old_disk: OldDisk::NotOffered,
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,

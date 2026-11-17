@@ -390,22 +390,19 @@ pub const APPROVAL_FLAG_FILES: &[&str] = &[
 /// Where the secrets service writes its state.
 pub const SECRETS_STATE_FILE: &str = "/run/ozbox-secrets/state";
 
-/// What the service writes at the end of its state's first line when it has used up its tries in this round and exits to be
-/// started again (`ozbox-cli`'s `secrets_cli`), against `(trying again in N s)` while it is still retrying.
-const SERVICE_GAVE_UP: &str = "(starting again)";
-
 /// How long a box set up for KMS may stay not ready before the self-test calls it failed, counted from the `failing_since` line
 /// the service keeps across its restarts. The service says `(starting again)` only for the few seconds between giving up and
-/// the unit starting it, so the phrase alone would read as unknown nearly all of a long outage. Not a figure to tune lightly:
+/// the unit starting it, so that state alone would read as unknown nearly all of a long outage. Not a figure to tune lightly:
 /// a key service that is only slow to answer must not fail a box.
 pub const PERSISTENT_FAILURE_SECS: u64 = 180;
 
 /// Whether a not-ready KMS service has failed for good: for `PERSISTENT_FAILURE_SECS` when it says since when, else (an older
-/// service) when it has just given up its tries.
-fn kms_failure_has_lasted(first: &str, failing_since: Option<u64>, now_ms: u64) -> bool {
+/// service) when it has just given up its tries. "Given up" is the service's typed `phase=gave-up` line
+/// (`ozbox_core::secrets_phase`), and the sentence it ends its first line with only for a file from before that line.
+fn kms_failure_has_lasted(state_text: &str, failing_since: Option<u64>, now_ms: u64) -> bool {
     match failing_since {
         Some(since) => (now_ms / 1000).saturating_sub(since) >= PERSISTENT_FAILURE_SECS,
-        None => first.ends_with(SERVICE_GAVE_UP),
+        None => ozbox_core::secrets_phase::gave_up(state_text),
     }
 }
 
@@ -416,7 +413,7 @@ fn kms_failure_has_lasted(first: &str, failing_since: Option<u64>, now_ms: u64) 
 /// * Not ready for good (`code=` config, no-escrow or kind-mismatch) fails, and says what to do about THAT: a lost or
 ///   mismatched store is mended with `recover-secrets` or `adopt-fleet-key`, never by looking at IAM or the network.
 /// * Not ready on a KMS key because the key service did not answer fails only once the service has used up its tries
-///   (`(starting again)`) or, when it says since when (`failing_since=`, kept across its restarts), has been failing for
+///   (its `phase=gave-up` line, or `(starting again)` from an older service) or, when it says since when (`failing_since=`, kept across its restarts), has been failing for
 ///   `PERSISTENT_FAILURE_SECS`; sooner than that (`(trying again in N s)`) it is `unknown`, as is any other kind of key that is
 ///   not ready. An older service that writes no `failing_since` is judged by the phrase alone.
 /// * No state file: `None` on a box with no secrets service (its folder is absent); `unknown` when the folder is there but the
@@ -426,7 +423,7 @@ fn secrets_key_check(host: &dyn HostSource, path: &Path, now_ms: u64) -> Option<
     let text = match host.read(&path.to_string_lossy()) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if !path.parent().is_some_and(Path::exists) {
+            if !path.parent().is_some_and(|p| host.exists(p)) {
                 return None;
             }
             return Some(unknown(
@@ -471,7 +468,7 @@ fn secrets_key_check(host: &dyn HostSource, path: &Path, now_ms: u64) -> Option<
                 "the secrets service is not configured, so no secret can be read or saved. The service says: {why}. Check `/etc/ozbox/secrets.env` names the key, then restart ozbox-secrets.service"
             ),
         ),
-        (_, Some("kms")) if kms_failure_has_lasted(first, failing_since, now_ms) => fail(
+        (_, Some("kms")) if kms_failure_has_lasted(&text, failing_since, now_ms) => fail(
             NAME,
             "the secrets service's state",
             format!(
@@ -1450,17 +1447,75 @@ mod tests {
     #[test]
     fn a_missing_state_file_is_unknown_where_the_service_has_a_folder_and_skipped_where_it_has_none(
     ) {
-        let d = tempfile::tempdir().unwrap();
-        let (_, h) = setup(d.path());
+        // B4-16: the folder is asked of the host, so this runs on fixtures alone (a box that has the real folder, or a laptop
+        // that has none, decides nothing here). The paths are made up and never exist on the machine running the test.
+        let h = FakeHost::default();
+        let state = Path::new("/fixture-only/run/ozbox-secrets/state");
+        // no folder: a box without the service
+        assert!(secrets_key_check(&h, state, 7).is_none());
         // the service's runtime folder is there, its state file is not: not verified, never skipped
-        match secrets_key_check(&h, &d.path().join("state"), 7).map(|c| c.outcome) {
+        h.set_dir("/fixture-only/run/ozbox-secrets");
+        match secrets_key_check(&h, state, 7).map(|c| c.outcome) {
             Some(Outcome::Unknown { reason }) => {
                 assert!(reason.contains("not written"), "{reason}")
             }
             o => panic!("{o:?}"),
         }
-        // no folder: a box without the service
-        assert!(secrets_key_check(&h, &d.path().join("absent/state"), 7).is_none());
+        assert!(
+            !state.parent().unwrap().exists(),
+            "the test reads the fixture, not the disk"
+        );
+        // the real host asks the disk, as before
+        let d = tempfile::tempdir().unwrap();
+        assert!(crate::host::FsHost.exists(d.path()));
+        assert!(!crate::host::FsHost.exists(&d.path().join("absent")));
+    }
+
+    /// B4-16: whether the service has given up is its typed `phase` line; the sentence only for a file from an older service.
+    /// The behaviour is unchanged: the same states decide the same way, and a reworded sentence decides nothing.
+    #[test]
+    fn a_kms_service_that_gave_up_is_known_by_its_typed_phase_and_the_sentence_only_for_an_older_file(
+    ) {
+        let h = FakeHost::default();
+        let state = Path::new("/fixture-only/state");
+        let at = |text: &str| {
+            h.set("/fixture-only/state", text);
+            secrets_key_check(&h, state, 7).map(|c| c.outcome)
+        };
+        // the typed line, whatever the sentence says
+        assert!(matches!(
+            at("not-ready: the key service did not answer\nkek=kms\ncode=transient\nphase=gave-up\n"),
+            Some(Outcome::Fail { .. })
+        ));
+        assert!(matches!(
+            at("not-ready: x (starting again)\nkek=kms\ncode=transient\nphase=retrying\n"),
+            Some(Outcome::Unknown { .. })
+        ));
+        // the very text the service writes, from its own state type
+        let written = |p: ozbox_core::secrets_phase::Phase| {
+            format!(
+                "not-ready: the key service could not be reached {}\nkek=kms\ncode=transient\nphase={}\n",
+                ozbox_core::secrets_phase::LEGACY_GAVE_UP,
+                p.word()
+            )
+        };
+        assert!(matches!(
+            at(&written(ozbox_core::secrets_phase::Phase::GaveUp)),
+            Some(Outcome::Fail { .. })
+        ));
+        // an older service: the sentence alone, as it always was
+        assert!(matches!(
+            at("not-ready: x (starting again)\nkek=kms\ncode=transient\n"),
+            Some(Outcome::Fail { .. })
+        ));
+        assert!(matches!(
+            at("not-ready: x (trying again in 2 s)\nkek=kms\ncode=transient\n"),
+            Some(Outcome::Unknown { .. })
+        ));
+        // and the source no longer carries the sentence of its own: the shared word is the one place it lives
+        let src = include_str!("selftest.rs");
+        let code = src.split("\nmod tests {").next().unwrap();
+        assert!(!code.contains(&["\"(starting", " again)\""].concat()));
     }
 
     #[test]
