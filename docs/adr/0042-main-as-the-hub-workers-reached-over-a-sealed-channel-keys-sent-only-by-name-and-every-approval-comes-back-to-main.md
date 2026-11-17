@@ -4,7 +4,7 @@
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub (none has one yet). **Built since (2026-11-17, for 0.3.0-beta, tested with fakes and, in CI, with real keys; never run on a real box):** the approval path over the channel (§8), test lanes (§7) and the merge queue over the channel (ADR 0020 §6), with `task_start` defaulting to the hub on a box that has one; `ozbox-hubd` (its socket, lifecycle, systemd units and self-test), **worker enrolment with key attestation**, and **the real signer and sealer** (the secrets service's channel operations and HPKE through `ozbox-seal`); what each leaves out is in the sections below. the transport on a network (workers dial out; a signed handshake; order, retransmission, a replay window, back-pressure and honest reachability) and **sealed key delivery by name** (through the issuer seam, sealed to the attested key, Production refused on the hub, in front of the issuer and on the worker), all tested in CI; **Not built:** the registrars themselves (until they are, no worker can enrol on a real box), nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub (none has one yet). **Built since (2026-11-17, for 0.3.0-beta, tested with fakes and, in CI, with real keys; never run on a real box):** the approval path over the channel (§8), test lanes (§7) and the merge queue over the channel (ADR 0020 §6), with `task_start` defaulting to the hub on a box that has one; `ozbox-hubd` (its socket, lifecycle, systemd units and self-test), **worker enrolment with key attestation**, and **the real signer and sealer** (the secrets service's channel operations and HPKE through `ozbox-seal`); what each leaves out is in the sections below. the transport on a network (workers dial out; a signed handshake; order, retransmission, a replay window, back-pressure and honest reachability) and **sealed key delivery by name** (through the issuer seam, sealed to the attested key, Production refused on the hub, in front of the issuer and on the worker), all tested in CI; the **registrars** (the AWS claim-service check, your computer as registrar, `ozbox hub repin`; amendment 10). **Not built:** the AWS claim service's deployment, nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -926,10 +926,10 @@ refusal with the network cut; a hand-made assignment with a Production declarati
   a self-test line or any `Debug` output; no message body appears in the daemon's state.
 
 **What this slice does not cover:** the registrars themselves (the claim service's registration under the pool role, and the laptop's
-signature for Hetzner and own machines) are not built, so on a real box no worker can enrol yet and the self-test says so; the worker's
+signature for Hetzner and own machines) are not built, (built since: amendment 10) so until one is pinned no worker can enrol and the self-test says so; the worker's
 side of enrolment runs only in tests (`ozbox-hub-agent` is not built); the network transport is not built, so the daemon's worker side
 is called in-process; the daemon's handshake proves the hub to the worker, and the worker is authenticated by its signed messages and its
-enrolment proof, not by a handshake of its own; `ozbox hub repin` and the succession statement are not built; the program
+enrolment proof, not by a handshake of its own; `ozbox hub repin` is built (amendment 10) and the succession statement is not; the program
 `ozbox-hubd` is not yet in the machine image or the release archive.
 
 **By hand on a real box** (one box, no worker):
@@ -1186,10 +1186,61 @@ instance from a bound role. None carries a Critical or High alone: the design as
   G6.
 - A box whose service predates the channel operations cannot be a worker. Since the second slice, a service makes its channel identity
   the first time it is asked; a box upgraded from before keeps its other secrets unchanged.
-- **Enrolment needs a registrar, and none is built yet** (second slice). Until the claim service registers keys on AWS and the laptop
-  signs for Hetzner and own machines, the hub refuses every worker with `unknown-registrar`, by design.
+- **Enrolment needs a registrar pinned on `main`.** The registrars are built (third slice, amendment below), but none is pinned until
+  the owner runs `ozbox hub repin`, and the AWS claim service that would call the AWS registrar is not deployed. Until a registrar is
+  pinned the hub refuses every worker with `unknown-registrar`, by design.
 - **Proven on AWS only, once the G6 run is done. Hetzner, own machines, nested hubs and Production to a worker are Planned.** Until
   the run, every part is Planned.
+
+## Amendment 10: the registrars (third slice, 0.3.0-beta)
+
+**Built, tested in CI with real keys and fixture documents** (`ozbox_hubd::registrar`, `ozbox hub`). This closes the second slice's
+"no registrar exists". Nothing here has run on a real box or against real AWS.
+
+**AWS: the claim-service path.** A worker on EC2 sends the registrar the **instance identity document** AWS signs (the `rsa2048`
+PKCS#7, document inside), the one-use enrolment token from its own parameter path, its public keys and a proof signed by its own
+channel key. The registrar verifies the signature against **AWS's published RSA-2048 certificate for the document's own region**
+(31 certificates, pinned as data with the source URL in `registrar/aws_certs.rs`; refreshing them is a reviewed change, never a
+runtime fetch; a region not in the list is refused). No AWS API is called. Each check has its own refusal code:
+`bad-signature`, `unknown-region`, `wrong-region`, `wrong-account`, `stale-document` (the instance's launch time, `pendingTime`, is
+older than 24 hours by default), `stale-claim`, `unknown-instance`, `wrong-instance` (the document is for an instance reserved for
+another worker), `production-box` (not a worker, or not a known non-Production environment), `bad-token`, `wrong-key`,
+`replayed-claim`, `already-attested`. It then signs the same attestation the hub already checks. The hub still refuses an
+unpinned registrar (`unknown-registrar`), another provider's registrar, and an attestation for a different instance than the invite
+(`binding-mismatch`). **How the claim is bound:** the document carries no signing time and is readable by any process on the
+instance, so it only authenticates "an instance". What makes the claim the worker's is the token (the claim service's own table
+holds its SHA-256), the claim service's reservation of that instance for that worker, a claim signed within two minutes by the
+worker's channel key over a digest of the document, the key and the hub, and one attestation per instance. The proof reuses the
+secrets service's existing enrolment-proof signature over a differently tagged digest, so no new signing operation was added and a
+claim proof can never be an enrolment proof.
+
+**Your computer as registrar (Hetzner and own machines).** `main` prepares a request of public facts; `ozbox hub attest` plans what
+it would sign, shows it, and signs only after you confirm. The key is made by `ozbox hub registrar-key` and lives in your
+computer's secret store under a name the box's secret socket refuses to write, list or read. On Hetzner the request carries an HMAC
+over the worker's keys under the one-time creation secret your computer made (`bad-creation-proof` without it), and the worker is
+bound to its private address. On a machine you own there is no secret: the plan shows the key fingerprints to compare with what you
+read yourself. `ozbox hub attest` refuses on a machine that looks like a box. The box user and agents have neither the key nor the
+pinned-file write: the registrars file is `0644 root`.
+
+**Pinning and rotation.** `ozbox hub repin` (as root on `main`; with no option it lists) plans and applies `--add KEY --provider
+aws|hetzner|own`, `--remove FINGERPRINT`, or both together as a rotation. It refuses a changed file (`stale-plan`), a bad or duplicate
+key, and any caller that is not root. The hub reads the file on every enrolment, so a removed pin counts at once. The self-test's
+`registrars` check passes once one is pinned.
+
+**What is not covered (residual risks).**
+- **The claim service itself is not deployed:** its function, its reservation table, its key and its writing of the token to the
+  parameter path are ADR 0040 work. This is the verification and signing logic it calls (`AwsRegistrar::attest`), behind the
+  `ClaimTable` and `AttestSigner` seams.
+- **No real AWS-signed document has been verified.** AWS publishes no sample document, so the real certificate path is tested only
+  for parsing (all 31 load as 2048-bit RSA keys) and for refusing a document it did not sign; signature handling is proven with
+  documents signed by a test certificate, in DER and BER, with and without signed attributes. The first real check is the owner's run.
+- **The certificate table is the one in the EC2 User Guide's last published source**, which can lag AWS's newest regions; such a
+  region is refused until the table is reviewed and extended.
+- **Hetzner's worker side is not built:** nothing yet places the creation secret in user data or makes the worker's creation proof;
+  `ozbox-hub-agent` is not built. The proof function and the laptop's check are tested.
+- **A registrar removed by `repin` does not remove workers it already enrolled.** Removing a worker is separate.
+- **The succession statement is not built.** The metadata guard (who on a worker may read the identity document) is a box control,
+  not part of this check.
 
 ## Acceptance test for release gate G6 (owner, 2026-11-12; negative cases and the leak check added by the review)
 
