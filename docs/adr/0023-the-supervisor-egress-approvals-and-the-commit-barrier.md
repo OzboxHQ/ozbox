@@ -152,8 +152,7 @@ the dashboard "already runs as its own user" while nothing ran. The self-test pa
   action (not a sub-word of the ungated `ensure-supervisor`, so the action table stays true). Sign-in settings decide who may
   approve on the box, so the box user must never be able to replace them. The helper spends a single-use approval of the new scope
   `dashboard-auth` (ADR 0041 amendment), bound to the first 32 hex digits of the sha256 of the new settings, and only then asks the
-  setup step to install the staged file whose own copy hashes to that sha256. A passkey or authenticator code in the dashboard, or
-  the laptop's pinned key (`ozbox dashboard install --replace-sign-in --approve-with-laptop-key`), can approve. A box with no second
+  setup step to install the staged file whose own copy hashes to that sha256. A passkey or authenticator code in the dashboard, can approve (the laptop's key does not: no command makes this approval with it). A box with no second
   factor refuses it. The old settings are kept beside the new (`auth.toml.replaced`) and put back if the dashboard does not start
   with the new ones. The address in the unit is never changed by this approval.
 - **Everything under the dashboard's folder is put back under its user at every run**, not only at the first move

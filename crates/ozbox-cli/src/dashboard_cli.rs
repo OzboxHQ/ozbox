@@ -851,26 +851,6 @@ pub(crate) fn settings_binding(install: &Install) -> String {
     install.auth_sha256().chars().take(32).collect()
 }
 
-/// The owner's approval of replacing the dashboard's sign-in settings, made now on their asking (`--replace-sign-in
-/// --approve-with-laptop-key`) with the key pinned when the box was made, for exactly these settings, once.
-fn mint_for_settings(
-    runner: &dyn CommandRunner,
-    keys: &dyn crate::secrets::SecretStore,
-    install: &Install,
-) -> Result<String, String> {
-    let (code, _) = crate::approval_key_cli::obtain(
-        runner,
-        keys,
-        &install.name,
-        crate::approval_key::PIN_ID,
-        "dashboard-auth",
-        "",
-        &settings_binding(install),
-    )
-    .map_err(|e| e.to_string())?;
-    crate::secrets_approval::canonical_code(&code).ok_or_else(|| t("dashboard.laptop_key_bad", &[]))
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install(
     cmd: &DashboardCommand,
@@ -924,7 +904,7 @@ pub(crate) fn install(
             return Err(CliError::Msg(t("tunnel.bad_approval", &[])).into());
         }
     }
-    if *approve_with_laptop_key && !*token_stdin && !*token_from_keychain && !*replace_sign_in {
+    if *approve_with_laptop_key && !*token_stdin && !*token_from_keychain {
         return Err(CliError::Msg(t("dashboard.approve_needs_token", &[])).into());
     }
     // Either the box downloads the program from an address given here, or (the default) it is the signed release of
@@ -1101,20 +1081,6 @@ pub(crate) fn install(
         }
     }
     let mut sent = send(runner, &install, token.as_deref());
-    // The box kept sign-in settings of its own and the owner asked to replace them with the key on this computer: made here now,
-    // for exactly these settings, and the install is sent again (the staged copy is still there, the box has not finished).
-    if let Err(Failure::NeedsSettingsApproval(why)) = &sent {
-        if *approve_with_laptop_key && install.settings_approval.is_none() {
-            let why = why.clone();
-            match mint_for_settings(runner, stores.keys, &install) {
-                Ok(code) => {
-                    install.settings_approval = Some(code);
-                    sent = send(runner, &install, token.as_deref());
-                }
-                Err(more) => sent = Err(Failure::NeedsSettingsApproval(format!("{why}\n{more}"))),
-            }
-        }
-    }
     // The box wants the owner's approval of the token change. It is made here only when the owner asked for it with this
     // command (`--approve-with-laptop-key`): with the key pinned when the box was made, for this very token, once.
     let asked = match &sent {

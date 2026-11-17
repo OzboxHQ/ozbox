@@ -234,7 +234,7 @@ dashboard cannot write in its own folder (its user was made again with a new id 
 pages then say "Permission denied" and name the folder). `ozbox admin <box> -- ensure-supervisor` puts the folder back under the
 dashboard's user. If you run `ozbox dashboard install` again
 with settings that differ from the ones the dashboard has, it keeps its own, starts if it was stopped, and tells you so. To replace
-them (they decide who may approve), add `--replace-sign-in` and either `--approve-with-laptop-key` or `--settings-approval CODE`
+them (they decide who may approve), add `--replace-sign-in` and `--settings-approval CODE`
 (a code from the dashboard's **Secret approvals**, for the approval binding the command prints). A box with no passkey or
 authenticator code enrolled refuses the replacement. The self-test also fails a **legacy_tunnel** check when an older setup left a
 tunnel running as the box user with a token file it can read: run `ozbox dashboard retire-legacy-tunnel <box>`, then rotate the

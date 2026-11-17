@@ -1287,8 +1287,7 @@ who may approve on the box; ADR 0023 Amendment 2). It is a **code** scope like `
 audit words know it) with no journal, no filers and no subject.
 
 - **Bound to the settings.** `project` is empty and `env` is the first 32 hex digits of the sha256 of the new `auth.toml` (the
-  longest a field may be). The laptop signs it (`ozbox dashboard install --replace-sign-in --approve-with-laptop-key`, the pinned
-  key, the same challenge as every other scope) or the dashboard mints it after a passkey or authenticator code (Secret approvals,
+  longest a field may be). The dashboard mints it after a passkey or authenticator code (Secret approvals,
   "Replacing the dashboard's sign-in settings", with the binding the install prints). A code made for other settings, for no
   settings, or for another scope approves nothing, and is single use.
 - **Bootstrap: refused.** With no second factor enrolled the box user cannot be told from the owner, and replacing who may

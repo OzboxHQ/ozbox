@@ -1158,8 +1158,8 @@ mod tests {
         }
     }
 
-    /// The laptop's pinned key approves replacing the dashboard's sign-in settings for exactly those settings (`ozbox dashboard install
-    /// --replace-sign-in --approve-with-laptop-key`): the same steps, with the binding the root helper recomputes from the staged file.
+    /// The approval primitive signs a dashboard sign-in replacement for exactly one settings digest, with the binding the root helper
+    /// recomputes from the staged file. (No command makes this approval with the laptop key: it is made in the dashboard.)
     #[test]
     fn the_laptop_key_approves_a_dashboard_sign_in_replacement_for_one_settings_digest_only() {
         let r = rig();

@@ -1435,11 +1435,11 @@ pub enum DashboardCommand {
         /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
         /// token, as `ozbox secrets approve --scope tunnel-token --token-stdin` would, and send it. Needs a token
         /// (--token-stdin or --token-from-keychain).
-        #[arg(long, conflicts_with_all = ["approval", "approval_stdin"])]
+        #[arg(long, conflicts_with_all = ["approval", "approval_stdin", "replace_sign_in"])]
         approve_with_laptop_key: bool,
         /// Replace the sign-in settings the dashboard already has (they decide who may approve on the box) with the ones given
-        /// here. Without this the dashboard keeps its own, and says so. Needs an approval: --approve-with-laptop-key (this
-        /// computer's pinned key, for exactly these settings) or --settings-approval CODE.
+        /// here. Without this the dashboard keeps its own, and says so. Needs an approval made in the dashboard (Secret
+        /// approvals): pass its code with --settings-approval. This computer's key never approves it.
         #[arg(long)]
         replace_sign_in: bool,
         /// A single-use approval code for replacing the sign-in settings, made in the dashboard (Secret approvals, "Replacing the
