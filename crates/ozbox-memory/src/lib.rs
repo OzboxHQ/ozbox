@@ -13,6 +13,7 @@
 //! Neither module starts a run, calls a model or touches the network.
 
 pub mod bundled;
+pub mod fabric;
 mod lock;
 pub mod memory;
 pub mod skills;

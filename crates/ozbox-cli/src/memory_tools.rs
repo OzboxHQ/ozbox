@@ -139,6 +139,7 @@ fn bind(tools: &Tools, s: &Session) -> Bound {
         terminal: None,
         projects: Vec::new(),
         box_name: None,
+        origin: None,
     };
     let book = tools.store.load().ok();
     if let Some(book) = &book {
