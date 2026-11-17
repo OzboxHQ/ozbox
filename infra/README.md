@@ -172,6 +172,11 @@ stays known; a module keeps `ignore_changes` on `image` and `user_data` so that 
 The browser's own Unix user (`ozbox-browser`, ADR 0037 amendment 4) is made by the image and, for a machine from stock Ubuntu, by
 first boot, which runs `ozbox browser-setup` (the script is carried in the program: Hetzner's user data is nearly at its limit).
 
+The first-boot user data is limited by the provider (16 KB compressed on AWS, 32 KB on Hetzner), and the module tests hold it under
+11 KB on AWS. So the larger scripts (the root helper, the secrets setup, the box-user services script) are carried in the program and
+written by `ozbox first-boot install-scripts`, which first boot runs once after the program is installed (ADR 0036, last
+amendment). Put a new first-boot script of more than a few lines in the program the same way, not in `box.yaml.tftpl`.
+
 ## The box-wide egress list (ADR 0034)
 
 Optional and off by default. `ozbox box-egress <box> --mode log --preset github --preset anthropic --host api.example.com`

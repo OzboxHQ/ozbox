@@ -17,6 +17,12 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A Production import says why an approval was refused.** Production imports need an approval from the dashboard (passkey or authenticator), not this computer's key, and `ozbox secrets approve --scope import --env production` now says so instead of making a code that cannot work.
 
   **How to get it.** `ozbox upgrade <box>` to the release that carries this.
+<Update label="[Release date]" tags={["CLI", "Docs"]} description="0.3.0-beta">
+  ## Creating a box sends less to the cloud
+
+  The setup a new box is given at first start is smaller, because the larger scripts now come from the `ozbox` program that the box already has. Behaviour is the same, and a box's own setup scripts now match the program release it runs.
+
+  - A new box's first-start data fits well inside each provider's limit, with room for what comes next.
 </Update>
 
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">

@@ -111,6 +111,9 @@ pub fn run(cli: Cli) -> Result<()> {
     if let Command::BrowserSetup { args } = &cli.command {
         return crate::browser_launch::run_setup(args);
     }
+    if let Command::FirstBoot { words } = &cli.command {
+        return crate::first_boot_cli::run(words);
+    }
     if let Command::Capped { args } = &cli.command {
         match crate::capped::run(args) {
             Ok(code) => std::process::exit(code),
@@ -458,6 +461,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::State { .. }
         | Command::HostGuard { .. }
         | Command::Capped { .. }
+        | Command::FirstBoot { .. }
         | Command::BrowserWorker
         | Command::AgentMcp { .. }
         | Command::BrowserLaunch
