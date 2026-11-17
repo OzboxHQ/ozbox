@@ -137,6 +137,9 @@ disk has not been measured.
   refuses to make or open an endpoint of its own, so no key sits where the box user can read it, unless a store is named on purpose
   (`OZBOX_SECRET_STORE`, used by tests); such an endpoint's JSON tasks carry `store_writable_by_agents: true`. **Proven on a
   real box: not yet**, so the channel is not recommended on `main` and has no approval path until it is.
+- **The owner has no path to the box's admin socket from a laptop.** `init`, `pin` and `restored` on a box need root, the box user has
+  no `sudo`, and `ozbox admin` has no action for them, so today they need a root session on the box. A gated admin action (pinning
+  changes who the box trusts, so it needs an approval the box user cannot make, under ADR 0041) is planned.
 - **The relay can capture and replay, not only drop or delay.** The process that reaches the relay socket sees the sealed envelopes of
   each round, so it can keep them and push them back later. The channel refuses a replay (stale, or a nonce already seen) and counts
   the refusals once per round per peer, with no state write per envelope; the relay socket takes one round at a time and 120 a minute,

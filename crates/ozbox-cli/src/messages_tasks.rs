@@ -44,7 +44,7 @@ pub const EN: &[(&str, &str)] = &[
     ("tasks.halted", "  Sending to {peer} is halted ({why}): a store looks restored from a backup. Run `ozbox tasks restored` on the end that was restored, then pin the new epoch on the other side."),
     ("tasks.every_zero", "--every must be at least 1 second."),
     ("tasks.box_answers", "This box answers; it does not dial. Run `ozbox tasks sync` on the computer that reaches this box."),
-    ("tasks.admin_needed", "That needs root on this box (it changes who the box trusts). Run it with sudo."),
+    ("tasks.admin_needed", "That needs root on this box (it changes who the box trusts), and the box user has no sudo. There is no `ozbox admin` action for it yet: run it in a root session on the box."),
     ("tasks.service_denied", "This user may not reach the task service."),
     ("tasks.service_down", "The task service is not running. Start it with `systemctl start ozbox-mesh`."),
     ("tasks.not_allowed_here", "That is not offered on this socket."),
