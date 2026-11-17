@@ -1306,8 +1306,8 @@ impl App {
             .collect();
         let mut outs: Vec<(String, Out)> = Vec::new();
         // what each conversation hears from: the session it follows, and the sessions a message was addressed to
-        // (conversation, session, the message id and box a watched session answers for)
-        type Heard = (String, Bind, Option<(String, String)>);
+        // (conversation, session, the message id a watched session answers for, and the thread to answer in)
+        type Heard = (String, Bind, Option<(String, Option<String>)>);
         let mut heard: Vec<Heard> = binds
             .iter()
             .map(|(k, b)| (k.clone(), b.clone(), None))
@@ -1317,7 +1317,7 @@ impl App {
                 let already = binds
                     .iter()
                     .any(|(bk, b)| bk == k && matches!(b, Bind::Task { id } if *id == w.task));
-                let msg = Some((w.msg_id.clone(), w.box_name.clone()));
+                let msg = Some((w.msg_id.clone(), w.thread.clone()));
                 if already {
                     // the followed session's replies carry the message id too
                     if let Some(h) = heard.iter_mut().find(|(hk, hb, _)| {
@@ -1356,19 +1356,25 @@ impl App {
             let seen = self.chat.seen_turns.get(&seen_key).copied().unwrap_or(0);
             if task.turns > seen {
                 self.chat.seen_turns.insert(seen_key, task.turns);
-                if let (Some(reply), Channel::Telegram, Ok(chat)) =
-                    (&task.last_reply, channel, cid.parse::<i64>())
-                {
-                    // a Telegram chat gets the stronger redaction, the box's detail level and the attribution
+                let attributed = channel == Channel::Telegram
+                    || (msg.is_some() && matches!(channel, Channel::Slack | Channel::Whatsapp));
+                if let (Some(reply), true) = (&task.last_reply, attributed) {
+                    // a Telegram chat, and any app's addressed message, gets the stronger redaction, the box's detail level
+                    // and the attribution; a reply to an addressed message is threaded under it
                     let text = self.tg_agent_reply(
-                        chat,
+                        key,
                         task.spec.box_name.as_str(),
                         tid,
                         msg.as_ref().map(|(m, _)| m.as_str()),
                         reply,
                         now,
                     );
-                    outs.push((key.clone(), mk(text, Vec::new())));
+                    let mut o = mk(text.clone(), Vec::new());
+                    if let Some((_, Some(th))) = msg {
+                        o.notice =
+                            Some(crate::notice::Notice::reply(text).in_thread(Some(th.clone())));
+                    }
+                    outs.push((key.clone(), o));
                 } else if let Some(reply) = &task.last_reply {
                     let (body, left) = text::summarise(reply, &secrets);
                     let msg = if left > 0 {
@@ -1529,7 +1535,7 @@ impl App {
         let mut ready: Vec<Out> = Vec::new();
         for (key, o) in outs {
             let th = self.chat.throttle.entry(key).or_default();
-            if !o.buttons.is_empty() || o.announce.is_some() {
+            if !o.buttons.is_empty() || o.announce.is_some() || o.notice.is_some() {
                 // a question with buttons, and a notice that is retried if it fails, is not held back or merged
                 ready.push(o);
             } else if let Some(text) = th.offer(o.text.clone(), now) {
@@ -1617,6 +1623,7 @@ impl App {
                 user,
                 text: body,
                 forwarded,
+                ts,
                 ..
             } => {
                 if let Some(person) = self
@@ -1625,7 +1632,17 @@ impl App {
                     .person_of(Channel::Slack, &user)
                     .map(str::to_string)
                 {
-                    self.chat_inbound(Channel::Slack, &user, &person, &body, forwarded, now);
+                    // through the same act table and decide as Telegram; replies to it are threaded under it
+                    let thread = Some(ts).filter(|t| !t.is_empty());
+                    self.chat_gate(
+                        Channel::Slack,
+                        &user,
+                        &person,
+                        &body,
+                        forwarded,
+                        thread,
+                        now,
+                    );
                 } else {
                     self.chat_try_pair(Channel::Slack, &user, &body, now);
                 }
@@ -1763,12 +1780,14 @@ impl App {
                     match m.button {
                         // a button decides nothing: a chat only notifies
                         Some(_) => {}
-                        None => self.chat_inbound(
+                        // through the same act table and decide as Telegram
+                        None => self.chat_gate(
                             Channel::Whatsapp,
                             &m.from,
                             &person,
                             &m.text,
                             m.forwarded,
+                            None,
                             now,
                         ),
                     }
@@ -2640,6 +2659,7 @@ mod tests {
             channel: "D1".into(),
             text: text.into(),
             forwarded: false,
+            ts: String::new(),
         };
         r.a.chat_slack_event(ev("U1", "/new alpha hello"), r.now);
         assert_eq!(r.task_count(), 0, "a stranger is not heard");
@@ -2665,6 +2685,7 @@ mod tests {
                 channel: "D1".into(),
                 text: "/new alpha again".into(),
                 forwarded: true,
+                ts: String::new(),
             },
             r.now + 2,
         );
@@ -3071,13 +3092,14 @@ mod tests {
                     .filter(|(k, _)| k == key)
                     .map(|(_, t)| t)
                     .collect();
+            // Slack and WhatsApp go through the same act table and decide as Telegram, so they are refused in its words
             assert!(
-                said.iter().any(|t| t.contains("not from a chat app")),
+                said.iter()
+                    .any(|t| t.contains("stopped in the dashboard, not from a chat")),
                 "{key} was not told to use the dashboard: {said:?}"
             );
             assert!(
-                said.iter()
-                    .any(|t| t.contains("cap is raised in the dashboard")),
+                said.iter().any(|t| t.contains("raised in the dashboard")),
                 "{key} /budget was not refused: {said:?}"
             );
         }

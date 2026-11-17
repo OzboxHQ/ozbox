@@ -305,6 +305,7 @@ impl Rig {
 fn admitted(chat: i64, text: &str, id: i64) -> Admitted {
     Admitted {
         update_id: id,
+        message_id: id,
         from_id: chat,
         chat_id: chat,
         first_name: "Ada".into(),
@@ -745,7 +746,7 @@ fn a_members_delegation_waits_for_an_owners_passkey_and_then_works() {
     r.tick();
     assert_eq!(r.tasks(), 0);
     assert!(
-        r.texts(PHONE).contains("owner's passkey"),
+        r.texts(PHONE).contains("also needs an owner"),
         "{}",
         r.texts(PHONE)
     );
@@ -1129,7 +1130,7 @@ fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delega
         "/box resume alpha",
         "/box pause alpha",
         "/box extend alpha 2",
-        "/run git status",
+        "/check git status",
         "/frobnicate",
     ];
     for w in words {
@@ -1163,7 +1164,7 @@ fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delega
                 && e.action == "telegram.act"
                 && (e.detail.contains("act=refused.")
                     || e.detail.contains("act=box.")
-                    || e.detail.contains("act=run"))
+                    || e.detail.contains("act=run tier"))
         })
         .collect();
     assert!(acted.is_empty(), "{acted:?}");
@@ -1353,12 +1354,7 @@ fn a_revoke_between_recorded_and_run_refuses() {
     let lid = r.link("owner", PHONE, Some(&["alpha"]));
     let bot = r.app.tg.bot.clone().unwrap();
     let link = r.app.tg.store.link(&lid).cloned().unwrap();
-    let who = super::telegram_bridge::Sender {
-        link_id: lid.clone(),
-        person: "owner".into(),
-        chat_id: PHONE,
-        legacy: false,
-    };
+    let who = super::telegram_bridge::Sender::telegram(lid.clone(), "owner".into(), PHONE, false);
     let a = admitted(PHONE, "/new alpha do the thing", 9_001);
     let now = unix_ms();
     let (planned, mac) = r
@@ -1504,6 +1500,7 @@ fn a_pointer_link_holds_its_token_only_in_the_fragment_opens_for_its_person_with
     let text =
         r.tg.texts_to(PHONE)
             .into_iter()
+            .rev()
             .find(|t| t.contains("/go#"))
             .expect("a handoff message");
     let token = text
@@ -1561,6 +1558,7 @@ fn a_pointer_link_holds_its_token_only_in_the_fragment_opens_for_its_person_with
     let id =
         r.tg.all_sent()
             .iter()
+            .rev()
             .find(|m| m.1.contains("/go#"))
             .unwrap()
             .2;

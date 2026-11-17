@@ -527,8 +527,9 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
     let secret = super::TOKEN;
     r.link("owner", PHONE, Some(&["alpha"]));
     let t0 = super::unix_ms();
+    let conv = format!("telegram:{PHONE}");
     let shown = r.app.tg_agent_reply(
-        PHONE,
+        &conv,
         "alpha",
         "t1",
         None,
@@ -547,7 +548,7 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
         .insert("alpha".into(), "metadata".into());
     let meta = r
         .app
-        .tg_agent_reply(PHONE, "alpha", "t1", None, "anything at all", t0);
+        .tg_agent_reply(&conv, "alpha", "t1", None, "anything at all", t0);
     assert!(!meta.contains("anything at all"));
     assert_eq!(
         r.last_said("tg.reply_metadata").unwrap().arg("box"),
@@ -605,4 +606,198 @@ fn ozbox_chat_lock_and_unlink_plan_from_the_store_and_the_dashboard_applies_them
         crate::telegram_store::LinkState::Revoked
     );
     assert!(r.chain_text().contains("telegram.unlink"));
+}
+
+// ---------- /run, threads, buttons, and the other chat apps through the same gateway ----------
+
+#[test]
+fn run_starts_a_session_on_the_named_box_or_the_followed_one_and_check_is_the_catalogue() {
+    let mut r = Rig::new();
+    r.link("owner", PHONE, Some(&["alpha"]));
+    let t0 = super::unix_ms();
+    r.say_at_ms("/run alpha fix the parser", t0);
+    assert_eq!(r.tasks(), 1, "{}", r.texts(PHONE));
+    let book = r.app.chat_book().unwrap();
+    assert_eq!(book.tasks[0].spec.box_name.as_str(), "alpha");
+    assert_eq!(book.tasks[0].spec.origin, ozbox_core::run::RunOrigin::Chat);
+    // with no box: the box this chat follows
+    r.say_at_ms("/run and now the tests", t0 + 1_000);
+    assert_eq!(r.tasks(), 2);
+    // a box that is not delegated is the dashboard's
+    r.say_at_ms("/run bravo do things", t0 + 2_000);
+    assert_eq!(r.tasks(), 2);
+    // /check is the catalogue, not built and not delegable yet: a handoff, nothing runs
+    r.say_at_ms("/check git status", t0 + 3_000);
+    assert_eq!(r.tasks(), 2);
+    assert!(
+        r.last_said("tg.handoff_no_delegation").is_some(),
+        "{:?}",
+        r.said_keys()
+    );
+}
+
+#[test]
+fn a_handoff_and_a_box_power_plan_carry_one_open_in_dashboard_url_button_and_no_callback() {
+    let mut r = Rig::new();
+    r.add_box("idle", Size::S, true);
+    r.price("S", 73.0);
+    let t0 = r.link_with_power(&["idle"], &["idle"], json!({}));
+    r.say_at_ms("/box pause idle", t0);
+    r.say_at_ms("/box resize idle xs", t0 + 2 * 60_000);
+    let bodies = r.tg.state.lock().unwrap().bodies.clone();
+    let with_button: Vec<_> = bodies
+        .iter()
+        .filter(|b| b["reply_markup"]["inline_keyboard"][0][0]["url"].is_string())
+        .collect();
+    assert!(with_button.len() >= 2, "{bodies:?}");
+    for b in &with_button {
+        let btn = &b["reply_markup"]["inline_keyboard"][0][0];
+        assert!(btn["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://box.example.com/go#"));
+        assert!(btn.get("callback_data").is_none(), "a button only opens");
+    }
+}
+
+#[test]
+fn a_fan_out_reply_is_threaded_under_the_persons_own_message_in_telegram() {
+    let mut r = Rig::new();
+    r.add_box("charlie", Size::S, false);
+    r.app
+        .tg
+        .store
+        .data
+        .marks
+        .groups
+        .insert("web".into(), vec!["alpha".into(), "charlie".into()]);
+    r.link("owner", PHONE, Some(&["alpha", "charlie"]));
+    let t0 = super::unix_ms();
+    let asked = r.tg.say_at(PHONE, "@web what is the status", t0 / 1000);
+    r.tick_at(t0);
+    r.settle(t0 + 1_000, 8);
+    let bodies = r.tg.state.lock().unwrap().bodies.clone();
+    let threaded: Vec<_> = bodies
+        .iter()
+        .filter(|b| b["reply_parameters"]["message_id"].as_i64() == Some(asked))
+        .collect();
+    assert!(
+        threaded.len() >= 2,
+        "a reply from each box, in the thread: {bodies:?}"
+    );
+    assert!(threaded
+        .iter()
+        .any(|b| b["text"].as_str().unwrap_or("").contains("alpha/")));
+    assert!(threaded
+        .iter()
+        .any(|b| b["text"].as_str().unwrap_or("").contains("charlie/")));
+}
+
+fn pair_slack(r: &mut Rig) {
+    r.app.state.chat.link(crate::chat::gateway::ChatLink {
+        channel: crate::chat::gateway::Channel::Slack,
+        id: "U1".into(),
+        name: "Ada".into(),
+        person: "owner".into(),
+    });
+}
+
+fn slack_says(r: &mut Rig, text: &str, ts: &str, now: u64) {
+    r.app.chat_slack_event(
+        crate::chat::slack::Event::Message {
+            user: "U1".into(),
+            channel: "D1".into(),
+            text: text.into(),
+            forwarded: false,
+            ts: ts.into(),
+        },
+        now,
+    );
+}
+
+#[test]
+fn slack_goes_through_the_same_act_table_and_decide_power_is_over_its_ceiling_and_addressing_works()
+{
+    let mut r = Rig::new();
+    pair_slack(&mut r);
+    r.app.tg.store.data.marks.production = vec!["bravo".into()];
+    let t0 = super::unix_ms();
+    // box power is above Slack's ceiling: refused in words, nothing changes
+    slack_says(&mut r, "/box pause alpha", "1700000000.000100", t0);
+    let s = r.said();
+    assert!(
+        s.iter()
+            .any(|x| x.key == "tg.channel_ceiling" && x.to == "slack:U1"),
+        "{s:?}"
+    );
+    assert_eq!(r.state_of("alpha"), Some(BoxState::Running));
+    // the refusals of approve and stop are the same as Telegram's
+    slack_says(&mut r, "/approve a1", "1700000000.000200", t0 + 1);
+    assert!(r.said().iter().any(|x| x.key == "tg.refused_approve"));
+    // an addressed message reaches alpha, never the Production box, and a fan-out remembers the Slack thread
+    slack_says(
+        &mut r,
+        "@fleet what is the status",
+        "1700000000.000300",
+        t0 + 2,
+    );
+    let f = r
+        .last_said("tg.address_fanout")
+        .expect("the fan-out summary");
+    assert!(f.arg("skipped").unwrap().contains("production"), "{f:?}");
+    let tr = r.app.tg.deliveries.last().unwrap();
+    assert_eq!(tr.to, "slack:U1");
+    assert_eq!(tr.thread.as_deref(), Some("1700000000.000300"));
+    let w = &r.app.state.chat.watch["slack:U1"];
+    assert!(w
+        .iter()
+        .all(|x| x.thread.as_deref() == Some("1700000000.000300")));
+    // /run on Slack starts a session the same way
+    let before = r.tasks();
+    slack_says(
+        &mut r,
+        "/run alpha write the notes",
+        "1700000000.000400",
+        t0 + 3,
+    );
+    assert_eq!(r.tasks(), before + 1);
+}
+
+#[test]
+fn whatsapp_goes_through_the_same_decide() {
+    let mut r = Rig::new();
+    r.app.state.chat.link(crate::chat::gateway::ChatLink {
+        channel: crate::chat::gateway::Channel::Whatsapp,
+        id: "2348000000001".into(),
+        name: "Ada".into(),
+        person: "owner".into(),
+    });
+    let t0 = super::unix_ms();
+    r.app.chat_gate(
+        crate::chat::gateway::Channel::Whatsapp,
+        "2348000000001",
+        "owner",
+        "/box resume alpha",
+        false,
+        None,
+        t0,
+    );
+    assert!(r
+        .said()
+        .iter()
+        .any(|x| x.key == "tg.channel_ceiling" && x.to == "whatsapp:2348000000001"));
+    r.app.chat_gate(
+        crate::chat::gateway::Channel::Whatsapp,
+        "2348000000001",
+        "owner",
+        "@alpha hello there",
+        false,
+        None,
+        t0 + 1,
+    );
+    assert!(
+        r.last_said("tg.address_sent").is_some(),
+        "{:?}",
+        r.said_keys()
+    );
 }

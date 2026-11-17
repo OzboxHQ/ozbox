@@ -169,7 +169,11 @@ acts! {
     BoxResize { key: "box.resize", cmd: "/box resize <box> <size>", tier: Power, needs: Power, safe: false, built: true, boxed: true,
         about: "Resizes a box inside the caps (owner decision D14)." },
     // ---- tier 3: run --------------------------------------------------------------------------------------------
-    Run { key: "run", cmd: "/run <command from the catalogue>", tier: Run, needs: Run, safe: false, built: false, boxed: true,
+    // `/run` starts a session (owner, 2026-11-17); the catalogue of read-only inspectors keeps its permanent key `run` and is
+    // written `/check` (ADR 0050 amendment of 2026-11-17)
+    RunSession { key: "run.session", cmd: "/run [box] <what to do>", tier: Converse, needs: Converse, safe: false, built: true, boxed: true,
+        about: "Starts a coding-agent session on a box, the same as /new; with no box, on the box this chat follows." },
+    Run { key: "run", cmd: "/check <command from the catalogue>", tier: Run, needs: Run, safe: false, built: false, boxed: true,
         about: "Runs one read-only inspector from the shipped catalogue. Never a free-form command." },
     // ---- tier 4: handoff ----------------------------------------------------------------------------------------
     BoxClone { key: "box.clone", cmd: "/box clone", tier: Handoff, needs: Nothing, safe: false, built: true, boxed: false,
@@ -299,7 +303,10 @@ pub enum ChatAct {
         box_name: String,
         size: String,
     },
-    /// The text after `/run`, exactly as written. It is not read here: the catalogue's parser (phase 4) is the only reader.
+    /// `/run [box] <what to do>`: the words after `/run`. Whether the first is a box is settled by the bridge, which knows the
+    /// boxes; the session is started the way `/new` starts one.
+    RunSession(String),
+    /// The text after `/check`, exactly as written. It is not read here: the catalogue's parser (phase 4) is the only reader.
     Run(String),
     BoxClone,
     BoxSnapshot,
@@ -351,6 +358,7 @@ impl ChatAct {
             ChatAct::BoxCreate { .. } => ActId::BoxCreate,
             ChatAct::BoxResize { .. } => ActId::BoxResize,
             ChatAct::Run(_) => ActId::Run,
+            ChatAct::RunSession(_) => ActId::RunSession,
             ChatAct::BoxClone => ActId::BoxClone,
             ChatAct::BoxSnapshot => ActId::BoxSnapshot,
             ChatAct::BoxDestroy => ActId::BoxDestroy,
@@ -554,6 +562,13 @@ pub fn parse_act(text: &str, own_bot: Option<&str>) -> ChatAct {
         "run" => {
             if rest.is_empty() {
                 ChatAct::Usage("chat.usage_run")
+            } else {
+                ChatAct::RunSession(rest.chars().take(MAX_TEXT_CHARS).collect())
+            }
+        }
+        "check" => {
+            if rest.is_empty() {
+                ChatAct::Usage("chat.usage_check")
             } else {
                 ChatAct::Run(rest.to_string())
             }
@@ -821,7 +836,11 @@ mod tests {
         );
         assert_eq!(parse_act("/pause", own), ChatAct::SessionPause);
         assert_eq!(
-            parse_act("/run git status", own),
+            parse_act("/run alpha fix it", own),
+            ChatAct::RunSession("alpha fix it".into())
+        );
+        assert_eq!(
+            parse_act("/check git status", own),
             ChatAct::Run("git status".into())
         );
         assert_eq!(parse_act("/lock", own), ChatAct::Lock);
@@ -904,7 +923,8 @@ mod tests {
         for a in [ActId::BoxClone, ActId::BoxSnapshot, ActId::BoxDestroy] {
             assert_eq!(a.tier(), Tier::Handoff);
         }
-        // `/run` is only ever the catalogue: there is no free-form tier
+        // the catalogue is only ever the catalogue: there is no free-form tier; `/run` starts a session, a converse act
+        assert_eq!(ActId::RunSession.tier(), Tier::Converse);
         assert_eq!(ActId::Run.row().needs, Needs::Run);
     }
 }

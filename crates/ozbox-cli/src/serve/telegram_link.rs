@@ -1392,7 +1392,7 @@ impl App {
                     return Err(Resp::error(
                         409,
                         "not_available",
-                        "/run arrives in a later release: talking to coding agents and box power can be delegated now",
+                        "/check (the catalogue of read-only commands) arrives in a later release: talking to coding agents and box power can be delegated now",
                     ))
                 }
                 _ => return Err(Resp::error(400, "bad_request", "an act is converse, power or run")),

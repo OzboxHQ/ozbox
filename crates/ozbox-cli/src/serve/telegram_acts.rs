@@ -28,7 +28,7 @@ use ozbox_core::{BoxName, BoxSpec, BoxState, Operation, Size};
 
 use super::telegram_bridge::Sender;
 use super::App;
-use crate::chat::gateway::{conv_key, Bind, Channel, Effect, Watch};
+use crate::chat::gateway::{Bind, Channel, Effect, Watch};
 use crate::messages::t;
 
 /// The most structured messages kept in memory.
@@ -37,7 +37,8 @@ const KEEP_SAID: usize = 500;
 /// One message the bridge sent, as data: the catalogue key and its arguments, before it was put into words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Said {
-    pub chat_id: i64,
+    /// The conversation it went to (`<channel>:<id>`).
+    pub to: String,
     pub key: &'static str,
     pub args: Vec<(&'static str, String)>,
 }
@@ -65,7 +66,10 @@ pub struct PowerJob {
 /// A message addressed from one chat, and where each copy stands.
 #[derive(Debug, Clone)]
 pub struct Tracked {
-    pub chat_id: i64,
+    /// The conversation it came from (`<channel>:<id>`).
+    pub to: String,
+    /// The message it answers, so every reply is threaded under it.
+    pub thread: Option<String>,
     pub delivery: Delivery,
     pub fanout: bool,
     pub told_done: bool,
@@ -106,11 +110,13 @@ impl App {
         args: &[(&'static str, String)],
         now: u64,
     ) {
-        let text = self.tg_note_said(who.chat_id, key, args);
+        let text = self.tg_note_said(&who.conv(), key, args);
         self.tg_reply(who, text, now);
     }
 
-    /// The same, with one pointer link to the dashboard page at `path` as `{where}`.
+    /// The same, as a structured notice whose one action is the **Open in dashboard** button: a pointer link made for this
+    /// person to the page at `path` (or the page named in words when there is no public address). The words keep a `{where}`
+    /// line too, so a chat app that cannot show a button still carries the link.
     pub(super) fn tg_tell_where(
         &mut self,
         who: &Sender,
@@ -119,25 +125,68 @@ impl App {
         path: &str,
         now: u64,
     ) {
-        let (where_text, tracked) = self.tg_where(&who.person, path, now);
+        let (action, where_text) = self.tg_action(&who.person, path, now);
+        let button = matches!(action, crate::notice::Action::OneTime { .. });
         let mut all = args.to_vec();
         all.push(("where", where_text));
-        let text = self.tg_note_said(who.chat_id, key, &all);
-        if tracked {
-            self.tg_send_tracked(who, text, now);
+        let _ = self.tg_note_said(&who.conv(), key, &all);
+        // the words: the link is the button when there is one, and named in the words when there is none
+        let mut words = args.to_vec();
+        if button {
+            words.push(("where", String::new()));
         } else {
-            self.tg_reply(who, text, now);
+            words.push(("where", all.last().map(|w| w.1.clone()).unwrap_or_default()));
+        }
+        let borrowed: Vec<(&str, &str)> = words.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let text = t(key, &borrowed).trim().to_string();
+        let box_name = args
+            .iter()
+            .find(|(k, _)| *k == "box")
+            .map(|(_, v)| v.clone());
+        let title = match (args.iter().find(|(k, _)| *k == "verb"), &box_name) {
+            (Some((_, verb)), Some(b)) => t("tg.notice_power", &[("verb", verb), ("box", b)]),
+            _ => t("tg.notice_dashboard", &[]),
+        };
+        let mut n = crate::notice::Notice::new(crate::notice::NoticeKind::Alert, title, text);
+        n.box_name = box_name;
+        n.created_ms = now;
+        n.only_tells = true;
+        let tracked = button;
+        let n = n
+            .opens(path, t("tg.notice_place", &[]))
+            .with_action(Some(action))
+            .in_thread(who.thread.clone());
+        if tracked {
+            self.tg_send_tracked_notice(who, n, now);
+        } else {
+            self.tg_reply_notice(who, n, now);
+        }
+    }
+
+    /// The Open in dashboard action for one person, and the words that say the same.
+    fn tg_action(&mut self, person: &str, path: &str, now: u64) -> (crate::notice::Action, String) {
+        let Some(base) = self.chat_public_base() else {
+            return (crate::notice::Action::Words, t("tg.where_none", &[]));
+        };
+        match self.tg_pointer(person, path, now) {
+            Some(tok) => {
+                let host = crate::notice::host_of(&base);
+                let url = format!("{base}/go#{tok}");
+                let words = t("tg.where", &[("host", &host), ("url", &url)]);
+                (crate::notice::Action::OneTime { url, host }, words)
+            }
+            None => (crate::notice::Action::Words, t("tg.where_none", &[])),
         }
     }
 
     pub(super) fn tg_note_said(
         &mut self,
-        chat_id: i64,
+        to: &str,
         key: &'static str,
         args: &[(&'static str, String)],
     ) -> String {
         self.tg.said.push_back(Said {
-            chat_id,
+            to: to.to_string(),
             key,
             args: args.to_vec(),
         });
@@ -149,11 +198,35 @@ impl App {
     }
 
     fn tg_sender_for(&self, chat_id: i64, person: &str) -> Sender {
+        Sender::telegram(String::new(), person.to_string(), chat_id, false)
+    }
+
+    /// Who to answer for a conversation key (`<channel>:<id>`).
+    pub(super) fn tg_sender_of_conv(
+        &self,
+        conv: &str,
+        person: &str,
+        thread: Option<String>,
+    ) -> Sender {
+        let (chan, id) = conv.split_once(':').unwrap_or(("telegram", conv));
+        let channel = match chan {
+            "slack" => Channel::Slack,
+            "whatsapp" => Channel::Whatsapp,
+            "dashboard" => Channel::Dashboard,
+            _ => Channel::Telegram,
+        };
         Sender {
             link_id: String::new(),
             person: person.to_string(),
-            chat_id,
+            chat_id: if channel == Channel::Telegram {
+                id.parse().unwrap_or(0)
+            } else {
+                0
+            },
             legacy: false,
+            channel,
+            id: id.to_string(),
+            thread,
         }
     }
 
@@ -680,7 +753,7 @@ impl App {
                 hosts_bot: marks.hub.as_deref() == Some(name.as_str()),
             };
             let target = (name.clone(), facts);
-            let (_, ctx) = app.tg_context(who, link, Some(&target), &delegations, now);
+            let ctx = app.chat_ctx(who, link, Some(&target), &delegations, now);
             let probe = ChatAct::Address {
                 to: Address::Name(name.clone()),
                 text: String::from("."),
@@ -709,9 +782,109 @@ impl App {
         out
     }
 
+    /// The facts of this moment for `decide`, for any chat app. Telegram: the link and the delegations just verified. Slack
+    /// and WhatsApp: the account the person paired with a one-time code (no passkey, so no delegation), under that app's
+    /// ceiling (ADR 0050 decision 1: what they have today).
+    pub(super) fn chat_ctx<'a>(
+        &self,
+        who: &Sender,
+        link: Option<&crate::telegram_store::TgLink>,
+        target: Option<&'a (String, BoxFacts)>,
+        delegations: &'a [ozbox_core::chat_policy::decide::DelegationFacts],
+        now: u64,
+    ) -> ozbox_core::chat_policy::decide::Context<'a> {
+        use ozbox_core::chat_policy::decide::{ChatChannel, Context, LinkFacts, LinkStatus};
+        let channel = match who.channel {
+            Channel::Slack => ChatChannel::Slack,
+            Channel::Whatsapp => ChatChannel::Whatsapp,
+            _ => return self.tg_context(who, link, target, delegations, now).1,
+        };
+        Context {
+            channel,
+            role: self.tg_role(&who.person),
+            link: Some(LinkFacts {
+                status: LinkStatus::Active,
+                created_ms: 0,
+                expires_ms: u64::MAX,
+            }),
+            target_box: target.map(|(n, f)| (n.as_str(), *f)),
+            delegations,
+            pairing_open: false,
+            now_ms: now,
+        }
+    }
+
+    /// One message from Slack or WhatsApp, from a person who paired that account: the same act table and the same `decide`
+    /// as Telegram, then the same executors. The adapter's only jobs were to verify the vendor's signature, find the person
+    /// and say whether the message was someone else's words.
+    pub(super) fn chat_gate(
+        &mut self,
+        channel: Channel,
+        id: &str,
+        person: &str,
+        text: &str,
+        forwarded: bool,
+        thread: Option<String>,
+        now: u64,
+    ) {
+        // someone else's words are data: the gateway says so, as it always has
+        if forwarded {
+            return self.chat_inbound(channel, id, person, text, true, now);
+        }
+        let who = Sender {
+            link_id: String::new(),
+            person: person.to_string(),
+            chat_id: 0,
+            legacy: false,
+            channel,
+            id: id.to_string(),
+            thread,
+        };
+        let conv = who.conv();
+        let act = ozbox_core::chat_policy::acts::parse_act(text, None);
+        let target = self.tg_target(&act, &conv);
+        let ctx = self.chat_ctx(&who, None, target.as_ref(), &[], now);
+        match decide(&act, &ctx) {
+            Decision::Refuse(r) => {
+                if !r.silent() {
+                    self.tg_tell(&who, r.message(), &[], now);
+                }
+            }
+            Decision::Handoff(h) => self.tg_tell_where(&who, h.message(), &[], "/chat", now),
+            Decision::Allow(_) => match act {
+                ChatAct::Address { to, text } => self.tg_address(&who, None, &to, &text, None, now),
+                ChatAct::To(to) => self.tg_set_to(&who, &to, now),
+                ChatAct::Who => self.tg_show_to(&who, now),
+                ChatAct::Boxes => self.tg_boxes(&who, None, now),
+                ChatAct::Fleets => self.tg_fleets(&who, None, now),
+                ChatAct::RunSession(t) => match self.tg_run_target(&t, &conv) {
+                    None => self.tg_tell(&who, "tg.run_which_box", &[], now),
+                    Some((b, prompt)) => self.chat_inbound(
+                        channel,
+                        id,
+                        person,
+                        &format!("/new {b} {prompt}"),
+                        false,
+                        now,
+                    ),
+                },
+                ChatAct::Converse(t)
+                    if self.tg_sticky(&conv).is_some()
+                        && !self.state.chat.binds.contains_key(&conv) =>
+                {
+                    if let Some(to) = self.tg_sticky(&conv) {
+                        self.tg_address(&who, None, &to, &t, None, now);
+                    }
+                }
+                // everything else that is allowed is the chat gateway's own code, unchanged
+                _ => self.chat_inbound(channel, id, person, text, false, now),
+            },
+        }
+    }
+
     /// `/to <address>`: where plain messages go from now on.
     pub(super) fn tg_set_to(&mut self, who: &Sender, to: &Address, now: u64) {
-        let key = conv_key(Channel::Telegram, &who.chat_id.to_string());
+        let key = who.conv();
         self.state.chat.to.insert(key.clone(), to.render());
         // a session address follows that session; anything else starts from no session
         if let Address::Session { session, .. } = to {
@@ -732,7 +905,7 @@ impl App {
 
     /// `/who`: where plain messages go now.
     pub(super) fn tg_show_to(&mut self, who: &Sender, now: u64) {
-        let key = conv_key(Channel::Telegram, &who.chat_id.to_string());
+        let key = who.conv();
         let to = self.state.chat.to.get(&key).cloned();
         let bound = match self.state.chat.binds.get(&key) {
             Some(Bind::Task { id }) => self
@@ -839,10 +1012,42 @@ impl App {
         }
     }
 
+    /// `/run [box] <what to do>`: the box and the prompt. The first word is a box when this dashboard knows a box (or a worker)
+    /// by that name and words follow it; otherwise the box is the one the sticky address or the followed session names.
+    pub(super) fn tg_run_target(&self, text: &str, conv: &str) -> Option<(String, String)> {
+        let text = text.trim();
+        if let Some((first, rest)) = text.split_once(char::is_whitespace) {
+            let first = first.strip_prefix('@').unwrap_or(first);
+            let known = BoxName::new(first)
+                .ok()
+                .and_then(|n| self.provider.get(&n).ok().flatten())
+                .is_some()
+                || self.remote_agents.workers().iter().any(|w| w.name == first);
+            if known && !rest.trim().is_empty() {
+                return Some((first.to_string(), rest.trim().to_string()));
+            }
+        }
+        let followed = match self.state.chat.binds.get(conv) {
+            Some(Bind::Task { id }) => self
+                .chat_book()
+                .and_then(|b| b.task(id).map(|t| t.spec.box_name.to_string())),
+            Some(Bind::Terminal { box_name, .. }) => Some(box_name.clone()),
+            None => None,
+        };
+        let sticky = match self.state.chat.to.get(conv).and_then(|a| Address::parse(a)) {
+            Some(Address::Session { box_name, .. }) => Some(box_name),
+            Some(Address::Name(n)) if !self.tg.store.data.marks.groups.contains_key(&n) => Some(n),
+            _ => None,
+        };
+        followed
+            .or(sticky)
+            .filter(|_| !text.is_empty())
+            .map(|b| (b, text.to_string()))
+    }
+
     /// The sticky address of this conversation, if one was set with `/to`.
-    pub(super) fn tg_sticky(&self, chat_id: i64) -> Option<Address> {
-        let key = conv_key(Channel::Telegram, &chat_id.to_string());
-        self.state.chat.to.get(&key).and_then(|a| Address::parse(a))
+    pub(super) fn tg_sticky(&self, conv: &str) -> Option<Address> {
+        self.state.chat.to.get(conv).and_then(|a| Address::parse(a))
     }
 
     /// A message for an address: expand it to the boxes this person may reach, judge each, and hand each copy to its box.
@@ -860,8 +1065,7 @@ impl App {
         let e = expand(to, &reach, &groups);
         let msg_id = super::random_hex(3).unwrap_or_else(|_| format!("{:x}", now % 0xffffff));
         let mut d = Delivery::new(&msg_id, to.clone(), &e);
-        let conv = conv_key(Channel::Telegram, &who.chat_id.to_string());
-        let id = who.chat_id.to_string();
+        let conv = who.conv();
         if e.targets.is_empty() {
             let why: Vec<String> = e
                 .skipped
@@ -883,75 +1087,25 @@ impl App {
                 d.advance(&b, DeliveryState::Unreachable("box_not_running"));
                 continue;
             }
-            if target.remote {
-                let dg = delegation.unwrap_or("");
-                match self
-                    .remote_agents
-                    .send(&b, target.session.as_deref(), text, &msg_id, dg)
-                {
-                    Ok(session) => {
-                        if let Some(t) = d.targets.iter_mut().find(|t| t.box_name == b) {
-                            t.session = Some(session);
-                        }
-                        d.advance(&b, DeliveryState::Delivered);
+            // the one delivery seam: the conversation fabric's chat-participant bridge replaces this call
+            let copy = self.fabric_deliver(who, target, text, &msg_id, delegation, now);
+            let (task, failed, outs) = match copy {
+                Copy::Delivered { session } if target.remote => {
+                    if let Some(t) = d.targets.iter_mut().find(|t| t.box_name == b) {
+                        t.session = Some(session);
                     }
-                    Err(e) => {
-                        let st = match e {
-                            crate::chat::remote::RemoteError::Refused => {
-                                DeliveryState::Failed(e.code())
-                            }
-                            _ => DeliveryState::Unreachable(e.code()),
-                        };
-                        d.advance(&b, st);
+                    d.advance(&b, DeliveryState::Delivered);
+                    continue;
+                }
+                Copy::Delivered { session } => (Some(session), None, Vec::new()),
+                Copy::NotDelivered { state, said } => {
+                    if said.is_empty() {
+                        d.advance(&b, state);
+                        continue;
                     }
+                    (None, Some(()), said)
                 }
-                continue;
-            }
-            // a box this dashboard runs: the supervisor's own path, the same as /new and a plain message
-            let session = target.session.clone().or_else(|| {
-                // the box's agent: the session this chat follows there, if there is one
-                match self.state.chat.binds.get(&conv) {
-                    Some(Bind::Task { id: tid }) => self
-                        .chat_book()
-                        .and_then(|bk| {
-                            bk.task(tid)
-                                .map(|t| (t.spec.box_name.to_string(), tid.clone()))
-                        })
-                        .filter(|(bx, _)| *bx == b)
-                        .map(|(_, tid)| tid),
-                    _ => None,
-                }
-            });
-            let mut bind = self.state.chat.binds.get(&conv).cloned();
-            let effect = match &session {
-                Some(s) => Effect::Send {
-                    task: s.clone(),
-                    text: text.to_string(),
-                },
-                None => Effect::Start {
-                    box_name: b.clone(),
-                    prompt: text.to_string(),
-                },
             };
-            let outs = self.chat_exec(
-                Channel::Telegram,
-                &id,
-                &who.person,
-                &mut bind,
-                vec![effect],
-                now,
-            );
-            let started = match (&session, &bind) {
-                (None, Some(Bind::Task { id: tid })) => Some(tid.clone()),
-                _ => None,
-            };
-            // a line typed into a session says nothing when it went; a session that was started is the new bind
-            let ok = match &session {
-                Some(_) => outs.is_empty(),
-                None => started.is_some(),
-            };
-            let failed = (!ok).then_some(());
-            let task = session.clone().or(started);
             match (task, failed) {
                 (Some(tid), None) => {
                     if let Some(tt) = d.targets.iter_mut().find(|x| x.box_name == b) {
@@ -965,6 +1119,7 @@ impl App {
                             task: tid.clone(),
                             box_name: b.clone(),
                             msg_id: msg_id.clone(),
+                            thread: who.thread.clone(),
                         });
                         let seen = self
                             .chat_book()
@@ -983,6 +1138,7 @@ impl App {
                             task: tid.clone(),
                             box_name: b.clone(),
                             msg_id: msg_id.clone(),
+                            thread: who.thread.clone(),
                         });
                     }
                 }
@@ -990,7 +1146,7 @@ impl App {
                     d.advance(&b, DeliveryState::Failed("box_refused"));
                     // the gateway's own words (a refusal of an elevated session, a role) go to the person as they are
                     for o in outs {
-                        self.tg_reply(who, o.text, now);
+                        self.tg_reply(who, o, now);
                     }
                 }
             }
@@ -1051,7 +1207,8 @@ impl App {
             }
         }
         self.tg.deliveries.push(Tracked {
-            chat_id: who.chat_id,
+            to: conv.clone(),
+            thread: who.thread.clone(),
             fanout: e.fanout,
             told_done: d.done(),
             delivery: d,
@@ -1080,7 +1237,7 @@ impl App {
     /// Returns the catalogue key and its arguments.
     pub(super) fn tg_agent_reply(
         &mut self,
-        chat_id: i64,
+        to: &str,
         box_name: &str,
         session: &str,
         msg_id: Option<&str>,
@@ -1132,61 +1289,56 @@ impl App {
             args.push(("where", String::new()));
         }
         if let Some(m) = msg_id {
-            for tr in self
-                .tg
-                .deliveries
-                .iter_mut()
-                .filter(|x| x.chat_id == chat_id)
-            {
+            for tr in self.tg.deliveries.iter_mut().filter(|x| x.to == to) {
                 if tr.delivery.msg_id == m {
                     tr.delivery.advance(box_name, DeliveryState::Replied);
                 }
             }
         }
-        self.tg_note_said(chat_id, key, &args)
+        self.tg_note_said(to, key, &args)
     }
 
     /// Replies from worker boxes, and the grouped end of a fan-out.
     pub(super) fn tg_remote_pump(&mut self, now: u64) {
         for r in self.remote_agents.take_replies() {
-            let Some(chat_id) = self
+            let Some((to, thread)) = self
                 .tg
                 .deliveries
                 .iter()
                 .find(|x| x.delivery.msg_id == r.msg_id)
-                .map(|x| x.chat_id)
+                .map(|x| (x.to.clone(), x.thread.clone()))
             else {
                 continue;
             };
-            let text = self.tg_agent_reply(
-                chat_id,
-                &r.box_name,
-                &r.session,
-                Some(&r.msg_id),
-                &r.text,
+            let text =
+                self.tg_agent_reply(&to, &r.box_name, &r.session, Some(&r.msg_id), &r.text, now);
+            let who = self.tg_sender_of_conv(&to, "", thread.clone());
+            self.tg_reply_notice(
+                &who,
+                crate::notice::Notice::reply(text).in_thread(thread),
                 now,
             );
-            self.tg_say(chat_id, text, now);
         }
         self.tg_deliveries_done(now);
     }
 
-    /// A fan-out whose every copy reached a final state gets one grouped line.
+    /// A fan-out whose every copy reached a final state gets one grouped line, in the thread of the message.
     pub(super) fn tg_deliveries_done(&mut self, now: u64) {
-        let done: Vec<(i64, address::Summary)> = self
+        type Done = (String, Option<String>, address::Summary);
+        let done: Vec<Done> = self
             .tg
             .deliveries
             .iter_mut()
             .filter(|x| x.fanout && !x.told_done && x.delivery.done())
             .map(|x| {
                 x.told_done = true;
-                (x.chat_id, x.delivery.summary())
+                (x.to.clone(), x.thread.clone(), x.delivery.summary())
             })
             .collect();
-        for (chat, s) in done {
+        for (to, thread, s) in done {
             let states: Vec<String> = s.states.iter().map(|(k, n)| format!("{n} {k}")).collect();
             let text = self.tg_note_said(
-                chat,
+                &to,
                 "tg.address_done",
                 &[
                     ("msg", s.msg_id.clone()),
@@ -1194,7 +1346,110 @@ impl App {
                     ("states", states.join(", ")),
                 ],
             );
-            self.tg_say(chat, text, now);
+            let who = self.tg_sender_of_conv(&to, "", thread.clone());
+            self.tg_reply_notice(
+                &who,
+                crate::notice::Notice::reply(text).in_thread(thread),
+                now,
+            );
+        }
+    }
+}
+
+/// What became of one copy of a message.
+pub(super) enum Copy {
+    /// The box's agent took it: the session it went to.
+    Delivered { session: String },
+    /// It did not go: its state, and anything the box's gateway said about why (to pass on as it is).
+    NotDelivered {
+        state: DeliveryState,
+        said: Vec<String>,
+    },
+}
+
+impl App {
+    /// **The delivery seam** (ADR 0050, End-to-end path): hand one copy of a message to one target's agent. Today a box this
+    /// dashboard runs is reached through the supervisor (the same start and send as `/new` and a plain message) and a worker
+    /// box through `chat::remote::RemoteAgents`. The hub's conversation fabric (its chat-participant bridge) replaces this one
+    /// function; nothing above it knows which transport carried the copy.
+    pub(super) fn fabric_deliver(
+        &mut self,
+        who: &Sender,
+        target: &address::Target,
+        text: &str,
+        msg_id: &str,
+        delegation: Option<&str>,
+        now: u64,
+    ) -> Copy {
+        let b = target.box_name.clone();
+        let conv = who.conv();
+        if target.remote {
+            let dg = delegation.unwrap_or("");
+            return match self
+                .remote_agents
+                .send(&b, target.session.as_deref(), text, msg_id, dg)
+            {
+                Ok(session) => Copy::Delivered { session },
+                Err(e) => Copy::NotDelivered {
+                    state: match e {
+                        crate::chat::remote::RemoteError::Refused => {
+                            DeliveryState::Failed(e.code())
+                        }
+                        _ => DeliveryState::Unreachable(e.code()),
+                    },
+                    said: Vec::new(),
+                },
+            };
+        }
+        // a box this dashboard runs: the supervisor's own path, the same as /new and a plain message
+        let session = target.session.clone().or_else(|| {
+            // the box's agent: the session this chat follows there, if there is one
+            match self.state.chat.binds.get(&conv) {
+                Some(Bind::Task { id: tid }) => self
+                    .chat_book()
+                    .and_then(|bk| {
+                        bk.task(tid)
+                            .map(|t| (t.spec.box_name.to_string(), tid.clone()))
+                    })
+                    .filter(|(bx, _)| *bx == b)
+                    .map(|(_, tid)| tid),
+                _ => None,
+            }
+        });
+        let mut bind = self.state.chat.binds.get(&conv).cloned();
+        let effect = match &session {
+            Some(s) => Effect::Send {
+                task: s.clone(),
+                text: text.to_string(),
+            },
+            None => Effect::Start {
+                box_name: b.clone(),
+                prompt: text.to_string(),
+            },
+        };
+        let outs = self.chat_exec(
+            who.channel,
+            &who.id,
+            &who.person,
+            &mut bind,
+            vec![effect],
+            now,
+        );
+        let started = match (&session, &bind) {
+            (None, Some(Bind::Task { id: tid })) => Some(tid.clone()),
+            _ => None,
+        };
+        // a line typed into a session says nothing when it went; a session that was started is the new bind
+        let ok = match &session {
+            Some(_) => outs.is_empty(),
+            None => started.is_some(),
+        };
+        match (ok, session.or(started)) {
+            (true, Some(s)) => Copy::Delivered { session: s },
+            _ => Copy::NotDelivered {
+                state: DeliveryState::Failed("box_refused"),
+                said: outs.into_iter().map(|o| o.text).collect(),
+            },
         }
     }
 }

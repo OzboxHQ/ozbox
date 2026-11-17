@@ -128,6 +128,10 @@ pub struct Notice {
     /// The action resolved for the recipient this copy is for.
     #[serde(skip)]
     pub action: Option<Action>,
+    /// The message this one answers, in the channel's own terms (a Telegram message id, a Slack `ts`): a reply to a message
+    /// sent to several boxes is threaded under it. Delivery routing, not content.
+    #[serde(skip)]
+    pub thread: Option<String>,
 }
 
 impl Notice {
@@ -143,6 +147,12 @@ impl Notice {
     /// A chat reply: words only, sent as plain text.
     pub fn reply(text: impl Into<String>) -> Self {
         Notice::new(NoticeKind::Reply, String::new(), text)
+    }
+
+    /// Thread this message under the one it answers.
+    pub fn in_thread(mut self, thread: Option<String>) -> Self {
+        self.thread = thread;
+        self
     }
 
     /// The dashboard page to open.

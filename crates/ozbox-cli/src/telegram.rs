@@ -538,6 +538,8 @@ pub mod fake {
         pub next_message_id: i64,
         /// (chat id, text, message id)
         pub sent: Vec<(i64, String, i64)>,
+        /// The whole `sendMessage` body of each send, beside `sent` (a reply thread, a URL button).
+        pub bodies: Vec<Value>,
         pub deleted: Vec<i64>,
         /// Every call's method and query (never the token).
         pub calls: Vec<String>,
@@ -571,6 +573,7 @@ pub mod fake {
                     next_update_id: 100,
                     next_message_id: 1000,
                     sent: Vec::new(),
+                    bodies: Vec::new(),
                     deleted: Vec::new(),
                     calls: Vec::new(),
                     conflicts: 0,
@@ -749,10 +752,17 @@ pub mod fake {
                             return status(503, "{}");
                         }
                         let chat = body["chat_id"].as_i64().unwrap_or(0);
-                        let text = body["text"].as_str().unwrap_or("").to_string();
+                        // what the person sees: the words, and the address of a URL button under them
+                        let mut text = body["text"].as_str().unwrap_or("").to_string();
+                        if let Some(url) =
+                            body["reply_markup"]["inline_keyboard"][0][0]["url"].as_str()
+                        {
+                            text.push_str(&format!("\n[button] {url}"));
+                        }
                         s.next_message_id += 1;
                         let id = s.next_message_id;
                         s.sent.push((chat, text, id));
+                        s.bodies.push(body.clone());
                         ok(&json!({ "ok": true, "result": { "message_id": id } }))
                     }
                     "deleteMessage" => {

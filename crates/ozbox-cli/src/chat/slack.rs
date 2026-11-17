@@ -26,6 +26,8 @@ pub enum Event {
         channel: String,
         text: String,
         forwarded: bool,
+        /// The message's own timestamp: a reply to it is threaded under it.
+        ts: String,
     },
     /// A button the person pressed: its value (for example `choice:a1`; nothing in Oz Box decides anything from one).
     Button {
@@ -93,6 +95,7 @@ pub fn parse_frame(text: &str) -> Frame {
                     channel: s(e, "channel").into(),
                     text: s(e, "text").into(),
                     forwarded,
+                    ts: s(e, "ts").into(),
                 },
             }
         }
@@ -304,7 +307,8 @@ mod tests {
                     user: "U1".into(),
                     channel: "D1".into(),
                     text: "hello".into(),
-                    forwarded: false
+                    forwarded: false,
+                    ts: String::new(),
                 }
             }
         );

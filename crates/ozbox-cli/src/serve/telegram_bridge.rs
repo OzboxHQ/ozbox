@@ -45,8 +45,33 @@ pub(super) struct Sender {
     /// The link's id, or `legacy:<chat>` for a chat linked before passkey links.
     pub link_id: String,
     pub person: String,
+    /// Telegram's chat id; 0 for another chat app.
     pub chat_id: i64,
     pub legacy: bool,
+    /// The chat app, and its own id for this conversation (the chat id, a Slack user, a WhatsApp number).
+    pub channel: Channel,
+    pub id: String,
+    /// The message being answered, in the app's terms (a Telegram message id, a Slack `ts`), when it has one.
+    pub thread: Option<String>,
+}
+
+impl Sender {
+    pub(super) fn telegram(link_id: String, person: String, chat_id: i64, legacy: bool) -> Sender {
+        Sender {
+            link_id,
+            person,
+            chat_id,
+            legacy,
+            channel: Channel::Telegram,
+            id: chat_id.to_string(),
+            thread: None,
+        }
+    }
+
+    /// The conversation key (`<channel>:<id>`).
+    pub(super) fn conv(&self) -> String {
+        conv_key(self.channel, &self.id)
+    }
 }
 
 /// What `decide` said, kept so the act can be asked again just before it is done.
@@ -269,12 +294,13 @@ impl App {
             if let Some(x) = self.tg.store.link_mut(&l.record.id) {
                 x.last_seen_ms = now;
             }
-            let who = Sender {
-                link_id: l.record.id.clone(),
-                person: l.record.person.clone(),
-                chat_id: l.record.chat_id,
-                legacy: false,
-            };
+            let mut who = Sender::telegram(
+                l.record.id.clone(),
+                l.record.person.clone(),
+                l.record.chat_id,
+                false,
+            );
+            who.thread = (a.message_id > 0).then(|| a.message_id.to_string());
             return self.tg_act(bot, &who, Some(&l), a, now);
         }
         if let Some(c) = self
@@ -285,12 +311,12 @@ impl App {
             .find(|c| c.id == a.chat_id)
             .cloned()
         {
-            let who = Sender {
-                link_id: format!("legacy:{}", c.id),
-                person: c.person.clone().unwrap_or_else(|| "owner".into()),
-                chat_id: c.id,
-                legacy: true,
-            };
+            let who = Sender::telegram(
+                format!("legacy:{}", c.id),
+                c.person.clone().unwrap_or_else(|| "owner".into()),
+                c.id,
+                true,
+            );
             return self.tg_act(bot, &who, None, a, now);
         }
         // a stranger: only `/link` while a window is open is heard, and it is the code that proves anything
@@ -309,7 +335,7 @@ impl App {
 
     // ---------- one act ----------
 
-    fn tg_role(&self, person: &str) -> Option<Role> {
+    pub(super) fn tg_role(&self, person: &str) -> Option<Role> {
         match &self.auth {
             Some(a) => a.role_opt(person),
             None => Some(Role::Owner),
@@ -317,7 +343,7 @@ impl App {
     }
 
     /// The box an act is about, with what the fleet record says about it.
-    fn tg_target(&self, act: &ChatAct, conv: &str) -> Option<(String, BoxFacts)> {
+    pub(super) fn tg_target(&self, act: &ChatAct, conv: &str) -> Option<(String, BoxFacts)> {
         let name = match act {
             // a group or the fleet is judged box by box when it is expanded, not as one box here
             ChatAct::Address {
@@ -328,6 +354,7 @@ impl App {
                 to: ozbox_core::chat_policy::address::Address::Name(n),
                 ..
             } if self.tg.store.data.marks.groups.contains_key(n) => return None,
+            ChatAct::RunSession(text) => self.tg_run_target(text, conv).map(|(b, _)| b),
             ChatAct::Converse(_) if self.tg_sticky_fans_out(conv) => return None,
             ChatAct::Converse(_) if self.tg_sticky_box(conv).is_some() => self.tg_sticky_box(conv),
             ChatAct::Switch(id) => self
@@ -602,6 +629,26 @@ impl App {
             | ChatAct::BoxExtend { .. }
             | ChatAct::BoxCreate { .. }
             | ChatAct::BoxResize { .. } => self.tg_power(who, act, delegation, a.update_id, now),
+            ChatAct::RunSession(text) => {
+                let conv = conv_key(Channel::Telegram, &who.chat_id.to_string());
+                match self.tg_run_target(text, &conv) {
+                    None => self.tg_tell(who, "tg.run_which_box", &[], now),
+                    Some((b, prompt)) => {
+                        if let Some(d) = delegation {
+                            self.tg_mark_used(d, now);
+                        }
+                        // the same start as /new: the chat gateway's own code, held to the chat profile
+                        self.chat_inbound(
+                            Channel::Telegram,
+                            &who.chat_id.to_string(),
+                            &who.person,
+                            &format!("/new {b} {prompt}"),
+                            false,
+                            now,
+                        );
+                    }
+                }
+            }
             ChatAct::Who => self.tg_show_to(who, now),
             ChatAct::Boxes => self.tg_boxes(who, link, now),
             ChatAct::Fleets => self.tg_fleets(who, link, now),
@@ -609,14 +656,14 @@ impl App {
             ChatAct::Address { to, text } => self.tg_address(who, link, to, text, delegation, now),
             // a plain message goes to the address set with /to, when one is set and no session is followed
             ChatAct::Converse(text)
-                if self.tg_sticky(who.chat_id).is_some()
+                if self.tg_sticky(&who.conv()).is_some()
                     && !self
                         .state
                         .chat
                         .binds
                         .contains_key(&conv_key(Channel::Telegram, &who.chat_id.to_string())) =>
             {
-                if let Some(to) = self.tg_sticky(who.chat_id) {
+                if let Some(to) = self.tg_sticky(&who.conv()) {
                     self.tg_address(who, link, &to, text, delegation, now);
                 }
             }
@@ -778,8 +825,27 @@ impl App {
             vec![super::chat_routes::Out {
                 announce: None,
                 notice: None,
-                channel: Channel::Telegram,
-                id: who.chat_id.to_string(),
+                channel: who.channel,
+                id: who.id.clone(),
+                text,
+                buttons: Vec::new(),
+            }],
+            now,
+        );
+    }
+
+    /// A structured message (with its Open in dashboard button, or a thread) to the sender's chat app.
+    pub(super) fn tg_reply_notice(&mut self, who: &Sender, n: crate::notice::Notice, now: u64) {
+        let text = {
+            use crate::notice::render::{Renderer, Text};
+            Text::render(&n)
+        };
+        self.chat_say(
+            vec![super::chat_routes::Out {
+                announce: None,
+                notice: Some(n),
+                channel: who.channel,
+                id: who.id.clone(),
                 text,
                 buttons: Vec::new(),
             }],
@@ -803,12 +869,7 @@ impl App {
 
     /// Say something to a chat from the server's own thread, as the record needs it (`/link` ack, the linked notice).
     pub(super) fn tg_say(&mut self, chat_id: i64, text: String, now: u64) {
-        let who = Sender {
-            link_id: String::new(),
-            person: String::new(),
-            chat_id,
-            legacy: false,
-        };
+        let who = Sender::telegram(String::new(), String::new(), chat_id, false);
         self.tg_reply(&who, text, now);
     }
 
@@ -862,8 +923,20 @@ impl App {
     }
 
     /// Send a message that carries a pointer link, remember its id, and delete it when the link lapses.
-    pub(super) fn tg_send_tracked(&mut self, who: &Sender, text: String, now: u64) {
-        // the sealed copy never holds the token
+    /// A structured message carrying a pointer link, deleted when the link lapses (Telegram); another app gets it plainly.
+    pub(super) fn tg_send_tracked_notice(
+        &mut self,
+        who: &Sender,
+        n: crate::notice::Notice,
+        now: u64,
+    ) {
+        if who.channel != Channel::Telegram {
+            return self.tg_reply_notice(who, n, now);
+        }
+        let text = {
+            use crate::notice::render::{Renderer, Text};
+            Text::render(&n)
+        };
         self.tg_record_out(who.chat_id, &text, now);
         let Ok(Some(token)) = self.secrets.get("telegram-bot-token") else {
             return;
@@ -872,17 +945,16 @@ impl App {
         let base = self.tg.api_base.clone();
         let chat_id = who.chat_id;
         let expires = now + crate::chat::links::TTL_MS;
-        let job: Job =
-            Box::new(
-                move || match Bot::new(http.as_ref(), &token, &base).send(chat_id, &text) {
-                    Ok(id) => Done::TelegramSent {
-                        chat_id,
-                        message_id: id,
-                        expires_ms: expires,
-                    },
-                    Err(_) => Done::Nothing,
+        let job: Job = Box::new(move || {
+            match Bot::new(http.as_ref(), &token, &base).send_notice(chat_id, &n) {
+                Ok(id) => Done::TelegramSent {
+                    chat_id,
+                    message_id: id,
+                    expires_ms: expires,
                 },
-            );
+                Err(_) => Done::Nothing,
+            }
+        });
         let _ = self.submit(job);
     }
 

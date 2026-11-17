@@ -527,7 +527,8 @@ mod tests {
             ActId::BoxExtend => "/box extend alpha 2",
             ActId::BoxCreate => "/box create gamma m",
             ActId::BoxResize => "/box resize alpha m",
-            ActId::Run => "/run git status",
+            ActId::Run => "/check git status",
+            ActId::RunSession => "/run alpha fix it",
             ActId::BoxClone => "/box clone",
             ActId::BoxSnapshot => "/box snapshot",
             ActId::BoxDestroy => "/box destroy",
@@ -883,7 +884,13 @@ mod tests {
     fn production_is_never_acted_on_and_the_hub_needs_its_warning_to_have_been_accepted() {
         let mut f = Fixture::new();
         f.facts.production = true;
-        for id in [ActId::Converse, ActId::New, ActId::BoxResume, ActId::Run] {
+        for id in [
+            ActId::Converse,
+            ActId::New,
+            ActId::RunSession,
+            ActId::BoxResume,
+            ActId::Run,
+        ] {
             assert_eq!(
                 f.decide(&sample(id)),
                 Decision::Refuse(Refusal::ProductionBox)

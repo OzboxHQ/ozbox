@@ -324,6 +324,11 @@ impl Renderer for Telegram {
             "protect_content": true,
         });
         let mut v = base;
+        // a reply to a message sent to several boxes answers it in Telegram's own thread
+        if let Some(id) = n.thread.as_deref().and_then(|t| t.parse::<i64>().ok()) {
+            v["reply_parameters"] =
+                json!({ "message_id": id, "allow_sending_without_reply": true });
+        }
         if n.kind == NoticeKind::Reply {
             v["text"] = json!(reply_text(n, 4000));
             return v;
@@ -405,6 +410,28 @@ impl Renderer for Slack {
     /// A message payload: `text` (the notification fallback) and `blocks`.
     type Out = Value;
     fn render(n: &Notice) -> Value {
+        let mut v = Self::render_unthreaded(n);
+        // a reply to a message sent to several boxes goes in the thread of that message
+        if let Some(ts) = n.thread.as_deref().filter(|t| slack_ts_ok(t)) {
+            v["thread_ts"] = json!(ts);
+        }
+        v
+    }
+}
+
+/// A Slack message timestamp: digits, one dot, digits.
+fn slack_ts_ok(t: &str) -> bool {
+    t.len() <= 32
+        && t.split_once('.').is_some_and(|(a, b)| {
+            !a.is_empty()
+                && !b.is_empty()
+                && a.bytes().all(|c| c.is_ascii_digit())
+                && b.bytes().all(|c| c.is_ascii_digit())
+        })
+}
+
+impl Slack {
+    fn render_unthreaded(n: &Notice) -> Value {
         if n.kind == NoticeKind::Reply {
             return json!({ "text": slack_escape(&reply_text(n, 3000)) });
         }
@@ -929,5 +956,24 @@ impl Renderer for Webhook {
             "url": url,
             "path": n.open.as_ref().map(|o| o.path.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+
+    #[test]
+    fn a_threaded_reply_carries_the_apps_own_thread_field_and_a_bad_id_is_dropped() {
+        let n = Notice::reply("hi").in_thread(Some("41".into()));
+        assert_eq!(Telegram::render(&n)["reply_parameters"]["message_id"], 41);
+        let n = Notice::reply("hi").in_thread(Some("1700000000.000300".into()));
+        assert_eq!(Slack::render(&n)["thread_ts"], "1700000000.000300");
+        let n = Notice::reply("hi").in_thread(Some("x<y".into()));
+        assert!(Telegram::render(&n).get("reply_parameters").is_none());
+        assert!(Slack::render(&n).get("thread_ts").is_none());
+        assert!(Slack::render(&Notice::reply("hi"))
+            .get("thread_ts")
+            .is_none());
     }
 }
