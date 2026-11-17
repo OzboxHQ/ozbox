@@ -86,8 +86,9 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    approve`) never approves Production: the box refuses to make one, and refuses one at import, and says to use the dashboard.
    An import into `staging` whose key names say production or live, or whose values are live-mode keys (`sk_live_…`) or production
    addresses, is a Production import too. This computer's key also never approves a declaration or the box's own settings (its
-   first-time dashboard code, its store key's escrow, its tunnel token, who may approve): use a laptop key that needs a touch,
-   root on the box, or the dashboard where it offers the change.
+   store key's escrow, its tunnel token, who may approve): use a laptop key that needs a touch, root on the box, or the dashboard
+   where it offers the change. The dashboard's first-time code needs no approval until someone enrols in the dashboard
+   (`ozbox secrets ingress setup-code`), and is refused for good after.
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used

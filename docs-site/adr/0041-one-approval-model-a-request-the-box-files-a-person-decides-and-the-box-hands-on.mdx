@@ -695,10 +695,12 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
 - The `secret-use` (Production) row is a pointer to ADR 0029, which keeps its own issuer; the no-software-key rule is repeated in its Amendment 9 §4.
 - **Legacy codes and the box's own acts.** Closed by the review fix of 2026-11-17 (Amendment of 2026-11-17, "Review fix"): on the
   code path a software laptop key now makes no code for `policy`, `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`,
-  `box-secrets` or `host-guard`, exactly as the request table says. What is still not covered: a box whose **only** approver is a
-  software laptop key (a box made by `ozbox create`, before a passkey or a touch key is enrolled) has no route on the code path to
-  its dashboard's first-time code, its store key's escrow, its tunnel token or a declaration; those now go through a request
-  decided by a laptop key that proves a touch, or by root. Making that first-day path smooth is open work.
+  `box-secrets` or `host-guard`, exactly as the request table says. The first-time dashboard code on a box
+  whose only approver is a software laptop key is reached through the **first-day window** (Amendment of 2026-11-17, "First-day
+  window"). What is still not covered: during that window, a program on the owner's computer that holds the ingress key (and, on
+  AWS, the AWS sign-in) can read the code and enrol its own passkey before the owner does; and on such a box the store key's
+  escrow, a tunnel token and a declaration go through a request decided by a laptop key that proves a touch, by root, or by the
+  dashboard where it offers the change, never by this computer's software key.
 - **The issuer's laptop presence is still declared.** The issuer refuses a laptop key whose record says it does not ask the
   person, and no setting changes that any more, but whether a key asks the person is still what its pinned record says, not a
   verified attestation (pending phase 2, as above).
@@ -1370,12 +1372,62 @@ An independent review of this amendment found two gaps, both fixed in the same c
   rows with the request path's own helpers (`name_says_production`, `value_says_production`), and an import whose names or values say
   Production is Production for a software key, whatever its environment. The refusal does not spend the code.
 
-**Consequence.** On a box whose only approver is this computer's software key, `ozbox secrets ingress setup-code` and `ozbox secrets
-ingress escrow`, a tunnel token set with this computer's key, and a declaration approved by it are refused; they go through a request
-decided by a laptop key that proves a touch, or by root (see "what is not covered").
+**Consequence.** On a box whose only approver is this computer's software key, `ozbox secrets ingress escrow`, a tunnel token set
+with this computer's key, and a declaration approved by it are refused; they go through a request decided by a laptop key that proves
+a touch, or by root (see "what is not covered"). The first-time dashboard code has its own route, the first-day window below.
 
 **Tests.** Each fails on the code before the fix: a software key gets no code for any of the six box scopes and a code that somehow
 exists for `kek-export` or `setup-code` is refused at the gate, unspent; a software key gets no `policy` code and one that exists is
 refused for a staging-only declaration as for a Production one; a software key's `staging` code is refused for an import with a key
 named live or production, a `sk_live_` value or a production address, nothing stored and the code left good for an ordinary import;
 the set of scopes a software key never decides is the same on both paths, read from `RULES`.
+
+### First-day window (2026-11-17): the first-time dashboard code through the sealed route, until the first enrolment
+
+**Why.** The review fix leaves a box made by `ozbox create` with one approver, the computer's software key, which never approves
+`setup-code`. The dashboard's first-time code is how the first passkey or authenticator is enrolled, so the owner could not set the
+dashboard up. Owner decision (2026-11-17): the code comes through the sealed ingress route with no approval, for that first day only.
+The root helper's admin action was considered and refused: `ozbox admin` reaches the root helper through the box user's own account,
+and root writes its answer where the box user reads it, so any agent on the box could ask for the code.
+
+**Decision.**
+
+1. While the dashboard has **no passkey and no authenticator** enrolled, the secrets service answers the sealed `setup_code` request
+   with no approval, whatever else the box has (a pinned laptop key included). The audit line says `via=ingress-first-day`; it never
+   holds the code.
+2. The dashboard tells the service on **every** enrolment, passkey or authenticator, and at every start once anyone is enrolled, through
+   a new call, `setup_code_close`, on the supervisor's own socket only (a folder only the supervisor's user may enter). The service
+   records the window closed in its encrypted store under a reserved name and forgets the code it holds. The record survives restarts;
+   no socket of the box user's, and not the supervisor, can write or remove it; nothing in the program removes it. The window never
+   reopens, even if every approver is later removed.
+3. Once closed, the sealed request without an approval is refused with a sentence that says someone is enrolled and to sign in to the
+   dashboard. With an approval it is judged as before, and a software laptop key never gives one (review H1).
+4. `ozbox secrets ingress setup-code` sends no approval and no longer uses this computer's key.
+
+**What reaching the route takes**, from the code (`sshconfig::ingress_block`, `ingress_client::send`, `ingress_guard`):
+
+- **On AWS**: `ssh` to the box's ingress alias, whose proxy command pushes this computer's ingress key
+  (`~/.ssh/ozbox_ingress_ed25519.pub`) for the `ozbox-ingress` account through EC2 Instance Connect for 60 seconds, then opens the
+  connection with `aws ssm start-session` (`AWS-StartSSHSession`). So it takes **an AWS sign-in allowed to start a Session Manager
+  session to that instance** (and to send an SSH public key to it through EC2 Instance Connect, unless the key is already in the
+  account's list) **and the ingress private key** on that computer.
+- **On Hetzner**: no cloud sign-in is in the path. The route is the box's SSH route, a Headscale tailnet this computer is signed in to
+  or a Cloudflare tunnel opened with `cloudflared access ssh`, to the `ozbox-ingress` account, whose only key is the one pinned when
+  the box was made, in a root-owned file. So it takes **the ingress private key and a way onto that route**, not a cloud sign-in.
+- **On every provider**, the account is forced to run `ozbox secrets receive` and nothing else, its key list is root-owned, its key is
+  never the box user's, and its socket is in a folder only the secrets user and that account may enter. **No process of the box user
+  can reach the route**, so no agent on the box can read the code through it.
+
+**Residual risk.** During the window only, a program on the owner's computer that holds the ingress key (and, on AWS, can use the AWS
+sign-in) can read the code and enrol its own passkey first. The owner then finds the code refused when they use it. The window ends at
+the first enrolment, and the code lasts 30 minutes.
+
+**Tests.** The window open: the code read through the sealed route with no approval on a box with a pinned laptop key. Only the
+supervisor closes it (the box, locked box, import, runner, broker, ingress, unsealed and admin sockets cannot, and a sealed close is
+refused). Neither the box user nor the dashboard can write or remove the record. After the close the code is gone, the read with no
+approval is refused, a software key's code is refused (none is made, one that exists is refused), and a fresh service on the same store
+keeps it closed. The code is in no file the service wrote. Every passkey or authenticator enrolment in the dashboard closes the window,
+and signing in does not.
+
+**Benchmark.** None. **Not proven on a real box.** Planned: on a new AWS box and a new Hetzner box, `ozbox secrets ingress setup-code
+--box &lt;box>` prints the code before anyone enrols, and after a passkey is enrolled it is refused with the sentence above.
