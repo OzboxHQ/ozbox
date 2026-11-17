@@ -30,8 +30,9 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   A code made with your computer's own approval key (`ozbox secrets approve`) could approve an import into a Production environment, although Production is meant to be approved only by a person with their passkey or authenticator. The box now refuses it.
 
   - **Production imports take the dashboard's code.** For an import into any environment other than `dev`, `development`, `staging`, `test` or `e2e`, ask for an approval on the box's dashboard with your passkey or authenticator and run the import with `--approval` and that code. A code from your computer's key is refused, and the message says where to go instead.
-  - **The same for a declaration that touches Production**: one whose commands take secrets from a Production environment, or that removes such a command or changes the project's Production identifiers.
-  - **Everything else is unchanged.** Your computer's key still approves imports into non-Production environments, other declarations, guard overrides for one change, and the box's own settings, and the dashboard's codes work as before.
+  - **A staging import that carries a live key is Production too.** A key named like `STRIPE_LIVE_KEY` or `PROD_…`, or a value such as `sk_live_…` or a production address, makes the import a Production one whatever its environment, so it takes the dashboard's code.
+  - **Your computer's key no longer approves declarations or the box's own settings.** That covers `ozbox secrets ingress setup-code`, `ozbox secrets ingress escrow`, a tunnel token and who may approve: a program running as you on your computer could otherwise take the box's store key or enrol its own passkey. Approve these with a laptop key that needs a touch, or as root on the box, or on the dashboard where it offers the change.
+  - **Everything else is unchanged.** Your computer's key still approves ordinary imports into non-Production environments and guard overrides for one change, and the dashboard's codes work as before.
 
   **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Secure agent workspace](/use-cases/secure-agent-workspace).
 </Update>
