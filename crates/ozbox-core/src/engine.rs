@@ -982,9 +982,9 @@ impl<B: Backend> Engine<B> {
                     } else {
                         notes.push(
                             if missing {
-                                "No final snapshot: the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost. Ask for a final snapshot to keep a copy first."
                             } else {
-                                "No final snapshot: the /work disk and everything on it will be lost."
+                                "No final snapshot: this destroy keeps no copy of /work, and the /work disk and everything on it will be lost."
                             }
                             .into(),
                         );
@@ -1024,8 +1024,10 @@ impl<B: Backend> Engine<B> {
                         Risk::High,
                     ));
                     if !rec.snapshots.is_empty() {
+                        // kept snapshots are billed: say so, and how to keep nothing (a throwaway box), since once the box
+                        // is gone they can no longer be listed through it
                         notes.push(format!(
-                            "{} existing snapshot(s) are kept.",
+                            "{} existing snapshot(s) of {name} are kept, and billed until deleted. To keep nothing, delete them first: `ozbox backup list {name}`, then `ozbox backup delete {name} <id>`.",
                             rec.snapshots.len()
                         ));
                     }

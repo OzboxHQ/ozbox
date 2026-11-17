@@ -136,7 +136,11 @@ Open the address, enter the one-time setup code the server prints, and register 
 Google (your own OAuth app) plus an authenticator code, or your identity-aware proxy's signed token
 ([ADR 0010](/adr/0010-bring-your-own-tunnels)).
 
-**More than one person:** give each person on the list a role with `--person` (`role=owner`, `role=member` or `role=viewer`). The
+**More than one person:** give each person on the list a role with `--person` (`role=owner`, `role=member` or `role=viewer`). Each
+`--person` starts with an id you choose for them (lowercase letters, digits and dashes, up to 32, such as `jane`), not their
+email: the email goes after it, for the way they sign in (`--person jane,google=jane@example.com` or
+`--person jane,access=jane@example.com`). An email given as the id is refused, with the id to use instead. For someone
+already on a dashboard, the id is the first word of the `--person` it was installed with. The
 first person is the owner and the rest are members unless their entry says otherwise. An **owner** can do everything,
 including the settings, permissions, secrets, costs and roles. A **member** does the work: starts runs, approves, watches
 and takes over a browser, and uses a box's terminal, files and IDE. A **viewer** only looks: boxes, runs, costs and the audit

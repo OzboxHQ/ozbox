@@ -1213,7 +1213,13 @@ impl UserManager {
         }
         recorder(d, "loginctl");
         fs::write(d.join("mounted"), "").unwrap();
+        fs::create_dir_all(d.join("etc/ozbox")).unwrap();
+        fs::create_dir_all(d.join("linger")).unwrap();
         Self { dir }
+    }
+
+    fn steps(&self) -> String {
+        fs::read_to_string(self.dir.path().join("etc/ozbox/first-boot-steps")).unwrap_or_default()
     }
 
     fn run(&self) -> Output {
@@ -1228,6 +1234,11 @@ impl UserManager {
                 ("OZBOX_LOGINCTL", &s("loginctl")),
                 ("OZBOX_ID", &s("id")),
                 ("OZBOX_MOUNTPOINT", &s("mountpoint")),
+                ("OZBOX_ETC", &s("etc")),
+                ("OZBOX_LINGER_DIR", &s("linger")),
+                ("OZBOX_RETRY_DELAYS", "0 0 0"),
+                ("OZBOX_LOGINCTL_TIMEOUT_S", "5"),
+                ("OZBOX_START_TIMEOUT_S", "5"),
             ],
         )
         .unwrap()
@@ -1296,6 +1307,128 @@ fn the_user_manager_is_not_started_while_work_is_not_mounted() {
     assert!(!o.status.success());
     assert!(text(&o).contains("not mounted"));
     assert!(!log(m.dir.path(), "systemctl").contains("start"));
+}
+
+/// B4-12: linger the image already turned on is not asked for again (an upgrade's first boot saw the login manager time
+/// out on that question), and what each step ended as is recorded for the self-test.
+#[test]
+fn linger_that_is_already_on_is_not_asked_for_and_each_step_is_recorded() {
+    let m = UserManager::new(false, 0, 0);
+    fs::write(m.dir.path().join("linger/ozbox"), "").unwrap();
+    let o = m.run();
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        log(m.dir.path(), "loginctl"),
+        "",
+        "no question to the login manager"
+    );
+    let steps = m.steps();
+    assert!(steps.contains("enable_linger ok already-on 0\n"), "{steps}");
+    assert!(steps.contains("user_manager ok started 1\n"), "{steps}");
+    // a second run replaces the lines, never adds to them
+    assert!(m.run().status.success());
+    assert_eq!(m.steps().lines().count(), 2, "{}", m.steps());
+}
+
+/// B4-12: a login manager that does not answer is asked a bounded number of times, never forever; linger is then written
+/// to its file (as the image does), the manager is still started, and the failure is recorded, naming the step.
+#[test]
+fn a_login_manager_that_does_not_answer_is_asked_a_bounded_number_of_times() {
+    let m = UserManager::new(false, 0, 0);
+    let d = m.dir.path();
+    fs::write(
+        d.join("loginctl"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho 'Failed to enable linger: Connection timed out' >&2\nexit 1\n",
+            d.join("loginctl.log").display()
+        ),
+    )
+    .unwrap();
+    let o = m.run();
+    assert!(o.status.success(), "{}", text(&o));
+    // the first try and one per pause (three), then it stops
+    assert_eq!(log(d, "loginctl").lines().count(), 4);
+    assert!(
+        d.join("linger/ozbox").exists(),
+        "linger is written to its file"
+    );
+    assert!(
+        log(d, "systemctl").contains("start user@1500.service"),
+        "the manager is still started"
+    );
+    let steps = m.steps();
+    assert!(
+        steps.contains("enable_linger failed login-manager-no-answer 4\n"),
+        "{steps}"
+    );
+    assert!(text(&o).contains("enable-linger"), "{}", text(&o));
+}
+
+/// B4-12: a manager that does not come up is waited for a bounded time, recorded as failed, and the step fails.
+#[test]
+fn a_manager_that_does_not_come_up_is_recorded_as_failed() {
+    let m = UserManager::new(false, 0, 0);
+    let d = m.dir.path();
+    fs::write(d.join("linger/ozbox"), "").unwrap();
+    fs::write(
+        d.join("systemctl"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in start) exit 1;; is-active) exit 3;; esac\nexit 0\n",
+            d.join("systemctl.log").display()
+        ),
+    )
+    .unwrap();
+    let o = m.run();
+    assert!(!o.status.success());
+    // asked once per pause whether it came up, then it stops
+    assert_eq!(
+        log(d, "systemctl")
+            .lines()
+            .filter(|l| l.starts_with("is-active --quiet user@"))
+            .count(),
+        // once before the start, and once after each of the three pauses
+        4
+    );
+    assert!(
+        m.steps().contains("user_manager failed start-failed 1\n"),
+        "{}",
+        m.steps()
+    );
+}
+
+/// The steps the scripts record are exactly the ones the self-test knows, both ways.
+#[test]
+fn the_first_boot_steps_the_scripts_record_are_the_ones_the_self_test_knows() {
+    let mut recorded = std::collections::BTreeSet::new();
+    for f in ["ozbox-user-manager.sh", "ozbox-supervisor-setup.sh"] {
+        let t = fs::read_to_string(script(f)).unwrap();
+        for l in t.lines() {
+            let l = l.trim_start();
+            if l.starts_with('#') {
+                continue;
+            }
+            let l = l
+                .split_once("record ")
+                .filter(|(before, _)| {
+                    before.is_empty()
+                        || before.ends_with(' ')
+                        || before.ends_with(';')
+                        || before.ends_with('{')
+                })
+                .map(|(_, r)| r);
+            if let Some(r) = l {
+                let name = r.split_whitespace().next().unwrap_or("");
+                if !name.starts_with('"') && !name.is_empty() && !name.contains('(') {
+                    recorded.insert(name.to_string());
+                }
+            }
+        }
+    }
+    let known: std::collections::BTreeSet<String> = ozbox_core::first_boot::STEPS
+        .iter()
+        .map(|s| s.name.to_string())
+        .collect();
+    assert_eq!(recorded, known);
 }
 
 #[test]

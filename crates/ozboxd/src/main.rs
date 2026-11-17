@@ -543,6 +543,10 @@ mod daemon {
                 Some(std::path::PathBuf::from(selftest::BOX_SECRETS_DECLARATION));
         }
         if cfg.selftest.require_mount {
+            stcfg.first_boot_steps =
+                Some(std::path::PathBuf::from(ozbox_core::first_boot::STEPS_FILE));
+        }
+        if cfg.selftest.require_mount {
             stcfg.approval_flag_files = selftest::APPROVAL_FLAG_FILES
                 .iter()
                 .map(std::path::PathBuf::from)

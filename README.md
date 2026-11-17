@@ -106,9 +106,9 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | Command | What it does |
 |---|---|
 | `ozbox init` | Guided first-run setup: provider check, region, state bucket, private network, the fleet's secrets key (AWS), budget, alerts. `--issuer-package <zip> --issuer-package-sha256 <hash>` also plans the off-box issuer for Production secrets |
-| `ozbox create <name> --size M` | Create a box (shows the plan first); `--tools`, `--profile`, `--label key=value`, `--disk` |
+| `ozbox create <name> --size M` | Create a box (shows the plan first) and write its SSH entry on this computer (`ssh ozbox-<name>`; `--no-ssh-entry` skips it); `--tools`, `--profile`, `--label key=value`, `--disk` |
 | `ozbox list` · `show <name>` · `sizes` · `providers` | List boxes, show one, the size catalogue, what each provider can do |
-| `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot |
+| `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot (`--no-final-snapshot` for a throwaway box) |
 | `ozbox upgrade <name>` | Replace the system disk from a newer signed image, keep `/work`, run the self-test. An image whose signature cannot be verified is refused unless `--allow-unverified-image` is given; an upgrade that would lose the box's secrets store is refused unless `--accept-new-secrets-store` is given (on AWS the old system disk is first kept as an encrypted snapshot, so the old store's key can be read back; `--no-pre-upgrade-snapshot` turns that off). On AWS, a box already on the image whose machine was made with another first boot (or has no record of it) is replaced from the same image (`--reprovision` forces it); a signed AWS image built with another first-boot configuration is refused unless `--allow-first-boot-mismatch` is given |
 | `ozbox infra` | The box modules and first-boot configuration this program renders: its version, their hashes and the folder in use |
 | `ozbox adopt-fleet-key <name>` | Move an AWS box's secrets store from a key kept in a file to your fleet's KMS key, in place, so an upgrade keeps it (the box re-wraps its own store; nothing is entered again) |
@@ -194,6 +194,8 @@ ozbox serve --public-url https://dash.example.com --tunnel cloudflare
 Everyone who signs in has a role (`--person you,role=owner|member|viewer`; the first person is the owner, the rest are
 members): an owner changes settings, permissions, secrets and costs, a member does the work, a viewer only looks
 ([ADR 0039](docs/adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md)).
+A `--person` starts with an id you choose (lowercase letters, digits and dashes, up to 32), never an email; the email goes
+after it, for the way they sign in: `--person jane,google=jane@example.com` or `--person jane,access=jane@example.com`.
 
 `ozbox dashboard install` can instead run it as a service on a box, which then goes down whenever that box is paused or
 upgraded; a machine outside the fleet is the better home ([ADR 0010](docs/adr/0010-bring-your-own-tunnels.md)).
