@@ -345,7 +345,7 @@ fn fake_aws(dir: &Path, f: &Fixture) -> PathBuf {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\necho \"$@\" >>'{log}'\ncase \"$2\" in\n  describe-images) cat '{images}' ;;\n  describe-snapshots) cat '{snaps}' ;;\n  *) : ;;\nesac\n",
+            "#!/bin/sh\necho \"$@\" >>'{log}'\ncase \"$2\" in\n  describe-images) cat '{images}' ;;\n  describe-snapshots) cat '{snaps}' ;;\n  describe-image-attribute) case \"$*\" in *ami-00000002*) echo '{{\"LaunchPermissions\":[]}}' ;; *) echo '{{\"LaunchPermissions\":[{{\"Group\":\"all\"}}]}}' ;; esac ;;\n  *) : ;;\nesac\n",
             log = log.display(),
             images = images.display(),
             snaps = snaps.display()
@@ -384,7 +384,7 @@ fn run_script(dir: &Path, aws: &Path, extra: &[&str]) -> (bool, String, String) 
 }
 
 #[test]
-fn the_script_is_a_dry_run_unless_told_to_apply() {
+fn the_script_is_a_plan_unless_told_to_apply_and_the_plan_says_private_by_default() {
     if !have("jq") || !have("bash") {
         return;
     }
@@ -394,24 +394,77 @@ fn the_script_is_a_dry_run_unless_told_to_apply() {
     let (ok, out, calls) = run_script(d.path(), &aws, &[]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("dry run") && out.contains("retire ami-"),
+        out.contains("plan only") && out.contains("make private ami-") && out.contains("kept"),
         "{out}"
     );
+    assert!(!out.contains("retire (delete)"), "{out}");
+    // with --delete the plan says delete, and still changes nothing
+    let (ok, out2, calls2) = run_script(d.path(), &aws, &["--delete"]);
+    assert!(ok, "{out2}");
     assert!(
-        !calls.contains("deregister-image") && !calls.contains("delete-snapshot"),
-        "a dry run changed nothing: {calls}"
+        out2.contains("retire (delete) ami-") && out2.contains("cannot be undone"),
+        "{out2}"
     );
+    for c in [&calls, &calls2] {
+        assert!(
+            !c.contains("deregister-image")
+                && !c.contains("delete-snapshot")
+                && !c.contains("modify-image-attribute"),
+            "a plan changed nothing: {c}"
+        );
+    }
 }
 
 #[test]
-fn applying_retires_each_old_image_and_its_snapshot_in_every_region_and_never_a_kept_one() {
+fn applying_by_default_makes_old_public_images_private_and_deletes_nothing() {
     if !have("jq") || !have("bash") {
         return;
     }
     let d = tempfile::tempdir().unwrap();
     let f = Fixture::with_versions(&["0.1.0", "0.2.0", "0.3.0", "0.4.0"]);
     let aws = fake_aws(d.path(), &f);
-    let (ok, _, calls) = run_script(d.path(), &aws, &["--apply"]);
+    let (ok, out, calls) = run_script(d.path(), &aws, &["--apply"]);
+    assert!(ok, "{out}");
+    assert!(
+        !calls.contains("deregister-image") && !calls.contains("delete-snapshot"),
+        "{calls}"
+    );
+    for region in ["us-east-1", "eu-west-1"] {
+        // 0.1.0 is ami-1 (public in the fake) and ami-2 (already private): only the public one is changed
+        assert!(
+            calls.contains(&format!(
+                "ec2 modify-image-attribute --region {region} --image-id ami-00000001 --launch-permission Remove=[{{Group=all}}]"
+            )),
+            "{region}: {calls}"
+        );
+        assert!(!calls.contains(&format!(
+            "ec2 modify-image-attribute --region {region} --image-id ami-00000002"
+        )));
+    }
+    assert!(
+        out.contains("ami-00000002 is already private: kept"),
+        "{out}"
+    );
+    for kept in 3..=8 {
+        assert!(
+            !calls.contains(&format!(
+                "modify-image-attribute --region us-east-1 --image-id ami-{kept:08x}"
+            )),
+            "kept image {kept} was touched: {calls}"
+        );
+    }
+}
+
+#[test]
+fn applying_with_delete_retires_each_old_image_and_its_snapshot_in_every_region_and_never_a_kept_one(
+) {
+    if !have("jq") || !have("bash") {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    let f = Fixture::with_versions(&["0.1.0", "0.2.0", "0.3.0", "0.4.0"]);
+    let aws = fake_aws(d.path(), &f);
+    let (ok, _, calls) = run_script(d.path(), &aws, &["--delete", "--apply"]);
     assert!(ok);
     for region in ["us-east-1", "eu-west-1"] {
         // 0.1.0 has two architectures: ami-1 and ami-2
@@ -438,6 +491,34 @@ fn applying_retires_each_old_image_and_its_snapshot_in_every_region_and_never_a_
     let dereg = calls.find("deregister-image").unwrap();
     let del = calls.find("delete-snapshot").unwrap();
     assert!(dereg < del);
+}
+
+#[test]
+fn the_workflow_keeps_old_versions_private_unless_a_person_asks_to_delete_and_runs_only_from_main_or_an_image_tag(
+) {
+    let w = std::fs::read_to_string(root().join(".github/workflows/image.yml")).unwrap();
+    let input = &w[w.find("      retire_old:").unwrap()..];
+    let input = &input[..input.find("      arch:").unwrap()];
+    assert!(input.contains("default: private"), "{input}");
+    assert!(
+        input.contains("options: [private, list, delete]"),
+        "{input}"
+    );
+    let step = &w[w.find("RETIRE: ${{ inputs.retire_old }}").unwrap()..];
+    let step = &step[..(step.find("retention.sh").unwrap() + 200).min(step.len())];
+    // a tag push has no input: it is the private default, never delete
+    assert!(step.contains("${RETIRE:-private}"), "{step}");
+    assert!(step.contains("private) mode=(--apply)"), "{step}");
+    assert!(step.contains("delete) mode=(--delete --apply)"), "{step}");
+    // the signing identity names main or an image-v tag: anything else is refused before a build
+    let plan = &w[w.find("REF_TYPE\" = \"tag\"").unwrap()..];
+    let plan = &plan[..800];
+    assert!(
+        plan.contains("image-v*) version=\"${REF_NAME#image-v}\""),
+        "{plan}"
+    );
+    assert!(plan.contains("\"$REF_NAME\" != \"main\""), "{plan}");
+    assert!(plan.contains("exit 1"), "{plan}");
 }
 
 #[test]
