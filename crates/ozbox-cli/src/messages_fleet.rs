@@ -10,4 +10,13 @@ pub const EN: &[(&str, &str)] = &[
     ("fleet.passkey_other_plan", "That passkey confirmation was for a different plan. Nothing was changed. Confirm this plan with your passkey."),
     ("fleet.owner_only", "Only the dashboard's owner can change the fleet. Nothing was changed."),
     ("fleet.sign_in_needed", "A fleet change from a box's dashboard needs a sign-in with a passkey. This dashboard has no sign-in, so it can only read."),
+    ("fleet.holder_not_you", "The fleet credential holder does not answer this request."),
+    ("fleet.holder_bad_request", "The fleet credential holder could not read that request. Nothing was changed."),
+    ("fleet.holder_window_refused", "That change window was refused: it is not the owner's, not for this box and plan, or it was changed on the way. Nothing was changed."),
+    ("fleet.holder_approvers_refused", "That list of people who may confirm fleet changes was not signed by your computer for this box. It was not used."),
+    ("fleet.holder_approvers_old", "That list of people who may confirm fleet changes is older than the one already in use. It was not used."),
+    ("fleet.holder_no_approvers", "No list of people who may confirm fleet changes has been sent from your computer yet. Sign one with `ozbox fleet approvers sign` and send it. Nothing was changed."),
+    ("fleet.holder_storage", "The fleet credential holder could not record this plan as used, so it did not change anything."),
+    ("fleet.holder_read_failed", "The fleet credential holder could not get a read session from the cloud."),
+    ("fleet.holder_apply_failed", "The change did not finish. This plan is used up; plan again to retry. Check the box list for what was done."),
 ];

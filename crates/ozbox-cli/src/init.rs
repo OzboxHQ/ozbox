@@ -850,6 +850,10 @@ impl InitPaths {
         self.modules.join("aws-box-policy")
     }
 
+    fn fleet_manager_dir(&self) -> PathBuf {
+        self.modules.join("aws-fleet-manager")
+    }
+
     fn issuer_dir(&self) -> PathBuf {
         self.modules.join("aws-issuer")
     }
@@ -1007,6 +1011,21 @@ impl SecurityManaged {
             preferences: has("aws_ssm_document", "session_preferences"),
         }
     }
+}
+
+/// What `ozbox fleet enable` asks of the fleet manager's roles (ADR 0040 §3).
+#[derive(Debug, Clone)]
+pub struct FleetOpts {
+    pub regions: Vec<String>,
+    pub machine_types: Vec<String>,
+    pub image_ids: Vec<String>,
+    pub subnet_ids: Vec<String>,
+    pub window_permission_set: String,
+    pub fleet_manager_box: String,
+    pub max_volume_gb: u32,
+    pub max_iops: u32,
+    pub max_throughput: u32,
+    pub read_costs: bool,
 }
 
 /// Which opt-in security services to have on (ADR 0035). The set is the whole desired state: leaving one out plans its
@@ -2102,6 +2121,72 @@ impl Init<'_> {
             run: if noop { Vec::new() } else { vec![apply] },
             after,
         })
+    }
+
+    /// The fleet manager's two roles (`aws-fleet-manager`, ADR 0040), made ONCE with an administrator's sign-in: the module
+    /// creates roles and policies under `/obx/`, which the daily operator is denied on purpose. Every value is checked by the
+    /// same renderer the policy tests use before it is written into the module's root (so a value cannot carry a quote or a
+    /// placeholder into the file). Nothing here changes a box, opens a port or makes a key.
+    pub fn plan_fleet_manager(
+        &self,
+        target: &Target,
+        account: &str,
+        o: &FleetOpts,
+    ) -> Res<Prepared> {
+        target.validate()?;
+        let region = target.region_or_err()?.to_string();
+        let vars = ozbox_provider_aws::fleet_policy::FleetVars {
+            account_id: account.to_string(),
+            regions: o.regions.clone(),
+            sizes: o.machine_types.clone(),
+            image_ids: o.image_ids.clone(),
+            max_volume_gb: o.max_volume_gb,
+            max_iops: o.max_iops,
+            max_throughput: o.max_throughput,
+            window_principal_arn: format!(
+                "arn:aws:iam::{account}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_{}_*",
+                o.window_permission_set
+            ),
+            subnet_ids: o.subnet_ids.clone(),
+            fleet_manager_box: o.fleet_manager_box.clone(),
+        };
+        for d in ozbox_provider_aws::fleet_policy::Doc::ALL {
+            ozbox_provider_aws::fleet_policy::render(d, &vars)
+                .map_err(|m| Finding::new("fleet_bad_value", m))?;
+        }
+        let list = |v: &[String]| serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
+        let dir = self.paths.work.join("fleet-manager").join(&region);
+        self.module_root(
+            &self.paths.fleet_manager_dir(),
+            &dir,
+            &format!(
+                "module \"fleet\" {{\n  source                = \"@MODULE@\"\n  regions               = {}\n  machine_types         = {}\n  image_ids             = {}\n  subnet_ids            = {}\n  max_volume_gb         = {}\n  max_iops              = {}\n  max_throughput        = {}\n  window_permission_set = \"{}\"\n  read_costs            = {}\n  fleet_manager_box     = \"{}\"\n}}\n\noutput \"change_role_arn\" {{\n  value = module.fleet.change_role_arn\n}}\n",
+                list(&o.regions),
+                list(&o.machine_types),
+                list(&o.image_ids),
+                list(&o.subnet_ids),
+                o.max_volume_gb,
+                o.max_iops,
+                o.max_throughput,
+                o.window_permission_set,
+                o.read_costs,
+                o.fleet_manager_box,
+            ),
+        )?;
+        let mut p = self.plan_state_module(
+            target,
+            account,
+            "fleet_manager",
+            dir,
+            // one pair of roles for the account, so one state, whatever the region
+            "ozbox/fleet-manager/account.tfstate",
+            t("init.sum_fleet_manager", &[]),
+            vec![t("init.note_fleet_manager", &[])],
+            After::Nothing,
+            Vec::new(),
+        )?;
+        p.estimate_usd_month = Some(0.0);
+        Ok(p)
     }
 
     /// The account's Session Manager policy for boxes (the `aws-box-policy` module), made ONCE with the setup identity: the

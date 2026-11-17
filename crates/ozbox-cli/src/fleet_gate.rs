@@ -66,6 +66,12 @@ pub struct WindowStatus {
 pub trait FleetCredentials: Send + Sync {
     /// The open window for this plan id, if any.
     fn window_for(&self, plan_id: &str) -> Option<WindowStatus>;
+
+    /// Whether this plan id was already used up. The credential holder keeps this durably (a restart forgets nothing); the
+    /// gate's own in-memory list is the second check.
+    fn is_spent(&self, _plan_id: &str) -> bool {
+        false
+    }
 }
 
 /// What the person showed for this plan.
@@ -129,6 +135,38 @@ fn named(op: &Operation) -> Vec<&str> {
     }
 }
 
+/// The part of the gate that needs only the operation: a change a box's dashboard may make, not naming the box it runs on.
+/// The credential holder asks it again, so it holds even if the dashboard is not what it should be.
+pub fn operation_refusal(op: &Operation, this_box: &str) -> Result<(), Refusal> {
+    let verb = op.verb();
+    if !matches!(
+        op,
+        Operation::Create { .. }
+            | Operation::Resize { .. }
+            | Operation::Pause { .. }
+            | Operation::Resume { .. }
+            | Operation::Snapshot { .. }
+            | Operation::Clone { .. }
+            | Operation::Destroy { .. }
+    ) {
+        return Err(refuse(
+            422,
+            "fleet_from_your_computer",
+            "fleet.from_your_computer",
+            &[("verb", verb)],
+        ));
+    }
+    if named(op).contains(&this_box) {
+        return Err(refuse(
+            409,
+            "fleet_this_box",
+            "fleet.this_box",
+            &[("box", this_box)],
+        ));
+    }
+    Ok(())
+}
+
 impl FleetGate {
     pub fn new(this_box: &str, store_id: &str, creds: Box<dyn FleetCredentials>) -> Self {
         FleetGate {
@@ -147,34 +185,8 @@ impl FleetGate {
     /// Everything that does not need the person: the operation, "this box", a spent plan, the window. Checked before a
     /// passkey is asked for, so nobody is asked to confirm a change that would be refused anyway.
     pub fn precheck(&self, plan_id: &str, plan: &Plan, now_ms: u64) -> Result<(), Refusal> {
-        let op = &plan.operation;
-        let verb = op.verb();
-        if !matches!(
-            op,
-            Operation::Create { .. }
-                | Operation::Resize { .. }
-                | Operation::Pause { .. }
-                | Operation::Resume { .. }
-                | Operation::Snapshot { .. }
-                | Operation::Clone { .. }
-                | Operation::Destroy { .. }
-        ) {
-            return Err(refuse(
-                422,
-                "fleet_from_your_computer",
-                "fleet.from_your_computer",
-                &[("verb", verb)],
-            ));
-        }
-        if named(op).contains(&self.this_box.as_str()) {
-            return Err(refuse(
-                409,
-                "fleet_this_box",
-                "fleet.this_box",
-                &[("box", &self.this_box)],
-            ));
-        }
-        if self.spent.iter().any(|p| p == plan_id) {
+        operation_refusal(&plan.operation, &self.this_box)?;
+        if self.spent.iter().any(|p| p == plan_id) || self.creds.is_spent(plan_id) {
             return Err(refuse(409, "fleet_plan_spent", "fleet.plan_spent", &[]));
         }
         match self.creds.window_for(plan_id) {

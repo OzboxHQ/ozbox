@@ -39,6 +39,7 @@ mod dashboard_keep;
 mod egress;
 mod egress_guard;
 mod fleet_gate;
+mod fleet_holder;
 mod guard;
 mod guard_cli;
 mod guard_diff;
