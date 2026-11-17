@@ -45,6 +45,16 @@ impl NetHost {
         hub_ops: Arc<dyn KeyOps>,
         listen: SocketAddr,
     ) -> Result<NetHost, String> {
+        Self::start_with_clock(hubd, hub_ops, listen, Arc::new(crate::daemon::now_ms))
+    }
+
+    /// As [`NetHost::start`], with the clock the first-contact check reads (a test that holds fixed attestations passes its own).
+    pub fn start_with_clock(
+        hubd: Arc<Hubd>,
+        hub_ops: Arc<dyn KeyOps>,
+        listen: SocketAddr,
+        clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> Result<NetHost, String> {
         let net = NetHub::start(HubNetConfig {
             listen,
             me: hubd.config().name.clone(),
@@ -66,7 +76,7 @@ impl NetHost {
                 )
             })?;
             taker
-                .receive_enrolment(&req, crate::daemon::now_ms())
+                .receive_enrolment(&req, clock())
                 .map_err(|e| (e.code.to_string(), e.message))
         }));
         let host = NetHost {

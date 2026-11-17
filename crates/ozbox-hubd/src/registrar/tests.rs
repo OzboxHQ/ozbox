@@ -923,3 +923,111 @@ fn the_claim_helpers_exist_for_the_hub_and_use_the_workers_service() {
     ));
     let _ = (token, hex(&[0]));
 }
+
+/// The AWS claim-service path, all the way over the network: an instance identity document AWS signed (the fixture), the registrar's
+/// attestation, the first contact on the hub's own listener, the owner's plan and apply, and the worker's dial-out connection under
+/// the attested keys.
+#[test]
+fn an_aws_worker_enrols_over_the_hubs_listener_and_connects_with_its_attested_keys() {
+    use std::sync::Arc;
+
+    use ozbox_core::hub::net::{enrol_over_net, NetWorker, Reach, TcpDialer, WorkerNetConfig};
+
+    use crate::crypto::{HandshakeSigner, HandshakeVerifier};
+    use crate::nethost::NetHost;
+    use crate::seams::worker_seams;
+
+    let w = world();
+    w.pin(&[reg(Provider::Aws, &w.aws)]);
+    let host = NetHost::start_with_clock(
+        w.hubd.clone(),
+        w.hub.ops(Caller::Hub),
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(|| NOW),
+    )
+    .unwrap();
+    let worker = end();
+    let token = w.invite(Provider::Aws, INSTANCE, "").to_string();
+    let claim = worker_claim(&w, &worker, &token, fx::OK, NOW);
+    let mut st = RegistrarState::default();
+    let a = w.attest(&table(&w, &token), &mut st, &claim).unwrap();
+    let req = make_request(
+        worker.ops(Caller::Supervisor).as_ref(),
+        WORKER,
+        &token,
+        a,
+        &w.hub_fp(),
+        NOW,
+    )
+    .unwrap();
+    let dialer = TcpDialer {
+        addr: host.local_addr().to_string(),
+        timeout: std::time::Duration::from_secs(5),
+    };
+    // a request the hub cannot check (an attestation from a registrar nobody pinned) is refused at first contact
+    w.pin(&[]);
+    let refused = enrol_over_net(&dialer, &serde_json::to_vec(&req).unwrap()).unwrap_err();
+    assert_eq!(refused.0, CODE_UNKNOWN_REGISTRAR_WORD);
+    w.pin(&[reg(Provider::Aws, &w.aws)]);
+    enrol_over_net(&dialer, &serde_json::to_vec(&req).unwrap()).unwrap();
+    let plan = w.hubd.plan_enrol(WORKER).unwrap();
+    w.hubd.apply_enrol(&plan, NOW).unwrap();
+    host.sync_roster().unwrap();
+    // the worker, pinned to the hub's identity, dials out and both ends prove themselves with the attested keys
+    let hub_identity = w.hubd.identity().clone();
+    let (seams, hub_fp) = worker_seams(worker.ops(Caller::Supervisor), &hub_identity).unwrap();
+    let net = NetWorker::start(WorkerNetConfig {
+        me: WORKER.into(),
+        hub: "main".into(),
+        hub_key: hub_fp,
+        signer: Arc::new(HandshakeSigner {
+            ops: worker.ops(Caller::Hub),
+        }),
+        verifier: Arc::new(HandshakeVerifier {
+            dir: seams.directory.clone(),
+        }),
+        dialer: Arc::new(dialer),
+    })
+    .unwrap();
+    let mut up = false;
+    for _ in 0..200 {
+        if matches!(net.reach(), Reach::Connected { .. })
+            && matches!(host.net.reach(WORKER), Some(Reach::Connected { .. }))
+        {
+            up = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    net.stop();
+    host.stop();
+    assert!(up, "the worker did not connect with its attested keys");
+}
+
+const CODE_UNKNOWN_REGISTRAR_WORD: &str = "unknown-registrar";
+
+/// The hub's listener takes only a loopback, private or tailnet address: a wildcard or a public one is refused before anything binds.
+#[test]
+fn the_hub_listens_on_nothing_but_a_loopback_or_private_address() {
+    use crate::nethost::NetHost;
+    let w = world();
+    for bad in [
+        "0.0.0.0:7443",
+        "8.8.8.8:7443",
+        "[::]:7443",
+        "1.1.1.1:443",
+        "172.32.0.1:7443",
+    ] {
+        assert!(
+            NetHost::start(w.hubd.clone(), w.hub.ops(Caller::Hub), bad.parse().unwrap()).is_err(),
+            "{bad}"
+        );
+    }
+    for ok in ["127.0.0.1:0", "10.0.0.1:0"] {
+        // a private address this machine does not have cannot bind, but it is not refused for being public
+        let r = NetHost::start(w.hubd.clone(), w.hub.ops(Caller::Hub), ok.parse().unwrap());
+        if let Ok(h) = r {
+            h.stop();
+        }
+    }
+}
