@@ -1,6 +1,6 @@
 # 0041 — One approval model: the box files a request, a person decides it where they are, and the box hands the decision to the waiting operation
 
-**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** **Amended 2026-11-17 (B4-27): a change made from a computer (an import, a declaration, a dashboard's tunnel token, the box's own secrets declaration) files a request and waits for it, so no code is copied between commands; a person with no passkey may approve on the dashboard with an authenticator code, checked by the secrets service itself (see "Amendment of 2026-11-17 (B4-27)"; owner to confirm the authenticator part).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
+**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** **Amended 2026-11-17 (B4-27): a change made from a computer (an import, a declaration, a dashboard's tunnel token, the box's own secrets declaration) files a request and waits for it, so no code is copied between commands; a person with no passkey may approve on the dashboard with an authenticator code, checked by the secrets service itself, for any act, Production included (see "Amendment of 2026-11-17 (B4-27)"; the authenticator part confirmed by the owner, 2026-11-17).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
 0 Critical, 6 High, 12 Medium, 6 Low, and the owner's decisions of the same day. This text is one current design that answers the
 review. **Phases 1 and 2 are built (see the notes below); phase 3 and the rest are not.** It amends ADR 0028 (item 4 and Amendments 1 to 3: the approval gate, codes and the laptop
 key), ADR 0023 (the commit barrier's override) and ADR 0029 Amendment 6 §3 and §6 (the ingress account and who may approve), and
@@ -77,7 +77,7 @@ One model for every gated request, in three parts.
    approval. No person sees, copies or types a code in the normal path.
 
 **Two kinds of "code", never confused.** An *approval code* is the old bearer string of ADR 0028 item 4. An *authenticator code*
-is a six-digit second factor (TOTP). An authenticator code never decides a request (§3). An approval code exists only as a
+is a six-digit second factor (TOTP). An authenticator code never decides a request (§3), except for a person with no passkey (Amendment of 2026-11-17, B4-27). An approval code exists only as a
 fallback, bound to a request id (§10).
 
 ## 1. The request object
@@ -179,8 +179,9 @@ parity test as `APPROVAL_SCOPES` has. A scope that is not in it is refused every
 - **An authenticator code never decides.** It still protects sign-in and the step-up for settings (ADR 0039). It does not satisfy
   `decide`, for any scope, and a code can be relayed through a lookalike page where a passkey cannot. **Amended 2026-11-17
   (B4-27):** a person **with no passkey** may now approve on the dashboard with an authenticator code, checked by the secrets
-  service itself and recorded as `authenticator`; a person with a passkey still approves only with it. See "Amendment of
-  2026-11-17 (B4-27)" for the conditions and what this costs.
+  service itself and recorded as `authenticator`, for any act, Production included (confirmed by the owner, 2026-11-17); a
+  person with a passkey still approves only with it. See "Amendment of 2026-11-17 (B4-27)" for the conditions and what this
+  costs.
 - **Laptop key.** An enrolled key (ADR 0028 item 4) with a recorded **key type**: `ed25519` (a software key, the only kind
   today), or a FIDO2 key (`sk-ssh-ed25519`, `ecdsa-sk`, or a WebAuthn P-256 credential). Its **presence class** is recorded on
   enrolment and on every decision: `laptop-key:<id>` for a key that is proved to need user presence, and
@@ -701,12 +702,13 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
   verified attestation (pending phase 2, as above).
 - **An authenticator decision is weaker than a passkey decision** (Amendment of 2026-11-17, B4-27): it is not bound to the
   request, so a lookalike page that relays a code, or a supervisor that swaps the request behind one, can turn one code into one
-  approval of something else. It is offered only to a person with no passkey.
+  approval of something else. It is offered only to a person with no passkey, and the owner accepted that risk for every act,
+  Production included (owner, 2026-11-17).
 - **The box user could read and replace an authenticator secret (closed by B4-29).** `totp-` was among the names the box socket
   could read back and write, so a process of the box user could make a valid code for anyone with an authenticator. The box
   user's reach is now one table (`BOX_REACH`, ADR 0018 Amendment 1): an authenticator secret is the dashboard's alone, and the
   secrets service reads it for an approval only when the decision comes in as the supervisor. An authenticator set up before
-  that fix should be set up again (ADR 0018 Amendment 1 says how). Authenticator approvals themselves are still **owner to confirm**.
+  that fix should be set up again (ADR 0018 Amendment 1 says how). Authenticator approvals themselves are **confirmed** (owner, 2026-11-17).
 - **Only an import from a computer files and waits so far.** A tunnel token, a declaration, the box's own secrets and a host
   guard change sent from a computer still take a code (`--approval`); a dashboard-native import (a `.env` file chosen in the
   browser) is Planned.
@@ -1384,8 +1386,13 @@ refused for Production (as it should be, above), with little to say what to do i
    offered. The box refuses a software key's decision of it, and its refusal now names the dashboard (Approvals) with a passkey or an
    authenticator code, a laptop key that needs a touch, or root. The catalogue sentence for a refused code says to run the import
    again without `--approval`.
-5. **An authenticator code may approve, on the dashboard, for a person with no passkey** (this reverses "An authenticator code
-   never decides" in §3 for that person; owner to confirm). The dashboard's approve sheet offers **Use an authenticator code**, which
+5. **An authenticator code may approve any act, Production included, on the dashboard, for a person with no passkey**
+   (this reverses "An authenticator code never decides" in §3 for that person; **confirmed by the owner, 2026-11-17**). A
+   passkey stays the preferred factor and is offered first: the approve sheet opens on the passkey wherever the browser has
+   passkeys, and the dashboard refuses an authenticator code from anyone who has a passkey enrolled (`passkey_required`, pinned by
+   a test). The residual risk stays: a code is not bound to the request the way a passkey's signature is, so a lookalike page
+   that relays a code, or a supervisor that swaps the request behind one, can turn one code into one approval of something else
+   (see "what is not covered"). The dashboard's approve sheet offers **Use an authenticator code**, which
    posts `POST /v1/approvals/requests/<id>/approve-authenticator` with the code.
    - The dashboard refuses a person who has a passkey (they approve with it, as the step-up does), one with no authenticator, a
      viewer, and more than 30 attempts in its window. It checks the code as at sign-in, so the same code cannot sign anyone in later.

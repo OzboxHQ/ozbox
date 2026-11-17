@@ -2867,3 +2867,30 @@ fn an_authenticator_code_is_checked_by_the_dashboard_before_it_approves_a_reques
         "no_sign_in"
     );
 }
+
+/// B4-27 (owner, 2026-11-17): an authenticator code may approve any request, Production included, but only for a person
+/// with no passkey. A person with a passkey is sent to it before any code is looked at, so the weaker factor is never the
+/// one used when the stronger one is enrolled.
+#[test]
+fn a_person_with_a_passkey_cannot_approve_with_an_authenticator_code() {
+    let r = rig();
+    let mut authn = Authenticator::new();
+    r.enrol(&authn, "owner");
+    let (c, _) = r.passkey_login(&mut authn);
+    let cookie = c
+        .cookie
+        .as_ref()
+        .map(|s| format!("__Host-ozbox_session={s}"));
+    let req = request(
+        "POST",
+        "/v1/approvals/requests/r1/approve-authenticator",
+        "",
+        &Value::Null,
+        cookie.as_deref(),
+        &c.csrf,
+        HOST,
+        Some(ORIGIN),
+    );
+    let refused = r.auth.approval_authenticator(&req, "123456").unwrap_err();
+    assert_eq!((refused.0, refused.1), (409, "passkey_required"));
+}

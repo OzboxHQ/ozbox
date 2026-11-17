@@ -87,6 +87,9 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    1. Open **Approvals** in the box's dashboard (a push or chat message says a request is waiting, if you set one up; a chat
       app never approves). The card lists the project, the environment and every key name.
    2. Tap **Approve with passkey**, or, if your account has no passkey, **Use an authenticator code** and type the six digits.
+      An authenticator code may approve any request, Production included (owner, 2026-11-17), but a passkey is offered first
+      and an account with a passkey must use it. A code is weaker: it is not tied to the request the way a passkey is, so
+      type it only into your own dashboard's address.
    3. The waiting command goes on by itself and stores exactly what was approved. A key changed after the approval is refused.
 
    For a **non-Production** environment (`dev`, `development`, `staging`, `test` or `e2e`) the command also asks
