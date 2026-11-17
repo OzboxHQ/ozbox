@@ -1494,7 +1494,14 @@ mod tests {
             o => panic!("{o:?}"),
         }
         // and it is part of the self-test, failing it
-        let r = run(&cfg, &h, &RecordingRunner::new(), "/bin:/usr/bin", &|| Ok(()), 0);
+        let r = run(
+            &cfg,
+            &h,
+            &RecordingRunner::new(),
+            "/bin:/usr/bin",
+            &|| Ok(()),
+            0,
+        );
         assert!(!r.ok);
         assert!(r.checks.iter().any(|c| c.name == "first_boot_steps"
             && matches!(&c.outcome, Outcome::Fail { step, .. } if step == "agent_tools")));

@@ -61,7 +61,11 @@ fn id_from_email(email: &str) -> String {
     let local = email.split('@').next().unwrap_or("");
     let mut id = String::new();
     for c in local.chars().flat_map(char::to_lowercase) {
-        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' };
+        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            c
+        } else {
+            '-'
+        };
         if !(c == '-' && (id.is_empty() || id.ends_with('-'))) {
             id.push(c);
         }

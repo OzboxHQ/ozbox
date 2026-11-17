@@ -1460,13 +1460,24 @@ fn a_systemd_that_is_not_ready_is_asked_a_bounded_number_of_times() {
         ),
     );
     let o = rig.run_env(&["--socket-only"], &[("OZBOX_BIN", &bin)]);
-    assert!(o.status.success(), "the rest of the setup still runs: {}", text(&o));
+    assert!(
+        o.status.success(),
+        "the rest of the setup still runs: {}",
+        text(&o)
+    );
     assert_eq!(
-        rig.log().lines().filter(|x| x.starts_with("systemd-run ")).count(),
+        rig.log()
+            .lines()
+            .filter(|x| x.starts_with("systemd-run "))
+            .count(),
         3
     );
     assert_eq!(steps(&rig), "agent_tools failed switch-user-refused 3\n");
-    assert!(text(&o).contains("ozbox admin <box> -- ensure-supervisor"), "{}", text(&o));
+    assert!(
+        text(&o).contains("ozbox admin <box> -- ensure-supervisor"),
+        "{}",
+        text(&o)
+    );
 }
 
 /// B4-12: a coding agent's settings the program refused (the person's own file) are said, recorded, and never retried or

@@ -790,8 +790,13 @@ pub fn run(cli: Cli) -> Result<()> {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
-                    let line =
-                        write_ssh_after_create(&SystemRunner, dir, &rec, &route_inputs(&config), now);
+                    let line = write_ssh_after_create(
+                        &SystemRunner,
+                        dir,
+                        &rec,
+                        &route_inputs(&config),
+                        now,
+                    );
                     if !json {
                         println!("{line}");
                     }
@@ -2304,6 +2309,7 @@ mod snapshot_wait_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod create_ssh_tests {
     use super::{create_ssh_note, write_ssh_after_create};
     use crate::sshconfig::{self, RouteInputs};
@@ -2339,7 +2345,8 @@ mod create_ssh_tests {
 
     /// B4-11: after create the box's SSH entry is written, exactly as `connect --ssh --write` writes it.
     #[test]
-    fn after_create_the_ssh_entry_is_written_and_a_box_without_a_route_says_how_to_write_it_later() {
+    fn after_create_the_ssh_entry_is_written_and_a_box_without_a_route_says_how_to_write_it_later()
+    {
         let dir = tempfile::tempdir().unwrap();
         // the keys already exist, so nothing is generated
         for k in [sshconfig::KEY_NAME, sshconfig::INGRESS_KEY_NAME] {
@@ -2353,8 +2360,14 @@ mod create_ssh_tests {
         let runner = ozbox_core::RecordingRunner::new();
         let rec = record(Some("i-0bbbbbbbbbbbbbbbb"));
         let line = write_ssh_after_create(&runner, dir.path(), &rec, &inputs, 1);
-        assert!(line.contains("wrote the entry for dev") && line.contains("ssh ozbox-dev"), "{line}");
-        assert!(line.contains("Include"), "a first entry adds the Include line: {line}");
+        assert!(
+            line.contains("wrote the entry for dev") && line.contains("ssh ozbox-dev"),
+            "{line}"
+        );
+        assert!(
+            line.contains("Include"),
+            "a first entry adds the Include line: {line}"
+        );
         let conf = std::fs::read_to_string(dir.path().join("ozbox/config")).unwrap();
         let want = sshconfig::block(
             "dev",
@@ -2365,7 +2378,13 @@ mod create_ssh_tests {
 
         // no machine id yet: no route, nothing written, and the line says how to write it later
         let empty = tempfile::tempdir().unwrap();
-        let line = write_ssh_after_create(&runner, empty.path(), &record(None), &RouteInputs::default(), 1);
+        let line = write_ssh_after_create(
+            &runner,
+            empty.path(),
+            &record(None),
+            &RouteInputs::default(),
+            1,
+        );
         assert!(line.contains("ozbox connect dev --ssh --write"), "{line}");
         assert!(!empty.path().join("ozbox").exists());
     }

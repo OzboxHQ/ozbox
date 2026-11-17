@@ -1309,7 +1309,8 @@ mod tests {
     /// risk), the plan says no copy of /work is kept, and snapshots the box already has are named as kept AND billed, with
     /// how to delete them first (once the box is gone they cannot be listed through it).
     #[test]
-    fn destroying_without_a_final_snapshot_says_nothing_is_kept_and_what_stays_billed() -> TestResult {
+    fn destroying_without_a_final_snapshot_says_nothing_is_kept_and_what_stays_billed() -> TestResult
+    {
         let dir = tempfile::tempdir()?;
         let (p, n, _work, _copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
         let plan = p.plan(&Operation::Destroy {

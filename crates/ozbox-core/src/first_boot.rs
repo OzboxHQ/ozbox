@@ -115,7 +115,10 @@ mod tests {
         assert!(s[0].ok);
         assert_eq!(s[1].info.name, "agent_tools");
         assert!(!s[1].ok);
-        assert_eq!((s[1].reason.as_str(), s[1].attempts), ("switch-user-refused", 4));
+        assert_eq!(
+            (s[1].reason.as_str(), s[1].attempts),
+            ("switch-user-refused", 4)
+        );
         assert_eq!(s[2].info.name, "user_manager");
     }
 
@@ -124,10 +127,16 @@ mod tests {
         let s = &parse("agent_tools failed switch-user-refused 4\n")[0];
         let t = failure_text(s);
         assert!(t.contains("coding agents' settings"), "{t}");
-        assert!(t.contains("after 4 tries") && t.contains("switch-user-refused"), "{t}");
+        assert!(
+            t.contains("after 4 tries") && t.contains("switch-user-refused"),
+            "{t}"
+        );
         assert!(t.contains("ozbox admin <box> -- ensure-supervisor"), "{t}");
         let s = &parse("enable_linger failed login-manager-no-answer 1\n")[0];
         let t = failure_text(s);
-        assert!(!t.contains("tries") && t.contains("-- enable-linger"), "{t}");
+        assert!(
+            !t.contains("tries") && t.contains("-- enable-linger"),
+            "{t}"
+        );
     }
 }
