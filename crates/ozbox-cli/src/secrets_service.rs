@@ -219,6 +219,10 @@ struct Resp {
     held: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     invalid: Option<Vec<String>>,
+    /// An import's names that were not stored, each with the reason (a blank value, one the store cannot hold, a public mark
+    /// refused): `[{"name", "why"}]`. Names and reasons only, never a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +239,7 @@ impl Resp {
             flag: None,
             held: None,
             invalid: None,
+            skipped: None,
             result: None,
             error: None,
         }
@@ -1034,10 +1039,21 @@ pub fn handle_from(
                                         a.held_back.len()
                                     ),
                                 );
+                                let skipped = a
+                                    .blank
+                                    .iter()
+                                    .map(|n| json!({"name": n, "why": "the value is blank"}))
+                                    .chain(
+                                        a.unstorable
+                                            .iter()
+                                            .map(|(n, why)| json!({"name": n, "why": why})),
+                                    )
+                                    .collect();
                                 Resp {
                                     names: Some(a.stored),
                                     held: Some(a.held_back),
                                     invalid: Some(a.invalid),
+                                    skipped: Some(skipped),
                                     ..Resp::ok()
                                 }
                             }
@@ -2864,6 +2880,23 @@ mod tests {
             assert!(out.contains("not valid"), "{out}");
         }
         assert!(s.get("workload.app.staging.X").unwrap().is_none());
+        // a name the box does not store is named with the reason (B4-18 item 9), and its value is not
+        let out = handle(
+            &s,
+            &m,
+            Policy::Unsealed,
+            &json!({"op":"import","project":"app","env":"staging","allowed":[],"text":"me",
+            "lines":[{"name":"BLANK_V","value":""},{"name":"GOOD_V","value":"good-0123456789"}]})
+            .to_string(),
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["names"], json!(["GOOD_V"]), "{out}");
+        assert_eq!(
+            v["skipped"],
+            json!([{"name":"BLANK_V","why":"the value is blank"}]),
+            "{out}"
+        );
+        assert!(!out.contains("good-0123"));
         s.set(crate::secrets_approval::ENROLLED_MARKER, "1")
             .unwrap();
         // the runner's resolve: exact for an environment value, plain-only inside a command line

@@ -114,7 +114,8 @@ pub fn parse_env(text: &str) -> Vec<EnvLine> {
 /// Parse `.env` text the way dotenv does (python-dotenv and Docker Compose; not Node's `dotenv`, which ends an unquoted
 /// value at any `#`).
 ///
-/// * Blank lines and `#` comment lines are skipped; a line without `=` is [`Rejected`] (and never stored).
+/// * Blank lines and `#` comment lines are skipped; a line without `=` is [`Rejected`] (and never stored). A byte-order mark
+///   at the start of the file and Windows line endings (`\r\n`) are read as nothing.
 /// * An `export ` (or `export<TAB>`) prefix is dropped.
 /// * A value in matching double quotes loses the quotes, and what follows the closing quote (a ` # comment`) is ignored.
 ///   Inside double quotes `\"` is a quote, `\\` is a backslash and `\n` is a line break; any other backslash stays as
@@ -133,6 +134,8 @@ pub fn parse_env_report(text: &str) -> ParsedEnv {
     let mut out: Vec<EnvLine> = Vec::new();
     let mut duplicates: Vec<Duplicate> = Vec::new();
     let mut rejected: Vec<Rejected> = Vec::new();
+    // a byte-order mark (what some editors put at the start of a file) is not part of the first name
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -155,7 +158,9 @@ pub fn parse_env_report(text: &str) -> ParsedEnv {
             continue;
         };
         let name = k.trim().to_string();
-        let v = v.trim();
+        // `KEY= # note` is a blank value with a comment (a space, then `#`); `KEY=#x` keeps the `#`
+        let comment_only = v.starts_with(char::is_whitespace) && v.trim_start().starts_with('#');
+        let v = if comment_only { "" } else { v.trim() };
         let (value, malformed) = if v.starts_with('"') || v.starts_with('\'') {
             // read on, a line at a time, until the quote closes
             let mut buf = Zeroizing::new(v.to_string());
@@ -844,6 +849,8 @@ mod tests {
             ("K=\"value\" # a trailing comment", "value"),
             ("K='value'   # c", "value"),
             ("K=a#b", "a#b"),
+            ("K=#leading", "#leading"),
+            ("K= # only a comment", ""),
             ("K=\"has # inside\"", "has # inside"),
             ("K=\"say \\\"hi\\\"\"", "say \"hi\""),
             ("K=\"a\\\\b\"", "a\\b"),
@@ -1640,6 +1647,39 @@ mod tests {
         let rows = plan(&lines, "app", "staging");
         let blank = rows.iter().filter(|r| r.status == Status::Blank).count();
         assert_eq!(blank, 3);
+    }
+
+    /// A fixture of the shapes real `.env` files take (B4-18 item 9): what each name's value is, and which are blank.
+    #[test]
+    fn dotenv_fixture_bom_crlf_spaces_export_and_comments() {
+        let text = "\u{FEFF}FIRST=one\r\n# a comment\r\n\r\nexport   SECOND = \"two\"  # c\r\nTHIRD='three' \r\nFOURTH=four#not-a-comment\r\nFIFTH=\t# only a comment\r\nSIXTH=\"\"\r\n";
+        let lines = parse_env(text);
+        let v: Vec<_> = lines
+            .iter()
+            .map(|l| (l.name.as_str(), l.value.as_str()))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("FIRST", "one"),
+                ("SECOND", "two"),
+                ("THIRD", "three"),
+                ("FOURTH", "four#not-a-comment"),
+                ("FIFTH", ""),
+                ("SIXTH", ""),
+            ]
+        );
+        let rows = plan(&lines, "app", "staging");
+        let blank: Vec<_> = rows
+            .iter()
+            .filter(|r| r.status == Status::Blank)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(blank, ["FIFTH", "SIXTH"]);
+        assert!(
+            rows.iter().all(|r| r.status != Status::Invalid),
+            "the BOM is not part of a name"
+        );
     }
 
     #[test]
