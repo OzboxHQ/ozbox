@@ -43,6 +43,8 @@ pub const SCOPE_RULES: &[(&str, InBootstrap)] = &[
     ("box-secrets", InBootstrap::FirstSettingOnly),
     // a change to the box's own guards that lets it do more (ADR 0034, 0035): the root helper asks before it applies one
     ("host-guard", InBootstrap::Refused),
+    // replacing the dashboard's kept sign-in settings, which decide who may approve: the box user must never name its own approver
+    ("dashboard-auth", InBootstrap::Refused),
 ];
 
 /// The scopes, in the order of [`SCOPE_RULES`] (a test keeps the two the same).
@@ -56,6 +58,7 @@ pub const SCOPES: &[&str] = &[
     "kek-export",
     "box-secrets",
     "host-guard",
+    "dashboard-auth",
 ];
 
 /// What a box with no second factor enrolled may do in one scope. Before a second factor exists the box user cannot be told

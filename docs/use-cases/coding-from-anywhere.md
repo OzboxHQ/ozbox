@@ -226,6 +226,17 @@ back from those, after the web IDE, and its report has a **Dashboard** line that
 (different people, say) add `--token-from-keychain` instead of `--token-stdin`; without either flag an install leaves the box's token
 as it is. `ozbox dashboard forget <box>` removes what this computer kept; nothing on the box changes.
 
+**After an upgrade the dashboard comes back by itself.** An upgrade replaces the box's system disk, which held the dashboard's
+service; its settings stay on the box's own disk, and the box keeps the dashboard's address in a place only root can write. The box
+makes the service again when it starts (or when you run `ozbox admin <box> -- ensure-supervisor`), with the settings it already
+had, and the self-test fails a **dashboard** check if one was installed and none runs. If you run `ozbox dashboard install` again
+with settings that differ from the ones the dashboard has, it keeps its own, starts if it was stopped, and tells you so. To replace
+them (they decide who may approve), add `--replace-sign-in` and either `--approve-with-laptop-key` or `--settings-approval CODE`
+(a code from the dashboard's **Secret approvals**, for the approval binding the command prints). A box with no passkey or
+authenticator code enrolled refuses the replacement. The self-test also fails a **legacy_tunnel** check when an older setup left a
+tunnel running as the box user with a token file it can read: run `ozbox dashboard retire-legacy-tunnel <box>`, then rotate the
+token in your Cloudflare account.
+
 **A new tunnel token later.** Run the same command again with the new token. The dashboard's program and sign-in settings
 stay as they are, and so does its public address; only the token changes. What happens next depends on the box:
 

@@ -3873,6 +3873,62 @@ mod tests {
         assert!(!ok(&gate(&unbound, "token-a-aaaaaaaaaaaaaaaaaaaa")));
     }
 
+    /// Replacing the dashboard's sign-in settings (who may approve) is approved for THOSE settings only: a code made for the digest of
+    /// settings A is refused for B (and stays good for A), an unbound code approves nothing, one is spent once, and a box with no
+    /// second factor refuses outright (the box user would be naming its own approver).
+    #[test]
+    fn a_dashboard_sign_in_approval_is_bound_to_the_settings_it_was_made_for_and_refused_before_a_second_factor(
+    ) {
+        let bind = |sha: &str| sha[..32].to_string();
+        let (a, b) = ("ab".repeat(32), "cd".repeat(32));
+        let d = tempfile::tempdir().unwrap();
+        let (s, m) = svc(d.path());
+        let g = Gates::default();
+        let gate = |code: &str, sha: &str| {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Admin,
+                json!({"op":"gate","scope":"dashboard-auth","project":"","env":bind(sha),"approval":code}),
+            )
+        };
+        // no second factor yet: refused, whatever is sent
+        let early = gate("ABCD-EFGH-JKMN-PQRS", &a);
+        assert!(!ok(&early), "{early}");
+        ask_with(&s, &m, &g, Policy::Admin, json!({"op":"enroll"}));
+        let mint = |env: &str| {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Supervisor,
+                json!({"op":"approve_mint","scope":"dashboard-auth","project":"","env":env}),
+            )["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let code = mint(&bind(&a));
+        assert!(!ok(&gate(&code, &b)), "another set of settings");
+        assert!(ok(&gate(&code, &a)));
+        assert!(!ok(&gate(&code, &a)), "single use");
+        // an unbound code, and one for another scope, approve nothing
+        let unbound = mint("");
+        assert!(!ok(&gate(&unbound, &a)));
+        let tunnel = ask_with(
+            &s,
+            &m,
+            &g,
+            Policy::Supervisor,
+            json!({"op":"approve_mint","scope":"tunnel-token","project":"cloudflare","env":bind(&a)}),
+        )["value"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!ok(&gate(&tunnel, &a)));
+    }
+
     /// The code reaches the request helper on standard input, never in its arguments, when the helper can read it there;
     /// a helper from before the flag gets it as an argument (the only case), and the token is never an argument.
     #[test]

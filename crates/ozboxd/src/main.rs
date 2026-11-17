@@ -561,6 +561,16 @@ mod daemon {
                 unit_present: std::path::Path::new(selftest::DASHBOARD_SOCKET_UNIT).exists(),
             });
         }
+        // a dashboard that was installed must be running, and no tunnel of the box user's own may be left (the marker is root's; the
+        // dashboard user's own folder is closed to this user)
+        if cfg.selftest.require_mount {
+            stcfg.dashboard_traces = Some(selftest::DashboardTraces {
+                marker: std::path::PathBuf::from(selftest::DASHBOARD_MARKER),
+                migrated: std::path::PathBuf::from(selftest::DASHBOARD_MIGRATED),
+                old_home: std::path::PathBuf::from(selftest::DASHBOARD_OLD_HOME),
+            });
+            stcfg.legacy_tunnel_paths = selftest::legacy_tunnel_paths(&stcfg.user_home);
+        }
         if cfg.selftest.require_mount && cfg.runs.backend != "scope" {
             stcfg.user_cgroup_root = Some(std::path::PathBuf::from("/sys/fs/cgroup"));
         }

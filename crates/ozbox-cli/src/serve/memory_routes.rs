@@ -97,6 +97,21 @@ struct ApproveBody {
     acknowledged: Vec<String>,
 }
 
+/// What a person is told when the store could not be opened. A "permission denied" is nearly always a folder that belongs to
+/// another user (the dashboard moved to its own user, and an upgrade made that user again with a new id): say which folder, and how
+/// to put it right, instead of the bare operating-system words.
+pub(crate) fn memory_open_error(dir: &std::path::Path, raw: &str) -> String {
+    let denied = raw.contains("Permission denied") || raw.contains("os error 13");
+    if denied {
+        crate::messages::t(
+            "memory.folder_denied",
+            &[("folder", &dir.display().to_string())],
+        )
+    } else {
+        raw.to_string()
+    }
+}
+
 impl App {
     /// Where the notes and skills live, for a page to say: `persisted` is false when there is no settings file to sit beside
     /// (a folder for this process only, forgotten when it ends); `host` names the box when this server runs on one.
@@ -124,7 +139,8 @@ impl App {
             return Ok(Arc::clone(h));
         }
         let dir: PathBuf = self.memory_dir();
-        let host = MemoryHost::open(&dir).map_err(|e| Resp::error(500, "internal", &e))?;
+        let host = MemoryHost::open(&dir)
+            .map_err(|e| Resp::error(500, "internal", &memory_open_error(&dir, &e)))?;
         let host = Arc::new(host);
         self.memory_host = Some(Arc::clone(&host));
         Ok(host)

@@ -3137,3 +3137,79 @@ fn the_daemon_starts_after_the_box_users_manager() {
     // never Requires: a manager that is held back (no /work yet) must not stop the daemon
     assert!(!unit.contains("Requires=user@"));
 }
+
+#[test]
+fn replacing_the_dashboards_sign_in_settings_is_gated_on_an_approval_bound_to_their_sha_before_anything_changes(
+) -> R {
+    let a = Admin::new();
+    let d = a.dir.path();
+    // a stand-in for `ozbox`: records its arguments, keeps what the gate was sent on standard input, and refuses when told to
+    fs::write(
+        d.join("ozbox"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{0}/ozbox.args'\nif [ \"$2\" = gate ]; then cat > '{0}/gate.stdin'; if [ -e '{0}/refuse' ]; then echo 'that approval is not valid, has been used, or has expired'; exit 1; fi; fi\nexit 0\n",
+            d.display()
+        ),
+    )?;
+    fs::set_permissions(d.join("ozbox"), fs::Permissions::from_mode(0o755))?;
+    let sha = "ab".repeat(32);
+    a.request(
+        "dddddddd01",
+        &format!("replace-dashboard-auth {sha} ABCD-EFGH-JKMN-PQRS"),
+    );
+    // shape errors never reach the program
+    a.request(
+        "dddddddd02",
+        "replace-dashboard-auth nothex ABCD-EFGH-JKMN-PQRS",
+    );
+    a.request("dddddddd03", &format!("replace-dashboard-auth {sha}"));
+    let o = a.process("");
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        a.answer("dddddddd01").starts_with("status=ok"),
+        "{}",
+        a.answer("dddddddd01")
+    );
+    assert!(!a.answer("dddddddd02").starts_with("status=ok"));
+    assert!(!a.answer("dddddddd03").starts_with("status=ok"));
+    let args = fs::read_to_string(d.join("ozbox.args"))?;
+    let gate = args
+        .lines()
+        .position(|l| l.starts_with("secrets gate"))
+        .unwrap();
+    let setup = args
+        .lines()
+        .position(|l| l.contains("supervisor-setup --replace-auth"))
+        .unwrap();
+    assert!(
+        gate < setup,
+        "the approval is checked before the settings are replaced: {args}"
+    );
+    // bound to the first 32 digits of the sha (a field's longest), in scope dashboard-auth; the code is on stdin and in no argument
+    let g = args.lines().nth(gate).unwrap();
+    assert!(
+        g.contains("--scope dashboard-auth") && g.contains(&format!("--env {}", &sha[..32])),
+        "{g}"
+    );
+    assert!(args.contains(&format!("supervisor-setup --replace-auth {sha}")));
+    assert!(!args.contains("ABCD-EFGH-JKMN-PQRS"));
+    assert_eq!(
+        fs::read_to_string(d.join("gate.stdin"))?,
+        "ABCD-EFGH-JKMN-PQRS\n"
+    );
+    // a refusal ends there: the setup step is not run
+    fs::remove_file(d.join("ozbox.args"))?;
+    fs::write(d.join("refuse"), "")?;
+    a.request(
+        "dddddddd04",
+        &format!("replace-dashboard-auth {sha} ABCD-EFGH-JKMN-PQRS"),
+    );
+    a.process("");
+    assert!(!a.answer("dddddddd04").starts_with("status=ok"));
+    assert!(!fs::read_to_string(d.join("ozbox.args"))?.contains("supervisor-setup"));
+    // the action says it is gated, and the helper's revision moved so existing boxes receive it
+    let h = read("infra/cloud-init/scripts/ozbox-admin.sh");
+    assert!(h.contains("\nreplace-dashboard-auth gated\n"));
+    assert!(h.contains("\nhelper_rev=2\n"));
+    Ok(())
+}

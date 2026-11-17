@@ -25,6 +25,7 @@ export const APPROVAL_RULES: readonly ApprovalRule[] = [
   { scope: 'kek-export', journal: true, filers: ['laptop-key'], dashboard: 'not-decidable', laptopPresence: true, software: 'never', telegram: 'notify-only', spendBy: 'inside', bootstrap: 'refused' },
   { scope: 'worker-keys', journal: true, filers: ['hub-agent'], dashboard: 'owner', laptopPresence: true, software: 'never', telegram: 'notify-only', spendBy: 'inside', bootstrap: 'refused' },
   { scope: 'secret-use', journal: false, filers: [], dashboard: 'issuer', laptopPresence: true, software: 'never', telegram: 'notify-only', spendBy: 'not-applicable', bootstrap: 'refused' },
+  { scope: 'dashboard-auth', journal: false, filers: [], dashboard: 'own-store', laptopPresence: true, software: 'not-applicable', telegram: 'notify-only', spendBy: 'admin-socket', bootstrap: 'refused' },
   { scope: 'agent-action', journal: false, filers: [], dashboard: 'own-store', laptopPresence: false, software: 'not-applicable', telegram: 'notify-only', spendBy: 'not-applicable', bootstrap: 'refused' },
   { scope: 'agent-action-protected', journal: false, filers: [], dashboard: 'own-store', laptopPresence: false, software: 'not-applicable', telegram: 'notify-only', spendBy: 'not-applicable', bootstrap: 'refused' },
   { scope: 'agent-action-production', journal: false, filers: [], dashboard: 'own-store', laptopPresence: false, software: 'not-applicable', telegram: 'notify-only', spendBy: 'not-applicable', bootstrap: 'refused' },

@@ -21,12 +21,14 @@ export interface ApprovalForm {
 
 export const SEG = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const DIGEST = /^[0-9a-f]{16}$/;
+/** The first 32 hex digits of the sha256 of the sign-in settings (`ozbox dashboard install` prints it). */
+export const AUTH_BINDING = /^[0-9a-f]{32}$/;
 
 /** Which fields a scope needs. */
 export function needs(f: Pick<ApprovalForm, 'scope' | 'vaultWhat'>) {
   return {
     project: f.scope === 'import' || f.scope === 'policy',
-    env: f.scope === 'import',
+    env: f.scope === 'import' || f.scope === 'dashboard-auth',
     digest: f.scope === 'host-guard' || (f.scope === 'box-secrets' && f.vaultWhat === 'declaration'),
     key: f.scope === 'signer-enroll',
   };
@@ -36,7 +38,8 @@ export function needs(f: Pick<ApprovalForm, 'scope' | 'vaultWhat'>) {
 export function formError(f: ApprovalForm): MessageKey | null {
   const n = needs(f);
   if (n.project && !SEG.test(f.project)) return 'secrets.err_project';
-  if (n.env && !SEG.test(f.env)) return 'secrets.err_env';
+  if (n.env && f.scope === 'dashboard-auth' && !AUTH_BINDING.test(f.env)) return 'secrets.err_binding';
+  if (n.env && f.scope !== 'dashboard-auth' && !SEG.test(f.env)) return 'secrets.err_env';
   if (n.digest && !DIGEST.test(f.digest)) return 'secrets.err_digest';
   if (n.key && !SEG.test(f.keyId)) return 'secrets.err_key';
   return null;
@@ -48,7 +51,8 @@ export function formError(f: ApprovalForm): MessageKey | null {
  * - signer-enroll: project the key's name (an enrolment or a revocation of that key);
  * - box-secrets: project declaration with env d-<change code> for a new declaration, project declaration for removing it,
  *   project bao-token for placing the vault token;
- * - tunnel-token: project the tunnel; import: project and environment; policy: project.
+ * - tunnel-token: project the tunnel; import: project and environment; policy: project;
+ * - dashboard-auth: no project, env the 32-digit binding of the new sign-in settings.
  */
 export function mintBody(f: ApprovalForm): MintRequest {
   const n = needs(f);

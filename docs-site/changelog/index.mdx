@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.4: the dashboard survives an upgrade">
+  ## Your dashboard is still there after `ozbox upgrade`
+
+  An upgrade could leave a box with its dashboard settings in place and no dashboard running, while the command reported that it "already runs". That is fixed.
+
+  - **The box starts its dashboard again after an upgrade**, with the settings and address it had, and `ozbox dashboard install` says plainly whether the dashboard runs. It never says "already runs" unless the box confirms it.
+  - **The self-test fails a `dashboard` check** when a dashboard was installed and nothing runs, and says the one command to fix it.
+  - **Replacing the dashboard's sign-in settings is a deliberate, approved step**: `ozbox dashboard install --replace-sign-in --approve-with-laptop-key`, or an approval made in the dashboard (Secret approvals, "Replacing the dashboard's sign-in settings"). Without it the dashboard keeps the settings it has.
+  - **Keeping the tunnel token on your computer works for every box name**, so an upgrade can put the dashboard and its token back.
+  - **An old tunnel left running as the box user is found and can be retired**: `ozbox dashboard retire-legacy-tunnel <box>`. Its token file could be read by every agent on the box, so rotate the token in Cloudflare afterwards.
+  - **The dashboard's Memory and Skills pages work after an upgrade**, and say which folder and which command to use if they cannot.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

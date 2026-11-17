@@ -1158,6 +1158,36 @@ mod tests {
         }
     }
 
+    /// The laptop's pinned key approves replacing the dashboard's sign-in settings for exactly those settings (`ozbox dashboard install
+    /// --replace-sign-in --approve-with-laptop-key`): the same steps, with the binding the root helper recomputes from the staged file.
+    #[test]
+    fn the_laptop_key_approves_a_dashboard_sign_in_replacement_for_one_settings_digest_only() {
+        let r = rig();
+        let (seed, pk) = generate().unwrap();
+        r.enroll("laptop", &pk).unwrap();
+        let (a, b) = ("ab".repeat(16), "cd".repeat(16));
+        let out = r
+            .approve(&seed, "laptop", "dashboard-auth", "", &a, NOW)
+            .unwrap();
+        let code = out["code"].as_str().unwrap().to_string();
+        assert!(r
+            .gates
+            .require(&r.store, "dashboard-auth", "", &b, &code, NOW + 5)
+            .is_err());
+        assert_eq!(
+            r.gates
+                .require(&r.store, "dashboard-auth", "", &a, &code, NOW + 6)
+                .unwrap(),
+            "laptop-key:laptop"
+        );
+        assert!(
+            r.gates
+                .require(&r.store, "dashboard-auth", "", &a, &code, NOW + 7)
+                .is_err(),
+            "single use"
+        );
+    }
+
     #[test]
     fn a_signed_challenge_makes_the_same_single_use_scoped_code_the_dashboard_does() {
         let r = rig();

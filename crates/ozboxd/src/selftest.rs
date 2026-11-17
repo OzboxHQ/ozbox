@@ -66,6 +66,14 @@ pub struct SelfTestConfig {
     pub run_backend: Option<RunBackendNow>,
     /// The box user's home on /work: its owner is the box user, whose manager is looked for.
     pub user_home: PathBuf,
+    /// Where it can be seen that a dashboard was installed on this box, and that survives an upgrade (the system disk, with the
+    /// dashboard's unit, does not). This daemon runs as the box user and the dashboard's own folder is closed to it, so the
+    /// marker is a content-free file root keeps in a folder the box user can pass through; the box user's old dashboard folder
+    /// is the other trace. `None` off a box.
+    pub dashboard_traces: Option<DashboardTraces>,
+    /// The tunnel leftovers an older setup left in the box user's own home: a connector unit it runs and a token file it can read.
+    /// Empty off a box.
+    pub legacy_tunnel_paths: Vec<PathBuf>,
     /// Set on a box that has a backup service. The check only appears for a box on which backups were set up.
     pub backups: Option<BackupsProbe>,
 }
@@ -179,6 +187,103 @@ pub fn dashboard_socket_check(d: &DashboardSocket) -> Check {
         );
     }
     pass("dashboard_socket")
+}
+
+/// The traces that say a dashboard was installed on this box.
+#[derive(Debug, Clone)]
+pub struct DashboardTraces {
+    /// Root's empty marker (`/work/ozbox-supervisor-keep/installed`), written when the dashboard started as its own user.
+    pub marker: PathBuf,
+    /// The dashboard user's own marker (`/work/ozbox-supervisor/.migrated`). The folder is closed to this user, so this is only
+    /// seen when the daemon runs as root; a refusal is never read as "absent".
+    pub migrated: PathBuf,
+    /// The box user's old dashboard folder, which an upgrade leaves on /work.
+    pub old_home: PathBuf,
+}
+
+/// Where each trace is on a box.
+pub const DASHBOARD_MARKER: &str = "/work/ozbox-supervisor-keep/installed";
+pub const DASHBOARD_MIGRATED: &str = "/work/ozbox-supervisor/.migrated";
+pub const DASHBOARD_OLD_HOME: &str = "/work/home/ozbox/ozbox-dashboard";
+
+/// Does this path exist, and is that known? A refusal to look (a folder that is closed to us) is `None`, never `false`.
+fn seen(p: &Path) -> Option<bool> {
+    match fs::symlink_metadata(p) {
+        Ok(_) => Some(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// A dashboard that was installed on this box must be running. An upgrade replaces the system disk and the dashboard's unit with
+/// it while its settings stay on /work, so a box can come back from an upgrade with everything in place except the dashboard, and
+/// every other check would pass. `None` when nothing says one was installed.
+pub fn dashboard_check(
+    t: &DashboardTraces,
+    user_wants: &Path,
+    runner: &dyn CommandRunner,
+) -> Option<Check> {
+    const NAME: &str = "dashboard";
+    let traces = [seen(&t.marker), seen(&t.migrated), seen(&t.old_home)];
+    let installed = traces.contains(&Some(true));
+    if !installed {
+        // nothing seen: but if the one place that would say is closed to us, we do not know, and that is never a pass
+        return if traces.contains(&None) {
+            Some(unknown(
+                NAME,
+                "whether a dashboard was installed on this box could not be seen from here (its folder is the dashboard user's); run: ozbox admin <box> -- ensure-supervisor",
+            ))
+        } else {
+            None
+        };
+    }
+    // a dashboard still run by the box user's own manager is checked with the box user's other services
+    if user_wants.join("ozbox-dashboard.service").exists() {
+        return None;
+    }
+    let up = runner
+        .run(&CommandSpec::new("systemctl").args(["is-active", "ozbox-dashboard.service"]))
+        .map(|o| o.status == Some(0) && o.stdout.trim() == "active")
+        .unwrap_or(false);
+    Some(if up {
+        pass(NAME)
+    } else {
+        fail(
+            NAME,
+            "systemctl is-active",
+            "a dashboard was installed on this box but no dashboard service is running (an upgrade removes the service and keeps the settings). Run: ozbox admin <box> -- ensure-supervisor; it makes the service again from the address kept on this box. If it says nothing is kept, run `ozbox dashboard install` from your computer",
+        )
+    })
+}
+
+/// Where an older setup left a tunnel of the box user's own, under its home.
+pub fn legacy_tunnel_paths(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".config/ozbox-tunnel/token"),
+        home.join(".config/systemd/user/oz-cloudflared.service"),
+    ]
+}
+
+/// A tunnel connector the box user runs itself, with a token file the box user can read. Whatever the box user can read, every
+/// coding agent on the box can read too, and that token can open the box's public address to anyone holding it. `None` when none is
+/// left.
+pub fn legacy_tunnel_check(paths: &[PathBuf]) -> Option<Check> {
+    let found: Vec<String> = paths
+        .iter()
+        .filter(|p| fs::symlink_metadata(p).is_ok())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    Some(fail(
+        "legacy_tunnel",
+        "box user's own tunnel",
+        format!(
+            "an older setup left a tunnel connector and token of the box user's own ({}). Anything the box user can read, an agent can read. Once the box's own tunnel is running, retire them from your computer with: ozbox dashboard retire-legacy-tunnel <box>, then rotate the tunnel token in your Cloudflare account",
+            found.join(", ")
+        ),
+    ))
 }
 
 /// Where root's approval setting files are on a box.
@@ -357,6 +462,8 @@ impl SelfTestConfig {
             user_cgroup_root: None,
             run_backend: None,
             user_home: work_dir.join("home/ozbox"),
+            dashboard_traces: None,
+            legacy_tunnel_paths: Vec::new(),
             backups: None,
             work_dir,
         }
@@ -937,6 +1044,16 @@ pub fn run(
 
     if let Some(now) = &cfg.run_backend {
         checks.push(run_backend_check(now));
+    }
+
+    // a dashboard that was installed is running (an upgrade removes its unit and keeps its settings)
+    if let Some(t) = &cfg.dashboard_traces {
+        if let Some(c) = dashboard_check(t, &cfg.user_wants_dir, runner) {
+            checks.push(c);
+        }
+    }
+    if let Some(c) = legacy_tunnel_check(&cfg.legacy_tunnel_paths) {
+        checks.push(c);
     }
 
     // the secrets service's sockets answer this user (a socket in the wrong group answers nobody)
@@ -2038,5 +2155,131 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.program == "systemctl" && c.args == ["is-active", "tunnel-b.service"]));
+    }
+
+    // ---- the dashboard survives an upgrade; no box-user tunnel is left (beta.4) ----
+
+    fn traces(root: &Path) -> DashboardTraces {
+        DashboardTraces {
+            marker: root.join("ozbox-supervisor-keep/installed"),
+            migrated: root.join("ozbox-supervisor/.migrated"),
+            old_home: root.join("home/ozbox/ozbox-dashboard"),
+        }
+    }
+
+    fn systemctl_says(active: bool) -> RecordingRunner {
+        let rec = RecordingRunner::new();
+        reply(
+            &rec,
+            if active { 0 } else { 3 },
+            if active { "active\n" } else { "inactive\n" },
+        );
+        rec
+    }
+
+    #[test]
+    fn a_dashboard_that_was_installed_but_is_not_running_fails_the_self_test_with_the_step_to_take()
+    {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        // the state an upgrade leaves: the marker and settings on /work, no service on the new system disk
+        fs::create_dir_all(t.marker.parent().unwrap()).unwrap();
+        fs::write(&t.marker, "").unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("no dashboard service is running") && reason.contains("ensure-supervisor")),
+            "{c:?}"
+        );
+        // and passes once it runs
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(true)).unwrap();
+        assert_eq!(c.outcome, Outcome::Pass);
+    }
+
+    #[test]
+    fn the_box_users_old_dashboard_folder_is_also_a_trace_for_a_box_upgraded_before_the_marker_existed(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        fs::create_dir_all(&t.old_home).unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).unwrap();
+        assert!(matches!(c.outcome, Outcome::Fail { .. }), "{c:?}");
+    }
+
+    #[test]
+    fn a_box_that_never_had_a_dashboard_is_not_asked_and_one_run_by_the_box_user_is_left_to_the_services_check(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        assert!(dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false)).is_none());
+        fs::create_dir_all(&t.old_home).unwrap();
+        let wants = d.path().join("wants");
+        fs::create_dir_all(&wants).unwrap();
+        fs::write(wants.join("ozbox-dashboard.service"), "").unwrap();
+        assert!(dashboard_check(&t, &wants, &systemctl_says(false)).is_none());
+    }
+
+    /// The daemon runs as the box user and the dashboard's folder is closed to it: a refusal to look is never read as "absent"
+    /// and never as a pass. (A fixture that is readable by its author would pass whatever the real box reads.)
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_is_closed_to_this_user_is_unknown_never_a_pass() {
+        use std::os::unix::fs::PermissionsExt;
+        if running_as_root() {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let t = traces(d.path());
+        let closed = d.path().join("ozbox-supervisor");
+        fs::create_dir_all(&closed).unwrap();
+        fs::write(closed.join(".migrated"), "").unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let c = dashboard_check(&t, &d.path().join("wants"), &systemctl_says(false));
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        let c = c.unwrap();
+        assert!(matches!(c.outcome, Outcome::Unknown { .. }), "{c:?}");
+    }
+
+    #[test]
+    fn a_token_file_or_connector_unit_of_the_box_users_own_fails_the_self_test() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home/ozbox");
+        let paths = legacy_tunnel_paths(&home);
+        assert!(legacy_tunnel_check(&paths).is_none());
+        fs::create_dir_all(home.join(".config/ozbox-tunnel")).unwrap();
+        fs::write(home.join(".config/ozbox-tunnel/token"), "x").unwrap();
+        let c = legacy_tunnel_check(&paths).unwrap();
+        assert!(
+            matches!(&c.outcome, Outcome::Fail { reason, .. } if reason.contains("token") && reason.contains("retire-legacy-tunnel") && !reason.contains(home.to_str().unwrap())),
+            "{c:?}"
+        );
+        // the unit alone is enough
+        fs::remove_file(home.join(".config/ozbox-tunnel/token")).unwrap();
+        fs::create_dir_all(home.join(".config/systemd/user")).unwrap();
+        fs::write(home.join(".config/systemd/user/oz-cloudflared.service"), "").unwrap();
+        assert!(legacy_tunnel_check(&paths).is_some());
+    }
+
+    #[test]
+    fn the_new_checks_are_part_of_the_run_only_when_configured() {
+        let d = tempfile::tempdir().unwrap();
+        let (mut cfg, h) = setup(d.path());
+        let rec = RecordingRunner::new();
+        reply(&rec, 0, "disk\n");
+        let r = run(&cfg, &h, &rec, "/bin", &|| Ok(()), 7);
+        assert!(r
+            .checks
+            .iter()
+            .all(|c| c.name != "dashboard" && c.name != "legacy_tunnel"));
+        cfg.dashboard_traces = Some(traces(d.path()));
+        fs::create_dir_all(&cfg.dashboard_traces.as_ref().unwrap().old_home).unwrap();
+        cfg.legacy_tunnel_paths = legacy_tunnel_paths(&cfg.user_home);
+        let rec = RecordingRunner::new();
+        reply(&rec, 0, "disk\n");
+        let r = run(&cfg, &h, &rec, "/bin", &|| Ok(()), 7);
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.name == "dashboard" && matches!(c.outcome, Outcome::Fail { .. })));
+        assert!(!r.ok);
     }
 }

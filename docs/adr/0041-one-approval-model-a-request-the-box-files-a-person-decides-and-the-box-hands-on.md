@@ -1278,3 +1278,19 @@ Git common operations on a 4 vCPU / 8 GiB / 40 GB box, with the hooks installed 
   stored value (inside the store's lock for the policy and the limits).
 - A loosening refused for lack of a fresh second factor writes a `permission.deny` event to the audit chain, like a role
   refusal. Its detail names the act and the reason, never a value.
+
+## Amendment (2026-11-17): the scope `dashboard-auth`
+
+A tenth scope of the single-use code model (`SCOPE_RULES`): replacing the sign-in settings the dashboard already has (they decide
+who may approve on the box; ADR 0023 Amendment 2). It is a **code** scope like `tunnel-token`, spent by the root helper's
+`replace-dashboard-auth` at the admin socket, not a filed request: it has a row in the rule table (so the dashboard and the
+audit words know it) with no journal, no filers and no subject.
+
+- **Bound to the settings.** `project` is empty and `env` is the first 32 hex digits of the sha256 of the new `auth.toml` (the
+  longest a field may be). The laptop signs it (`ozbox dashboard install --replace-sign-in --approve-with-laptop-key`, the pinned
+  key, the same challenge as every other scope) or the dashboard mints it after a passkey or authenticator code (Secret approvals,
+  "Replacing the dashboard's sign-in settings", with the binding the install prints). A code made for other settings, for no
+  settings, or for another scope approves nothing, and is single use.
+- **Bootstrap: refused.** With no second factor enrolled the box user cannot be told from the owner, and replacing who may
+  approve is the one change it must never make for itself (ADR 0028 Amendment 1), so this is `Refused`, as `signer-enroll` is.
+- **A software laptop key and Telegram decide nothing here** beyond what the code model already gives every scope.

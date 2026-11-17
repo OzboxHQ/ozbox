@@ -47,6 +47,11 @@ pub struct Install {
     /// A single-use approval code for the tunnel-token change, for a box whose dashboard has a second factor (from
     /// `ozbox secrets approve --scope tunnel-token` on this computer). It goes in the script's body, never a command line.
     pub approval: Option<String>,
+    /// The person asked to REPLACE the sign-in settings the dashboard already has with `auth_toml` (`--replace-sign-in`).
+    pub replace_settings: bool,
+    /// The single-use approval of that replacement, bound to the sha256 of `auth_toml` (made on this computer with the pinned key, or
+    /// from the dashboard). It goes to the box's root helper in a request line, never in a command line of this computer.
+    pub settings_approval: Option<String>,
 }
 
 fn url_ok(u: &str) -> bool {
@@ -135,6 +140,8 @@ impl Install {
             auth_toml,
             caddy,
             approval: None,
+            replace_settings: false,
+            settings_approval: None,
         })
     }
 
@@ -410,6 +417,9 @@ pub(crate) fn run_with(
                 println!("{text}");
             }
             return Ok(());
+        }
+        DashboardCommand::RetireLegacyTunnel { name } => {
+            return crate::legacy_tunnel_cli::run(name, yes, dry_run, json_out, runner, input, tty);
         }
         DashboardCommand::Restore {
             name,
@@ -761,6 +771,9 @@ pub(crate) struct Installed {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Failure {
     NeedsApproval(String),
+    /// The dashboard keeps sign-in settings of its own and the person asked to replace them: the box wants an approval of THAT
+    /// change (bound to the sha256 of the new settings), which is a different one from the token's.
+    NeedsSettingsApproval(String),
     Other(CliError),
 }
 
@@ -773,7 +786,7 @@ impl From<CliError> for Failure {
 impl Failure {
     pub(crate) fn into_cli(self) -> CliError {
         match self {
-            Failure::NeedsApproval(m) => CliError::Msg(m),
+            Failure::NeedsApproval(m) | Failure::NeedsSettingsApproval(m) => CliError::Msg(m),
             Failure::Other(e) => e,
         }
     }
@@ -831,6 +844,33 @@ fn mint_for_token(
     crate::secrets_approval::canonical_code(&code).ok_or_else(|| t("dashboard.laptop_key_bad", &[]))
 }
 
+/// What an approval of replacing the dashboard's sign-in settings is bound to: the first 32 hex digits of the sha256 of the settings
+/// file the box checks (the longest a field may be). The laptop signs it, the box's service compares it, so a code made for one set
+/// of settings cannot install another.
+pub(crate) fn settings_binding(install: &Install) -> String {
+    install.auth_sha256().chars().take(32).collect()
+}
+
+/// The owner's approval of replacing the dashboard's sign-in settings, made now on their asking (`--replace-sign-in
+/// --approve-with-laptop-key`) with the key pinned when the box was made, for exactly these settings, once.
+fn mint_for_settings(
+    runner: &dyn CommandRunner,
+    keys: &dyn crate::secrets::SecretStore,
+    install: &Install,
+) -> Result<String, String> {
+    let (code, _) = crate::approval_key_cli::obtain(
+        runner,
+        keys,
+        &install.name,
+        crate::approval_key::PIN_ID,
+        "dashboard-auth",
+        "",
+        &settings_binding(install),
+    )
+    .map_err(|e| e.to_string())?;
+    crate::secrets_approval::canonical_code(&code).ok_or_else(|| t("dashboard.laptop_key_bad", &[]))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install(
     cmd: &DashboardCommand,
@@ -862,6 +902,8 @@ pub(crate) fn install(
         approval_stdin,
         token_from_keychain,
         approve_with_laptop_key,
+        replace_sign_in,
+        settings_approval,
     } = cmd
     else {
         return Err(CliError::Msg(t("dashboard.not_install", &[])).into());
@@ -877,7 +919,12 @@ pub(crate) fn install(
             return Err(CliError::Msg(t("tunnel.bad_approval", &[])).into());
         }
     }
-    if *approve_with_laptop_key && !*token_stdin && !*token_from_keychain {
+    if let Some(code) = settings_approval {
+        if !crate::secrets_approval::is_code_shape(code) {
+            return Err(CliError::Msg(t("tunnel.bad_approval", &[])).into());
+        }
+    }
+    if *approve_with_laptop_key && !*token_stdin && !*token_from_keychain && !*replace_sign_in {
         return Err(CliError::Msg(t("dashboard.approve_needs_token", &[])).into());
     }
     // Either the box downloads the program from an address given here, or (the default) it is the signed release of
@@ -940,6 +987,10 @@ pub(crate) fn install(
             .map(|c| crate::secrets_approval::canonical_code(c).unwrap_or_else(|| c.to_string())),
         ..install
     };
+    install.replace_settings = *replace_sign_in;
+    install.settings_approval = settings_approval
+        .as_deref()
+        .and_then(crate::secrets_approval::canonical_code);
     let plan = install.plan();
     if json_out {
         if !o.quiet {
@@ -1050,6 +1101,20 @@ pub(crate) fn install(
         }
     }
     let mut sent = send(runner, &install, token.as_deref());
+    // The box kept sign-in settings of its own and the owner asked to replace them with the key on this computer: made here now,
+    // for exactly these settings, and the install is sent again (the staged copy is still there, the box has not finished).
+    if let Err(Failure::NeedsSettingsApproval(why)) = &sent {
+        if *approve_with_laptop_key && install.settings_approval.is_none() {
+            let why = why.clone();
+            match mint_for_settings(runner, stores.keys, &install) {
+                Ok(code) => {
+                    install.settings_approval = Some(code);
+                    sent = send(runner, &install, token.as_deref());
+                }
+                Err(more) => sent = Err(Failure::NeedsSettingsApproval(format!("{why}\n{more}"))),
+            }
+        }
+    }
     // The box wants the owner's approval of the token change. It is made here only when the owner asked for it with this
     // command (`--approve-with-laptop-key`): with the key pinned when the box was made, for this very token, once.
     let asked = match &sent {
@@ -1193,7 +1258,9 @@ pub(crate) fn restore_kept(
             address: kept.public_url,
             token: done.token_stored,
         },
-        Err(Failure::NeedsApproval(_)) => Restored::NeedsApproval,
+        Err(Failure::NeedsApproval(_) | Failure::NeedsSettingsApproval(_)) => {
+            Restored::NeedsApproval
+        }
         Err(Failure::Other(e)) => Restored::Failed(e.to_string()),
     }
 }
@@ -1272,9 +1339,34 @@ fn send(
     }
 }
 
+/// What the box's setup step says about the dashboard it just dealt with: the line it ends with, written by root on the box (never
+/// the box user's own script), so a laptop can believe it. `settings` is `installed`, `replaced`, `kept` or `unchanged`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SetupState {
+    pub running: bool,
+    pub settings: String,
+}
+
+pub(crate) fn setup_state(said: &str) -> Option<SetupState> {
+    // the LAST one: a request that ran the step twice (kept, then replaced) ends with what is true now
+    let rest = said
+        .rsplit("state dashboard=")
+        .next()
+        .filter(|_| said.contains("state dashboard="))?;
+    let mut words = rest.split_whitespace();
+    let running = words.next()? == "running";
+    let settings = words.next()?.strip_prefix("settings=")?.to_string();
+    Some(SetupState { running, settings })
+}
+
 /// Ask the box's root helper to start the staged dashboard as its own user, then to destroy the box user's copies. An error
 /// says what happened; in every case nothing runs as the box user (the helper starts no box-user copy of a staged one).
-fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<Moved, CliError> {
+///
+/// A dashboard is reported as running only when the box says so (the helper's own `state` line) or, from a helper that predates
+/// that line, when a second question over the box's own route finds it still up after its restart delay. Never from "it already
+/// has settings" alone: an upgrade removes the unit and keeps the settings, which is how "already runs" was once said of a
+/// dashboard that was not there.
+fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<Moved, Failure> {
     let box_name = install.name.as_str();
     let ask = |request: &str| -> Result<String, CliError> {
         let o = runner
@@ -1292,41 +1384,77 @@ fn start_as_supervisor(runner: &dyn CommandRunner, install: &Install) -> Result<
             )))
         }
     };
-    let moved = ask(&format!(
+    let mut moved = ask(&format!(
         "ensure-supervisor expect {}",
         install.auth_sha256()
     ))?;
-    // The dashboard already has sign-in settings of its own: the helper kept them (it cannot replace them on a request the box
-    // user could have made) and changed nothing, so there is nothing to finish or check.
-    if moved.contains("already has sign-in settings of its own") {
-        return Ok(Moved::Kept(moved));
+    let mut kept = moved.contains("already has sign-in settings of its own");
+    if kept && install.replace_settings {
+        // Replacing settings that decide who may approve needs an approval made where the box user cannot make it, bound to these
+        // exact settings. The root helper checks it with the secrets service before anything changes.
+        let Some(code) = &install.settings_approval else {
+            return Err(Failure::NeedsSettingsApproval(t(
+                "dashboard.need_settings_approval",
+                &[("box", box_name), ("binding", &settings_binding(install))],
+            )));
+        };
+        let replaced = ask(&format!(
+            "replace-dashboard-auth {} {code}",
+            install.auth_sha256()
+        ))?;
+        if setup_state(&replaced).is_none_or(|s| s.settings != "replaced") {
+            return Err(CliError::Msg(t(
+                "dashboard.supervisor_failed",
+                &[("box", box_name), ("why", replaced.trim())],
+            ))
+            .into());
+        }
+        moved = format!("{moved}\n{replaced}");
+        kept = false;
     }
-    if !moved.contains("runs as ozbox-supervisor") {
+    if !kept
+        && !moved.contains("runs as ozbox-supervisor")
+        && !setup_state(&moved).is_some_and(|s| s.running)
+    {
         return Err(CliError::Msg(t(
             "dashboard.supervisor_failed",
             &[("box", box_name), ("why", moved.trim())],
-        )));
+        ))
+        .into());
     }
-    // A helper from an earlier program says "runs" as soon as the process forks, so a dashboard that exits at once (settings
-    // it cannot read) was reported as running. Ask the box, after the restart delay, whether it stayed up.
-    let health = runner
-        .run(&install.health_command())
-        .map_err(|_| CliError::Msg(t("dashboard.reach_failed", &[("box", box_name)])))?;
-    if !health.stdout.contains("dashboard-health: ok") {
-        let state = health
-            .stdout
-            .lines()
-            .find_map(|l| l.strip_prefix("dashboard-health: "))
-            .unwrap_or("unknown")
-            .trim()
-            .to_string();
-        return Err(CliError::Msg(t(
-            "dashboard.not_running",
-            &[("box", box_name), ("state", &state)],
-        )));
+    let box_says_running = setup_state(&moved).is_some_and(|s| s.running);
+    if !box_says_running || !kept {
+        // A helper from an earlier program says "runs" as soon as the process forks, so a dashboard that exits at once (settings
+        // it cannot read) was reported as running. Ask the box, after the restart delay, whether it stayed up.
+        let health = runner
+            .run(&install.health_command())
+            .map_err(|_| CliError::Msg(t("dashboard.reach_failed", &[("box", box_name)])))?;
+        if !health.stdout.contains("dashboard-health: ok") {
+            let state = health
+                .stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("dashboard-health: "))
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
+            return Err(CliError::Msg(t(
+                if kept {
+                    "dashboard.kept_not_running"
+                } else {
+                    "dashboard.not_running"
+                },
+                &[("box", box_name), ("state", &state)],
+            ))
+            .into());
+        }
     }
     let finished = ask("ensure-supervisor finish")?;
-    Ok(Moved::Started(format!("{moved}\n{finished}")))
+    let text = format!("{moved}\n{finished}");
+    Ok(if kept {
+        Moved::Kept(text)
+    } else {
+        Moved::Started(text)
+    })
 }
 
 /// What the root helper did with the staged dashboard.
@@ -1575,6 +1703,8 @@ mod tests {
             approval_stdin: false,
             token_from_keychain: false,
             approve_with_laptop_key: false,
+            replace_sign_in: false,
+            settings_approval: None,
         };
         let r = RecordingRunner::new();
         let (secrets, keys) = (MemorySecrets::default(), MemorySecrets::default());
@@ -1661,6 +1791,8 @@ mod tests {
             approval_stdin: false,
             token_from_keychain: false,
             approve_with_laptop_key: false,
+            replace_sign_in: false,
+            settings_approval: None,
         }
     }
 
@@ -2277,13 +2409,27 @@ mod tests {
         ));
         assert!(install_with(&r, &by_hand(), &FakeAssets::ok()).is_err());
 
-        // a box whose dashboard already has sign-in settings of its own keeps them, and that is said: the helper is asked,
-        // and answers that it changed nothing, so there is nothing to finish
+        // a box whose dashboard already has sign-in settings of its own keeps them, and that is said. The helper's own state line
+        // says the dashboard runs, so it is believed; the box user's staged copies are then destroyed (finish)
+        let r = Arc::new(RecordingRunner::new());
+        r.reply(ok_out("dashboard-setup: supervisor-present"));
+        r.reply(ok_out("status=ok\nozbox-supervisor-setup: the dashboard on this box already has sign-in settings of its own, so the ones sent from your computer were not applied ozbox-supervisor-setup: state dashboard=running settings=kept"));
+        r.reply(ok_out(
+            "status=ok\nozbox-supervisor-setup: the old dashboard state is destroyed",
+        ));
+        install_with(&r, &by_hand(), &FakeAssets::ok()).unwrap();
+        assert_eq!(r.calls().len(), 3);
+        // an OLDER helper (no state line) that says the same and started nothing: the box is asked whether the dashboard stays up,
+        // and "already runs" is never said without an answer (this is the upgrade defect: the unit was gone, the settings were kept)
         let r = Arc::new(RecordingRunner::new());
         r.reply(ok_out("dashboard-setup: supervisor-present"));
         r.reply(ok_out("status=ok\nozbox-supervisor-setup: the dashboard on this box already has sign-in settings of its own, so the ones sent from your computer were not applied"));
-        install_with(&r, &by_hand(), &FakeAssets::ok()).unwrap();
-        assert_eq!(r.calls().len(), 2);
+        r.reply(ok_out("dashboard-health: inactive, restarted 0 times"));
+        let e = install_with(&r, &by_hand(), &FakeAssets::ok())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("not running"), "{e}");
+        assert_eq!(r.calls().len(), 3);
     }
 
     /// Found on a real box (2026-11-15): after an upgrade the supervisor's folder (kept on /work) had no sign-in settings, the
@@ -2895,5 +3041,121 @@ mod tests {
         );
         // and the token is still kept, for the one command that follows
         assert!(crate::dashboard_keep::has_token(&secrets, "dash"));
+    }
+
+    // ---- the dashboard survives an upgrade (beta.4) ----
+
+    const KEPT_SAID: &str = "status=ok\nozbox-supervisor-setup: the dashboard on this box already has sign-in settings of its own, so the ones sent from your computer were not applied (replacing them needs your approval, which this step cannot take; ask for one and run the install again with --replace-sign-in)";
+
+    fn requests(r: &RecordingRunner) -> Vec<String> {
+        r.calls()
+            .iter()
+            .filter_map(|c| c.args.last().cloned())
+            .filter(|a| a.contains("ozbox-admin-request"))
+            .collect()
+    }
+
+    /// The failure this fixes: an upgrade removed the dashboard's unit and kept its settings, the helper said "already has
+    /// settings" and did nothing, and the laptop reported that the dashboard "already runs as its own user".
+    #[test]
+    fn a_dashboard_with_kept_settings_that_is_not_running_is_never_reported_as_running() {
+        let r = RecordingRunner::new();
+        r.reply(ok_out(KEPT_SAID)); // an older helper: no state line, and it started nothing
+        r.reply(ok_out("dashboard-health: inactive, restarted 0 times"));
+        let i = install(Some("cloudflare"));
+        let e = match start_as_supervisor(&r, &i) {
+            Err(Failure::Other(e)) => e.to_string(),
+            Err(_) => panic!("wrong failure"),
+            Ok(_) => panic!("said the dashboard runs"),
+        };
+        assert!(
+            e.contains("not running") && e.contains("ensure-supervisor"),
+            "{e}"
+        );
+        // and nothing was finished or destroyed
+        assert_eq!(requests(&r).len(), 1);
+    }
+
+    #[test]
+    fn a_new_helper_that_made_the_unit_again_is_believed_by_its_own_state_line_and_the_box_is_finished(
+    ) {
+        let r = RecordingRunner::new();
+        r.reply(ok_out(&format!(
+            "{KEPT_SAID} ozbox-supervisor-setup: state dashboard=running settings=kept"
+        )));
+        r.reply(ok_out("status=ok\nthe old dashboard state is destroyed"));
+        let i = install(Some("cloudflare"));
+        assert!(matches!(start_as_supervisor(&r, &i), Ok(Moved::Kept(_))));
+        let reqs = requests(&r);
+        assert_eq!(reqs.len(), 2, "{reqs:?}");
+        assert!(reqs[1].ends_with("ensure-supervisor finish"));
+    }
+
+    #[test]
+    fn replacing_kept_settings_needs_an_approval_bound_to_their_sha_and_asks_for_none_unless_told()
+    {
+        let sha = install(Some("cloudflare")).auth_sha256();
+        // no approval: refused on the laptop, the helper is asked for nothing more, and the binding is named
+        let r = RecordingRunner::new();
+        r.reply(ok_out(&format!(
+            "{KEPT_SAID} state dashboard=running settings=kept"
+        )));
+        let mut i = install(Some("cloudflare"));
+        i.replace_settings = true;
+        match start_as_supervisor(&r, &i) {
+            Err(Failure::NeedsSettingsApproval(m)) => assert!(m.contains(&sha[..32]), "{m}"),
+            _ => panic!("expected a request for an approval"),
+        }
+        assert_eq!(requests(&r).len(), 1);
+        // with one: the helper is sent the sha and the code, and the result is a started dashboard with the new settings
+        let r = RecordingRunner::new();
+        r.reply(ok_out(&format!(
+            "{KEPT_SAID} state dashboard=running settings=kept"
+        )));
+        r.reply(ok_out(
+            "status=ok\nozbox-supervisor-setup: state dashboard=running settings=replaced",
+        ));
+        r.reply(ok_out("dashboard-health: ok"));
+        r.reply(ok_out("status=ok\nfinished"));
+        i.settings_approval = Some("ABCD-EFGH-JKMN-PQRS".into());
+        assert!(matches!(start_as_supervisor(&r, &i), Ok(Moved::Started(_))));
+        let reqs = requests(&r);
+        assert!(
+            reqs.iter()
+                .any(|q| q.ends_with(&format!("replace-dashboard-auth {sha} ABCD-EFGH-JKMN-PQRS"))),
+            "{reqs:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_replacement_says_the_boxs_words_and_does_not_report_a_start() {
+        let r = RecordingRunner::new();
+        r.reply(ok_out(&format!(
+            "{KEPT_SAID} state dashboard=running settings=kept"
+        )));
+        r.reply(ok_out(
+            "status=failed\nthat approval is not valid, has been used, or has expired",
+        ));
+        let mut i = install(Some("cloudflare"));
+        i.replace_settings = true;
+        i.settings_approval = Some("ABCD-EFGH-JKMN-PQRS".into());
+        let e = match start_as_supervisor(&r, &i) {
+            Err(Failure::Other(e)) => e.to_string(),
+            _ => panic!("expected a refusal"),
+        };
+        assert!(e.contains("not valid"), "{e}");
+    }
+
+    #[test]
+    fn the_state_line_is_read_only_in_its_one_shape() {
+        assert_eq!(
+            setup_state("x: state dashboard=running settings=replaced y"),
+            Some(SetupState {
+                running: true,
+                settings: "replaced".into()
+            })
+        );
+        assert!(setup_state("the dashboard runs as ozbox-supervisor").is_none());
+        assert!(setup_state("state dashboard=running").is_none());
     }
 }
