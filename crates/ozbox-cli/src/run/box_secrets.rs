@@ -214,7 +214,7 @@ pub(super) fn command(
         .get(&name)?
         .ok_or_else(|| ozbox_core::Error::NotFound(name.to_string()))?;
     if rec.provider == "hcloud" {
-        return hetzner(agent, &rec, &name, &change, &extras, f);
+        return hetzner(agent, runner, &rec, &name, &change, &extras, f);
     }
     if rec.provider != "aws" {
         return Err(CliError::Msg(
@@ -272,6 +272,7 @@ pub(super) fn command(
 /// variables only matter for a box not yet created.
 fn hetzner(
     agent: &dyn BoxAgent,
+    runner: &dyn CommandRunner,
     rec: &ozbox_core::BoxRecord,
     name: &BoxName,
     change: &Change,
@@ -300,7 +301,22 @@ fn hetzner(
         ));
     }
     super::admin::ask(f, name.as_str())?;
-    match agent.admin(rec, &request) {
+    let mut answer = agent.admin(rec, &request);
+    // B4-27: the box needs an approval and none was given. Nothing was changed; file a request for exactly this declaration,
+    // wait while it is approved in the dashboard, and send the change again with the approved request (`req-<id>`).
+    if let (Ok((false, out)), None) = (&answer, extras.approval.as_deref()) {
+        if crate::approval_flow::needs_approval(out) {
+            if let Some(word) = request_for_declaration(runner, name, change, extras, &request)? {
+                let x = Extras {
+                    approval: Some(word),
+                    ..extras.clone()
+                };
+                let again = hetzner_request(change, &x).map_err(CliError::Msg)?;
+                answer = agent.admin(rec, &again);
+            }
+        }
+    }
+    match answer {
         Ok((true, out)) => {
             if !f.json {
                 println!("{out}");
@@ -325,12 +341,59 @@ fn hetzner(
     print_result(f, name, true, false)
 }
 
+/// File a `box-secrets` request for exactly this declaration over the box's sealed route and wait for the dashboard to approve
+/// it (only the dashboard approves the box's own secrets). `Ok(None)` when the box cannot spend one, so the refusal stands and
+/// says how to get a code.
+fn request_for_declaration(
+    runner: &dyn CommandRunner,
+    name: &BoxName,
+    change: &Change,
+    extras: &Extras,
+    request: &str,
+) -> Result<Option<String>> {
+    let mut call = |v: &serde_json::Value| {
+        crate::workload_cli::ssh_receive(runner, name.as_str(), v)
+            .map(|r| r["result"].clone())
+            .map_err(|e| e.to_string())
+    };
+    if !crate::approval_flow::box_files(&mut call, "box-secrets") {
+        return Ok(None);
+    }
+    let bind = hetzner_binding(request).unwrap_or_default();
+    let subject =
+        ozbox_core::approval_subject::gate_subject("box-secrets", "declaration", &bind, "")
+            .map_err(|e| CliError::Msg(e.0))?;
+    let what = match change {
+        Change::Remove => crate::messages::t(
+            "approval.flow_box_secrets_remove_what",
+            &[("box", name.as_str())],
+        ),
+        _ => crate::messages::t(
+            "approval.flow_box_secrets_what",
+            &[
+                ("box", name.as_str()),
+                ("address", extras.vault_addr.as_deref().unwrap_or("none")),
+            ],
+        ),
+    };
+    let ok = crate::workload_cli::request_and_wait(
+        runner,
+        name.as_str(),
+        &serde_json::json!({"op": "areq_file", "subject": subject}),
+        "box-secrets",
+        false,
+        &what,
+        crate::approval_flow::MAX_WAIT_MINUTES,
+    )?;
+    Ok(Some(ozbox_core::approval_subject::request_word(&ok.id)))
+}
+
 /// The plan for a box with no instance tags, in words.
 pub fn describe_hetzner(name: &str, c: &Change) -> String {
     match c {
         Change::Set(c) => format!(
             "On {name}: write /etc/ozbox/box-secrets.env so it keeps its own secrets in {} under {}/{} (the file holds names and an address, never a secret), then have the box read them. \
-             The vault token is not set here: place it on the box with `ozbox admin {name} -- place-bao-token`. A box with a second factor needs a fresh approval (--approval).",
+             The vault token is not set here: place it on the box with `ozbox admin {name} -- place-bao-token`. A box with a second factor needs a fresh approval: without --approval this command files a request and waits while you approve it in the dashboard (Approvals).",
             c.backend, c.path, c.role
         ),
         Change::Remove => format!(
@@ -474,6 +537,18 @@ mod tests {
         let other = hetzner_request(&set, &x("https://evil.example.com")).unwrap();
         assert_ne!(hetzner_binding(&other), hetzner_binding(&r));
         assert_eq!(hetzner_binding("clear-box-secrets -"), None);
+        // an approved request's word (B4-27) rides where the code went, and the binding does not change with it
+        let word = ozbox_core::approval_subject::request_word("abcdefghijklmnopqrstuvwxyz");
+        let by_request = hetzner_request(
+            &set,
+            &Extras {
+                approval: Some(word.clone()),
+                ..x("https://vault.example.com:8200")
+            },
+        )
+        .unwrap();
+        assert!(by_request.starts_with(&format!("write-box-secrets {word} ")));
+        assert_eq!(hetzner_binding(&by_request), hetzner_binding(&r));
     }
 
     #[test]

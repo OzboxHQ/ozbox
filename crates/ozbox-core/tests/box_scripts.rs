@@ -1913,6 +1913,79 @@ fn hexs(s: &str) -> String {
     s.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Review open question (b), B4-27: the box-secrets binding the approval is checked against is worked out on the root helper's
+/// side, from the very words it then validates and writes (role, path, address, mount), never taken from the caller: the request
+/// carries no binding at all. It equals the laptop's `hetzner_binding` for the same declaration (the vector its own test pins),
+/// and a declaration with another vault address is checked against another binding, with that address the one written.
+#[test]
+fn the_box_secrets_binding_is_worked_out_by_root_from_what_it_writes() -> R {
+    let gate = "printf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/gate.args\"; echo laptop-key:laptop";
+    let bound = |b: &BoxSecrets| {
+        b.file("gate.args")
+            .lines()
+            .last()
+            .and_then(|l| {
+                l.split_once("--env ")
+                    .map(|(_, r)| r.split(' ').next().unwrap_or("").to_string())
+            })
+            .unwrap_or_default()
+    };
+    let b = BoxSecrets::new(gate);
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://vault.example.com:8200"),
+        "secret",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+    // the laptop's hetzner_binding for this declaration (crates/ozbox-cli/src/run/box_secrets.rs pins the same vector)
+    assert_eq!(bound(&b), "d-7805e83e21b45add", "{}", b.file("gate.args"));
+    assert!(b
+        .file("gate.args")
+        .contains("--scope box-secrets --project declaration"));
+    assert!(b
+        .file("box-secrets.env")
+        .contains("BAO_ADDR=https://vault.example.com:8200"));
+    // another address: another binding, and the address written is the one bound
+    let b = BoxSecrets::new(gate);
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://evil.example.com"),
+        "secret",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_ne!(bound(&b), "d-7805e83e21b45add");
+    assert!(
+        bound(&b).starts_with("d-") && bound(&b).len() == 18,
+        "{}",
+        bound(&b)
+    );
+    assert!(b
+        .file("box-secrets.env")
+        .contains("BAO_ADDR=https://evil.example.com"));
+    // a refusal at the gate writes nothing
+    let b = BoxSecrets::new("echo refused >&2; exit 1");
+    let o = b.run(&[
+        "write-box-secrets",
+        "-",
+        "openbao",
+        "main",
+        "ozbox..dev",
+        &hexs("https://vault.example.com:8200"),
+        "secret",
+    ]);
+    assert!(!o.status.success());
+    assert!(b.file("box-secrets.env").is_empty());
+    Ok(())
+}
+
 #[test]
 fn the_declaration_is_written_as_the_settings_file_the_loader_reads_and_the_secrets_are_reloaded(
 ) -> R {

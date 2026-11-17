@@ -237,8 +237,11 @@ impl Install {
         out.push_str(&format!("TUNNEL_ARGS=({args})\n"));
         out.push_str(&format!("TUNNEL_TOKEN={}\n", quote(token.unwrap_or(""))));
         if let Some(code) = &self.approval {
-            // only something shaped like a code (letters, digits, dashes) is ever written, so the quoting holds
-            if !crate::secrets_approval::is_code_shape(code) {
+            // only something shaped like a code, or an approved request's word (`req-<id>`, B4-27) is ever written: letters,
+            // digits and dashes, so the quoting holds
+            if !crate::secrets_approval::is_code_shape(code)
+                && ozbox_core::approval_subject::request_word_id(code).is_none()
+            {
                 return Err(t("tunnel.bad_approval", &[]));
             }
         }
@@ -851,6 +854,51 @@ pub(crate) fn settings_binding(install: &Install) -> String {
     install.auth_sha256().chars().take(32).collect()
 }
 
+/// File a `tunnel-token` request for exactly this token over the box's sealed route, wait while the owner approves it in the
+/// dashboard, and return the word the box's root helper takes in place of a code (`req-<id>`). `Ok(None)` when the box cannot
+/// spend one (an older service, or a root helper that does not bind an approval to the token): the install then says how to
+/// get a code, as before. Only the dashboard approves a tunnel token (a key kept on this computer never does by request).
+fn request_for_token(
+    runner: &dyn CommandRunner,
+    install: &Install,
+    token: &str,
+) -> Result<Option<String>, CliError> {
+    if helper_binds_approval(runner, &install.name) != Some(true) {
+        return Ok(None);
+    }
+    let box_name = install.name.as_str();
+    let mut call = |v: &serde_json::Value| {
+        crate::workload_cli::ssh_receive(runner, box_name, v)
+            .map(|r| r["result"].clone())
+            .map_err(|e| e.to_string())
+    };
+    if !crate::approval_flow::box_files(&mut call, "tunnel-token") {
+        return Ok(None);
+    }
+    let provider = install.kind.map(|k| k.id()).unwrap_or("cloudflare");
+    let subject = ozbox_core::approval_subject::gate_subject(
+        "tunnel-token",
+        provider,
+        &crate::secrets_approval::tunnel_token_binding(token),
+        &ozbox_core::approval_subject::tunnel_token_sha256(token),
+    )
+    .map_err(|e| CliError::Msg(e.0))?;
+    let what = t(
+        "approval.flow_tunnel_what",
+        &[("provider", provider), ("box", box_name)],
+    );
+    let ok = crate::workload_cli::request_and_wait(
+        runner,
+        box_name,
+        &json!({"op": "areq_file", "subject": subject}),
+        "tunnel-token",
+        false,
+        &what,
+        crate::approval_flow::MAX_WAIT_MINUTES,
+    )?;
+    Ok(Some(ozbox_core::approval_subject::request_word(&ok.id)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install(
     cmd: &DashboardCommand,
@@ -1098,6 +1146,23 @@ pub(crate) fn install(
                 sent = send(runner, &install, token.as_deref());
             }
             Err(more) => sent = Err(Failure::NeedsApproval(format!("{why}\n{more}"))),
+        }
+    }
+    // B4-27: no code was given and the owner did not ask for the laptop key. File a request for exactly this token, wait
+    // while it is approved in the dashboard, and send the install again with the approved request. Not when this runs quietly
+    // (putting a dashboard back after an upgrade never waits on a person), and not on a box that cannot spend one.
+    let file_it = matches!(&sent, Err(Failure::NeedsApproval(_)))
+        && install.approval.is_none()
+        && !*approve_with_laptop_key
+        && !o.quiet;
+    if let (true, Some(tk)) = (file_it, token.as_deref()) {
+        match request_for_token(runner, &install, tk) {
+            Ok(Some(word)) => {
+                install.approval = Some(word);
+                sent = send(runner, &install, token.as_deref());
+            }
+            Ok(None) => {}
+            Err(e) => sent = Err(Failure::Other(e)),
         }
     }
     if let Err(Failure::NeedsApproval(m)) = &mut sent {
@@ -2491,6 +2556,13 @@ mod tests {
         // it is never an argument of the command that reaches the box
         assert!(!i.command(body).args.iter().any(|a| a.contains("ABCD-EFGH")));
         i.approval = Some("x'; touch /tmp/p; '".into());
+        assert!(i.script(Some("SENTINEL-TOKEN-0123456789")).is_err());
+        // an approved request's word (B4-27) is letters, digits and dashes too, and goes where a code goes
+        let word = ozbox_core::approval_subject::request_word("abcdefghijklmnopqrstuvwxyz");
+        i.approval = Some(word.clone());
+        let body = i.script(Some("SENTINEL-TOKEN-0123456789")).unwrap();
+        assert!(body.contains(&format!("TUNNEL_APPROVAL='{word}'")));
+        i.approval = Some("req-not a request".into());
         assert!(i.script(Some("SENTINEL-TOKEN-0123456789")).is_err());
     }
 

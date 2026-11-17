@@ -3,6 +3,8 @@ import { toast } from 'sonner';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { PanelSheet, PanelSheetBody, PanelSheetContent, PanelSheetDescription, PanelSheetFooter, PanelSheetHeader, PanelSheetTitle } from '@/components/ui/panel-sheet';
 import { Spinner } from '@/components/ui/spinner';
 import { ApiError } from '../../api/error';
@@ -13,6 +15,7 @@ import { t } from '../../lib/i18n';
 import { getPasskey, passkeysSupported, wasCancelled } from '../../lib/webauthn';
 
 type Phase = 'ready' | 'working' | 'done';
+type Mode = 'passkey' | 'code';
 
 /**
  * The passkey step. It names what is being approved first. One press makes one challenge, one assertion and one decision:
@@ -22,6 +25,27 @@ export function ApproveSheet({ client, card, onClose, onDecided }: { client: Api
   const [phase, setPhase] = useState<Phase>('ready');
   const [note, setNote] = useState<string | null>(null);
   const supported = passkeysSupported();
+  // a browser with no passkeys starts on the authenticator code; the person can switch either way
+  const [mode, setMode] = useState<Mode>(supported ? 'passkey' : 'code');
+  const [code, setCode] = useState('');
+  const codeReady = code.replace(/\s/g, '').length === 6;
+
+  async function confirmWithCode() {
+    setPhase('working');
+    setNote(null);
+    try {
+      await client.approvalRequests.approveWithCode(card.id, code);
+      setCode('');
+      toast.success(t('areq.approved_toast'));
+      setPhase('done');
+      onDecided();
+    } catch (e) {
+      setPhase('ready');
+      setCode('');
+      setNote(e instanceof ApiError ? e.message : t('areq.approve_failed'));
+      if (e instanceof ApiError && e.status !== 401 && e.status !== 429) onDecided();
+    }
+  }
 
   async function confirm() {
     setPhase('working');
@@ -56,8 +80,8 @@ export function ApproveSheet({ client, card, onClose, onDecided }: { client: Api
     <PanelSheet open onOpenChange={(o) => !o && phase !== 'working' && onClose()}>
       <PanelSheetContent data-testid="approve-sheet" size="compact">
         <PanelSheetHeader>
-          <PanelSheetTitle>{t('areq.sheet_title')}</PanelSheetTitle>
-          <PanelSheetDescription>{t('areq.sheet_desc')}</PanelSheetDescription>
+          <PanelSheetTitle>{t(mode === 'code' ? 'areq.sheet_title_code' : 'areq.sheet_title')}</PanelSheetTitle>
+          <PanelSheetDescription>{t(mode === 'code' ? 'areq.sheet_desc_code' : 'areq.sheet_desc')}</PanelSheetDescription>
         </PanelSheetHeader>
         <PanelSheetBody className="space-y-4">
           <dl className="space-y-3 text-sm">
@@ -87,10 +111,52 @@ export function ApproveSheet({ client, card, onClose, onDecided }: { client: Api
           ) : (
             <p className="text-xs text-muted-foreground">{t('areq.sheet_will')}</p>
           )}
-          {!supported && phase !== 'done' ? (
+          {!supported && phase !== 'done' && mode === 'passkey' ? (
             <Alert variant="destructive" role="alert">
               <AlertDescription>{t('areq.sheet_no_passkeys')}</AlertDescription>
             </Alert>
+          ) : null}
+          {mode === 'code' && phase !== 'done' ? (
+            <form
+              id="approve-code-form"
+              className="space-y-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (codeReady && phase !== 'working') void confirmWithCode();
+              }}
+            >
+              <Label htmlFor="approve-code">{t('areq.sheet_code_label')}</Label>
+              <Input
+                className="h-11 lg:h-10"
+                id="approve-code"
+                data-testid="approve-sheet-code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={7}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                aria-describedby="approve-code-hint"
+              />
+              <p id="approve-code-hint" className="text-xs text-muted-foreground">
+                {t('areq.sheet_code_hint')}
+              </p>
+            </form>
+          ) : null}
+          {phase !== 'done' ? (
+            <Button
+              type="button"
+              variant="link"
+              className="h-11 px-0 lg:h-auto"
+              disabled={phase === 'working'}
+              onClick={() => {
+                setNote(null);
+                setCode('');
+                setMode(mode === 'code' ? 'passkey' : 'code');
+              }}
+              data-testid="approve-sheet-switch"
+            >
+              {t(mode === 'code' ? 'areq.sheet_use_passkey' : 'areq.sheet_use_code')}
+            </Button>
           ) : null}
           {note ? (
             <Alert variant="destructive" role="alert" data-testid="approve-sheet-note">
@@ -108,16 +174,29 @@ export function ApproveSheet({ client, card, onClose, onDecided }: { client: Api
               <Button variant="outline" className="max-lg:h-11" disabled={phase === 'working'} onClick={onClose} data-testid="approve-sheet-close">
                 {t('areq.sheet_close')}
               </Button>
-              <Button className="max-lg:h-11" disabled={phase === 'working' || !supported} onClick={() => void confirm()} data-testid="approve-sheet-confirm">
-                {phase === 'working' ? (
-                  <>
-                    <Spinner className="mr-2 h-4 w-4" />
-                    {t('areq.sheet_confirming')}
-                  </>
-                ) : (
-                  t('areq.sheet_confirm')
-                )}
-              </Button>
+              {mode === 'code' ? (
+                <Button type="submit" form="approve-code-form" className="max-lg:h-11" disabled={phase === 'working' || !codeReady} data-testid="approve-sheet-code-confirm">
+                  {phase === 'working' ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      {t('areq.sheet_code_confirming')}
+                    </>
+                  ) : (
+                    t('areq.sheet_code_confirm')
+                  )}
+                </Button>
+              ) : (
+                <Button className="max-lg:h-11" disabled={phase === 'working' || !supported} onClick={() => void confirm()} data-testid="approve-sheet-confirm">
+                  {phase === 'working' ? (
+                    <>
+                      <Spinner className="mr-2 h-4 w-4" />
+                      {t('areq.sheet_confirming')}
+                    </>
+                  ) : (
+                    t('areq.sheet_confirm')
+                  )}
+                </Button>
+              )}
             </>
           )}
         </PanelSheetFooter>

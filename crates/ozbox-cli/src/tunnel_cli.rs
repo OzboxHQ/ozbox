@@ -223,9 +223,16 @@ pub fn run(cmd: &TunnelCommand, json_out: bool) -> Result<(), CliError> {
                 if let Some(code) = &approval {
                     crate::secrets_service::give_tunnel_approval(code);
                 }
-                secrets
-                    .set(name, &token)
-                    .map_err(|e| CliError::Msg(e.to_string()))?;
+                secrets.set(name, &token).map_err(|e| {
+                    let e = e.to_string();
+                    // On a box the box user cannot file a tunnel-token request (only the computer that made the box, or the
+                    // root helper, can): say where the change is approved from instead (B4-27).
+                    if approval.is_none() && crate::approval_flow::needs_approval(&e) {
+                        CliError::Msg(format!("{e}\n{}", t("approval.flow_tunnel_on_box", &[])))
+                    } else {
+                        CliError::Msg(e)
+                    }
+                })?;
             }
             file.save(&path).map_err(CliError::Msg)?;
             let token_ok = secret.map(|name| secrets.exists(name).unwrap_or(false));

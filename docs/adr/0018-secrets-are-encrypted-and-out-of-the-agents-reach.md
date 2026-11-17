@@ -21,7 +21,8 @@ operating system's keychain.
    private home. The box user is not in its group. Only one socket's directory is open to the box user; through it a
    process can write a secret, ask whether one exists, ask for the keyed tag of a token, and read back a short, shrinking
    list of the dashboard's own sending keys. It can never read back a tunnel token, a backup key, a workload
-   secret or the internal keys. A second socket, for the box agent's runner, only resolves `{{secret:NAME}}` references
+   secret or the internal keys. *(Amendment 1: what the box user may do with each name is one table, and a person's sign-in
+   factors are never in its reach.)* A second socket, for the box agent's runner, only resolves `{{secret:NAME}}` references
    from a command's allow-list and refuses production-flagged keys. A third, for root, does everything. Who may connect is
    the file permission of the socket's directory (each socket is in its directory's group: ADR 0028, Amendment 1), so no
    access decision rests on peer credentials and there is no `unsafe`. The audit service reads the peer's uid (`SO_PEERCRED`,
@@ -62,8 +63,9 @@ needs a fresh second factor, and a commit holding a stored key is stopped. What 
 - Until a second factor is enrolled, a box accepts some changes and records them as `bootstrap`: which ones is one table,
   scope by scope (ADR 0028, Amendment 2); naming an approver and loosening a box's own guards are refused. A laptop has no
   second user, so the claim still raises the bar there without closing the gap.
-- The dashboard's own sending keys (chat and email tokens) are readable by the supervisor, not by the box user; the
-  credential broker will take them over and the list shrinks to nothing.
+- The dashboard's own sending keys (chat and email tokens) are readable by the supervisor. The box user can read them back
+  only on a box whose secrets service has no supervisor socket (one made before ADR 0023 and not upgraded since), where the
+  dashboard itself runs as the box user; the credential broker will take them over and the list shrinks to nothing.
 - Model keys are not readable by the box user. The credential broker (ADR 0017) runs inside the secrets service and
   issues run tokens over its own socket. Only the supervisor can ask for a token (ADR 0023); a key is only ever sent to the address it was first used with: a
   provider whose address changes is refused until its key is saved again.
@@ -84,3 +86,49 @@ needs a fresh second factor, and a commit holding a stored key is stopped. What 
 - (ADR 0028) The secrets service now also writes the box's audit chain, keeps its seal key in this store, and records its own
   actions (tokens, resolves, approvals, imports, declarations, loads). A laptop key can mint approvals. On Hetzner the box's
   own secrets are declared through a settings file, and the vault token reaches the loader through a root-only file.
+
+## Amendment 1 (2026-11-17): the box user's reach is one table, and sign-in factors are not in it
+
+**Found.** A security review found the owner's authenticator-app secret (`totp-<user>`) on the box socket's read-back list,
+and nothing stopped the box socket writing one. On a box whose secrets service has no supervisor socket, any agent could read
+the secret and make valid authenticator codes, or put in a secret of its own. The same socket could overwrite the key that
+sessions and setup codes are tagged with, and read the sign-in client secret, the key notifications are signed with and a
+person's device subscriptions. On a box with a supervisor socket the box socket already read nothing back and wrote nothing,
+but it still answered whether a person had an authenticator and listed the names, which says who they are.
+
+**Decision.** What the box user may do with a name is one table in the secrets service, first match wins, with four answers:
+
+| Reach | Read back | Write, delete | Asked about, listed | Names |
+|---|---|---|---|---|
+| none | no | no | no | `totp-*`, `google-client-secret`, `vapid-private-key`, `push-*`, `store-kek`, `internal-hmac-keys`, `workload*`, and the service's own approval, audit, ingress and enrolment records |
+| ask | no | only through the root helper | yes | `tunnel-token-*` |
+| read | only on a socket with no supervisor | yes, on a socket with no supervisor | yes | the dashboard's sending keys: chat, SMS, email and webhook keys, and incoming trigger secrets |
+| write | no | yes, on a socket with no supervisor | yes | backup credentials (`restic-*`), model keys (`model-key-*`), a box's IDE and desktop passwords, and what a command run on the box keeps for other boxes: `ide-tunnel-token-*`, `dashboard-tunnel-token-*`, `dashboard-install-*`, `mesh-authkey-*` |
+| none | no | no | no | every name no row names |
+
+- Reading back and writing are both allow-lists: only the "read" rows are read back, and only the "read" and "write" rows
+  are written, and neither on a locked box socket. The "write" rows are every name a box user's command or a dashboard
+  running as the box user writes today.
+- A name with reach "none" gets the same refusal whether it is set or not, so the answer says nothing about which names exist.
+- The dashboard reads and writes the sign-in factors as its own user (`ozbox-supervisor`), on its own socket. Root reads
+  everything through the admin socket.
+- A test walks every row of the table and asks the service, op by op, on both box sockets. Another stores a sentinel secret
+  as the supervisor and checks it appears in no answer, error or audit record the box user can get.
+
+**Consequences and what is not covered.**
+- A box whose secrets service has no supervisor socket runs its dashboard as the box user. There the sign-in factors cannot
+  be kept from an agent, so they are refused: an authenticator code, Google sign-in and notifications to devices stop
+  working there until the box is upgraded (which gives it the supervisor socket). Passkeys are kept by the dashboard itself
+  and keep working.
+- **Treat an authenticator secret set up before this change as possibly read.** An agent on a box without a supervisor
+  socket could read it, and so could anything running as the box user on a box whose dashboard once ran as the box user
+  (before ADR 0023). After upgrading, remove the authenticator on the dashboard's Account page and set it up again (a passkey first, if the authenticator is the only second factor).
+  Rotate the Google client secret with Google if that box used Google sign-in.
+- A name no row names is refused on every operation, with the same words as a reserved one, whether it is set or not. A
+  laptop approval key (`approval-key-*`) is one of them: a box's store never holds a person's signing key, and storing one
+  there could never have been read back to sign with.
+- Neither box socket answers `mac` (the tag of a token under the internal keys) any more: an agent that can ask for tags can
+  check a guessed session or setup code. The dashboard asks on its own socket. A dashboard that still runs as the box user
+  (a box with no supervisor socket) keys its sessions with a key of its own process instead, so a restart of it signs
+  everyone out there. It could also create the internal keys over the box socket on its first start; only the service
+  makes them now.

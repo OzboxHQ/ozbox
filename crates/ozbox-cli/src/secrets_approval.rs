@@ -132,7 +132,8 @@ struct Approval {
     scope: String,
     project: String,
     env: String,
-    via: String,
+    /// Who made it (ADR 0041 §3): a software key's code is never spent on anything in the Production tier.
+    signer: crate::secrets_signer::Signer,
     expires_ms: u64,
 }
 
@@ -228,18 +229,22 @@ impl ApprovalGate {
             .collect()
     }
 
-    /// A new approval, once usable, for `scope` (and the project and environment it is about, when it is about one).
+    /// A new approval, once usable, for `scope` (and the project and environment it is about, when it is about one), made by
+    /// `signer`. A software key never gets a code for an act the box already knows is Production.
     pub fn mint(
         &self,
         scope: &str,
         project: &str,
         env: &str,
-        via: &str,
+        signer: &crate::secrets_signer::Signer,
         now_ms: u64,
         ttl_ms: u64,
     ) -> Result<String, String> {
         if !SCOPES.contains(&scope) || !seg_ok(project) || !seg_ok(env) {
             return Err("that approval is not valid".into());
+        }
+        if !crate::secrets_signer::allowed(signer, scope, env, false) {
+            return Err(crate::secrets_signer::refusal(scope));
         }
         let ttl = ttl_ms.clamp(1_000, MAX_TTL_MS);
         let mut raw = [0u8; 16];
@@ -261,7 +266,7 @@ impl ApprovalGate {
                 scope: scope.to_string(),
                 project: project.to_string(),
                 env: env.to_string(),
-                via: via.to_string(),
+                signer: signer.clone(),
                 expires_ms: now_ms + ttl,
             },
         );
@@ -274,10 +279,38 @@ impl ApprovalGate {
         ))
     }
 
+    /// A code recorded as made by `signer` with no rule applied, as an older program could have made one: for tests that the
+    /// gate, not the mint, refuses what a signer may not approve.
+    #[cfg(test)]
+    pub fn mint_unchecked_for_test(
+        &self,
+        scope: &str,
+        project: &str,
+        env: &str,
+        signer: &crate::secrets_signer::Signer,
+    ) -> Result<String, String> {
+        let code = self.mint(
+            scope,
+            project,
+            env,
+            &crate::secrets_signer::Signer::Dashboard,
+            0,
+            MAX_TTL_MS,
+        )?;
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(a) = st.live.get_mut(&self.tag(&code)) {
+            a.signer = signer.clone();
+            a.expires_ms = u64::MAX;
+        }
+        Ok(code)
+    }
+
     /// Use an approval. It is spent by a good answer and by nothing else. **A wrong code never locks anything** (ADR 0041
     /// §2): the code is 80 bits and lives five minutes, so a guess cannot be repeated into success,
     /// and a counter shared by every caller was a lever for the box user to lock the owner out of the codes (the old
     /// five-a-minute lock was global). The service writes a refused line for each wrong code instead.
+    /// (Tests only: the service always says what it knows of the act, through the `_tiered` form.)
+    #[cfg(test)]
     pub fn consume(
         &self,
         code: &str,
@@ -286,22 +319,55 @@ impl ApprovalGate {
         env: &str,
         now_ms: u64,
     ) -> Result<String, String> {
-        let wrong = NOT_VALID;
+        self.consume_tiered(code, scope, project, env, false, now_ms)
+            .map_err(ConsumeThen::into_message)
+    }
+
+    /// [`ApprovalGate::consume`] for an act the spender knows more about: `declared` says the thing being approved touches
+    /// Production (a declaration with a Production command). A code its signer may not spend on this act is refused and left
+    /// as it was ([`ConsumeThen::Signer`]); it can never be spent on it.
+    pub fn consume_tiered(
+        &self,
+        code: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, ConsumeThen> {
+        self.take(code, scope, project, env, declared, now_ms)
+            .map(|(_, a)| a.signer.via())
+    }
+
+    /// Find the code for exactly this act, check its signer may approve it, and take it, under the lock.
+    fn take(
+        &self,
+        code: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<(String, Approval), ConsumeThen> {
+        let wrong = || ConsumeThen::Approval(NOT_VALID.into());
         // No code at all is a person who has not asked yet, not a guess.
         if normalise(code).is_empty() {
-            return Err(wrong.into());
+            return Err(wrong());
         }
+        let tag = self.tag(code);
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         st.live.retain(|_, a| a.expires_ms > now_ms);
-        let tag = self.tag(code);
-        let ok = st
+        let Some(a) = st
             .live
             .get(&tag)
-            .is_some_and(|a| a.scope == scope && a.project == project && a.env == env);
-        if !ok {
-            return Err(wrong.into());
+            .filter(|a| a.scope == scope && a.project == project && a.env == env)
+        else {
+            return Err(wrong());
+        };
+        if !crate::secrets_signer::allowed(&a.signer, scope, env, declared) {
+            return Err(ConsumeThen::Signer(crate::secrets_signer::refusal(scope)));
         }
-        Ok(st.live.remove(&tag).map(|a| a.via).unwrap_or_default())
+        st.live.remove(&tag).map(|a| (tag, a)).ok_or_else(wrong)
     }
 
     /// [`ApprovalGate::consume`], spent only if `effect` succeeds. The approval is checked and TAKEN under the lock, and the lock is
@@ -309,6 +375,8 @@ impl ApprovalGate {
     /// slow effect must not stall every other mint and consume on the box. Taking it first is what keeps a code single use: a second
     /// request with the same code, arriving while the effect runs, finds nothing. If the effect fails the approval is put back with its own expiry, so a refused write leaves the person's code usable; if the effect panics the code stays spent,
     /// which is the safe side. The effect may take this gate's lock (it can mint another code).
+    /// (Tests only: the service always says what it knows of the act, through the `_tiered` form.)
+    #[cfg(test)]
     pub fn consume_then<T>(
         &self,
         code: &str,
@@ -318,27 +386,24 @@ impl ApprovalGate {
         now_ms: u64,
         effect: impl FnOnce(&str) -> Result<T, String>,
     ) -> Result<T, ConsumeThen> {
-        let wrong = NOT_VALID;
-        if normalise(code).is_empty() {
-            return Err(ConsumeThen::Approval(wrong.into()));
-        }
-        let tag = self.tag(code);
-        let taken = {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.live.retain(|_, a| a.expires_ms > now_ms);
-            let ok = st
-                .live
-                .get(&tag)
-                .is_some_and(|a| a.scope == scope && a.project == project && a.env == env);
-            if !ok {
-                return Err(ConsumeThen::Approval(wrong.into()));
-            }
-            st.live.remove(&tag)
-        };
-        let Some(approval) = taken else {
-            return Err(ConsumeThen::Approval(wrong.into()));
-        };
-        match effect(&approval.via) {
+        self.consume_then_tiered(code, scope, project, env, false, now_ms, effect)
+    }
+
+    /// [`ApprovalGate::consume_then`] with what the spender knows of the act (see [`ApprovalGate::consume_tiered`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn consume_then_tiered<T>(
+        &self,
+        code: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        declared: bool,
+        now_ms: u64,
+        effect: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, ConsumeThen> {
+        // the lock is released when `take` returns, before the effect runs
+        let (tag, approval) = self.take(code, scope, project, env, declared, now_ms)?;
+        match effect(&approval.signer.via()) {
             Ok(out) => Ok(out),
             Err(e) => {
                 // put back as it was, with its own expiry: the next use or mint drops it if it has run out meanwhile
@@ -355,7 +420,18 @@ impl ApprovalGate {
 #[derive(Debug)]
 pub enum ConsumeThen {
     Approval(String),
+    /// The code is good for this act, but its signer may not approve it (a software key, and the act is Production). Nothing
+    /// ran and the code is left as it was.
+    Signer(String),
     Effect(String),
+}
+
+impl ConsumeThen {
+    pub fn into_message(self) -> String {
+        match self {
+            ConsumeThen::Approval(m) | ConsumeThen::Signer(m) | ConsumeThen::Effect(m) => m,
+        }
+    }
 }
 
 /// What a change is allowed by, in words for the audit line.
@@ -437,7 +513,7 @@ mod tests {
                 "import",
                 "app",
                 "staging",
-                "dashboard-stepup",
+                &crate::secrets_signer::Signer::Dashboard,
                 1000,
                 DEFAULT_TTL_MS,
             )
@@ -456,7 +532,16 @@ mod tests {
         // spent
         assert!(g.consume(&c, "import", "app", "staging", 4000).is_err());
         // expired
-        let c2 = g.mint("policy", "app", "", "x", 10_000, 5_000).unwrap();
+        let c2 = g
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                10_000,
+                5_000,
+            )
+            .unwrap();
         assert!(g.consume(&c2, "policy", "app", "", 15_001).is_err());
     }
 
@@ -465,7 +550,16 @@ mod tests {
     #[test]
     fn wrong_guesses_never_lock_the_gate_and_a_right_code_still_works_straight_after() {
         let g = ApprovalGate::new();
-        let c = g.mint("import", "a", "b", "x", 0, DEFAULT_TTL_MS).unwrap();
+        let c = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS,
+            )
+            .unwrap();
         for i in 0..1000 {
             assert!(g
                 .consume("AAAA-AAAA-AAAA-AAAA", "import", "a", "b", i as u64)
@@ -477,19 +571,72 @@ mod tests {
     #[test]
     fn a_bad_scope_or_name_is_never_minted_and_the_queue_is_bounded() {
         let g = ApprovalGate::new();
-        assert!(g.mint("root", "", "", "x", 0, 1000).is_err());
-        assert!(g.mint("import", "Bad Name", "", "x", 0, 1000).is_err());
+        assert!(g
+            .mint(
+                "root",
+                "",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                1000
+            )
+            .is_err());
+        assert!(g
+            .mint(
+                "import",
+                "Bad Name",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                1000
+            )
+            .is_err());
         for _ in 0..MAX_LIVE {
-            g.mint("import", "a", "b", "x", 0, DEFAULT_TTL_MS).unwrap();
+            g.mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS,
+            )
+            .unwrap();
         }
-        assert!(g.mint("import", "a", "b", "x", 0, DEFAULT_TTL_MS).is_err());
+        assert!(g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS
+            )
+            .is_err());
     }
 
     #[test]
     fn codes_differ_and_are_made_of_the_readable_alphabet() {
         let g = ApprovalGate::new();
-        let a = g.mint("import", "a", "b", "x", 0, 9000).unwrap();
-        let b = g.mint("import", "a", "b", "x", 0, 9000).unwrap();
+        let a = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                9000,
+            )
+            .unwrap();
+        let b = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                9000,
+            )
+            .unwrap();
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c == '-' || ALPHABET.contains(&(c as u8))));
         assert!(is_code_shape(&a));
@@ -517,7 +664,14 @@ mod tests {
     fn a_code_is_spent_only_when_the_write_it_was_for_succeeded() {
         let a = ApprovalGate::new();
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         // the wrong scope never runs the effect
         let mut ran = false;
@@ -553,7 +707,14 @@ mod tests {
     fn a_code_put_back_after_a_failed_write_still_expires_at_its_own_time() {
         let a = ApprovalGate::new();
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 1000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                1000,
+            )
             .unwrap();
         assert!(a
             .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
@@ -563,7 +724,14 @@ mod tests {
         // put back, but the code was only ever good until 2000
         assert!(a.consume(&code, "policy", "app", "", 2000).is_err());
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 1000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                1000,
+            )
             .unwrap();
         assert!(a
             .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
@@ -578,7 +746,14 @@ mod tests {
     fn two_requests_with_one_code_make_exactly_one_write() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -614,14 +789,28 @@ mod tests {
     fn the_gate_is_not_held_while_the_write_runs() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let a2 = a.clone();
         std::thread::spawn(move || {
             let r = a2.consume_then(&code, "policy", "app", "", 1001, |_| {
                 let other = a2
-                    .mint("import", "app", "dev", "dashboard-stepup", 1001, 60_000)
+                    .mint(
+                        "import",
+                        "app",
+                        "dev",
+                        &crate::secrets_signer::Signer::Dashboard,
+                        1001,
+                        60_000,
+                    )
                     .unwrap();
                 a2.consume(&other, "import", "app", "dev", 1002).map(|_| ())
             });
@@ -639,7 +828,14 @@ mod tests {
     fn a_panicking_write_leaves_the_code_spent_and_the_gate_usable() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", "dashboard-stepup", 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let (a2, c2) = (a.clone(), code.clone());
         let r = std::thread::spawn(move || {
@@ -650,6 +846,15 @@ mod tests {
         .join();
         assert!(r.is_err());
         assert!(a.consume(&code, "policy", "app", "", 1002).is_err());
-        assert!(a.mint("policy", "app", "", "x", 1003, 60_000).is_ok());
+        assert!(a
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1003,
+                60_000
+            )
+            .is_ok());
     }
 }

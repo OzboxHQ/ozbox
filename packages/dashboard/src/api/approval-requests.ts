@@ -37,7 +37,7 @@ export interface Decision {
   decider: string;
   role: 'owner' | 'member' | null;
   surface: DecisionSurface;
-  /** `passkey`, `laptop-key:<id>`, `laptop-key:<id> (no user presence)`, `root`, `bootstrap`, `chat-deny`. */
+  /** `passkey`, `authenticator`, `laptop-key:<id>`, `laptop-key:<id> (no user presence)`, `root`, `bootstrap`, `chat-deny`. */
   factor_label: string;
   presence: 'proved' | 'no-presence' | 'not-applicable';
   at_ms: number;
@@ -115,6 +115,11 @@ export interface ApprovalRequestsApi {
   /** One challenge names one request, its digest and the outcome: one assertion decides one request. */
   challenge(id: string, signal?: AbortSignal): Promise<DecideChallenge>;
   approve(id: string, assertion: AssertionJson, signal?: AbortSignal): Promise<{ request: RequestCard }>;
+  /**
+   * For a person with no passkey: an authenticator-app code approves instead. The dashboard and the box's secrets service
+   * both check it; the record says `authenticator`, never `passkey`. The code is sent once and kept nowhere.
+   */
+  approveWithCode(id: string, code: string, signal?: AbortSignal): Promise<{ request: RequestCard }>;
   /** Needs no passkey (a deny is fail safe). Also revokes an approved request that was not spent. */
   deny(id: string, signal?: AbortSignal): Promise<{ request: RequestCard }>;
   keys(signal?: AbortSignal): Promise<ApproverKeys>;
@@ -129,6 +134,7 @@ export function createApprovalRequestsApi(request: Request): ApprovalRequestsApi
     get: (id, s) => request('GET', one(id), undefined, s),
     challenge: (id, s) => request('POST', `${one(id)}/challenge`, {}, s),
     approve: (id, assertion, s) => request('POST', `${one(id)}/approve`, { assertion }, s),
+    approveWithCode: (id, code, s) => request('POST', `${one(id)}/approve-authenticator`, { code: code.replace(/\s/g, '') }, s),
     deny: (id, s) => request('POST', `${one(id)}/deny`, {}, s),
     keys: (s) => request('GET', '/v1/approvals/keys', undefined, s),
     revokeKey: (id, s) => request('POST', `/v1/approvals/keys/${encodeURIComponent(id)}/revoke`, {}, s),

@@ -89,6 +89,9 @@ impl App {
             },
             ["requests", id, "challenge"] if post => self.approval_challenge(req, id),
             ["requests", id, "approve"] if post => self.approval_approve(req, id),
+            ["requests", id, "approve-authenticator"] if post => {
+                self.approval_approve_authenticator(req, id)
+            }
             ["requests", id, "deny"] if post => self.approval_deny(req, id),
             _ => Resp::error(404, "not_found", "no such route"),
         }
@@ -222,6 +225,46 @@ impl App {
                 "evidence": {"passkey": {
                     "credential_id": signed.credential_id, "authenticator_data": signed.authenticator_data_hex,
                     "client_data": signed.client_data_hex, "signature": signed.signature_hex}},
+            }),
+        );
+        match out {
+            Ok(v) => {
+                self.log_activity("approve_request", "", None, "ok");
+                Resp::json(
+                    200,
+                    &json!({"request": card(&with_viewer_can(&v["request"]))}),
+                )
+            }
+            Err(e) if e.starts_with("already") => Resp::error(409, "already_decided", &e),
+            Err(e) if e.starts_with("the request is") => Resp::error(409, "not_pending", &e),
+            Err(e) => Resp::error(403, "not_allowed", &e),
+        }
+    }
+
+    /// Approve with an authenticator-app code, for a person with no passkey (ADR 0041, amendment of 2026-11-17). The code is
+    /// checked here as at sign-in and again by the secrets service, which records the decision as `authenticator`, never as
+    /// a passkey. The code is in no answer, log line or activity record.
+    fn approval_approve_authenticator(&mut self, req: &Req, id: &str) -> Resp {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let code = zeroize::Zeroizing::new(body["code"].as_str().unwrap_or("").to_string());
+        if code.len() > 16 {
+            return Resp::error(400, "bad_request", "that code is not valid");
+        }
+        if let Err(r) = self.approval_can(req, id, "approve") {
+            return r;
+        }
+        let Some(auth) = self.auth.clone() else {
+            return Resp::error(403, "no_sign_in", "sign in to decide a request");
+        };
+        let (person, role) = match auth.approval_authenticator(req, &code) {
+            Ok(x) => x,
+            Err((s, c, m)) => return Resp::error(s, c, &m),
+        };
+        let out = self.areq(
+            "areq_decide",
+            json!({
+                "id": id, "outcome": "approve", "person": person, "role": role_word(role),
+                "surface": "dashboard", "factor": "authenticator", "code": code.as_str(),
             }),
         );
         match out {

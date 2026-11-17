@@ -275,6 +275,12 @@ pub fn decide(
         Waited::Refused(m) | Waited::GaveUp(m) => {
             return Ok(Outcome::Stop(format!("ozbox: {m}; nothing was let through.\n")))
         }
+        // this wait has no limit of its own beyond the request's life, so it never times out early
+        Waited::TimedOut => {
+            return Ok(Outcome::Stop(
+                "ozbox: the wait ran out; nothing was let through.\n".into(),
+            ))
+        }
         Waited::Stopped => {
             return Ok(Outcome::Stop(
                 "ozbox: stopped waiting; the request stays for 30 minutes, and nothing was let through.\n".into(),
