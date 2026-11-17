@@ -90,6 +90,8 @@ export const enModels = {
   'models.engine_scope': 'Applies to',
   'models.engine_scope_fleet': 'The whole fleet',
   'models.engine_provider_only': 'Only providers this engine can use are listed.',
+  'models.needs_provider': 'Add a provider first: there is nothing to choose until one is set up.',
+  'models.needs_provider_link': 'Go to Add provider',
   'models.engine_no_providers': 'No provider you set up works with this engine yet.',
   'models.engine_fallback_label': 'Fallback provider',
   'models.engine_fallback_model': 'Fallback model name',

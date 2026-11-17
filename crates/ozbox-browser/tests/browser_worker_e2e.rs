@@ -505,6 +505,47 @@ fn desktop_session(private: bool) {
     h.op(Op::Close);
 }
 
+/// The live view pictures what is on screen. A clip at the top of the page pictured the undrawn part above the screen once the
+/// page was scrolled, so the live view was a blank white picture, byte for byte the same as the empty start page's.
+#[test]
+fn the_live_view_follows_a_scrolled_page() {
+    if !have_browser() {
+        return;
+    }
+    let site = testsite::start(0).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = BrowserPolicy {
+        min_gap_ms: 0,
+        ..BrowserPolicy::default()
+    };
+    let mut h = H::open(dir.path(), "live", Device::Desktop, policy, &[]);
+    let jpeg = |h: &mut H| {
+        let f = h.op(Op::Frame);
+        assert!(f.ok, "{:?}", f.error);
+        (
+            f.result["jpeg"].as_str().unwrap().to_string(),
+            f.result["page"].as_str().unwrap().to_string(),
+        )
+    };
+    let (blank, page) = jpeg(&mut h);
+    assert_eq!(page, "about:");
+    h.ok(Action::Navigate {
+        url: url(site.port, "127.0.0.1", "/tall"),
+    });
+    let (top, _) = jpeg(&mut h);
+    h.ok(Action::Scroll {
+        target: None,
+        dy: 2000,
+    });
+    let (scrolled, _) = jpeg(&mut h);
+    assert_ne!(top, blank);
+    assert_ne!(
+        scrolled, blank,
+        "the scrolled page was pictured as a blank page"
+    );
+    assert_ne!(scrolled, top, "the picture did not follow the scroll");
+}
+
 #[test]
 fn the_phone_preset_and_the_task_limit() {
     if !have_browser() {

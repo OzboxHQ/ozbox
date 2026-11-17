@@ -14,6 +14,7 @@ import { useApp } from '../../App';
 import { t } from '../../lib/i18n';
 import { MODEL_RE, providersFor } from '../../lib/models';
 import { useAsync } from '../../lib/use-async';
+import { NeedsProviderNote } from './needs-provider-note';
 
 const NONE = '__none__';
 const FLEET = '__fleet__';
@@ -96,6 +97,7 @@ export function EnginesCard({ settings, save, reload }: Props) {
     <Card className="space-y-3 p-4" data-testid="model-engines">
       <h2 className="text-sm font-semibold">{t('models.engines_title')}</h2>
       <p className="text-xs text-muted-foreground">{t('models.engines_help')}</p>
+      {providers.length === 0 ? <NeedsProviderNote id="engines-needs-provider" /> : null}
       <ul className="divide-y" aria-label={t('models.engines_title')}>
         {engines.map((e) => (
           <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2" data-testid={`engine-${e.id}`}>
@@ -107,7 +109,7 @@ export function EnginesCard({ settings, save, reload }: Props) {
                 <p key={b} className="text-xs text-muted-foreground">{t('models.engine_override_note', { box: b, provider: label(per[e.id]?.provider_id ?? ''), model: per[e.id]?.model ?? '' })}</p>
               ))}
             </div>
-            <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} aria-label={t('models.engine_edit', { engine: e.label })} onClick={() => open(e.id, FLEET)}>{t('common.edit')}</Button>
+            <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} aria-describedby={providers.length === 0 ? 'engines-needs-provider' : undefined} aria-label={t('models.engine_edit', { engine: e.label })} onClick={() => open(e.id, FLEET)}>{t('common.edit')}</Button>
           </li>
         ))}
       </ul>

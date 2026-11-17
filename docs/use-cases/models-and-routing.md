@@ -47,7 +47,8 @@ ozbox models default codex openai <model-id>
 ozbox models list
 ```
 
-Engines are only offered providers they can speak to.
+Engines are only offered providers they can speak to. In the dashboard this is **Settings → Models → Which engine uses which
+model**; until a provider is set up, its **Edit** is unavailable and the card says so, with a link to **Add provider**.
 
 **Status:** Preview.
 

@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import type { Settings } from '../../api/types';
 import { t } from '../../lib/i18n';
 import { MODEL_RE } from '../../lib/models';
+import { NeedsProviderNote } from './needs-provider-note';
 
 const MAX_PRICE = 1_000_000;
 
@@ -60,11 +61,12 @@ export function PricesCard({ settings, save, reload }: { settings: Settings; sav
     <Card className="space-y-3 p-4" data-testid="model-prices">
       <div className="flex items-start justify-between gap-2">
         <h2 className="text-sm font-semibold">{t('models.prices_title')}</h2>
-        <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} onClick={() => start()}>
+        <Button variant="outline" size="sm" className="max-lg:h-11" disabled={providers.length === 0} aria-describedby={providers.length === 0 ? 'prices-needs-provider' : undefined} onClick={() => start()}>
           {t('models.prices_add')}
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">{t('models.prices_help')}</p>
+      {providers.length === 0 ? <NeedsProviderNote id="prices-needs-provider" /> : null}
       {rows.length === 0 ? (
         <p className="text-sm" data-testid="prices-empty">{t('models.prices_none')}</p>
       ) : (
