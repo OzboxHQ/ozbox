@@ -702,12 +702,11 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
 - **An authenticator decision is weaker than a passkey decision** (Amendment of 2026-11-17, B4-27): it is not bound to the
   request, so a lookalike page that relays a code, or a supervisor that swaps the request behind one, can turn one code into one
   approval of something else. It is offered only to a person with no passkey.
-- **The box user can read and replace an authenticator secret today.** `totp-` is among the names the box socket may read back
-  (`BOX_GET_PREFIXES`, for the dashboard) and is not refused for a write there, so a process of the box user can make a valid
-  code for anyone with an authenticator, or set one it knows. It still needs that person's signed-in dashboard session to approve
-  with one (the same holds for the step-up behind a legacy dashboard code), but until that name is the supervisor's only, an
-  authenticator protects less than this ADR assumes. Moving it is the next fix, and it must not strand a dashboard that still
-  reaches its store over the box socket.
+- **The box user could read and replace an authenticator secret (closed by B4-29).** `totp-` was among the names the box socket
+  could read back and write, so a process of the box user could make a valid code for anyone with an authenticator. The box
+  user's reach is now one table (`BOX_REACH`, ADR 0018 Amendment 1): an authenticator secret is the dashboard's alone, and the
+  secrets service reads it for an approval only when the decision comes in as the supervisor. An authenticator set up before
+  that fix should be set up again (ADR 0018 Amendment 1 says how). Authenticator approvals themselves are still **owner to confirm**.
 - **Only an import from a computer files and waits so far.** A tunnel token, a declaration, the box's own secrets and a host
   guard change sent from a computer still take a code (`--approval`); a dashboard-native import (a `.env` file chosen in the
   browser) is Planned.
