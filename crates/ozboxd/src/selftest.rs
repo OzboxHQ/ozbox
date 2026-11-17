@@ -280,21 +280,13 @@ pub fn uid_in_passwd(text: &str, user: &str) -> Option<u32> {
 /// Root's record of the last repair of the dashboard's folder: `uid=<n> wrong=<n>`, either may be `unknown` (`None`). A record
 /// that is not in that shape is `None` as a whole.
 pub fn parse_folder_state(text: &str) -> Option<(Option<u32>, Option<u64>)> {
-    let mut uid = None;
-    let mut wrong = None;
-    let mut seen = (false, false);
-    for w in text.split_whitespace() {
-        if let Some(v) = w.strip_prefix("uid=") {
-            seen.0 = true;
-            uid = v.parse().ok();
-        } else if let Some(v) = w.strip_prefix("wrong=") {
-            seen.1 = true;
-            wrong = v.parse().ok();
-        } else {
-            return None;
-        }
+    let mut words = text.split_whitespace();
+    let uid = words.next()?.strip_prefix("uid=")?;
+    let wrong = words.next()?.strip_prefix("wrong=")?;
+    if words.next().is_some() {
+        return None;
     }
-    (seen.0 && seen.1).then_some((uid, wrong))
+    Some((uid.parse().ok(), wrong.parse().ok()))
 }
 
 /// The dashboard can write in its own folder: the folder belongs to the dashboard's user AS IT IS NOW (an upgrade makes the user
