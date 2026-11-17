@@ -212,7 +212,13 @@ fn every_name_the_store_keeps_is_reached_by_the_box_user_exactly_as_the_table_sa
         ("dashboard-tunnel-token-dev", BoxReach::Write),
         ("dashboard-install-dev", BoxReach::Write),
         ("ide-tunnel-token-dev", BoxReach::Write),
-        ("my-own-secret", BoxReach::Write),
+        ("mesh-authkey-dev", BoxReach::Write),
+        ("trigger-secret-t1-previous", BoxReach::Read),
+        // a name no row names is refused
+        ("my-own-secret", BoxReach::None),
+        ("approval-key-laptop", BoxReach::None),
+        ("slack-bot-token", BoxReach::None),
+        ("projects/app/X", BoxReach::None),
         // the dashboard sends with these
         ("telegram-bot-token", BoxReach::Read),
         ("sms-secret", BoxReach::Read),
@@ -312,4 +318,46 @@ fn an_authenticator_seed_appears_in_no_answer_the_box_user_gets_and_in_no_record
     // the supervisor's write was recorded by name only
     assert!(r.chain().contains("totp-owner"));
     assert_eq!(r.store.get("totp-owner").unwrap().as_deref(), Some(SEED));
+}
+
+/// A name no row of the table names is refused on every op, with the same answer whether it is set or not, and the same
+/// answer as for a name that is refused because it is reserved.
+#[test]
+fn a_name_the_table_does_not_name_is_refused_alike_whether_it_exists_or_not() {
+    let r = rig();
+    r.store.set("my-own-secret", "v1").unwrap();
+    r.store.set("totp-owner", SEED).unwrap();
+    for p in BOX_USER {
+        for op in ["get", "set", "delete", "exists"] {
+            let ask = |n: &str| r.ask(p, json!({"op":op,"name":n,"value":"v2"}));
+            let set = ask("my-own-secret");
+            assert_eq!(set["ok"], false, "{p:?} {op}");
+            assert_eq!(set, ask("never-set-anywhere"), "{p:?} {op}");
+            assert_eq!(set, ask("totp-owner"), "{p:?} {op}");
+            assert_eq!(set["error"], "that is not allowed on this socket");
+        }
+        let n = r.ask(p, json!({"op":"names","prefix":""}));
+        assert!(!n.to_string().contains("my-own-secret"), "{p:?}: {n}");
+    }
+    assert_eq!(r.store.get("my-own-secret").unwrap().as_deref(), Some("v1"));
+    assert!(!r.store.exists("never-set-anywhere").unwrap());
+}
+
+/// The tag of a token under the internal keys is the dashboard's: the box user gets none on either box socket.
+#[test]
+fn the_box_user_gets_no_tag_of_a_token_and_the_supervisor_does() {
+    let r = rig();
+    let req = json!({"op":"mac","msg":"dG9rZW4="});
+    for p in BOX_USER {
+        let a = r.ask(p, req.clone());
+        assert_eq!(a["ok"], false, "{p:?}");
+        assert!(a.get("tags").is_none_or(Value::is_null), "{p:?}");
+    }
+    assert_eq!(
+        r.ask(Policy::Supervisor, req.clone())["tags"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(r.ask(Policy::Admin, req)["ok"], true);
 }
