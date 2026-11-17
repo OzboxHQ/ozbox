@@ -147,6 +147,25 @@ pub fn passwd_ids(passwd: &str, name: &str) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    /// ADR 0040: fleet changes are the dashboard's, behind a sign-in, a change window and the owner's passkey. The box
+    /// daemon (which runs as the box user, whom agents act as) has no fleet route on the dashboard's socket.
+    #[test]
+    fn the_daemon_socket_carries_nothing_about_the_fleet() {
+        for r in ROUTES {
+            for word in [
+                "fleet",
+                "plans",
+                "apply",
+                "credential",
+                "window",
+                "sts",
+                "imds",
+            ] {
+                assert!(!r.path.contains(word), "{} carries {word}", r.path);
+            }
+        }
+    }
+
     #[test]
     fn the_dashboards_surface_is_allowed_and_names_a_route() {
         for (m, p, n) in [

@@ -2799,3 +2799,179 @@ fn a_box_change_is_decided_and_recorded_as_the_signed_in_person() {
     );
     assert_eq!(ok.0, 202, "{ok:?}");
 }
+
+/// ADR 0040: a box's dashboard that manages the fleet plans and applies with the laptop's own code, and every change also
+/// needs a change window for that plan and the owner's passkey over THAT plan's challenge. The window's session is never in
+/// anything the dashboard says.
+#[test]
+fn a_fleet_change_from_a_boxs_dashboard_needs_a_window_and_the_owners_passkey_over_that_plan() {
+    use crate::fleet_gate::{testing::FakeCreds, FleetGate};
+    const SENTINEL: &str = "SENTINEL-FLEET-SESSION-0040";
+    let dir = tempfile::tempdir().unwrap();
+    let r = rig();
+    let mut authn = Authenticator::new();
+    r.enrol(&authn, "owner");
+    let (c, _) = r.passkey_login(&mut authn);
+    let creds = FakeCreds::with_sentinel(SENTINEL);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 7878));
+    let mut app = crate::serve::App::new(
+        Box::new(ozbox_provider_fake::open(dir.path())),
+        true,
+        addr,
+        "tok".into(),
+    )
+    .with_auth(r.auth.clone())
+    .with_task_store(Some(dir.path().join("tasks.json")))
+    .with_fleet_gate(FleetGate::new("main", "store-1", Box::new(creds.clone())));
+    let cookie = format!("__Host-ozbox_session={}", c.cookie.clone().unwrap());
+    let mut said = String::new();
+    let mut call = |app: &mut crate::serve::App, method: &str, path: &str, body: Value| {
+        let resp = app.handle(&request(
+            method,
+            path,
+            "",
+            &body,
+            Some(&cookie),
+            &c.csrf,
+            HOST,
+            Some(ORIGIN),
+        ));
+        said.push_str(&String::from_utf8_lossy(&resp.body));
+        (
+            resp.status,
+            serde_json::from_slice::<Value>(&resp.body).unwrap_or(Value::Null),
+        )
+    };
+    let (_, info) = call(&mut app, "GET", "/v1/info", Value::Null);
+    assert_eq!(info["fleet"]["mode"], "managed", "{info}");
+    let create = |name: &str| json!({"operation": {"op": "create", "spec": {"name": name, "size": "M", "work_disk_gb": 100, "image": null, "region": null, "from_snapshot": null, "labels": {}}}});
+    let (st, plan) = call(&mut app, "POST", "/v1/plans", create("dev"));
+    assert_eq!(st, 200, "{plan}");
+    let id = plan["plan_id"].as_str().unwrap().to_string();
+    let challenge_path = format!("/v1/fleet/plans/{id}/challenge");
+
+    // no window: refused before anyone is asked for a passkey
+    let (st, b) = call(&mut app, "POST", &challenge_path, Value::Null);
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (409, Some("change_window_required")),
+        "{b}"
+    );
+    let (st, b) = call(&mut app, "POST", "/v1/apply", json!({"plan_id": id}));
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (409, Some("change_window_required")),
+        "{b}"
+    );
+
+    // a window, but no passkey: refused, and the plan is kept
+    creds.open(&id, crate::serve::unix_ms() + 600_000);
+    let (st, b) = call(&mut app, "POST", "/v1/apply", json!({"plan_id": id}));
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (403, Some("fleet_passkey_required")),
+        "{b}"
+    );
+
+    // the passkey over this plan's challenge applies it
+    let (st, o) = call(&mut app, "POST", &challenge_path, Value::Null);
+    assert_eq!(st, 200, "{o}");
+    let ch = decode_url(o["options"]["challenge"].as_str().unwrap()).unwrap();
+    let (cd, ad, sig) = authn.assert(&r.auth.cfg.rp, &ch);
+    let assertion = json!({"id": encode_url(&authn.cred_id), "response": {"clientDataJSON": cd, "authenticatorData": ad, "signature": sig, "userHandle": encode_url(b"owner")}});
+    let (st, b) = call(
+        &mut app,
+        "POST",
+        "/v1/apply",
+        json!({"plan_id": id, "fleet_assertion": assertion}),
+    );
+    assert_eq!(st, 202, "{b}");
+    // the plan is used up
+    let (st, _) = call(
+        &mut app,
+        "POST",
+        "/v1/apply",
+        json!({"plan_id": id, "fleet_assertion": assertion}),
+    );
+    assert_eq!(st, 409);
+
+    // that assertion does not carry over to another plan, even with its window open
+    let (_, plan2) = call(&mut app, "POST", "/v1/plans", create("dev2"));
+    let id2 = plan2["plan_id"].as_str().unwrap().to_string();
+    creds.open(&id2, crate::serve::unix_ms() + 600_000);
+    let (st, b) = call(
+        &mut app,
+        "POST",
+        "/v1/apply",
+        json!({"plan_id": id2, "fleet_assertion": assertion}),
+    );
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (400, Some("bad_assertion")),
+        "{b}"
+    );
+
+    // the box this dashboard runs on is never changed from it, whatever is shown
+    let (_, plan3) = call(&mut app, "POST", "/v1/plans", create("main"));
+    let id3 = plan3["plan_id"].as_str().unwrap().to_string();
+    creds.open(&id3, crate::serve::unix_ms() + 600_000);
+    let (st, b) = call(
+        &mut app,
+        "POST",
+        &format!("/v1/fleet/plans/{id3}/challenge"),
+        Value::Null,
+    );
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (409, Some("fleet_this_box")),
+        "{b}"
+    );
+
+    // the server's own follow-up (an orchestration step) carries no person, so it cannot change the fleet
+    let (_, plan4) = call(&mut app, "POST", "/v1/plans", create("dev4"));
+    let id4 = plan4["plan_id"].as_str().unwrap().to_string();
+    creds.open(&id4, crate::serve::unix_ms() + 600_000);
+    let resp = app.apply(
+        json!({"plan_id": id4}).to_string().as_bytes(),
+        crate::serve::roles::StepUp::Fresh,
+    );
+    let b: Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(
+        (resp.status, b["code"].as_str()),
+        (403, Some("fleet_passkey_required")),
+        "{b}"
+    );
+
+    // the refusals and the change are in the audit chain; the session is in nothing the dashboard said or recorded
+    let (_, act) = call(&mut app, "GET", "/v1/activity", Value::Null);
+    said.push_str(&act.to_string());
+    let chain = chain_of(dir.path());
+    let kinds: Vec<String> = chain.iter().map(|e| e.action.clone()).collect();
+    assert!(kinds.iter().any(|k| k == "fleet.refused"), "{kinds:?}");
+    assert!(kinds.iter().any(|k| k == "fleet.apply.start"), "{kinds:?}");
+    said.push_str(&serde_json::to_string(&chain).unwrap());
+    assert!(!said.contains(SENTINEL));
+}
+
+/// A dashboard that does not manage the fleet has no challenge route and its apply is unchanged.
+#[test]
+fn without_a_fleet_gate_there_is_no_fleet_challenge() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = rig();
+    let mut authn = Authenticator::new();
+    r.enrol(&authn, "owner");
+    let (c, _) = r.passkey_login(&mut authn);
+    let mut app = app_over(&r, dir.path());
+    let cookie = format!("__Host-ozbox_session={}", c.cookie.clone().unwrap());
+    let resp = app.handle(&request(
+        "POST",
+        "/v1/fleet/plans/abc/challenge",
+        "",
+        &Value::Null,
+        Some(&cookie),
+        &c.csrf,
+        HOST,
+        Some(ORIGIN),
+    ));
+    assert_eq!(resp.status, 404);
+}
