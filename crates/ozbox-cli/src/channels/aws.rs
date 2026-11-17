@@ -99,6 +99,7 @@ pub fn ses_answer(status: u16, body: &str) -> SendResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ses(
     ctx: &Ctx,
     region_setting: Option<&str>,
