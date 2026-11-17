@@ -34,6 +34,18 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Secure agent workspace](/use-cases/secure-agent-workspace).
 </Update>
 
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Agents on a box cannot reach your authenticator">
+  ## Agents on a box can no longer read or replace your authenticator
+
+  On a box made before the dashboard had a user of its own, and not upgraded since, an agent on the box could read the secret behind your authenticator app and make valid sign-in codes, or replace it. It could also read the dashboard's Google sign-in secret and the keys that send notifications to your devices.
+
+  - **Your sign-in factors are now the dashboard's alone.** Agents on a box cannot read, replace, remove or even see the names of your authenticator secret, the Google sign-in secret or your devices' notification keys, on any box.
+  - **What agents may do with each kind of secret is now one fixed list.** They can still store secrets of their own; they can read back only the dashboard's sending keys, and only on an older box.
+  - **On a box that has not been upgraded**, the authenticator, Google sign-in and device notifications stop working until you upgrade it. Passkeys keep working.
+
+  **What to do after upgrading.** Treat an authenticator set up before this release as possibly seen: on the dashboard's **Account** page, under **Authenticator app**, choose **Remove**, then **Set up an authenticator app** again (if the authenticator is your only second factor, add a passkey first). If that box used Google sign-in, make a new client secret for your OAuth app and save it again. Upgrade with `ozbox upgrade <box>`.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

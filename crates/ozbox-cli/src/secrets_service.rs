@@ -75,25 +75,119 @@ impl Policy {
     }
 }
 
-/// Names the box user's side may read back over the box socket for now, because the dashboard sends with them. A secret
-/// of any other kind is never answered there. This list shrinks as the credential broker takes each over.
-const BOX_GET_PREFIXES: &[&str] = &[
-    "email-api-key",
-    "telegram-bot-token",
-    "slack-webhook-url",
-    "discord-webhook-url",
-    "teams-webhook-url",
-    "smtp-password",
-    "sms-",
-    "whatsapp-token",
-    "google-client-secret",
-    "vapid-private-key",
-    "push-",
-    "webhook-url-",
-    "webhook-secret-",
-    "trigger-secret-",
-    "totp-",
+/// What the box user, and every agent (which runs as it), may do with one secret name on its own socket. A row of
+/// [`BOX_REACH`] says which; [`box_reach`] is the one place the box socket asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxReach {
+    /// Nothing: not read, written, deleted, asked about or listed. The refusal is the same words whether the name is set or
+    /// not, so the answer does not say which names exist.
+    None,
+    /// Asked whether it is set, and listed; written only through the root helper's admin action (see `box_may_write`).
+    Ask,
+    /// Written, deleted, asked about and listed; never read back.
+    Write,
+    /// What `Write` allows, and read back, on the box socket of a service with no supervisor socket only (the dashboard then
+    /// runs as the box user and sends with it). A locked box socket never reads anything back.
+    Read,
+}
+
+/// How a row of [`BOX_REACH`] matches a name.
+#[derive(Debug, Clone, Copy)]
+pub enum NameRule {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl NameRule {
+    fn matches(self, name: &str) -> bool {
+        match self {
+            NameRule::Exact(n) => name == n,
+            NameRule::Prefix(p) => name.starts_with(p),
+        }
+    }
+}
+
+/// One row: the names, what the box user may do with them, and whether the supervisor (the dashboard's own user) may read
+/// them back on its socket. Each row in the table says why in a comment.
+pub struct ReachRow {
+    pub rule: NameRule,
+    pub box_user: BoxReach,
+    pub supervisor_get: bool,
+}
+
+const fn row(rule: NameRule, box_user: BoxReach, supervisor_get: bool) -> ReachRow {
+    ReachRow {
+        rule,
+        box_user,
+        supervisor_get,
+    }
+}
+
+use NameRule::{Exact, Prefix};
+
+/// The whole access rule for the box user's socket, first match wins. The names the store keeps for its own approval keys,
+/// audit keys, ingress key and markers are checked before the table (see [`box_reach`]); a name no row matches is
+/// [`BoxReach::Write`]: the box user may store a secret of its own under it and never read it back.
+///
+/// Reading back is an allow-list: only the `Read` rows. A person's sign-in and second factors and the dashboard's own keys
+/// are `None`: the dashboard reads and writes them as its own user (`ozbox-supervisor`), never the box user. A security
+/// review (2026-11-17) found `totp-<user>` on the read list, so on a service with no supervisor socket any agent could read
+/// the owner's authenticator secret and make valid codes, and write one of its own.
+pub const BOX_REACH: &[ReachRow] = &[
+    // a person's sign-in and second factors, and the keys the dashboard signs and sends with as itself
+    row(Prefix("totp-"), BoxReach::None, true), // an authenticator-app secret: whoever reads it can make valid codes
+    row(Exact("google-client-secret"), BoxReach::None, true), // the sign-in client secret
+    row(Exact("vapid-private-key"), BoxReach::None, true), // the key notifications to a person's devices are signed with
+    row(Prefix("push-"), BoxReach::None, true), // a person's device subscriptions: whoever holds them can send to that device
+    // the store's own keys
+    row(Exact("store-kek"), BoxReach::None, false), // the store's key-encryption key
+    row(Exact(crate::tokenmac::KEYS_SECRET), BoxReach::None, false), // the keys sessions, setup codes and tokens are tagged with
+    // a project's secrets and declaration (ADR 0029): the runner and the root launcher only
+    row(Prefix("workload"), BoxReach::None, false), // a workload secret or a project's declaration
+    // decides where the dashboard is reached from: the root helper writes it, behind a fresh approval
+    row(Prefix("tunnel-token-"), BoxReach::Ask, false), // a tunnel token
+    // the dashboard sends with these; this list shrinks as the credential broker takes each over
+    row(Exact("email-api-key"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("telegram-bot-token"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("slack-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("discord-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("teams-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("smtp-password"), BoxReach::Read, true), // a notification channel's send key
+    row(Prefix("sms-"), BoxReach::Read, true),         // a notification channel's send key
+    row(Exact("whatsapp-token"), BoxReach::Read, true), // a notification channel's send key
+    row(Prefix("webhook-url-"), BoxReach::Read, true), // an outgoing webhook's address
+    row(Prefix("webhook-secret-"), BoxReach::Read, true), // an outgoing webhook's signing secret
+    row(Prefix("trigger-secret-"), BoxReach::Read, true), // an incoming trigger's secret (it starts a run as the box user)
 ];
+
+/// What the box user may do with `name` on its socket (see [`BOX_REACH`]).
+pub fn box_reach(name: &str) -> BoxReach {
+    if is_reserved_record(name) {
+        return BoxReach::None;
+    }
+    BOX_REACH
+        .iter()
+        .find(|r| r.rule.matches(name))
+        .map_or(BoxReach::Write, |r| r.box_user)
+}
+
+/// The store's own records that a module of this service keeps (approval keys and markers, audit keys, the ingress key, the
+/// second-factor marker): not the box user's to read, write, ask about or list.
+fn is_reserved_record(name: &str) -> bool {
+    name == crate::secrets_approval::ENROLLED_MARKER
+        || crate::audit_service::is_audit_secret(name)
+        || crate::approval_key::is_reserved(name)
+        || crate::secrets_ingress::is_reserved(name)
+}
+
+/// Whether the supervisor's socket answers `get` for `name`: the dashboard's send keys and the sign-in factors it owns.
+pub fn supervisor_may_get(name: &str) -> bool {
+    !is_reserved_record(name)
+        && BOX_REACH
+            .iter()
+            .find(|r| r.rule.matches(name))
+            .is_some_and(|r| r.supervisor_get)
+}
 
 /// Names whose writes are not the box user's to make over the box socket: a tunnel token decides where the dashboard is
 /// reached from. The write goes through the root helper's admin action instead, which is recorded, and which the
@@ -123,8 +217,9 @@ pub fn user_name_count(store: &EncryptedSecrets) -> Option<u32> {
     u32::try_from(names.iter().filter(|n| !is_system_name(n)).count()).ok()
 }
 
+/// Whether the box socket of a service with no supervisor socket answers `get` for `name`.
 pub fn box_may_get(name: &str) -> bool {
-    BOX_GET_PREFIXES.iter().any(|p| name.starts_with(p))
+    box_reach(name) == BoxReach::Read
 }
 
 #[derive(Deserialize, Default)]
@@ -810,10 +905,18 @@ pub fn handle_from(
     let denied = || Resp::fail("that is not allowed on this socket");
     // a workload secret and a project's declaration are never the box socket's to read, write or list
     let boxy = |name: &str| !name.starts_with("workload");
+    // the box user's reach is the table's (`BOX_REACH`); the supervisor's is its own names and the box user's
+    let may_write = |name: &str| match policy {
+        Policy::Admin => true,
+        Policy::Box => {
+            matches!(box_reach(name), BoxReach::Write | BoxReach::Read) && box_may_write(name)
+        }
+        Policy::Supervisor => boxy(name) && box_may_write(name),
+        _ => false,
+    };
+    let box_user = matches!(policy, Policy::Box | Policy::BoxLocked);
     let resp = match (policy, r.op.as_str()) {
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "set")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
-        {
+        (Policy::Box | Policy::Supervisor | Policy::Admin, "set") if may_write(&r.name) => {
             let stored = if r.value_b64.is_empty() {
                 store.set(&r.name, &r.value)
             } else if policy != Policy::Admin || !r.value.is_empty() {
@@ -844,7 +947,9 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists") => {
+        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists")
+            if !box_user || box_reach(&r.name) != BoxReach::None =>
+        {
             match store.exists(&r.name) {
                 Ok(b) => Resp {
                     flag: Some(b),
@@ -853,9 +958,7 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "delete")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
-        {
+        (Policy::Box | Policy::Supervisor | Policy::Admin, "delete") if may_write(&r.name) => {
             match store.delete(&r.name) {
                 Ok(()) => {
                     gates.audit_event(
@@ -886,7 +989,9 @@ pub fn handle_from(
                         n.into_iter()
                             .filter(|n| {
                                 policy == Policy::Admin
-                                    || (boxy(n)
+                                    || (box_user && box_reach(n) != BoxReach::None)
+                                    || (policy == Policy::Supervisor
+                                        && boxy(n)
                                         && n != crate::secrets_approval::ENROLLED_MARKER
                                         && !crate::audit_service::is_audit_secret(n)
                                         && !crate::approval_key::is_reserved(n))
@@ -905,7 +1010,10 @@ pub fn handle_from(
             },
             None => Resp::fail("that request is not valid"),
         },
-        (Policy::Box | Policy::Supervisor, "get") if box_may_get(&r.name) => {
+        (Policy::Box, "get") | (Policy::Supervisor, "get")
+            if (policy == Policy::Box && box_may_get(&r.name))
+                || (policy == Policy::Supervisor && supervisor_may_get(&r.name)) =>
+        {
             match store.get(&r.name) {
                 Ok(v) => Resp {
                     value: v,
