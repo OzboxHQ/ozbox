@@ -491,6 +491,9 @@ impl Gates {
     /// if the write fails ([`crate::secrets_approval::ApprovalGate::consume_then`]), the lock not held across the write. Check everything that does not depend on the approval BEFORE
     /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
     /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
+    ///
+    /// `declared` says what the caller knows of the change: it touches Production (a declaration with a Production command), so a
+    /// code a software key made is refused for it (ADR 0041 §3). It can only make the gate stricter.
     #[allow(clippy::too_many_arguments)]
     pub fn require_then<T>(
         &self,
@@ -499,6 +502,7 @@ impl Gates {
         project: &str,
         env: &str,
         approval: &str,
+        declared: bool,
         now_ms: u64,
         effect: impl FnOnce(&str) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -524,7 +528,7 @@ impl Gates {
         }
         match self
             .approvals
-            .consume_then(approval, scope, project, env, now_ms, |via| {
+            .consume_then_tiered(approval, scope, project, env, declared, now_ms, |via| {
                 let out = effect(via)?;
                 line("allowed", via);
                 Ok(out)
@@ -532,6 +536,10 @@ impl Gates {
             Ok(out) => Ok(out),
             Err(ConsumeThen::Effect(e)) => {
                 line("kept", "none");
+                Err(e)
+            }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
                 Err(e)
             }
             Err(ConsumeThen::Approval(e)) => {
@@ -573,6 +581,21 @@ impl Gates {
         approval: &str,
         now_ms: u64,
     ) -> Result<String, Refusal> {
+        self.require_typed_tiered(store, scope, project, env, approval, false, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_typed_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, Refusal> {
+        use crate::secrets_approval::ConsumeThen;
         let line =
             |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
         if !store
@@ -595,13 +618,18 @@ impl Gates {
         }
         match self
             .approvals
-            .consume(approval, scope, project, env, now_ms)
+            .consume_tiered(approval, scope, project, env, declared, now_ms)
         {
             Ok(via) => {
                 line("allowed", &via);
                 Ok(via)
             }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
+                Err(Refusal::Approval(e))
+            }
             Err(e) => {
+                let e = e.into_message();
                 line("refused", "none");
                 Err(Refusal::Approval(if approval.is_empty() {
                     "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
@@ -1063,6 +1091,11 @@ pub fn handle_from(
                     &r.project,
                     "",
                     &r.approval,
+                    // a declaration that touches Production is never approved by a key kept on a computer (ADR 0041 §3); one
+                    // whose current declaration cannot be read is treated as touching it, the stricter reading
+                    crate::workload_policy::load(store, &r.project).map_or(true, |cur| {
+                        crate::secrets_signer::declaration_touches_production(&p, cur.as_ref())
+                    }),
                     now,
                     |via| {
                         crate::workload_policy::save(store, &r.project, &p).map_err(|e| e.0)?;
@@ -1193,7 +1226,7 @@ pub fn handle_from(
                 &r.scope,
                 &r.project,
                 &r.env,
-                "dashboard-stepup",
+                &crate::secrets_signer::Signer::Dashboard,
                 now,
                 crate::secrets_approval::DEFAULT_TTL_MS,
             ) {

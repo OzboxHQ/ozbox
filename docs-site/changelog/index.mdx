@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Production approvals come from the dashboard">
+  ## A key kept on your computer can no longer approve Production
+
+  A code made with your computer's own approval key (`ozbox secrets approve`) could approve an import into a Production environment, although Production is meant to be approved only by a person with their passkey or authenticator. The box now refuses it.
+
+  - **Production imports take the dashboard's code.** For an import into any environment other than `dev`, `development`, `staging`, `test` or `e2e`, ask for an approval on the box's dashboard with your passkey or authenticator and run the import with `--approval` and that code. A code from your computer's key is refused, and the message says where to go instead.
+  - **The same for a declaration that touches Production**: one whose commands take secrets from a Production environment, or that removes such a command or changes the project's Production identifiers.
+  - **Everything else is unchanged.** Your computer's key still approves imports into non-Production environments, other declarations, guard overrides for one change, and the box's own settings, and the dashboard's codes work as before.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Secure agent workspace](/use-cases/secure-agent-workspace).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

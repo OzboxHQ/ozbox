@@ -80,6 +80,11 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    with `--allow-live-all` (the two cannot be used together). Either way the keys are listed first, a person at a terminal
    types the project's name to confirm, and a script is refused with the exact command to run yourself. The keys stay flagged and
    no agent's command is ever given them.
+   **The approval for a production file comes from the dashboard.** On a box with a second factor, an import into a Production
+   environment (any environment other than `dev`, `development`, `staging`, `test` or `e2e`) needs the `--approval` code the
+   dashboard gives you after your passkey or authenticator code. A code made with this computer's own key (`ozbox secrets
+   approve`) never approves Production: the box refuses to make one, and refuses one at import, and says to use the dashboard.
+   The same holds for a declaration whose commands take secrets from a Production environment.
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used

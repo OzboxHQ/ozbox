@@ -989,7 +989,7 @@ mod enrol {
     fn mint_enroll_code(r: &Rig, id: &str) -> String {
         r.gates
             .approvals
-            .mint("signer-enroll", id, "", "dashboard-stepup", T, 60_000)
+            .mint("signer-enroll", id, "", &crate::secrets_signer::Signer::Dashboard, T, 60_000)
             .unwrap()
     }
 
@@ -1002,12 +1002,13 @@ mod enrol {
         r.store
             .set(crate::secrets_approval::ENROLLED_MARKER, "1")
             .unwrap();
-        // the laptop's challenge route is open
+        // the laptop's challenge route is open (for a non-Production import: a key kept on a computer never approves
+        // Production, ADR 0041 §3, and an import with no environment named is not a known non-Production one)
         assert!(handle(
             &r.store,
             &r.gates,
             Policy::Unsealed,
-            &json!({"op":"approval_challenge","key_id":"first","scope":"import"}),
+            &json!({"op":"approval_challenge","key_id":"first","scope":"import","env":"staging"}),
             T
         )
         .is_ok());
@@ -1190,7 +1191,7 @@ mod enrol {
         // the dashboard's socket enrols by a request only, and there is no journal to hold one
         let code = gates
             .approvals
-            .mint("signer-enroll", "evil", "", "dashboard-stepup", T, 60_000)
+            .mint("signer-enroll", "evil", "", &crate::secrets_signer::Signer::Dashboard, T, 60_000)
             .unwrap();
         let e = handle(&store, &gates, Policy::Supervisor, &json!({"op":"approval_key_enroll","key_id":"evil","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap_err();
@@ -1198,7 +1199,7 @@ mod enrol {
         // a code enrolment through the laptop's route serves the wait, read from the store alone
         let code = gates
             .approvals
-            .mint("signer-enroll", "second", "", "laptop-key:first", T, 60_000)
+            .mint("signer-enroll", "second", "", &crate::secrets_signer::Signer::SoftwareKey("first".into()), T, 60_000)
             .unwrap();
         handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap();

@@ -890,7 +890,8 @@ pub enum SecretsCommand {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
         /// The approval code the dashboard gave you after your passkey or authenticator code (Settings, Secrets). A box
-        /// whose dashboard has a second factor refuses the keys without one.
+        /// whose dashboard has a second factor refuses the keys without one. An import into a Production environment takes
+        /// only the dashboard's code: a code this computer's key made (`ozbox secrets approve`) never approves Production.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
     },
@@ -948,7 +949,10 @@ pub enum SecretsCommand {
         #[command(subcommand)]
         command: IngressCommand,
     },
-    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes).
+    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes). This
+    /// computer's key never approves Production: an import into a Production environment (anything but dev, development,
+    /// staging, test or e2e), a declaration with a command that takes Production secrets, and a guard override that is not for
+    /// one change are refused by the box. Approve those on the dashboard with your passkey or authenticator.
     Approve {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,

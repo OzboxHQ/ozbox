@@ -2220,9 +2220,7 @@ pub fn dashboard_can_deny(req: &Request, role: Option<Role>) -> Result<(), Strin
 /// and there is no setting that turns that on.
 fn software_cell(req: &Request) -> Result<(), String> {
     if req.subject.production() {
-        return Err(
-            "a software key never decides Production: use a key with presence, or root".into(),
-        );
+        return Err("a software key never decides Production: approve it on the dashboard with your passkey (an owner), with a laptop key that needs a touch, or as root".into());
     }
     match req.scope {
         Scope::GuardOverride => Ok(()),

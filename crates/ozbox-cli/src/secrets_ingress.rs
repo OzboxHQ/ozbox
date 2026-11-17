@@ -953,7 +953,7 @@ mod tests {
             .unwrap();
         let code = gates
             .approvals
-            .mint("kek-export", "", "", "dashboard-stepup", now, 60_000)
+            .mint("kek-export", "", "", &crate::secrets_signer::Signer::Dashboard, now, 60_000)
             .unwrap();
         let ask = |id: &str| {
             let r = req(&ing, json!({"op": "kek_export", "approval": code}), id, now).to_string();
@@ -1029,12 +1029,12 @@ mod tests {
             // an approval for another scope does not do
             let other = gates
                 .approvals
-                .mint("import", "app", "dev", "dashboard-stepup", now, 60_000)
+                .mint("import", "app", "dev", &crate::secrets_signer::Signer::Dashboard, now, 60_000)
                 .unwrap();
             assert_eq!(ask(op, &other, &format!("{id}{:028}", 2))["ok"], false);
             let code = gates
                 .approvals
-                .mint(scope, "", "", "dashboard-stepup", now, 60_000)
+                .mint(scope, "", "", &crate::secrets_signer::Signer::Dashboard, now, 60_000)
                 .unwrap();
             let yes = ask(op, &code, &format!("{id}{:028}", 3));
             assert_eq!(yes["ok"], true, "{op}: {yes}");

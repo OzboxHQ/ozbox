@@ -2517,3 +2517,68 @@ fn the_seen_set_is_keyed_by_the_request_and_the_key_never_by_the_signature_bytes
         .unwrap_err()
         .contains("already used"));
 }
+
+/// B4-28: a software key never decides Production on the request path, in any environment the rules call Production or for a
+/// key whose name says production, and the refusal names what does approve it. Every row of the table is classified, so a new
+/// row (or a new kind of software cell) cannot leave Production open to a software key without this test saying so.
+#[test]
+fn a_software_key_never_decides_production_in_any_row_and_is_told_what_does() {
+    // every software cell this version knows means "never Production"; a new variant must be added here on purpose
+    for r in RULES {
+        let never_production = match r.software {
+            Soft::MemberLevel | Soft::NewNonProductionNames | Soft::Never | Soft::NotApplicable => {
+                true
+            }
+        };
+        assert!(never_production, "{}", r.key);
+    }
+    let c = ctx();
+    let sw = key("soft", KeyType::Ed25519, false);
+    let mut subjects: Vec<(String, Subject)> = ["production", "prod", "live", "qa", "uat"]
+        .iter()
+        .map(|e| (e.to_string(), import(e, Classification::Secret)))
+        .collect();
+    let mut named = import("staging", Classification::Secret);
+    if let Subject::Import(i) = &mut named {
+        i.names[0].name = "STRIPE_LIVE_KEY".into();
+    }
+    subjects.push(("staging with a live name".into(), named));
+    let mut flagged = import("staging", Classification::Secret);
+    if let Subject::Import(i) = &mut flagged {
+        i.production = true;
+    }
+    subjects.push(("staging marked production".into(), flagged));
+    for (n, (what, s)) in subjects.into_iter().enumerate() {
+        assert!(s.production(), "{what}");
+        let mut b = book();
+        let id = format!("p{n}");
+        b.file(&c, T0, filing(&id, s, laptop("lap"))).unwrap();
+        let e = b
+            .decide(
+                &c,
+                T0 + 1,
+                &id,
+                laptop_decide(&b, &c, &id, &sw, false, false, None),
+            )
+            .unwrap_err();
+        assert!(
+            e.contains("never decides Production") && e.contains("dashboard") && e.contains("passkey"),
+            "{what}: {e}"
+        );
+    }
+    // a non-Production import of a new name is still a software key's to decide
+    let mut b = book();
+    b.file(
+        &c,
+        T0,
+        filing("s", import("staging", Classification::Secret), laptop("lap")),
+    )
+    .unwrap();
+    b.decide(
+        &c,
+        T0 + 1,
+        "s",
+        laptop_decide(&b, &c, "s", &sw, false, false, None),
+    )
+    .unwrap();
+}
