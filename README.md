@@ -239,7 +239,9 @@ orchestration, schedules and triggers, chat, linking Telegram with a passkey (ph
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 
-**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, and signed skills. The
+**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, signed skills, and running an engine on
+your own subscription instead of an API key (Settings → Models says, per engine, whether the vendor allows it and why not yet;
+[ADR 0054](docs/adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach.md)). The
 [use-case guides](docs/use-cases/README.md) say, example by example, where each stands.
 
 ## Community and support

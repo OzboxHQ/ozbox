@@ -130,3 +130,26 @@ never your key. The broker adds the real key to outgoing requests and records us
 ([ADR 0017](../adr/0017-credential-broker-per-run-tokens.md)).
 
 **Status:** Preview (built and tested; not yet exercised with a real agent on a real cloud box).
+
+## 11. Use your own subscription instead of an API key
+
+**You want:** your agents to run on a plan you already pay for: Claude Pro or Max, a ChatGPT plan, Gemini Code Assist or
+GitHub Copilot.
+
+**Settings → Models → Use a subscription instead of a key** lists each engine and plan with its status, the reason, and
+links to the vendor's own documentation and terms. Oz Box connects a plan only where the vendor allows a tool like Oz Box to
+hold that sign-in for runs on a remote machine. It keeps the sign-in in the secrets store, out of the agents' reach, and
+lets a run use it only through the credential broker
+([ADR 0054](../adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach.md)).
+
+Today none can be connected:
+
+- **Not offered:** Claude plans (Anthropic's terms do not let another product store or pass on the sign-in), Claude or Google
+  sign-ins through OpenCode, and Aider (API keys only).
+- **Planned:** ChatGPT with Codex CLI or OpenCode, Gemini CLI with a Google account, and GitHub Copilot with OpenCode. Each
+  row says what is missing.
+
+You can still sign an engine in yourself, in a terminal on a box, with the engine's own login command. Oz Box does not hold
+that sign-in, and any agent on that box can read it, so do this only on a box you alone work on.
+
+**Status:** Planned (the status page is built; no sign-in is).

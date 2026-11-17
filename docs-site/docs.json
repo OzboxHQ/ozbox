@@ -144,7 +144,8 @@
               "adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver",
               "adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again",
               "adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest",
-              "adr/0053-init-adopts-what-already-exists-only-what-oz-box-made-never-replaced"
+              "adr/0053-init-adopts-what-already-exists-only-what-oz-box-made-never-replaced",
+              "adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach"
             ]
           },
           {

@@ -8,6 +8,18 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "Docs", "Security"]} description="Subscriptions instead of API keys: where each engine stands">
+  ## See whether each agent engine can run on your own subscription
+
+  You may already pay for a Claude, ChatGPT, Google or GitHub Copilot plan and want your agents to use it instead of an API key. **Settings → Models → Use a subscription instead of a key** now tells you, for each engine and plan, whether Oz Box can connect it, why not where it cannot, and links the vendor's own documentation and terms.
+
+  - **None can be connected yet.** Claude plans are not offered, because Anthropic's terms do not let another product store or pass on the sign-in. ChatGPT, Google and GitHub Copilot sign-ins are planned, and each row says what is missing.
+  - **Oz Box never copies a sign-in from your computer.** When a plan can be connected, you will sign in on the vendor's own page from the dashboard. The sign-in will be kept in the secrets store, out of your agents' reach.
+  - **Signing an engine in yourself still works.** The page says plainly that agents on that box can read such a sign-in.
+
+  See [Models and routing](/use-cases/models-and-routing).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 
