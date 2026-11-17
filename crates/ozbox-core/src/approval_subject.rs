@@ -1308,6 +1308,82 @@ impl Subject {
     }
 }
 
+/// How an approved request is named where a gated change used to carry an approval code (the root helper's request line,
+/// the dashboard installer's settings): `req-` and the request's id. Letters, digits and dashes only, so it passes every place
+/// a code passes, and never the shape of a code (ADR 0041, amendment of 2026-11-17 for B4-27).
+pub const REQUEST_WORD_PREFIX: &str = "req-";
+
+/// The word for an approved request, `req-<id>`.
+pub fn request_word(id: &str) -> String {
+    format!("{REQUEST_WORD_PREFIX}{id}")
+}
+
+/// The request id a `req-<id>` word names, or `None` when it is not such a word.
+pub fn request_word_id(word: &str) -> Option<&str> {
+    word.trim()
+        .strip_prefix(REQUEST_WORD_PREFIX)
+        .filter(|id| crate::approval::request_id_ok(id))
+}
+
+/// The full digest of a tunnel token as the box binds a request to it: `sha256(token)` of the trimmed token, in hex. Its
+/// first 32 digits are the code path's binding (`tunnel_token_binding`).
+pub fn tunnel_token_sha256(token: &str) -> String {
+    sha256_hex(token.trim())
+}
+
+/// The subject of a change the root helper checks at its gate (`ozbox secrets gate`), from what the gate sees: the scope, the
+/// project word, the binding it compares (`env`) and, for a tunnel token, the token's full digest. One function, so the
+/// computer that files the request and the box that spends it compute the same subject.
+///
+/// * `tunnel-token`: the token's kind and digest. The binding, when there is one, must be the digest's first 32 digits. The
+///   identity is left empty (nothing decodes it on both sides yet).
+/// * `box-secrets`: the declaration (`project` is `declaration` or `bao-token`), a `set` bound to the binding, or a `remove`
+///   for a declaration with no binding.
+pub fn gate_subject(
+    scope: &str,
+    project: &str,
+    env: &str,
+    token_sha256: &str,
+) -> Result<Subject, SubjectError> {
+    let subject = match scope {
+        "tunnel-token" => {
+            if token_sha256.is_empty() {
+                return bad(
+                    "a tunnel-token change by request is bound to the token, and none was sent",
+                );
+            }
+            if !env.is_empty() && !token_sha256.starts_with(env) {
+                return bad("the binding is not the token's");
+            }
+            Subject::TunnelToken(TunnelToken {
+                kind: project.to_string(),
+                token_sha256: token_sha256.to_string(),
+                account_tag: String::new(),
+                tunnel_id: String::new(),
+            })
+        }
+        "box-secrets" => {
+            let remove = project == "declaration" && env.is_empty();
+            Subject::BoxSecrets(BoxSecrets {
+                address: project.to_string(),
+                action: if remove { "remove" } else { "set" }.to_string(),
+                change_digest: if remove {
+                    String::new()
+                } else {
+                    to_hex(&digest_fields(
+                        "ozbox-gate-box-secrets-v1",
+                        &[project.as_bytes(), env.as_bytes()],
+                    ))
+                },
+                first_setting: false,
+            })
+        }
+        _ => return bad("this change is not approved by request at the root helper's gate"),
+    };
+    subject.validate()?;
+    Ok(subject)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1958,5 +2034,55 @@ mod review_tests {
             "a challenge signature cannot be replayed as a decision"
         );
         assert_ne!(msg, decide_message(&ids(), "REQ1", &d, "deny"));
+    }
+
+    #[test]
+    fn a_gate_subject_is_the_same_on_both_sides_and_bound_to_what_the_gate_sees() {
+        let tok = "token-a-aaaaaaaaaaaaaaaaaaaa";
+        let full = tunnel_token_sha256(tok);
+        assert_eq!(full, tunnel_token_sha256(&format!(" {tok}\n")));
+        let bind = &full[..32];
+        let a = gate_subject("tunnel-token", "cloudflare", bind, &full).unwrap();
+        assert_eq!(
+            a,
+            gate_subject("tunnel-token", "cloudflare", "", &full).unwrap()
+        );
+        assert_eq!(a.scope(), "tunnel-token");
+        assert!(!a.production());
+        // another token, a binding that is not the token's, or no digest at all
+        let other = tunnel_token_sha256("token-b-bbbbbbbbbbbbbbbbbbbb");
+        assert_ne!(
+            a,
+            gate_subject("tunnel-token", "cloudflare", "", &other).unwrap()
+        );
+        assert!(gate_subject("tunnel-token", "cloudflare", &other[..32], &full).is_err());
+        assert!(gate_subject("tunnel-token", "cloudflare", bind, "").is_err());
+        // a declaration: set is bound to its binding, remove has none
+        let s1 = gate_subject("box-secrets", "declaration", "d-0123456789abcdef", "").unwrap();
+        let s2 = gate_subject("box-secrets", "declaration", "d-fedcba9876543210", "").unwrap();
+        assert_ne!(s1, s2);
+        let rm = gate_subject("box-secrets", "declaration", "", "").unwrap();
+        let Subject::BoxSecrets(b) = &rm else {
+            panic!()
+        };
+        assert_eq!(b.action, "remove");
+        let Subject::BoxSecrets(b) = gate_subject("box-secrets", "bao-token", "", "").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(b.action, "set");
+        assert!(gate_subject("import", "app", "staging", "").is_err());
+    }
+
+    #[test]
+    fn a_request_word_names_a_request_and_is_never_a_code() {
+        let id = "abcdefghijklmnopqrstuvwxyz";
+        let id = &id[..26];
+        let w = request_word(id);
+        assert_eq!(request_word_id(&w), Some(id));
+        assert!(w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+        assert_eq!(request_word_id("ABCD-EFGH-JKMN-PQRS"), None);
+        assert_eq!(request_word_id("req-short"), None);
+        assert_eq!(request_word_id("req-ABCDEFGHIJKLMNOPQRSTUVWXYZ"), None);
     }
 }

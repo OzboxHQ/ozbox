@@ -803,6 +803,8 @@ fn gate(
     // (A token the box user can swap in a file after the check is not a risk this way: the helper hands over the bytes it
     // already holds.)
     let bound;
+    // the token's full digest, which an approved `tunnel-token` request is bound to (B4-27); the code path ignores it
+    let mut token_sha256 = String::new();
     let env = if bind_token_stdin {
         let mut tok = zeroize::Zeroizing::new(String::new());
         let _ = std::io::stdin().read_line(&mut tok);
@@ -810,6 +812,7 @@ fn gate(
             return Err(CliError::Msg(t("approval_key.token_stdin_empty", &[])));
         }
         bound = crate::secrets_approval::tunnel_token_binding(&tok);
+        token_sha256 = ozbox_core::approval_subject::tunnel_token_sha256(&tok);
         bound.as_str()
     } else {
         env
@@ -817,7 +820,7 @@ fn gate(
     let v = crate::secrets_service::SocketSecrets::new(path)
         .call(
             json!({"op": "gate", "scope": scope, "project": project, "env": env,
-            "approval": line.trim()}),
+            "approval": line.trim(), "token_sha256": token_sha256}),
         )
         .map_err(fail)?;
     println!("{}", v["value"].as_str().unwrap_or("allowed"));

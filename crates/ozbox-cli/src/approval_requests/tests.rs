@@ -1804,8 +1804,10 @@ fn a_spend_recomputes_the_matches_from_the_text_the_hook_sends() {
     .unwrap();
 }
 
+/// A policy change is filed with the declaration's text (B4-27): a subject of the filer's own making (its digests and its
+/// label) is never read, so one with no declaration is refused.
 #[test]
-fn a_policy_change_is_not_filed_through_this_operation_yet() {
+fn a_policy_change_is_filed_with_its_declaration_never_a_filers_subject() {
     let r = rig(true, false);
     let p = json!({"scope":"policy","policy_sha256":hex64('d'),"predecessor_sha256":hex64('e'),"sensitivity":"ordinary"});
     let e = r
@@ -1816,7 +1818,7 @@ fn a_policy_change_is_not_filed_through_this_operation_yet() {
             json!({"op":"areq_file","subject":p}),
         )
         .unwrap_err();
-    assert!(e.contains("policy change is not filed"), "{e}");
+    assert!(!e.is_empty());
 }
 
 /// a caller that cannot see a request cannot hold a place in its await cap, and the per-request cap is per class.

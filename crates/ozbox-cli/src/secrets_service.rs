@@ -276,6 +276,10 @@ struct Req {
     request_id: String,
     #[serde(default)]
     salt: String,
+    /// At the root helper's gate, for a tunnel token: the token's full digest (`tunnel_token_sha256`), which an approved
+    /// `tunnel-token` request is bound to. Sent by the gate itself (root), never by the box user.
+    #[serde(default)]
+    token_sha256: String,
     #[serde(default)]
     scope: String,
     #[serde(default)]
@@ -661,7 +665,7 @@ impl Gates {
             Err(ConsumeThen::Approval(e)) => {
                 line("refused", "none");
                 Err(if approval.is_empty() {
-                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                    NEEDS_APPROVAL.to_string()
                 } else {
                     e
                 })
@@ -748,7 +752,7 @@ impl Gates {
                 let e = e.into_message();
                 line("refused", "none");
                 Err(Refusal::Approval(if approval.is_empty() {
-                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                    NEEDS_APPROVAL.to_string()
                 } else {
                     e
                 }))
@@ -756,6 +760,11 @@ impl Gates {
         }
     }
 }
+
+/// What the gate says when a change needs an approval and none was sent: what approves it and where (B4-27). A computer's
+/// command recognises its first words (`approval_flow::needs_approval`) and files a request by itself; the root helper shows
+/// the person at most 300 characters of it.
+pub const NEEDS_APPROVAL: &str = "this change needs a fresh approval: run it from your computer without --approval and approve the request it files in the dashboard (Approvals) with your passkey or authenticator code, or pass --approval CODE from the dashboard (Settings, Secrets)";
 
 /// Spend an approved `import` request for exactly these rows (ADR 0041 §4). The subject is recomputed here from
 /// the rows as they stand: every name, its classification, the digest of its value under the laptop's salt, the environment
@@ -817,6 +826,111 @@ fn spend_import_request(
             .as_ref()
             .map_or("approved", |d| d.factor_label.as_str())
     ))
+}
+
+/// Spend an approved request named at the root helper's gate (`req-<id>`, ADR 0041 amendment of 2026-11-17 for B4-27): a
+/// `tunnel-token` or `box-secrets` change filed from a computer and approved on the dashboard. The subject is recomputed from
+/// what the gate sees ([`ozbox_core::approval_subject::gate_subject`]), so a request approved for another token or another
+/// declaration is refused and kept. The gate is the whole check, as it is for a code: the helper makes the change next, so the
+/// request is finished here. Returns how it was approved, for the helper's message.
+#[allow(clippy::too_many_arguments)]
+fn spend_gate_request(
+    store: &EncryptedSecrets,
+    gates: &Gates,
+    scope: &str,
+    project: &str,
+    env: &str,
+    token_sha256: &str,
+    id: &str,
+    now: u64,
+) -> Result<String, String> {
+    let svc = gates
+        .requests
+        .get()
+        .ok_or("this service does not keep approval requests: send an approval code")?;
+    let subject = ozbox_core::approval_subject::gate_subject(scope, project, env, token_sha256)
+        .map_err(|e| e.0)?;
+    let r = svc.spend(
+        store,
+        gates,
+        ozbox_core::approval::SpendVia::Socket {
+            class: ozbox_core::approval::SocketClass::Admin,
+            uid: None,
+        },
+        id,
+        &subject,
+        now,
+    )?;
+    let _ = svc.finish_inside(id, now);
+    Ok(format!(
+        "request:{}",
+        r.decision
+            .as_ref()
+            .map_or("approved", |d| d.factor_label.as_str())
+    ))
+}
+
+/// Spend an approved `policy` request and write the declaration (§2: spending, effect, spent). A write that fails after the
+/// spend leaves the request spending, as an import's does; the person files a new one.
+fn spend_declaration_request(
+    store: &EncryptedSecrets,
+    gates: &Gates,
+    project: &str,
+    p: &crate::workload_policy::Policy,
+    request_id: &str,
+    now: u64,
+) -> Result<String, String> {
+    let svc = gates
+        .requests
+        .get()
+        .ok_or("this service does not keep approval requests: send an approval code")?;
+    let subject = declaration_subject(store, project, p)?;
+    let r = svc.spend(
+        store,
+        gates,
+        ozbox_core::approval::SpendVia::Inside,
+        request_id,
+        &subject,
+        now,
+    )?;
+    crate::workload_policy::save(store, project, p).map_err(|e| e.0)?;
+    let _ = svc.finish_inside(request_id, now);
+    Ok(format!(
+        "request:{}",
+        r.decision
+            .as_ref()
+            .map_or("approved", |d| d.factor_label.as_str())
+    ))
+}
+
+/// The subject of a declaration change, worked out by the service from the declaration it was sent and the one it holds
+/// (ADR 0041 §3.1, B4-27): the digest of each, as the service serialises them, and the sensitivity. A workload declaration
+/// names no `host-guard` or `tunnel-token` entry, so it never widens a guarded scope: its sensitivity is `ordinary`, read from
+/// the two parsed declarations, never a filer's label. One function, used where the request is filed and where it is spent.
+pub fn declaration_subject(
+    store: &EncryptedSecrets,
+    project: &str,
+    new: &crate::workload_policy::Policy,
+) -> Result<ozbox_core::approval_subject::Subject, String> {
+    use ozbox_core::approval_subject::{
+        policy_sensitivity, sha256_hex, GuardedSettings, PolicyChange, Subject,
+    };
+    let digest = |p: &crate::workload_policy::Policy| {
+        serde_json::to_string(p)
+            .map(|s| sha256_hex(&s))
+            .map_err(|_| "the declaration could not be read".to_string())
+    };
+    let current = crate::workload_policy::load(store, project).map_err(|e| e.0)?;
+    let predecessor = match &current {
+        Some(c) => digest(c)?,
+        None => sha256_hex(""),
+    };
+    let none = GuardedSettings::default();
+    Ok(Subject::Policy(PolicyChange {
+        policy_sha256: digest(new)?,
+        predecessor_sha256: predecessor,
+        sensitivity: policy_sensitivity(&none, &none),
+    }))
 }
 
 /// Answer one request under a policy, with a fresh gate state (tests that need none of it).
@@ -1216,6 +1330,27 @@ pub fn handle_from(
                 .and_then(|p| policy_bootstrap_gate(store, &r.project, &p).map(|()| p))
             {
                 Err(e) => Resp::fail(&e),
+                // an approved `policy` request (B4-27): the subject is worked out again from this declaration and the one held
+                // now, so a declaration changed after the approval, or one the box's own changed under, is refused and kept
+                Ok(p) if !r.request_id.is_empty() => {
+                    match spend_declaration_request(store, gates, &r.project, &p, &r.request_id, now)
+                    {
+                        Err(e) => Resp::fail(&e),
+                        Ok(via) => {
+                            crate::workload::audit(
+                                store.path(),
+                                &format!("policy project={} via={via}", r.project),
+                            );
+                            gates.audit_event(
+                                store,
+                                "secrets.policy.write",
+                                &r.project,
+                                &format!("via={via}"),
+                            );
+                            Resp::ok()
+                        }
+                    }
+                }
                 Ok(p) => match gates.require_then(
                     store,
                     "policy",
@@ -1467,7 +1602,21 @@ pub fn handle_from(
         },
         // The root helper asks this before it stores a tunnel token (it cannot judge a code itself).
         (Policy::Admin, "gate") => {
-            match gates.require(store, &r.scope, &r.project, &r.env, &r.approval, now) {
+            // an approved request (`req-<id>`, B4-27) or a code; the request is recomputed from what the gate sees
+            let allowed = match ozbox_core::approval_subject::request_word_id(&r.approval) {
+                Some(id) => spend_gate_request(
+                    store,
+                    gates,
+                    &r.scope,
+                    &r.project,
+                    &r.env,
+                    &r.token_sha256,
+                    id,
+                    now,
+                ),
+                None => gates.require(store, &r.scope, &r.project, &r.env, &r.approval, now),
+            };
+            match allowed {
                 Ok(via) => Resp {
                     value: Some(via),
                     ..Resp::ok()

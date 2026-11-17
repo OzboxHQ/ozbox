@@ -701,6 +701,10 @@ impl RequestService {
                 "version": 1,
                 "ids": {"box_id": self.ids.box_id, "store_id": self.ids.store_id},
                 "scopes": RULES.iter().filter(|r| r.journal).map(|r| r.key).collect::<Vec<_>>(),
+                // B4-27 (additive): a declaration is filed with its text, and the root helper's gate spends an approved
+                // request (`req-<id>`) for these scopes
+                "policy_requests": true,
+                "gate_requests": ["tunnel-token", "box-secrets"],
                 "pending_ms": ozbox_core::approval::PENDING_MS,
                 "approved_ms": ozbox_core::approval::APPROVED_MS,
                 "await_max_ms": AWAIT_MAX_MS,
@@ -938,17 +942,28 @@ impl RequestService {
             Some("guard-override") => {
                 derive_guard_fields(store, gates, &mut raw, v["scanned_text"].as_str(), now)?
             }
-            // a policy's sensitivity is worked out from the two parsed policies, which nothing in this release hands the
-            // service: until the policy operation exists, a policy change is not filed here
-            Some("policy") => {
-                return Err(
-                    "a policy change is not filed through this operation in this release".into(),
-                )
-            }
             _ => {}
         }
-        let mut subject: Subject = serde_json::from_value(raw)
-            .map_err(|_| "that request's subject is not valid".to_string())?;
+        // A declaration change (B4-27) is filed with the declaration itself, never a subject: the service parses it, checks it
+        // as the `policy` operation would, and works out the digests and the sensitivity from it and the declaration it holds.
+        // A filer's own fields are not read.
+        let mut policy_reason = None;
+        let mut subject: Subject = if raw["scope"].as_str() == Some("policy") {
+            let project = v["project"].as_str().unwrap_or("");
+            crate::workload_policy::secret_name(project)
+                .map_err(|_| "that request's subject is not valid".to_string())?;
+            let p = crate::workload_policy::Policy::parse(v["policy_text"].as_str().unwrap_or(""))
+                .and_then(|p| p.check_before_write().map(|_| p))
+                .map_err(|e| e.0)?;
+            policy_reason = Some(format!(
+                "declaration for project {project} ({} command(s))",
+                p.commands.len()
+            ));
+            crate::secrets_service::declaration_subject(store, project, &p)?
+        } else {
+            serde_json::from_value(raw)
+                .map_err(|_| "that request's subject is not valid".to_string())?
+        };
         // a key's attestation is verified now and the verdict kept: the challenge it was made over does not live as long as the
         // approval's wait
         let staged = match &subject {
@@ -967,7 +982,7 @@ impl RequestService {
             .as_str()
             .map(|c| sanitize_display(c, 64))
             .filter(|c| !c.is_empty());
-        let reason = v["reason"].as_str().map(str::to_string);
+        let reason = policy_reason.or_else(|| v["reason"].as_str().map(str::to_string));
         // facts the service derives itself, from the one read of the store's names above: a replacement is a value already
         // stored (a name that cannot be looked up counts as stored, which is the stricter reading)
         let derived = match &subject {
@@ -976,6 +991,11 @@ impl RequestService {
                     crate::secrets_enc::workload_name(&i.project, &i.environment, &n.name)
                         .map_or(true, |w| names.contains(&w))
                 }),
+                ..Derived::default()
+            },
+            // the service's own reading (`declaration_subject`), never a filer's label
+            Subject::Policy(p) => Derived {
+                policy_sensitivity: Some(p.sensitivity),
                 ..Derived::default()
             },
             _ => Derived::default(),
