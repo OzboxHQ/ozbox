@@ -8,7 +8,7 @@
       "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
       "Condition": {
         "ArnLike": { "aws:PrincipalArn": "${window_principal_arn}" },
-        "StringLike": { "sts:SourceIdentity": "ozbox-*", "sts:RoleSessionName": ["plan-*", "orch-*"] }
+        "StringLike": { "sts:SourceIdentity": "ozbox-*", "sts:RoleSessionName": "plan-*" }
       }
     }
   ]

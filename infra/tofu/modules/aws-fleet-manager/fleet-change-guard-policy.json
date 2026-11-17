@@ -93,11 +93,8 @@
       "Sid": "NeverLaunchOnAnotherOwnersInterface",
       "Effect": "Deny",
       "Action": "ec2:RunInstances",
-      "Resource": "arn:aws:ec2:*:${account_id}:network-interface/*",
+      "Resource": "arn:aws:ec2:*:${account_id}:network-interface/eni-*",
       "Condition": {
-        "Null": {
-          "aws:ResourceTag/ozbox-managed": "false"
-        },
         "StringNotEquals": {
           "aws:ResourceTag/ozbox-managed": "true"
         }

@@ -182,3 +182,36 @@ run "an_image_that_is_not_an_ami_is_refused" {
 
   expect_failures = [var.image_ids]
 }
+
+# Second review, Low 1: an orch-* session has no ozbox-window-box tag, so the trust admits plan-* sessions only.
+run "only_plan_sessions_may_assume_the_change_role" {
+  command = apply
+
+  assert {
+    condition     = jsondecode(aws_iam_role.change.assume_role_policy).Statement[0].Condition.StringLike["sts:RoleSessionName"] == "plan-*"
+    error_message = "the change role trusts plan-* sessions only until the orchestration window is built"
+  }
+
+  assert {
+    condition     = !strcontains(aws_iam_role.change.assume_role_policy, "orch-")
+    error_message = "no orch-* session in the trust"
+  }
+}
+
+# Second review, Low 2: an existing interface (ARN network-interface/eni-...) without ozbox-managed=true is refused, tagged
+# otherwise or not at all; the interface a launch creates (literal ARN network-interface/*) is not matched by eni-*.
+run "an_existing_untagged_interface_is_refused" {
+  command = apply
+
+  assert {
+    condition = length([
+      for st in jsondecode(aws_iam_policy.change_guard.policy).Statement : st
+      if st.Sid == "NeverLaunchOnAnotherOwnersInterface"
+      && st.Effect == "Deny"
+      && st.Resource == "arn:aws:ec2:*:123456789012:network-interface/eni-*"
+      && st.Condition.StringNotEquals["aws:ResourceTag/ozbox-managed"] == "true"
+      && !contains(keys(st.Condition), "Null")
+    ]) == 1
+    error_message = "the deny covers every existing interface not tagged ozbox-managed=true, untagged included, and not the launch's new one"
+  }
+}
