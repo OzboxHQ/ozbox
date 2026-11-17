@@ -91,6 +91,7 @@ mod metadata_guard;
 mod model_engines;
 mod model_prices;
 mod model_providers;
+mod model_subscriptions;
 mod model_usage;
 mod models;
 mod models_cli;
@@ -146,6 +147,7 @@ mod settings;
 mod ssh_limits;
 mod sshconfig;
 mod state;
+mod subscription_signin;
 #[cfg(test)]
 mod systemd_props_guard;
 mod telegram;

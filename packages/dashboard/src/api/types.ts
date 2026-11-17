@@ -520,10 +520,29 @@ export interface EngineInfo {
   kinds: ModelKind[];
 }
 
+/** Whether an engine can run on a person's own subscription instead of an API key (ADR 0054). Ids, codes and links only. */
+export interface SubscriptionInfo {
+  id: string;
+  engine: string;
+  engine_label: string;
+  kind: 'subscription';
+  /** `opt_in`: the engine reads the sign-in itself, so it is handed to its runs only after the owner turns that on (ADR 0055). */
+  status: 'available' | 'opt_in' | 'planned' | 'not_offered';
+  sign_in: 'device_code' | 'browser_only' | 'not_documented' | 'none';
+  reason: string;
+  /** The vendor's own documentation and terms the status rests on. */
+  sources: string[];
+  checked_on: string;
+  /** This row has an opt-in in Settings, Models (ADR 0055). An older server leaves it out. */
+  opt_in?: boolean;
+}
+
 export interface ModelsCatalog {
   kinds: ModelKindInfo[];
   engines: EngineInfo[];
   price_table_as_of: string;
+  /** Added with ADR 0054; an older server leaves it out. */
+  subscriptions?: SubscriptionInfo[];
 }
 
 /** A price in US dollars per million tokens. Always an estimate. */

@@ -144,6 +144,18 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Every change is confirmed for that exact plan.** The dashboard plans and shows each change as it does today; applying it then needs a change window opened from your own computer and your passkey over that plan. An authenticator code or a computer's key is not accepted.
   - **Boxes stay in your own network, and the managing box stays out of reach.** A box made this way can only be placed in Oz Box's own subnets, a change can attach only its own box's disks, and nothing can be attached to, started on, or cloned from the box that manages the fleet, including from its older backups.
   - **Known limit.** The part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the fleet is not connected. See ADR 0040.
+<Update label="[Release date]" tags={["Dashboard", "Docs", "Security"]} description="0.3.0-beta: use your ChatGPT plan with Codex, on your opt-in">
+  ## Run Codex on your ChatGPT plan, if you choose to, and see where every other plan stands
+
+  You may already pay for a Claude, ChatGPT, Google or GitHub Copilot plan and want your agents to use it instead of an API key. **Settings → Models → Use a subscription instead of a key** now tells you, for each engine and plan, whether Oz Box can connect it, why not where it cannot, and links the vendor's own documentation and terms.
+
+  - **Codex with a ChatGPT plan can be turned on, by an owner, per engine.** Codex reads its sign-in from a file, so an agent in a Codex run can read it and copy it. The page says exactly that before you choose, then asks you to type the plan's id and confirm with your passkey. It is off until you do.
+  - **You sign in on OpenAI's own page.** The dashboard shows OpenAI's link and a one-time code. Nothing is typed on the box, and a sign-in already on your computer is never copied.
+  - **Only Codex runs get it, one at a time, each with its box to itself,** and it is removed when the run ends. Every hand-off is in the audit log.
+  - **Revoke and turn off** deletes it from Oz Box and links the OpenAI page where you revoke it for good.
+  - **Claude plans, Google accounts and Aider are not offered**, because the vendors' terms do not allow it. ChatGPT and GitHub Copilot through OpenCode, and Gemini CLI, are planned; each row says what is missing.
+
+  This is a preview: no real sign-in has been tried yet. See [Models and routing](/use-cases/models-and-routing).
 </Update>
 
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">

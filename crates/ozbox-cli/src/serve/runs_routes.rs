@@ -78,9 +78,22 @@ pub(super) struct ServeHost {
     brokered: std::collections::BTreeSet<String>,
     /// The Oz Box tools' server: runs of an orchestration are handed a token for it (see `orch_routes`).
     mcp: Option<Arc<crate::mcp::McpServer>>,
+    /// Runs handed a subscription sign-in (ADR 0055), by run: (box, subscription id). Forgotten when the run ends.
+    sub_runs: BTreeMap<String, (String, &'static str)>,
+    /// Each hand-off since the server last wrote them to the audit chain: (run, box, subscription id). Ids only.
+    pub(super) handoffs: Vec<(String, String, &'static str)>,
 }
 
 impl ServeHost {
+    /// The runs that were handed this subscription's sign-in and have not ended: each keeps its copy until it does.
+    pub(super) fn runs_holding(&self, sub_id: &str) -> Vec<String> {
+        self.sub_runs
+            .iter()
+            .filter(|(_, (_, s))| *s == sub_id)
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+
     /// The shared way to the boxes' daemons, for the tool host's backend.
     pub(super) fn link(&self) -> RunLink {
         self.link.clone()
@@ -290,7 +303,58 @@ impl AgentHost for ServeHost {
         }
     }
 
+    /// A run of an engine the owner opted in (ADR 0055) is handed that engine's own sign-in, as a file the box writes into a
+    /// folder of that run alone and removes when it ends. Such a run runs alone on its box (anything else running as the box
+    /// user could read the file), and a sign-in is used by one run at a time (Codex's own rule). Every other run, of any
+    /// engine, is handed nothing.
+    fn run_files(
+        &mut self,
+        task_id: &str,
+        spec: &RunSpec,
+        others: &[(String, String, String)],
+    ) -> Result<Vec<ozbox_core::agent_engine::RunFile>, String> {
+        let Some(secrets) = self.secrets.clone() else {
+            return Ok(Vec::new());
+        };
+        let holds = |engine: &str| {
+            crate::subscription_signin::for_engine(secrets.as_ref(), engine).is_some()
+        };
+        let here: Vec<&(String, String, String)> =
+            others.iter().filter(|o| o.1 == spec.box_name).collect();
+        // a run on this box holds a sign-in: it runs alone until it ends (known here, or by its engine after a restart)
+        if here
+            .iter()
+            .any(|o| self.sub_runs.contains_key(&o.0) || holds(&o.2))
+        {
+            return Err(
+                "waiting: a run on this box holds your subscription sign-in, and it runs alone until it ends".into(),
+            );
+        }
+        let Some(a) = crate::subscription_signin::for_engine(secrets.as_ref(), &spec.engine) else {
+            return Ok(Vec::new());
+        };
+        if !here.is_empty() {
+            return Err("waiting: this run uses your subscription sign-in, so it starts once nothing else runs on its box".into());
+        }
+        if others.iter().any(|o| {
+            o.2 == a.engine
+                || self
+                    .sub_runs
+                    .get(&o.0)
+                    .is_some_and(|(_, id)| *id == a.sub_id)
+        }) {
+            return Err("waiting: your subscription sign-in is in use by another run, and the vendor allows one at a time".into());
+        }
+        let files = crate::subscription_signin::files_for_run(secrets.as_ref(), a)?;
+        self.sub_runs
+            .insert(task_id.to_string(), (spec.box_name.clone(), a.sub_id));
+        self.handoffs
+            .push((task_id.to_string(), spec.box_name.clone(), a.sub_id));
+        Ok(files)
+    }
+
     fn end_run(&mut self, task_id: &str) {
+        self.sub_runs.remove(task_id);
         if let Some(m) = &self.mcp {
             m.revoke_run(task_id);
         }
@@ -1917,6 +1981,76 @@ mod tests {
     // The provider is the fake one but the app is not simulated, so a run goes through the same path a real box's does:
     // the Claude Code adapter, `BoxRunTransport`, and `BoxAgent::runs`. The box daemon is a double that keeps what it was
     // asked to start and serves a scripted log.
+
+    /// ADR 0055: only a run of the opted-in engine is handed its sign-in, and only once the owner opted in and signed in;
+    /// such a run runs alone on its box and one at a time; once it ends nothing of it is remembered; and no other run, of
+    /// any engine, on that box or another, is handed anything.
+    #[test]
+    fn a_subscription_sign_in_is_handed_only_to_the_opted_in_engines_run_alone_and_once() {
+        use crate::subscription_signin as ss;
+        let s = Arc::new(crate::secrets::MemorySecrets::default());
+        let mut h = ServeHost {
+            secrets: Some(s.clone() as Arc<dyn SecretStore>),
+            ..ServeHost::default()
+        };
+        let spec = |engine: &str, b: &str| -> RunSpec {
+            serde_json::from_value(
+                json!({"engine":engine,"prompt":"p","box_name":b,"requested_by":"owner"}),
+            )
+            .unwrap()
+        };
+        let codex = spec("codex", "alpha");
+        // nothing stored: nothing handed
+        assert!(h.run_files("t1", &codex, &[]).unwrap().is_empty());
+        ss::store_login(s.as_ref(), "codex-chatgpt", "SENTINEL-login").unwrap();
+        // signed in but not opted in: still nothing
+        assert!(h.run_files("t1", &codex, &[]).unwrap().is_empty());
+        ss::set_opt_in(s.as_ref(), "codex-chatgpt", 1).unwrap();
+        for other in ["claude-code", "opencode", "gemini-cli", "aider"] {
+            assert!(
+                h.run_files("o", &spec(other, "bravo"), &[])
+                    .unwrap()
+                    .is_empty(),
+                "{other}"
+            );
+        }
+        // a Codex run waits while anything else runs on its box
+        let busy = [(
+            "x".to_string(),
+            "alpha".to_string(),
+            "claude-code".to_string(),
+        )];
+        assert!(h
+            .run_files("t1", &codex, &busy)
+            .unwrap_err()
+            .contains("starts once nothing else runs"));
+        assert!(h.handoffs.is_empty());
+        let files = h.run_files("t1", &codex, &[]).unwrap();
+        assert_eq!(files[0].contents, "SENTINEL-login");
+        assert_eq!(h.runs_holding("codex-chatgpt"), vec!["t1".to_string()]);
+        assert_eq!(h.handoffs.len(), 1);
+        assert!(!format!("{:?}", h.handoffs).contains("SENTINEL"));
+        let going = [("t1".to_string(), "alpha".to_string(), "codex".to_string())];
+        // while it goes, no other run starts on its box, and no second Codex run anywhere
+        assert!(h
+            .run_files("t2", &spec("claude-code", "alpha"), &going)
+            .unwrap_err()
+            .contains("runs alone"));
+        assert!(h
+            .run_files("t3", &spec("codex", "bravo"), &going)
+            .unwrap_err()
+            .contains("one at a time"));
+        // a run on another box of another engine is unaffected, and handed nothing
+        assert!(h
+            .run_files("t4", &spec("claude-code", "bravo"), &going)
+            .unwrap()
+            .is_empty());
+        h.end_run("t1");
+        assert!(h.runs_holding("codex-chatgpt").is_empty());
+        // revoked: the next Codex run is handed nothing
+        ss::revoke(s.as_ref(), "codex-chatgpt").unwrap();
+        assert!(h.run_files("t5", &codex, &[]).unwrap().is_empty());
+    }
 
     mod real_box {
         use super::*;

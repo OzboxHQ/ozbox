@@ -474,6 +474,14 @@ mod daemon {
                 default_max_runtime_s: (cfg.runs.default_max_runtime_s > 0)
                     .then_some(cfg.runs.default_max_runtime_s),
                 default_memory_cap: cfg.runs.default_memory_cap,
+                // a run's own files (ADR 0055) live in the box user's memory-backed runtime folder, never on /work
+                files_root: uid.and_then(|u| {
+                    let d = format!("/run/user/{u}");
+                    std::path::Path::new(&d)
+                        .is_dir()
+                        .then(|| ozboxd::run_files::default_root(Some(&d)))
+                        .flatten()
+                }),
                 ..RunConfig::default()
             },
             run_cg,
@@ -481,6 +489,11 @@ mod daemon {
             spawner,
             clock.clone(),
         )));
+        // a run's files left by runs that ended while no daemon was here go now (those still going are taken over below,
+        // which sweeps again with them kept)
+        if switch.is_none() {
+            lock(&runs).sweep_run_files();
+        }
         if let Some(sw) = &switch {
             // Runs a previous daemon left going are always carried on with, whichever way new runs go now; a record that
             // does not verify is reported. A box with no records and no manager has nothing to look for.

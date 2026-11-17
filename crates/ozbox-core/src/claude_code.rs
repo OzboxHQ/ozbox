@@ -42,6 +42,8 @@ pub struct Launch {
     /// Keep standard input open after `stdin`, so [`RunTransport::send`] can add to it (a conversation, or a prompt that
     /// is longer than one request holds).
     pub keep_stdin_open: bool,
+    /// Files for this run only, written by the box into a private folder it removes when the run ends (ADR 0055). Secret.
+    pub files: Vec<crate::agent_engine::RunFile>,
 }
 
 /// The most prompt text one request to a box's daemon carries, in bytes. A longer prompt is sent in pieces.
@@ -57,6 +59,7 @@ impl fmt::Debug for Launch {
             .field("program", &self.argv.first())
             .field("args", &self.argv.len().saturating_sub(1))
             .field("env_keys", &self.env.len())
+            .field("files", &self.files.len())
             .field("stdin_bytes", &self.stdin.as_ref().map(String::len))
             .finish()
     }
@@ -438,6 +441,7 @@ impl<T: RunTransport> AgentEngine for ClaudeCodeEngine<T> {
             require_capability: false,
             stdin: Some(head),
             keep_stdin_open: req.interactive || long,
+            files: req.run_files.clone(),
         };
         let run_id = self
             .transport
@@ -619,6 +623,7 @@ mod tests {
             interactive: false,
             resume_session: None,
             ask_for_edits: false,
+            run_files: Vec::new(),
         }
     }
 

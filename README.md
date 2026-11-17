@@ -242,7 +242,10 @@ orchestration, schedules and triggers, chat, linking Telegram with a passkey (ph
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 
-**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, and signed skills. The
+**Not built:** a network allow-list for a whole box, a log writer an agent cannot reach, and signed skills. Running an engine on
+your own subscription instead of an API key is Preview for Codex with a ChatGPT plan only, on your opt-in, which lets an agent in
+that run read the sign-in ([ADR 0055](docs/adr/0055-a-subscription-sign-in-an-engine-reads-itself-only-on-the-owners-opt-in-per-engine-in-that-run-alone.md)); Settings → Models says, per engine, whether the vendor allows it and why not
+([ADR 0054](docs/adr/0054-subscription-sign-ins-only-where-the-vendor-allows-a-tool-to-hold-them-and-never-in-an-agents-reach.md)). The
 [use-case guides](docs/use-cases/README.md) say, example by example, where each stands.
 
 ## Community and support
