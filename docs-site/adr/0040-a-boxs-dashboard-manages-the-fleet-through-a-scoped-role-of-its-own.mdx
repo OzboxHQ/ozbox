@@ -568,7 +568,10 @@ Confirmed in the IAM policy simulator, or on a canary where stated, or from prov
 22. An SCP denying actions to a role's sessions applies to sessions already issued (the early end of a window).
 23. `RunInstances` naming an EXISTING network interface: the interface's own subnet is in the request context as `ec2:Subnet`
     on the `network-interface` resource (so `TheLaunchsInterfaceIsInAnOzboxSubnet` refuses an interface in a foreign subnet),
-    and its tags are there as `aws:ResourceTag/*` (Amendment 1, review finding M3).
+    and its tags are there as `aws:ResourceTag/*` (Amendment 1, review finding M3). OWNER RUN: simulate `ec2:RunInstances` on
+    `arn:aws:ec2:us-east-1:<acct>:network-interface/eni-0123456789abcdef0` with no tag (expect explicitDeny), with
+    `ozbox-managed=false` (expect explicitDeny) and with `ozbox-managed=true` in an Oz subnet (expect allowed), and on
+    `network-interface/*` (a new interface) in an Oz subnet (expect allowed).
 24. A Deny whose `StringNotEquals` value is `${aws:PrincipalTag/ozbox-window-box}` does nothing when the session has no such tag,
     and the `Null` Deny beside it then refuses a `plan-*` session's `AttachVolume` (finding L1).
 25. `ec2:AttachVolume` is evaluated against both the instance and the volume, each with its own `aws:ResourceTag/ozbox-box`.
@@ -759,8 +762,8 @@ and nothing in a released program turns it on: a box's dashboard still says "Fle
    them with the module): `fleet-read-policy.json`, `fleet-cost-policy.json` (attached only when asked:
    decision 4), `fleet-change-policy.json` (the allows) and `fleet-change-guard-policy.json` (the explicit denies; one document
    would pass the managed-policy size), and the two trusts, `fleet-read-trust-policy.json` (only `obx-main`) and
-   `fleet-change-trust-policy.json` (only the owner's Identity Center window permission set, with a session named `plan-*` or
-   `orch-*`; `main` is never in it). `fleet-main-assume-policy.json` is `main`'s one permission. They are templates with one
+   `fleet-change-trust-policy.json` (only the owner's Identity Center window permission set, with a session named `plan-*` only (no
+   `orch-*` until the orchestration window is built, Amendment 1); `main` is never in it). `fleet-main-assume-policy.json` is `main`'s one permission. They are templates with one
    renderer, `ozbox_provider_aws::fleet_policy::render`, which refuses any value that is not a plain name.
 2. **The setup module** `infra/tofu/modules/aws-fleet-manager` (applied once by an administrator, never the daily operator,
    which is denied every role under `/obx/`): the two roles under `/obx/`, one-hour sessions, the policies above, and the
@@ -835,9 +838,15 @@ setup accepts.
 - **The window must carry its box.** The window command (not built) must set the `ozbox-window-box` session tag to the plan's
   box. A batch window (`orch-*`, not built) spans several boxes, so the attach rule above does not bind it; its session policy
   must name the boxes before batch windows exist.
-- **An untagged interface already in an Oz Box subnet** passes the interface rule: it would bring its own security groups. The
-  change role cannot create interfaces, so only an administrator or the operator could have made one; the one-time preflight
-  (§3.3) lists what is in Oz Box's subnets.
+- **Orchestration windows: not built.** The trust no longer admits an `orch-*` session. It carries no `ozbox-window-box` tag, so
+  the attach rule would not bind it, and without a session policy it could attach any ozbox-managed volume to any ozbox-managed
+  machine except `main`. The trust names `plan-*` only until the batch window exists and binds its boxes (session policy or the
+  same tag rule); adding `orch-*` back is part of that build.
+- **An untagged interface already in an Oz Box subnet** (second review, Low) is now refused: `NeverLaunchOnAnotherOwnersInterface`
+  denies `RunInstances` on `network-interface/eni-*` (an existing interface; the one a launch creates has the literal ARN
+  `network-interface/*`, which that pattern does not match) unless it carries `ozbox-managed=true`. `StringNotEquals` is also true
+  when the key is absent (IAM JSON policy elements reference, "Condition operators": negated operators match a missing key), so an
+  untagged interface is refused too. M3's `ec2:Subnet` rule is unchanged. Not simulated in AWS: OWNER RUN NEEDED, fact 23 below.
 - **Not proven in AWS's own policy simulator.** The evaluator here is ours; the facts of §15 (above all fact 1, whether
   `ec2:Attribute/InstanceType` is in the request context for a resize, fact 2, an encrypted launch under the KMS deny, and fact
   23, that an existing interface in a foreign subnet is refused) are
