@@ -359,6 +359,20 @@ role can decrypt with, and an invoke-only policy for a box's role. Its tests pin
 box and nothing until you apply it, and the function's package is yours to build (the `ozbox-issuer` crate is its logic); the
 `ozbox init --issuer-package <zip> --issuer-package-sha256 <hash>` plans it (the hash is from the signed release or a reproducible build; the module refuses a file that does not match) (shown, approved, recorded in your config).
 
+## A box's dashboard and the fleet (`aws-fleet-manager`, ADR 0040: Preview, not applied anywhere)
+
+`modules/aws-fleet-manager` makes the two roles a box's dashboard would manage the fleet through, in the reserved namespace
+(`/obx/`), which the daily operator role is denied: **`obx-fleet-read`** (the fleet inventory and prices, and the bill only with
+`read_costs = true` in an account that holds nothing but Oz Box), assumed only by `main`'s own role `obx-main`; and
+**`obx-fleet-change`** (create, resize, pause, resume, snapshot, clone and destroy `ozbox-managed` resources in your regions,
+machine types and images), assumed only by your own sign-in on your computer, through the Identity Center permission set named
+by `window_permission_set`, one plan at a time. `main`'s role is never in the change role's trust. The change role is denied
+anything tagged `ozbox-fleet-manager` (the box module's `fleet_manager = true` puts that tag on `main` and its disks), IAM, direct
+KMS, secrets, shells, copying data out and swapping a role or network. The documents are `aws/fleet-*.json`; the module and the
+program fill them the same way, and the tests evaluate the filled documents. An administrator applies the module once; the
+operator role cannot. **Nothing uses it yet**: the part on the box that would hold the credentials, the window command on your
+computer, the pool of box roles and the managed state bucket are not built (see the ADR's Amendment 1).
+
 ## Opt-in AWS security services (ADR 0035)
 
 ```bash

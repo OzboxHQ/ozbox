@@ -1,6 +1,6 @@
 # 0040 — A box's dashboard manages the fleet through a scoped role of its own
 
-**Status.** Proposed (design only). **Nothing here is built.** Revised after the security review (2026-11-12): the review
+**Status.** Proposed. **A first slice is built and is Preview (Amendment 1, 2026-11-17): the role documents, the setup module, the plan-bound gate and the dashboard's passkey step. Security review required before merge.** The rest below is design only. Revised after the security review (2026-11-12): the review
 (accept with changes: 1 Critical, 5 High, 11 Medium, 9 Low findings; the review itself is kept privately) is answered in
 the body below, and the owner's decisions 1 to 9 (at the end) are binding. It needs a second review of this revision before any
 code. **Revised again after the consistency check of ADRs 0040 to 0042 (2026-11-12):** the batch window is scoped to an
@@ -735,3 +735,70 @@ All of ADR 0040's open questions are decided (Q1 to Q7), and the body above foll
 11. **The pool starts with 8 box roles** for workers, test lanes and headroom (up to 3 workers per orchestration); `main` has
     its own role, `obx-main`, outside the pool and never passable (§3.1). An administrator adds more pool roles.
 12. **The claim step's few seconds at spawn are accepted** and measured, and reported with the benchmark numbers.
+
+## Amendment 1 (2026-11-17): the first slice is built, and what it does not cover
+
+**Status of this amendment: Preview. Security review required before merge.** Nothing here has run against a real account,
+and nothing in a released program turns it on: a box's dashboard still says "Fleet not connected" until the credential holder
+(§1) exists.
+
+**What is built.**
+
+1. **The role documents** (§3), in `infra/aws/`: `fleet-read-policy.json`, `fleet-cost-policy.json` (attached only when asked:
+   decision 4), `fleet-change-policy.json` (the allows) and `fleet-change-guard-policy.json` (the explicit denies; one document
+   would pass the managed-policy size), and the two trusts, `fleet-read-trust-policy.json` (only `obx-main`) and
+   `fleet-change-trust-policy.json` (only the owner's Identity Center window permission set, with a session named `plan-*` or
+   `orch-*`; `main` is never in it). `fleet-main-assume-policy.json` is `main`'s one permission. They are templates with one
+   renderer, `ozbox_provider_aws::fleet_policy::render`, which refuses any value that is not a plain name.
+2. **The setup module** `infra/tofu/modules/aws-fleet-manager` (applied once by an administrator, never the daily operator,
+   which is denied every role under `/obx/`): the two roles under `/obx/`, one-hour sessions, the policies above, and the
+   attachment to `obx-main`. The box module gains `fleet_manager`, which tags `main`'s machine, its `/work` and its system disk
+   `ozbox-fleet-manager = true` from the moment they exist; a label cannot set that tag.
+3. **The policy tests** (`crates/ozbox-provider-aws/tests/fleet_policy.rs`): a small evaluator, in the IAM order (an explicit
+   deny wins, then an allow whose action, resource and every condition match), runs a matrix over the RENDERED documents:
+   untagged, foreign, other-account and other-region resources are refused; `main` itself (by its tag) cannot be stopped,
+   destroyed, resized, snapshotted or cloned, and nothing can be created carrying that tag; IAM, direct KMS, secrets, shells,
+   data paths out and role or network swaps are denied; a launch must be tagged, of an allowed type and image, IMDSv2 only, with
+   encrypted, bounded volumes; resize changes the instance type only; a pool role is passable only when reserved for this session
+   and not bound; state is the managed bucket's box objects only; every allowed action is under the operator policy's ceiling
+   (named exceptions); only `obx-main` may assume the read role, and `main` may never assume the change role. A condition
+   operator the evaluator does not know fails the suite. Mock-provider `tofu test` covers the module's namespace, trusts and
+   tokens.
+4. **The gate** (`crates/ozbox-cli/src/fleet_gate.rs`, wired into the dashboard server's `apply`): a dashboard that manages
+   the fleet plans and applies with the laptop's own code (no second code path), and before `apply` uses a plan up it requires
+   a change a box's dashboard may make (create, resize, pause, resume, snapshot, clone, destroy), not naming the box it runs on
+   (§8 layers 2 and 3), a plan id not yet spent, a change window open for exactly that plan (as the credential holder reports
+   it: a name and an expiry, never a credential), and the owner's passkey over the plan's challenge
+   `H("ozbox-fleet-apply-v1", box id, store id, "plan", plan id, plan hash)`, encoded as ADR 0041 §4 encodes a digest. An
+   authenticator code, a laptop key, a member's or viewer's passkey, a passkey over another plan and the server's own follow-up
+   (an orchestration step, which carries no person) are refused. The challenge is offered at
+   `POST /v1/fleet/plans/{id}/challenge` only when nothing else would refuse the plan. Refusals and starts are written to the
+   audit chain as `fleet.refused` and `fleet.apply.start`, with the box and the plan id only.
+5. **The dashboard** says on its fleet pages, in managed mode, what each change needs, and when the server asks for the fleet
+   passkey it fetches that plan's challenge, asks the browser for the passkey, and applies the same plan once with it.
+
+**What is not covered (yet), said plainly.**
+
+- **No credential holder, apply unit or window delivery** (§1, §2, §6: the build plan's P1). So the gate is set only in tests,
+  and the dashboard on a box stays "Fleet not connected". The metadata guard's list is unchanged on purpose (the ADR's order: the
+  credential holder joins it only after `main` runs the narrow box policies), and a test pins that the box user, its runs, the
+  dashboard and the future credential uids are not on it. There is no `ozbox fleet window` or `ozbox fleet enable` command yet.
+- **The passkey is checked against the dashboard's own passkey registry**, not yet the laptop-signed approver set (§2). A
+  compromised dashboard could add a passkey there; until the approver set exists, this is the residual, and why the window
+  (made on the laptop, which a compromised `main` cannot open) is the wall that matters.
+- **The window is not a session policy yet**: the plan-scoped session policy (§2) is the laptop's to build with the window
+  command. The gate only checks that a window named for this plan is open and not expired.
+- **No pool roles, claim service, managed state bucket or SCPs** (§4, §6, §3.1's SCP): the change policy names them so it is
+  complete, but they are not made. Without the pool, a create from `main` cannot pass a role, so it would fail at launch.
+- **No batch window** (orchestrations, ADR 0042) and **no Hetzner** fleet role (§9).
+- **Not proven in AWS's own policy simulator.** The evaluator here is ours; the facts of §15 (above all fact 1, whether
+  `ec2:Attribute/InstanceType` is in the request context for a resize, and fact 2, an encrypted launch under the KMS deny) are
+  an owner run with a read-only identity. If fact 1 fails, `ResizeChangesTheInstanceTypeOnly` is removed and resize stays a
+  laptop action.
+- **The dashboard's own flow is not run end to end in a browser with a real passkey**; the browser test checks the notice at
+  390, 820 and 1440 px, and the flow is tested through fakes and the server's own end-to-end test with a software
+  authenticator.
+
+**Benchmark.** None of this is on a measured path: the CLI's plan and apply, a box's image, disk, network and size mapping are
+unchanged. The `list` and `info` cache (§10) and the spawn-from-`main` timings (§11) are still to be built and measured.
+
