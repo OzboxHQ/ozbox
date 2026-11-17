@@ -169,6 +169,7 @@ at any time; `--access` answers it without a prompt.
 | `ozbox tunnel setup\|status\|remove` | The outbound tunnel that reaches the dashboard from outside, with your own account |
 | `ozbox auth init` | The sign-in settings for a dashboard on a shared machine |
 | `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
+| `ozbox hub repin\|registrar-key\|attest` | The registrars that vouch for a worker box: `repin` (as root on `main`) pins, rotates or lists them; `registrar-key` and `attest` (on your own computer, refused on a box) make your registrar key and sign a worker's attestation after you confirm a plan. Preview |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
