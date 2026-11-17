@@ -305,6 +305,7 @@ impl Rig {
 fn admitted(chat: i64, text: &str, id: i64) -> Admitted {
     Admitted {
         update_id: id,
+        message_id: id,
         from_id: chat,
         chat_id: chat,
         first_name: "Ada".into(),
@@ -745,7 +746,7 @@ fn a_members_delegation_waits_for_an_owners_passkey_and_then_works() {
     r.tick();
     assert_eq!(r.tasks(), 0);
     assert!(
-        r.texts(PHONE).contains("owner's passkey"),
+        r.texts(PHONE).contains("also needs an owner"),
         "{}",
         r.texts(PHONE)
     );
@@ -784,19 +785,18 @@ fn a_members_delegation_waits_for_an_owners_passkey_and_then_works() {
 }
 
 #[test]
-fn power_and_run_cannot_be_delegated_in_this_release_and_a_later_delegation_is_its_own_passkey() {
+fn run_cannot_be_delegated_in_this_release_and_a_later_delegation_is_its_own_passkey() {
     let mut r = Rig::new();
     let lid = r.link("owner", PHONE, None);
-    for act in ["power", "run"] {
-        let (st, v) = r.call(
-            "owner",
-            "POST",
-            &format!("/v1/telegram/links/{lid}/delegations/challenge"),
-            json!({ "acts": [act], "boxes": ["alpha"] }),
-        );
-        assert_eq!(st, 409, "{v}");
-        assert_eq!(v["code"], "not_available");
-    }
+    // box power can be delegated now (see e2e.rs); /run cannot yet
+    let (st, v) = r.call(
+        "owner",
+        "POST",
+        &format!("/v1/telegram/links/{lid}/delegations/challenge"),
+        json!({ "acts": ["run"], "boxes": ["alpha"] }),
+    );
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["code"], "not_available");
     // converse later, on a link that is under a day old: allowed to make, and it waits out the first day
     let (st, v) = r.passkey_step(
         "owner",
@@ -1094,7 +1094,7 @@ fn updates_that_are_not_a_private_text_message_from_the_linked_person_do_nothing
 #[test]
 fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delegation() {
     let mut r = Rig::new();
-    r.link("owner", PHONE, Some(&["alpha"]));
+    let lid = r.link("owner", PHONE, Some(&["alpha"]));
     r.tg.say(PHONE, "/new alpha start one");
     r.tick();
     assert_eq!(r.tasks(), 1);
@@ -1130,7 +1130,7 @@ fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delega
         "/box resume alpha",
         "/box pause alpha",
         "/box extend alpha 2",
-        "/run git status",
+        "/check git status",
         "/frobnicate",
     ];
     for w in words {
@@ -1159,10 +1159,12 @@ fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delega
     let acted: Vec<_> = chain
         .iter()
         .filter(|e| {
-            e.action == "telegram.act"
+            // this link's own entries: on a box the chain is the box's, shared with every other test
+            e.subject.as_deref() == Some(lid.as_str())
+                && e.action == "telegram.act"
                 && (e.detail.contains("act=refused.")
                     || e.detail.contains("act=box.")
-                    || e.detail.contains("act=run"))
+                    || e.detail.contains("act=run tier"))
         })
         .collect();
     assert!(acted.is_empty(), "{acted:?}");
@@ -1352,12 +1354,7 @@ fn a_revoke_between_recorded_and_run_refuses() {
     let lid = r.link("owner", PHONE, Some(&["alpha"]));
     let bot = r.app.tg.bot.clone().unwrap();
     let link = r.app.tg.store.link(&lid).cloned().unwrap();
-    let who = super::telegram_bridge::Sender {
-        link_id: lid.clone(),
-        person: "owner".into(),
-        chat_id: PHONE,
-        legacy: false,
-    };
+    let who = super::telegram_bridge::Sender::telegram(lid.clone(), "owner".into(), PHONE, false);
     let a = admitted(PHONE, "/new alpha do the thing", 9_001);
     let now = unix_ms();
     let (planned, mac) = r
@@ -1503,6 +1500,7 @@ fn a_pointer_link_holds_its_token_only_in_the_fragment_opens_for_its_person_with
     let text =
         r.tg.texts_to(PHONE)
             .into_iter()
+            .rev()
             .find(|t| t.contains("/go#"))
             .expect("a handoff message");
     let token = text
@@ -1560,6 +1558,7 @@ fn a_pointer_link_holds_its_token_only_in_the_fragment_opens_for_its_person_with
     let id =
         r.tg.all_sent()
             .iter()
+            .rev()
             .find(|m| m.1.contains("/go#"))
             .unwrap()
             .2;
@@ -1717,3 +1716,5 @@ fn the_polling_lane_is_its_own_and_the_offset_moves_only_after_the_updates_are_r
         .iter()
         .any(|c| c.contains(&format!("offset={}", id + 1))));
 }
+
+mod e2e;

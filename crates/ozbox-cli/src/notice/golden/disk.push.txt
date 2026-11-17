@@ -1,0 +1,3 @@
+Box main: the work disk is 96% full
+main · Grow the work disk, or clear space, before it fills.
+/go#0123456789abcdef0123456789abcdef0123456789abcdef

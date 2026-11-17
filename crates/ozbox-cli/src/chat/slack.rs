@@ -26,6 +26,8 @@ pub enum Event {
         channel: String,
         text: String,
         forwarded: bool,
+        /// The message's own timestamp: a reply to it is threaded under it.
+        ts: String,
     },
     /// A button the person pressed: its value (for example `choice:a1`; nothing in Oz Box decides anything from one).
     Button {
@@ -93,6 +95,7 @@ pub fn parse_frame(text: &str) -> Frame {
                     channel: s(e, "channel").into(),
                     text: s(e, "text").into(),
                     forwarded,
+                    ts: s(e, "ts").into(),
                 },
             }
         }
@@ -150,6 +153,41 @@ pub fn post(
             )
             .header("Authorization", format!("Bearer {bot_token}"))
             .json(&post_body(channel, text, buttons)),
+        )
+        .map_err(|e| e.to_string())?;
+    let ok = r.ok()
+        && serde_json::from_str::<Value>(&r.body)
+            .ok()
+            .and_then(|v| v["ok"].as_bool())
+            .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Slack answered HTTP {}", r.status))
+    }
+}
+
+/// Post a notice to a channel or a person: its Block Kit rendering (`notice::render::Slack`), links never unfurled.
+pub fn post_notice(
+    http: &dyn HttpClient,
+    bot_token: &str,
+    channel: &str,
+    n: &crate::notice::Notice,
+) -> Result<(), String> {
+    use crate::notice::render::{Renderer, Slack};
+    let mut body = Slack::render(n);
+    body["channel"] = json!(channel);
+    body["unfurl_links"] = json!(false);
+    body["unfurl_media"] = json!(false);
+    let r = http
+        .send(
+            &HttpRequest::new(
+                "POST",
+                "https://slack.com/api/chat.postMessage",
+                Guard::Public,
+            )
+            .header("Authorization", format!("Bearer {bot_token}"))
+            .json(&body),
         )
         .map_err(|e| e.to_string())?;
     let ok = r.ok()
@@ -269,7 +307,8 @@ mod tests {
                     user: "U1".into(),
                     channel: "D1".into(),
                     text: "hello".into(),
-                    forwarded: false
+                    forwarded: false,
+                    ts: String::new(),
                 }
             }
         );

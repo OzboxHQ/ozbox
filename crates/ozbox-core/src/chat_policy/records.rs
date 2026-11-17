@@ -56,19 +56,41 @@ impl DelegatedAct {
     }
 }
 
-/// The caps a delegation carries. Only the session cap is enforced in this release; the rest arrive with box power.
+/// The caps a delegation carries (ADR 0050 §3). The session cap governs converse; the rest govern box power and are part of
+/// the signed digest only when the delegation grants power, so a converse-only record digests as it always did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Caps {
     /// Sessions the person may have open from chat at once.
     pub sessions: u32,
+    /// Power: the largest standard size a chat may create a box at or resize one to (`XS` to `XXL`). `None`: a chat may
+    /// resume, pause and extend, but never create or resize. A GPU size is never reached from chat.
+    pub max_size: Option<String>,
+    /// Power: what box time started or extended from chat may cost in one day (UTC), in whole US dollars.
+    pub daily_usd: u32,
+    /// Power: boxes a chat may create in one day.
+    pub creates_per_day: u32,
+    /// Power: resumes a chat may make in one day.
+    pub resumes_per_day: u32,
+    /// Power: boxes started from chat that may be running at once.
+    pub running: u32,
 }
 
 impl Default for Caps {
     fn default() -> Self {
-        Caps { sessions: 3 }
+        Caps {
+            sessions: 3,
+            max_size: None,
+            daily_usd: 10,
+            creates_per_day: 1,
+            resumes_per_day: 6,
+            running: 2,
+        }
     }
 }
+
+/// The domain word that starts the power caps inside a delegation's digest.
+const POWER_CAPS_TAG: &str = "power-caps-v1";
 
 /// Why a record is refused. For a person; never a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +223,14 @@ impl DelegationRecord {
             .u64(self.expires_ms)
             .flag(self.hub_ack)
             .flag(self.with_link);
+        if self.grants(DelegatedAct::Power) {
+            e.text(POWER_CAPS_TAG)
+                .text(self.caps.max_size.as_deref().unwrap_or(""))
+                .u64(u64::from(self.caps.daily_usd))
+                .u64(u64::from(self.caps.creates_per_day))
+                .u64(u64::from(self.caps.resumes_per_day))
+                .u64(u64::from(self.caps.running));
+        }
         Ok(e.digest())
     }
 
@@ -233,6 +263,29 @@ impl DelegationRecord {
         }
         if !(1..=20).contains(&self.caps.sessions) {
             return Err(RecordError("sessions: between 1 and 20"));
+        }
+        if self.grants(DelegatedAct::Power) {
+            let c = &self.caps;
+            if let Some(m) = &c.max_size {
+                match m.parse::<crate::Size>() {
+                    Ok(sz) if crate::Size::STANDARD.contains(&sz) => {}
+                    _ => return Err(RecordError("the size cap is a standard size, XS to XXL")),
+                }
+            }
+            if !(1..=500).contains(&c.daily_usd) {
+                return Err(RecordError(
+                    "the daily money cap: between 1 and 500 dollars",
+                ));
+            }
+            if c.creates_per_day > 10 {
+                return Err(RecordError("creates a day: at most 10"));
+            }
+            if !(1..=50).contains(&c.resumes_per_day) {
+                return Err(RecordError("resumes a day: between 1 and 50"));
+            }
+            if !(1..=20).contains(&c.running) {
+                return Err(RecordError("boxes running from chat: between 1 and 20"));
+            }
         }
         Ok(())
     }
@@ -398,6 +451,50 @@ mod tests {
         let mut d = deleg();
         d.caps.sessions = 9;
         assert_ne!(d.digest().unwrap(), base);
+    }
+
+    #[test]
+    fn power_caps_are_signed_with_a_power_delegation_and_leave_a_converse_digest_as_it_was() {
+        // a converse-only record ignores the power caps, so records signed before box power still verify
+        let base = deleg().digest().unwrap();
+        let mut d = deleg();
+        d.caps.daily_usd = 99;
+        d.caps.max_size = Some("L".into());
+        assert_eq!(
+            d.digest().unwrap(),
+            base,
+            "power caps are not part of a converse digest"
+        );
+        let mut p = deleg();
+        p.acts = vec![DelegatedAct::Power];
+        p.with_link = false;
+        let pd = p.digest().unwrap();
+        for edit in [
+            |c: &mut Caps| c.daily_usd = 11,
+            |c: &mut Caps| c.max_size = Some("M".into()),
+            |c: &mut Caps| c.creates_per_day = 2,
+            |c: &mut Caps| c.resumes_per_day = 7,
+            |c: &mut Caps| c.running = 3,
+        ] {
+            let mut q = p.clone();
+            edit(&mut q.caps);
+            assert_ne!(
+                q.digest().unwrap(),
+                pd,
+                "every power cap is covered by the passkey"
+            );
+        }
+        for bad in [
+            |c: &mut Caps| c.daily_usd = 0,
+            |c: &mut Caps| c.max_size = Some("GPU-S".into()),
+            |c: &mut Caps| c.max_size = Some("HUGE".into()),
+            |c: &mut Caps| c.creates_per_day = 11,
+            |c: &mut Caps| c.running = 0,
+        ] {
+            let mut q = p.clone();
+            bad(&mut q.caps);
+            assert!(q.validate().is_err());
+        }
     }
 
     #[test]

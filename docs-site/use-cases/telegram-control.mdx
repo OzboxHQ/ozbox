@@ -47,8 +47,10 @@ is not in the table is refused.
 | Kind | Messages | Needs |
 |---|---|---|
 | Look | `/status`, `/fleet`, `/box list`, `/tasks`, `/log`, `/sessions`, `/whoami`, `/help` | a link |
-| Talk to an agent | plain text, `/new <box> <what to do>`, `/pause`, `/resume`, `/switch`, `/detach`, `/attach`, `/adopt` | **chat delegation** for that box |
-| Start or pause a box, create or resize one, run one catalogue command | `/box resume`, `/box pause`, `/box extend`, `/box create`, `/box resize`, `/run` | **not in this release**: a delegation to them is not accepted yet |
+| Talk to an agent | plain text, `/run [box] <what to do>` (or `/new`), `/session pause`, `/session resume`, `/switch`, `/detach`, `/attach`, `/adopt` | **chat delegation** for that box |
+| Talk to a box, a session, a group or every box | `@<box>`, `@<box>/<session>`, `@<group>`, `@fleet`, `/to`, `/who`, `/boxes`, `/fleets` | **chat delegation** for each box reached (section 3a) |
+| Start, pause or extend a box, create or resize one | `/box resume`, `/box pause`, `/box extend`, `/box create`, `/box resize` | a **box power** delegation for that box, inside its caps (section 3b) |
+| Run one catalogue command | `/check` | **not in this release**: a delegation to it is not accepted yet |
 | Sent to the dashboard | clone, snapshot, destroy a box; anything above what you delegated | a passkey in the dashboard |
 | Refused | approve, deny, cancel, `/stop`, `/budget`, secrets, policy, people, roles, links, limits, tunnels, sending outbound messages, pushing to a protected branch, **every act on a Production box** | never |
 
@@ -79,14 +81,78 @@ confirm with your passkey. Then `/new main fix the flaky test` from your phone s
 
 **Status:** Preview.
 
+## 3a. Talk to a box, an agent or a fleet
+
+**You want:** to send one message to the agent on a particular box, to one session you already have, or to several boxes at once.
+
+```
+@main fix the flaky test            the agent on main (the session this chat follows there, or a new one)
+@main/t3 and add a test             one session
+@web what is the git status         every box in the group "web" you may reach
+@fleet pull and rebuild             every box you may reach
+/to @main/t3                        from now on, plain messages go to t3; /who shows where they go
+/boxes  /fleets                     what you may reach from this chat
+```
+
+- Each message gets a short id. The chat says how many copies were **delivered**, which boxes are **unreachable** (a box that is
+  not running says so, never silence) and how many boxes were **left out** and why (a Production box, a box your delegation does not
+  name).
+- Every reply names its box and session, carries the message's id, and has secrets, links and markup removed. A message to a group
+  or the fleet gets one line when every box has answered or failed.
+- An owner names groups and sets how much of an agent's reply a box sends to a chat (`full`, `summary` or `metadata`, `full` by
+  default) with the dashboard's `PUT /v1/telegram/marks` (fields `groups` and `detail`, a passkey shown a moment ago); **the screen
+  for it is not built yet**. A Production box is never reached, by name, by group or with `@fleet`, and always shows `metadata`.
+- **Worker boxes** are reached over the agent mesh ([A task channel](/use-cases/task-channel)): a dashboard on your computer uses its own task
+  channel, and a reply from a worker is shown as a summary at most. **A dashboard on a box cannot reach worker boxes yet** (the hub's
+  daemon and transport are not in this release).
+- A reply to a message sent to several boxes is threaded under your message (Telegram and Slack).
+- Slack and WhatsApp follow the same rules and understand the same addresses; box power is Telegram's only.
+
+**Status:** Preview.
+
+## 3b. Start, pause, extend, create or resize a box
+
+**You want:** to wake a box from a bus, or put it to sleep when you are done.
+
+On your Account page, under the link, choose **Allow box power**, pick the boxes, the days, the largest size a chat may create or
+resize to (**None** by default: no create or resize) and what box time started from chat may cost a day ($10 by default). The
+other limits are fixed for now: one box created and six resumes a day, and two boxes started from chat running at once. Confirm with
+your passkey; the limits are part of what it signs. A day after the link was made, then:
+
+```
+/box resume main          /box pause main          /box extend main 2
+/box create scratch M     /box create scratch web  (a saved profile)     /box resize main L
+```
+
+- Every one is **planned first**: the chat shows what will change and one link to the dashboard, then does it if it is inside your
+  limits, and tells you when it finished. Outside them (too big, over the day's money, no price known for the size, more boxes than
+  allowed) it does nothing and sends you to the dashboard with the same plan.
+- A box started from chat **pauses again after four hours**; `/box extend <box> 1` or `2` adds up to two hours, once.
+- **A pause only happens on an idle box.** If anything is running, the reply lists what a pause would end and sends you to the
+  dashboard. There is no "stop" for a box.
+- Never on a Production box. The box that runs this bot can be resumed but not paused or resized from chat.
+- The money limit uses the size prices an owner entered in **Settings → Budget**. A size with no price is not started from chat.
+
+**Status:** Preview. Not built yet: the box's own timer for the four-hour pause (the dashboard pauses it, so a stopped dashboard does
+not), `/box pause <box> when-idle`, and the narrow cloud role that can only start and stop opted-in boxes (the change runs with the
+dashboard's own access, through the same permission rules as a click in the dashboard).
+
 ## 4. Lock it, cut it, hand off
 
 - **`/lock`** in the chat makes this link read-only until you lift the lock with a passkey. **`/unlink`** cuts it. Anyone linked may
   send either, because they only make Telegram less able. The Account page has **Lock**, **Unlink** and an owner's **Lock every link**.
   A revoke takes effect on the next message, and ends everything delegated to the link.
+- The command line does the same, and shows its plan first: `ozbox chat lock --link <id>` (or `--all`) and `ozbox chat unlink`
+  on the computer that runs the dashboard, or from your computer for a dashboard on a box with `--box <box>` (sent over the sealed
+  route your computer pinned, like `ozbox ingress requests`). The dashboard applies it within a few seconds and records it.
 - When something needs a passkey, the chat sends **one link to the dashboard** and does nothing else. The link is a pointer, not a
   credential: ten minutes, only for you, with the dashboard's own host named in the message, the token in the address's fragment (so no
   tunnel or proxy ever logs it), and opening it changes nothing. The bot deletes that message when the link lapses.
+- **An approval or an alert** reaches your chat as one message: what to do first, the box and environment (Production marked),
+  who asked, the risk and the expiry, and an **Open in dashboard** button under it. The button only opens the dashboard on that
+  item, with a link made for you (the same ten minutes, only for you); once the request is decided, the link says so. That message
+  is not deleted, so after ten minutes open the dashboard → **Approvals** as it says. See
+  [Chat with your coding agents](/use-cases/chat#3-be-told-in-the-chat-decide-in-the-dashboard).
 - A lost phone: unlink from the dashboard, and secure the Telegram account itself with Telegram's two-step verification and by ending
   its other sessions. Oz Box cannot see or enforce those.
 
@@ -103,7 +169,8 @@ confirm with your passkey. Then `/new main fix the flaky test` from your phone s
   delegation used. A message from an account that is not linked is only counted.
 - The bridge stops, with an alert, when Telegram answers **409** (another program reads the bot, or a webhook is set) or when the bot's
   settings are not as above, and stays stopped across a restart until an owner confirms in **Settings → Apps**. It reads updates by
-  long polling, takes `message` updates only (there are no buttons), and ignores a message older than five minutes.
+  long polling, takes `message` updates only (the one kind of button a message carries opens a web page and sends nothing back), and
+  ignores a message older than five minutes.
 
 **Status:** Preview.
 
@@ -114,11 +181,10 @@ the hub that runs the dashboard and the bridge. Changing it needs a passkey show
 
 ## 7. What is not built yet
 
-Starting, pausing, extending, creating and resizing a box from a chat, `/run`, the chat profile that holds a chat-started session to
-always-ask on the box itself, detail levels and the stronger redaction of what an agent writes back, worker boxes, and `ozbox chat lock`
-and `ozbox chat unlink` on the command line. Until they are built, an act the policy would allow but that has no executor answers with a
-link to the dashboard ("this version cannot do it from a chat yet"). Your links and permissions carry over when they arrive. The design
-is [ADR 0050](/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver).
+`/check` (the catalogue of read-only commands), `/box pause <box> when-idle`, the box's own four-hour timer, the narrow cloud role
+for box power, a screen for groups and detail levels, and reaching worker boxes from a dashboard that runs on a box. Until they are built, an act the policy would allow but that has no executor answers with a link to
+the dashboard ("this version cannot do it from a chat yet"). Your links and permissions carry over when they arrive. The design is
+[ADR 0050](/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver).
 
 ---
 
@@ -136,4 +202,11 @@ This is what makes the Preview mark honest, and it is run by a person, with a **
    Approvals page and waits for your passkey.
 6. Send `/lock`, check that `/new` is refused, lift the lock from the dashboard. Send `/unlink`, check the next message is not answered.
 7. Open a handoff link on iOS and on Android, including from Telegram's built-in browser, and note what works.
-8. Record the date, the phone, the dashboard's address kind (tunnel or domain) and what failed, and only then move this page to Works.
+8. Allow box power on a **test box** with a size cap of `XS` and a $1 daily limit, and enter the size prices in Settings → Budget.
+   Send `/box pause <box>` with nothing running, then `/box resume <box>`: check each shows its plan, then "done", and that the box
+   really paused and resumed. Send `/box resize <box> L` and check it is refused with a link. Leave it running past four hours and
+   check the chat says it is being paused. Time the resume and record it as a chat-resume figure, not a benchmark number.
+9. Send `@<box> say hello`, then `/to @<box>`, `/who`, and a plain message; check the reply names the box and session. Send
+   `@fleet hello` with one box paused and check that box is named as unreachable.
+10. On the dashboard's computer run `ozbox chat lock --link <id>`, confirm, and check the next chat act is refused.
+11. Record the date, the phone, the dashboard's address kind (tunnel or domain) and what failed, and only then move this page to Works.

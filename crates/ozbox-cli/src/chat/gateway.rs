@@ -59,6 +59,23 @@ pub struct ChatState {
     pub binds: BTreeMap<String, Bind>,
     /// WhatsApp: when each number last wrote to us (free-form replies are allowed for 24 hours after).
     pub wa_inbound: BTreeMap<String, u64>,
+    /// `<channel>:<id>` -> the address plain messages go to (`/to @alpha`), until it is changed. Sticky, per conversation.
+    pub to: BTreeMap<String, String>,
+    /// `<channel>:<id>` -> the other sessions this conversation hears from: the targets of an addressed message or a fan-out,
+    /// beside the one it follows.
+    pub watch: BTreeMap<String, Vec<Watch>>,
+}
+
+/// A session a conversation hears replies from because a message was addressed to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watch {
+    pub task: String,
+    pub box_name: String,
+    /// The message id the reply answers (shown with the reply, so a fan-out's replies are grouped under it).
+    pub msg_id: String,
+    /// The message to thread the reply under, in the chat app's terms (a Telegram message id, a Slack `ts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
 }
 
 pub fn conv_key(channel: Channel, id: &str) -> String {

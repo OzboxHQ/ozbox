@@ -2057,14 +2057,19 @@ fn a_chat_app_can_decide_nothing_and_no_chat_source_names_a_request_operation_th
         checked += 1;
     }
     assert_eq!(checked, 13);
-    // the notification builder offers a link and no button
+    // the notification builder offers a link, and the one button a message may carry only opens it: no callback a chat could
+    // answer with exists anywhere a message is built
     let route = include_str!("../serve/approval_requests.rs");
     assert!(route.contains("approvals?request="));
-    for banned in ["inline_keyboard", "callback_data", "reply_markup"] {
-        assert!(
-            !route.contains(banned) && !include_str!("../notify.rs").contains(banned),
-            "{banned}"
-        );
+    for src in [
+        route,
+        include_str!("../notify.rs"),
+        include_str!("../notice/render.rs"),
+        include_str!("../notice/mod.rs"),
+    ] {
+        for banned in ["callback_data", "switch_inline", "callback_game"] {
+            assert!(!src.contains(banned), "{banned}");
+        }
     }
 }
 

@@ -824,6 +824,8 @@ pub fn drift_alerts(
             body.push_str(&t("cost.alert.drift_more", &[("n", &more.to_string())]));
         }
         out.push(crate::notify::Alert {
+            notice: None,
+            reach: Default::default(),
             key: format!("drift:{}", key_of(r)),
             kind: "cost_drift".into(),
             severity: crate::notify::Severity::Normal,

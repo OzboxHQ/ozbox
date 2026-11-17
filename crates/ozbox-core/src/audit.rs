@@ -17,7 +17,7 @@
 
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ring::digest::{digest, SHA256};
 use ring::hmac;
@@ -163,6 +163,8 @@ struct Tail {
     seq: u64,
     hash: Option<String>,
     last_src: Option<(String, u64)>,
+    /// The highest source number the chain holds for each source epoch (as far as the tail read reaches).
+    max_src: std::collections::BTreeMap<String, u64>,
     last_checkpoint_seq: u64,
     last_checkpoint_ms: u64,
 }
@@ -300,36 +302,14 @@ impl AuditLog {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let lock_path = self.path.with_extension("lock");
-        let start = Instant::now();
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Lock(lock_path)),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&lock_path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > Duration::from_secs(30));
-                    if stale {
-                        let _ = std::fs::remove_file(&lock_path);
-                        continue;
-                    }
-                    if start.elapsed() > Duration::from_secs(5) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "the audit log is busy",
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => return Err(e),
+        // one advisory lock on an open descriptor: never judged by age, never removed (see `crate::filelock`)
+        Lock::acquire(&self.path.with_extension("lock"), Duration::from_secs(5)).map_err(|e| {
+            if e.kind() == io::ErrorKind::TimedOut {
+                io::Error::new(io::ErrorKind::TimedOut, "the audit log is busy")
+            } else {
+                e
             }
-        }
+        })
     }
 
     /// The seal key, made on first use. Readable only by its owner.
@@ -378,6 +358,8 @@ impl AuditLog {
                     tail.seq = e.seq;
                     tail.hash = Some(e.hash.clone());
                     if let Some(s) = e.src.as_deref().and_then(parse_src) {
+                        let top = tail.max_src.entry(s.0.clone()).or_insert(0);
+                        *top = (*top).max(s.1);
                         tail.last_src = Some(s);
                     }
                 }
@@ -425,8 +407,10 @@ impl AuditLog {
         let mut text = String::new();
         let mut anchor_text = String::new();
         for ev in events {
-            if let (Some((ep, n)), Some((lep, ln))) = (&ev.src, &tail.last_src) {
-                if ep == lep && n <= ln {
+            // a source record is held once: judged by its own epoch and number, not only against the newest entry, so a
+            // record of an earlier epoch (a store restored from a backup) offered again is not chained a second time
+            if let Some((ep, n)) = &ev.src {
+                if tail.max_src.get(ep).is_some_and(|top| n <= top) {
                     continue;
                 }
             }
@@ -444,7 +428,9 @@ impl AuditLog {
             e.hash = entry_hash(&e);
             tail.seq = e.seq;
             tail.hash = Some(e.hash.clone());
-            if ev.src.is_some() {
+            if let Some((ep, n)) = &ev.src {
+                let top = tail.max_src.entry(ep.clone()).or_insert(0);
+                *top = (*top).max(*n);
                 tail.last_src = ev.src.clone();
             }
             text.push_str(&line_of(&Line::Entry(e.clone()))?);
@@ -737,13 +723,7 @@ impl LegacyChain {
     }
 }
 
-struct Lock(PathBuf);
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+type Lock = crate::filelock::FileLock;
 
 fn line_of(l: &Line) -> io::Result<String> {
     let mut s = serde_json::to_string(l).map_err(io::Error::other)?;
@@ -975,6 +955,27 @@ mod tests {
         assert!(LegacyChain::read(&other.join("tasks.audit.jsonl")).is_err());
     }
 
+    #[test]
+    fn four_writers_at_once_leave_one_unbroken_chain() {
+        let d = tempfile::tempdir().unwrap();
+        let l = log(d.path());
+        std::thread::scope(|s| {
+            for w in 0..4u64 {
+                let l = &l;
+                s.spawn(move || {
+                    for i in 0..20u64 {
+                        l.append(ev(w * 100 + i, "run.queued")).unwrap();
+                    }
+                });
+            }
+        });
+        let r = l.verify().unwrap();
+        assert!(r.ok, "{r:?}");
+        assert_eq!(l.entries().unwrap().len(), 80);
+        // the lock file is never removed (removing it is how a second holder gets in)
+        assert!(d.path().join("tasks.audit.lock").exists());
+    }
+
     fn fill(l: &AuditLog, n: u64) {
         for i in 1..=n {
             l.append(ev(i, "run.queued")).unwrap();
@@ -1194,6 +1195,10 @@ mod tests {
             ..ev(9, "run.queued")
         };
         assert_eq!(l.append_many(vec![fresh]).unwrap().len(), 1);
+        // and the earlier epoch's records offered again after the new epoch wrote are still not chained twice
+        let old = l.append_many(vec![mk(2), mk(3), mk(4)]).unwrap();
+        assert_eq!(old.len(), 1, "only (e1, 4) is new");
+        assert_eq!(l.entries().unwrap().len(), 5);
     }
 
     #[test]

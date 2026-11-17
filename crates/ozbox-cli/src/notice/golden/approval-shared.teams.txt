@@ -1,0 +1,97 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in dashboard",
+            "type": "Action.OpenUrl",
+            "url": "https://dash.example.com/approvals?request=R1a2b3c4"
+          }
+        ],
+        "body": [
+          {
+            "color": "Default",
+            "size": "Medium",
+            "text": "Approve or deny: guard override",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "text": "A change was filed on a box and waits for a person with the right role.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "facts": [
+              {
+                "title": "Box",
+                "value": "main"
+              },
+              {
+                "title": "Project",
+                "value": "shop"
+              },
+              {
+                "title": "Environment",
+                "value": "staging"
+              },
+              {
+                "title": "Hook",
+                "value": "commit \\(pre\\-commit\\)"
+              },
+              {
+                "title": "Repository",
+                "value": "/work/shop"
+              },
+              {
+                "title": "Asked by",
+                "value": "box\\-user \\(uid 1000\\)"
+              },
+              {
+                "title": "Risk",
+                "value": "Skips the secret scan for one commit."
+              }
+            ],
+            "type": "FactSet"
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Expires in 2 h 5 min",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Open it on dash.example.com → Approvals \\(sign in first\\).",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "size": "Small",
+            "text": "Ref R1a2b3c4",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

@@ -8,6 +8,62 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["Dashboard", "CLI", "Security"]} description="0.3.0-beta: talk to any box or the whole fleet from Telegram, and start or pause boxes from your phone">
+  ## Talk to a box, a session or the whole fleet from Telegram, and start or pause boxes from your phone
+
+  A linked Telegram chat could talk to one coding session at a time and could not wake or pause a box. Now:
+
+  - **Address who you mean.** `@main fix the test`, `@main/t3 and add a test`, `@web git status` for a group, or `@fleet` for every box you may reach. Every reply names its box and session; a box that is not running is named as unreachable, and boxes you may not reach are counted and left out. `/to` makes a target stick, `/who` shows it, `/boxes` and `/fleets` list what you may reach.
+  - **Box power from your phone, inside limits you set with a passkey.** `/box resume`, `/box pause` (only when the box is idle), `/box extend`, `/box create` (at a size or from a saved profile) and `/box resize`. Each shows its plan and a link to the dashboard first, and is done only inside the size, money and count limits you allowed; a box started from chat pauses again after four hours. Never on a Production box.
+  - **Agent replies are safer in a chat.** Secrets (also when encoded), links and markup are removed before a reply is shortened, and an owner chooses per box whether a chat sees the reply, a summary or only that it answered.
+  - **`/run <box> <what to do>`** starts a session; `/session pause` stops one.
+  - **Slack and WhatsApp** understand the same addresses and follow the same rules (box power stays Telegram's).
+  - **Replies to a message sent to several boxes are threaded under it**, in Telegram and Slack, and box-power messages carry an **Open in dashboard** button.
+  - **Agents on worker boxes** answer over the agent mesh when your dashboard runs on your computer.
+  - **`ozbox chat lock` and `ozbox chat unlink`**, on the dashboard's computer or from yours with `--box`.
+
+  Preview: tested against a test Telegram, never yet with a real phone. See [Control your boxes from Telegram](/use-cases/telegram-control).
+</Update>
+
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="0.3.0-beta: clear chat messages that open the right request">
+  ## Chat and alert messages open exactly what they are about
+
+  A message about an approval could reach your phone with no link, and read as one block of text.
+
+  - **Every message that asks for you carries a link to that exact item**, made for you when it is sent: it works once you are signed in, only for you, for ten minutes. On Telegram it is an **Open in dashboard** button that only opens the dashboard; nothing in a chat approves or denies.
+  - **Every message reads the same way on every channel**: what to do first, the box and environment (Production marked), who asked and why, the risk, when it expires, and a short reference. Telegram, Slack, Discord, Teams, WhatsApp, email, SMS and push each show it in their own style.
+  - **Alerts link too**: a full disk opens its box, a budget alert opens Usage, and a push notification opens what it is about.
+  - **A link to something already decided says so**, and a dashboard with no public address says where to go instead of leaving the link out.
+  - **Email alerts have an HTML version**, with the plain text beside it.
+
+  See [Chat with your coding agents](/use-cases/chat) and [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
+  ## Your computer and a box can pass tasks instead of notes
+
+  Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box, and it leaves Preview when that proof passes.
+
+  - **A box runs the channel as a user of its own**, so an agent on the box can ask and answer through it but cannot read its keys. On your computer the channel's private keys are kept in your keychain, never in a file. A peer's words are always shown as untrusted (`--for-model` fences them for a model), a cancel is a request the other side decides, and the first contact finishes in one `ozbox tasks sync`.
+  - **`ozbox tasks`** sets up the two sides, sends a task, shows your inbox, answers, cancels, and explains why a task is stuck (`ozbox tasks why`).
+  - **A message can ask and never grant.** Saying "approved" in a task changes nothing, and text that looks like a key is refused on both sides and never stored.
+  - **Acts that need an approval are refused by name** until the passkey approval path exists, and a Production act is refused outright.
+  - A closed laptop is a normal state: the task waits and is delivered when you next sync.
+  - See [A task channel](/use-cases/task-channel) and [ADR 0044](/adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Main as the hub (Preview)">
+  ## `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
+
+  Until now `main` reached a worker through your computer's connection. This release adds the first part of a route that does not: `task_start` takes `transport: hub`, the task goes to the worker as a signed, sealed message, and `task_status` shows what the worker reported. **Preview:** built and tested with fake boxes only; no box has a hub yet, and it has not run on a real cloud box.
+
+  - **On a box with no hub, `transport: hub` is refused by name** and the default `ssh` route works exactly as before.
+  - **A worker is never given a Production key.** The hub refuses it, the worker refuses it again, and the off-box issuer refuses a worker. No setting turns this off; it comes back later, approved at your computer.
+  - **A task never names keys.** A conductor that tries is refused, and the attempt is recorded.
+  - Every hand-off and refusal is in the audit record by name, never by value.
+  - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

@@ -19,6 +19,9 @@ const MAX_LIVE: usize = 200;
 pub enum LinkError {
     /// Not a link made here, already used, or lapsed: one answer, so nothing is learned by trying.
     Invalid,
+    /// The link is genuine and for this person, and what it names was already decided: said only to the person it was made
+    /// for, so a stranger still learns nothing.
+    Used,
 }
 
 struct Entry {
@@ -26,6 +29,7 @@ struct Entry {
     approval_id: String,
     person: String,
     expires_ms: u64,
+    used: bool,
 }
 
 pub struct Links {
@@ -75,6 +79,7 @@ impl Links {
             approval_id: approval_id.to_string(),
             person: person.to_string(),
             expires_ms: now_ms + TTL_MS,
+            used: false,
         });
         Ok(token)
     }
@@ -87,12 +92,24 @@ impl Links {
             return Err(LinkError::Invalid);
         }
         let tag = self.tag(token);
-        self.live
+        let e = self
+            .live
             .iter()
             .find(|e| ct_eq(&e.tag, &tag))
             .filter(|e| e.expires_ms > now_ms && e.person == person)
-            .map(|e| e.approval_id.clone())
-            .ok_or(LinkError::Invalid)
+            .ok_or(LinkError::Invalid)?;
+        if e.used {
+            return Err(LinkError::Used);
+        }
+        Ok(e.approval_id.clone())
+    }
+
+    /// Every link that names `item` is used: what it names was decided (by anyone, anywhere). Opening one afterwards says
+    /// so to its person instead of landing on a request that is gone.
+    pub fn retire(&mut self, item: &str) {
+        for e in self.live.iter_mut().filter(|e| e.approval_id == item) {
+            e.used = true;
+        }
     }
 
     /// Use a token once: the approval it names, for the person it was made for.
@@ -109,6 +126,9 @@ impl Links {
         let e = self.live.remove(i);
         if e.expires_ms <= now_ms || e.person != person {
             return Err(LinkError::Invalid);
+        }
+        if e.used {
+            return Err(LinkError::Used);
         }
         Ok(e.approval_id)
     }
@@ -158,6 +178,30 @@ mod tests {
         );
         assert_eq!(l.redeem("zz", "ada", 1), Err(LinkError::Invalid));
         assert_eq!(l.redeem(&"0".repeat(48), "ada", 1), Err(LinkError::Invalid));
+    }
+
+    #[test]
+    fn a_link_to_something_decided_says_so_to_its_person_only() {
+        let mut l = Links::new().unwrap();
+        let t = l.issue("path:/approvals/R1", "ada", 1_000).unwrap();
+        let other = l.issue("path:/approvals/R2", "ada", 1_000).unwrap();
+        assert_eq!(l.peek(&t, "ada", 2_000), Ok("path:/approvals/R1".into()));
+        assert_eq!(
+            l.peek(&t, "ada", 2_000),
+            Ok("path:/approvals/R1".into()),
+            "opening is free"
+        );
+        l.retire("path:/approvals/R1");
+        assert_eq!(l.peek(&t, "ada", 2_000), Err(LinkError::Used));
+        assert_eq!(
+            l.peek(&t, "bob", 2_000),
+            Err(LinkError::Invalid),
+            "a stranger learns nothing"
+        );
+        assert_eq!(
+            l.peek(&other, "ada", 2_000),
+            Ok("path:/approvals/R2".into())
+        );
     }
 
     #[test]

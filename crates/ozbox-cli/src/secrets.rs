@@ -119,6 +119,9 @@ pub fn valid_name(name: &str) -> bool {
         "tunnel-token-",
         "trigger-secret-",
         "approval-key-",
+        // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's, never the store's
+        "tasks-sign-",
+        "tasks-seal-",
     ]
     .iter()
     .any(|p| {

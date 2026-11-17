@@ -223,6 +223,16 @@ impl App {
         Some(Resp::json(202, &json!({ "job_id": job_id, "job": v })))
     }
 
+    /// How a change ended: `None` while it runs, `Some(true)` when it was applied, `Some(false)` when it failed or is no longer
+    /// known.
+    pub(super) fn apply_job_outcome(&mut self, id: &str) -> Option<bool> {
+        match self.apply_jobs.get_mut(id).map(|j| &j.state) {
+            Some(State::Running) => None,
+            Some(State::Done(_)) => Some(true),
+            Some(State::Failed { .. }) | None => Some(false),
+        }
+    }
+
     /// The refusals that come before a change starts: one change per box at a time, and a bound on the total.
     pub(super) fn apply_job_refusal(&self, plan: &Plan) -> Option<Resp> {
         let name = plan.operation.box_name().to_string();
@@ -294,6 +304,10 @@ impl App {
         };
         if let Some(j) = self.apply_jobs.get_mut(&job_id) {
             j.state = state;
+        }
+        // a change a chat started is told back to that chat
+        if self.tg.power_jobs.iter().any(|p| p.job_id == job_id) {
+            self.tg_power_jobs_finished(unix_ms());
         }
         self.version
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

@@ -284,6 +284,8 @@ pub struct Gates {
     pub ingress: std::sync::OnceLock<Arc<crate::secrets_ingress::Ingress>>,
     /// The first-time dashboard code the supervisor handed over, held in memory until it expires.
     pub setup_code: crate::secrets_ingress::SetupCode,
+    /// Telegram links the owner's computer asked to lock or cut, held until the dashboard takes them.
+    pub chat_links: crate::secrets_ingress::ChatLinkRequests,
     /// Where a file-kept store key is, when this box keeps it in one (so the owner can escrow a copy off the box).
     pub kek_file: std::sync::OnceLock<std::path::PathBuf>,
     /// The approval requests (ADR 0041): a journal of their own, off the lock `resolve` takes. Unset until a decider
@@ -1155,6 +1157,21 @@ pub fn handle_from(
                 "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
             ),
             Err(e) => Resp::fail(&e),
+        },
+        // `ozbox chat lock|unlink --box` from the owner's computer: a Telegram link made less able. It only reduces what a chat
+        // can do, so it needs no approval (the same rule as /lock and the dashboard's buttons); it is recorded, and the
+        // dashboard takes it from the supervisor socket and applies it.
+        (Policy::Unsealed, "chat_link_request") => match gates.chat_links.put(&r.value, now) {
+            Ok(()) => {
+                let act = r.value.split(':').next().unwrap_or("");
+                gates.audit_event(store, "secrets.chat-link.request", act, "via=ingress");
+                Resp::ok()
+            }
+            Err(e) => Resp::fail(e),
+        },
+        (Policy::Supervisor, "chat_link_take") => Resp {
+            value: Some(gates.chat_links.take().join("\n")),
+            ..Resp::ok()
         },
         // A copy of the file-kept store key for the owner's keychain, so an upgrade that replaces the system disk can put it
         // back (ADR 0029 Amendment 6 section 9). Only a sealed request from the owner's computer; recorded; never logged.

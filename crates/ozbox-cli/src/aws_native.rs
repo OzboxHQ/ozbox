@@ -357,7 +357,7 @@ pub(crate) mod fakes {
 
     use tiny_http::{Header, Response, Server};
 
-    pub const ACCESS_KEY: &str = "AKIAFAKEFAKEFAKE0000";
+    pub const ACCESS_KEY: &str = concat!("AK", "IAFAKEFAKEFAKE0000");
     pub const SECRET_KEY: &str = "fake-secret-access-key-sentinel-0000000000";
     pub const SESSION_TOKEN: &str = "fake-session-token-sentinel";
 

@@ -1,0 +1,89 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "emoji": true,
+        "text": "🔐 Approve or deny: guard override",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "A change was filed on a box and waits for a person with the right role.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "fields": [
+        {
+          "emoji": true,
+          "text": "Box: main",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Project: shop",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Environment: staging",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Hook: commit (pre-commit)",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Repository: /work/shop",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Asked by: box-user (uid 1000)",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Risk: Skips the secret scan for one commit.",
+          "type": "plain_text"
+        }
+      ],
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "emoji": true,
+          "text": "Expires in 2 h 5 min",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Ref R1a2b3c4",
+          "type": "plain_text"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Open your dashboard → Approvals. This dashboard has no public address yet, so the message carries no link.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    }
+  ],
+  "text": "Approve or deny: guard override"
+}

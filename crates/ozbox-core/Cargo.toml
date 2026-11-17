@@ -16,6 +16,12 @@ thiserror.workspace = true
 tempfile = "3"
 yaml-rust2 = { version = "0.11", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+
+[dev-dependencies]
+ozbox-seal = { path = "../ozbox-seal" }
+
 [lints]
 workspace = true
 
