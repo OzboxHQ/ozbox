@@ -62,6 +62,12 @@ pub trait Merger {
         branch: &str,
         into: &str,
     ) -> Result<MergeOutcome, String>;
+    /// The commit `branch` points at on the conductor's side right now, when this merger can say. The merge queue over the hub
+    /// refuses to merge a branch that moved after its lane tested it. The default says nothing, and the check then rests on the
+    /// commit the worker reported.
+    fn head(&mut self, _repo: Option<&str>, _branch: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

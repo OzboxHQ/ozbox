@@ -82,6 +82,8 @@ pub struct AgentSeams {
     pub approvals: Option<Arc<Mutex<dyn ApprovalService + Send>>>,
     pub engines: Box<dyn EngineFactory>,
     pub workspace: Box<dyn Workspace>,
+    /// How long the hub may be out of reach before every key is deleted ([`HUB_LOST_AFTER_MS`] on a real box).
+    pub lost_after_ms: u64,
 }
 
 /// One worker box's agent.
@@ -94,6 +96,10 @@ pub struct WorkerAgent {
     said_hello: u64,
     lost_since: Option<u64>,
     keys_deleted: bool,
+    /// Why turns were not sent, kept for the host to show (the last few; reasons only, never the text).
+    pub withheld_log: Vec<String>,
+    /// What the hub said back about this worker's features (`<feature>:<kind>`: merged, conflict, tests-failed ...), the last few.
+    pub heard: Vec<String>,
 }
 
 fn end_of(s: &AgentSeams) -> WorkerEnd<'_> {
@@ -123,6 +129,8 @@ impl WorkerAgent {
             said_hello: 0,
             lost_since: None,
             keys_deleted: false,
+            withheld_log: Vec::new(),
+            heard: Vec::new(),
         }
     }
 
@@ -133,6 +141,56 @@ impl WorkerAgent {
             .ok_or_else(|| "that task is not running here".to_string())?
             .decide(approved)
             .map_err(|e| e.to_string())
+    }
+
+    /// The lane shards the hub handed this worker since the last call. Running a shard with the declared command is the box's own
+    /// runner's; the agent only carries the assignment in and the result back ([`WorkerAgent::shard_result`]).
+    pub fn take_shards(&mut self) -> Vec<ozbox_core::hub::lane::ShardAssign> {
+        std::mem::take(&mut self.state.shards)
+    }
+
+    /// Report a lane shard's results to the hub.
+    pub fn shard_result(&mut self, now: u64, r: &ozbox_core::hub::lane::ShardResult) {
+        end_of(&self.s).shard_result(&mut self.state, now, r);
+    }
+
+    /// Report that this worker finished a feature on `commit` (the exact commit the merge queue will merge), outside an engine run:
+    /// a worker that pushed again.
+    pub fn report_finished(
+        &mut self,
+        now: u64,
+        orchestration: &str,
+        feature: &str,
+        commit: &str,
+        summary: &str,
+    ) {
+        end_of(&self.s).finish(
+            &mut self.state,
+            now,
+            orchestration,
+            feature,
+            commit,
+            summary,
+        );
+    }
+
+    /// Ask the hub for keys by name for a task this worker holds (an agent that needs one later than at the start). Refused here, before
+    /// anything is sent, for a name the task did not declare and for anything that is or looks like Production.
+    pub fn ask_keys(
+        &mut self,
+        now: u64,
+        orchestration: &str,
+        feature: &str,
+        names: &[String],
+    ) -> Result<(), String> {
+        end_of(&self.s)
+            .ask_keys(&mut self.state, now, orchestration, feature, names)
+            .map_err(|e| e.code.to_string())
+    }
+
+    /// Change how long the hub may be out of reach before every key is deleted (a test shortens it).
+    pub fn set_lost_after(&mut self, ms: u64) {
+        self.s.lost_after_ms = ms;
     }
 
     /// The tasks running on an engine here.
@@ -151,7 +209,7 @@ impl WorkerAgent {
             }
             Reach::Never | Reach::NotAnswering { .. } => {
                 let since = *self.lost_since.get_or_insert(now);
-                if now.saturating_sub(since) >= HUB_LOST_AFTER_MS && !self.keys_deleted {
+                if now.saturating_sub(since) >= self.s.lost_after_ms && !self.keys_deleted {
                     let end = end_of(&self.s);
                     end.hub_lost(&mut self.state, now, self.s.store.as_ref());
                     self.keys_deleted = true;
@@ -203,6 +261,8 @@ impl WorkerAgent {
         // 5. answers the hub gave about these tasks go to the agent that asked
         for ans in std::mem::take(&mut self.state.answers) {
             let id = format!("{}/{}", ans.orchestration, ans.feature);
+            self.heard.push(format!("{}:{}", ans.feature, ans.kind));
+            self.heard.truncate(32);
             if let Some(sess) = self.sessions.get_mut(&id) {
                 let text = if ans.kind == "answer" {
                     ans.text
@@ -238,7 +298,8 @@ impl WorkerAgent {
                 // the run's own token comes from the box's broker when the real factory starts it; nothing of a key is in a task
                 secret_env: BTreeMap::new(),
                 deny_commands: Vec::new(),
-                conversation: true,
+                // a task runs to its result; a question an agent asks is a turn of its own (a conversation is a person's, over chat)
+                conversation: false,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -268,6 +329,11 @@ impl WorkerAgent {
         };
         let assign = self.state.tasks.iter().find(|t| task_id(t) == id).cloned();
         for t in turns {
+            self.withheld_log.push(format!(
+                "turn {id}: {}",
+                format!("{t:?}").chars().take(30).collect::<String>()
+            ));
+            self.withheld_log.truncate(40);
             let mut turn = t;
             // a finished task reports the commit its branch points at: that is what the merge queue merges
             if let (Turn::Result(o), Some(a)) = (&mut turn, &assign) {
@@ -289,7 +355,11 @@ impl WorkerAgent {
                 }
                 Ok(HubOut::Approval(action)) => rep.approval_asks.push((id.to_string(), action)),
                 Ok(HubOut::Local) => {}
-                Err(e) => rep.withheld.push(format!("{id}: {e}")),
+                Err(e) => {
+                    rep.withheld.push(format!("{id}: {e}"));
+                    self.withheld_log.push(format!("{id}: {e}"));
+                    self.withheld_log.truncate(8);
+                }
             }
         }
         if self.done.contains(id) {

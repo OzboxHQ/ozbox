@@ -299,7 +299,11 @@ impl Merger for HubMerger<'_, '_> {
         }
         match self.hub.lane_tick(self.st, &run, self.now) {
             None | Some(Verdict::Running { .. }) => Ok(TestOutcome::Pending),
-            Some(Verdict::Pass { .. }) => Ok(TestOutcome::Pass),
+            Some(Verdict::Pass { .. }) => {
+                // what passed is this exact commit: the merge is allowed only while the branch still points at it
+                self.st.tested.insert(branch.to_string(), commit);
+                Ok(TestOutcome::Pass)
+            }
             Some(Verdict::Fail { failed }) => {
                 let list: Vec<String> = failed.into_iter().take(20).collect();
                 Ok(TestOutcome::Fail(format!(
@@ -320,7 +324,24 @@ impl Merger for HubMerger<'_, '_> {
         branch: &str,
         into: &str,
     ) -> Result<MergeOutcome, String> {
-        self.inner.merge(repo, branch, into)
+        if let Some(tested) = self.st.tested.get(branch).cloned() {
+            // a worker that reported a newer commit since the lane passed, or a branch the conductor's side sees elsewhere, was not
+            // what the lane tested: it goes back through the lane, never merged on the old verdict
+            let reported = self.commits.get(branch);
+            let head = self.inner.head(repo, branch)?;
+            if reported.is_some_and(|c| *c != tested) || head.is_some_and(|h| h != tested) {
+                self.st.tested.remove(branch);
+                return Err(format!(
+                    "the branch no longer points at the commit the lane tested ({}): it is tested again",
+                    &tested[..12.min(tested.len())]
+                ));
+            }
+        }
+        let out = self.inner.merge(repo, branch, into);
+        if out.is_ok() {
+            self.st.tested.remove(branch);
+        }
+        out
     }
 }
 

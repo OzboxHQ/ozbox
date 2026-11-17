@@ -124,6 +124,10 @@ pub struct OrchRt {
     pub(super) hub: Option<Arc<ozbox_core::hub::engine::HubService>>,
     /// The declared test lanes the merge queue may run over the hub (`test_lane_box = "hub:<name>"`).
     pub(super) lanes: std::collections::BTreeMap<String, ozbox_core::hub::merge::LaneDecl>,
+    /// The hub as the server holds it (the daemon's spool, the real signer and sealer, the fabric), when this box is one.
+    pub(super) attachment: Option<Arc<crate::hub_fleet::HubAttachment>>,
+    /// The conversation fabric's tools (ADR 0057), when this box is a hub.
+    pub(super) fabric: Option<Arc<crate::fabric_tools::FabricHost>>,
 }
 
 fn bad(msg: &str) -> Resp {
@@ -222,7 +226,8 @@ impl App {
         let tools = Arc::new(Composite {
             orch: Tools::new(store, ops)
                 .with_memory(self_memory)
-                .with_hub(self.orch.hub.clone()),
+                .with_hub(self.orch.hub.clone())
+                .with_fabric(self.orch.fabric.clone()),
             host,
         });
         self.orch.tools = Some(Arc::clone(&tools));
@@ -236,8 +241,6 @@ impl App {
     /// Make this box a hub (ADR 0042): the orchestration tools hand tasks over it, the merge queue takes its workers' commits and
     /// runs declared lanes across them, and the fleet inbox shows its workers' requests. Called when the server starts, before
     /// the tools do: tools already running keep the route they were made with, so a later call is refused.
-    // the hub process attaches itself here when it starts the server; until it exists only the tests call this
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn attach_hub(
         &mut self,
         hub: Arc<ozbox_core::hub::engine::HubService>,
@@ -248,6 +251,22 @@ impl App {
         }
         self.orch.hub = Some(hub);
         self.orch.lanes = lanes;
+        Ok(())
+    }
+
+    /// Attach the hub as the daemon, the secrets service and the fabric make it: the channel, the fleet inbox, the merge queue, and the
+    /// messaging tools. Called when the server starts, before the tools do.
+    pub fn attach_hub_fleet(
+        &mut self,
+        att: Arc<crate::hub_fleet::HubAttachment>,
+        lanes: std::collections::BTreeMap<String, ozbox_core::hub::merge::LaneDecl>,
+    ) -> Result<(), &'static str> {
+        self.attach_hub(att.svc.clone(), lanes)?;
+        self.orch.fabric = Some(Arc::new(crate::fabric_tools::FabricHost::new(
+            att.fabric.clone(),
+            &att.svc.me,
+        )));
+        self.orch.attachment = Some(att);
         Ok(())
     }
 
@@ -351,6 +370,10 @@ impl App {
             host: &mut host,
             handles,
         };
+        if let Some(a) = &self.orch.attachment {
+            // enrolment's roster, what the workers sent, key asks and the fabric: one round per tick
+            a.tick(now_ms);
+        }
         let hub = self.orch.hub.clone();
         let lanes = self.orch.lanes.clone();
         // what the workers reported over the hub comes in first: a finished commit joins its merge queue
@@ -497,7 +520,8 @@ impl App {
         Some(
             Tools::new(store, Arc::new(SnapshotOps(self.orch_boxes())))
                 .with_memory(self.memory_host.clone())
-                .with_hub(self.orch.hub.clone()),
+                .with_hub(self.orch.hub.clone())
+                .with_fabric(self.orch.fabric.clone()),
         )
     }
 

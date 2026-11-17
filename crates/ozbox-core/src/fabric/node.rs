@@ -205,7 +205,7 @@ pub struct HubFabric {
     pub hub_box: String,
     pub my_fp: String,
     /// The workers this hub reaches: box name to the key fingerprint its enrolment attested (the worker channel's roster).
-    pub roster: BTreeMap<String, String>,
+    roster: std::sync::RwLock<BTreeMap<String, String>>,
     pub seams: Seams,
     pub walls: Option<Arc<dyn WallSource>>,
     pub store: Option<Store<HubFabricState>>,
@@ -225,7 +225,7 @@ impl HubFabric {
         HubFabric {
             hub_box: hub_box.into(),
             my_fp: my_fp.into(),
-            roster,
+            roster: std::sync::RwLock::new(roster),
             seams,
             walls,
             store: None,
@@ -241,6 +241,29 @@ impl HubFabric {
                 walls_due: BTreeSet::new(),
             }),
             cv: Condvar::new(),
+        }
+    }
+
+    /// The boxes this hub reaches now: those it started with and those that enrolled since.
+    pub fn roster_now(&self) -> BTreeMap<String, String> {
+        self.roster.read().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    fn knows(&self, b: &str) -> bool {
+        self.roster.read().is_ok_and(|r| r.contains_key(b))
+    }
+
+    /// A box enrolled (or was given a new attested key): it is reached from the next pump. Nobody copies it in by hand.
+    pub fn enrol(&self, box_name: &str, key_fp: &str) {
+        if let Ok(mut r) = self.roster.write() {
+            r.insert(box_name.to_string(), key_fp.to_string());
+        }
+    }
+
+    /// A box was removed from the roster.
+    pub fn unenrol(&self, box_name: &str) {
+        if let Ok(mut r) = self.roster.write() {
+            r.remove(box_name);
         }
     }
 
@@ -267,7 +290,7 @@ impl HubFabric {
     }
 
     fn pins(&self, st: &mut HubFabricState) {
-        for (b, fp) in &self.roster {
+        for (b, fp) in &self.roster_now() {
             let ep = endpoint(b);
             let current = st.core.links.get(&ep).is_some_and(|l| &l.sign_key == fp);
             if !current {
@@ -312,7 +335,7 @@ impl HubFabric {
             st.mail.sweep(now);
             if now >= st.walls_ms.saturating_add(WALLS_EVERY_MS) {
                 st.walls_ms = now;
-                st.walls_due.extend(me.roster.keys().cloned());
+                st.walls_due.extend(me.roster_now().into_keys());
             }
             let due = std::mem::take(&mut st.walls_due);
             for b in due {
@@ -325,7 +348,7 @@ impl HubFabric {
     /// Send the workers' walls again at the next pump (after a person approved or forgot a note, or approved a skill).
     pub fn walls_changed(&self) {
         if let Ok(mut st) = self.state.lock() {
-            st.walls_due.extend(self.roster.keys().cloned());
+            st.walls_due.extend(self.roster_now().into_keys());
         }
     }
 
@@ -349,10 +372,7 @@ impl HubFabric {
     }
 
     fn apply(&self, st: &mut HubFabricState, from: &str, kind: &str, body: &[u8], now: u64) {
-        let Some(b) = box_of(from)
-            .filter(|b| self.roster.contains_key(*b))
-            .map(str::to_string)
-        else {
+        let Some(b) = box_of(from).filter(|b| self.knows(b)).map(str::to_string) else {
             return;
         };
         let refuse = |st: &mut HubFabricState, why: &str| {
@@ -498,7 +518,7 @@ impl HubFabric {
     /// Queue for every worker what it is owed: new copies for its agents, what changed about what they sent, refusals, and its
     /// directory when that changed.
     fn route(&self, st: &mut HubFabricState, now: u64) {
-        for b in self.roster.keys() {
+        for b in self.roster_now().keys() {
             let ep = endpoint(b);
             let homed: Vec<Participant> = Self::homed_on(st, b).cloned().collect();
             // copies

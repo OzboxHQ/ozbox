@@ -108,6 +108,10 @@ pub struct HubState {
     /// Test lanes in flight, by lane run id (ADR 0042 section 7).
     #[serde(default)]
     pub lanes: BTreeMap<String, super::lane::LaneRun>,
+    /// The commit a branch's lane last passed on (branch to commit). The merge queue merges a branch only while it still points at
+    /// that commit: a worker that finished again, or a branch that moved, goes back through the lane.
+    #[serde(default)]
+    pub tested: BTreeMap<String, String>,
 }
 
 impl HasCore for HubState {
@@ -128,6 +132,7 @@ impl HubState {
             peers: BTreeMap::new(),
             service_pins: BTreeMap::new(),
             lanes: BTreeMap::new(),
+            tested: BTreeMap::new(),
         }
     }
 

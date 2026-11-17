@@ -51,6 +51,8 @@ mod cost_routes;
 mod demo_telegram;
 mod files;
 mod fleet_approvals;
+#[cfg(test)]
+mod hub_fleet_e2e;
 mod lane;
 #[cfg(test)]
 mod lane_tests;
@@ -2509,6 +2511,24 @@ pub fn serve(
     }
     if !simulated_metrics {
         app = app.with_agent(agent_for_provider(&provider_id, false, inputs));
+    }
+    // a box with the hub daemon's socket is a hub: the channel, the fleet inbox, the merge queue and the messaging tools attach
+    if !simulated_metrics {
+        let supervisor = std::env::var_os("OZBOX_SUPERVISOR_SOCKET").map(std::path::PathBuf::from);
+        if let Some(cfg) = crate::hub_fleet::from_environment(|| {
+            supervisor.map(|p| {
+                Arc::new(ozbox_hubd::ops::SocketKeyOps::new(p)) as Arc<dyn ozbox_hubd::ops::KeyOps>
+            })
+        }) {
+            match crate::hub_fleet::HubAttachment::connect(cfg) {
+                Ok(att) => {
+                    if let Err(e) = app.attach_hub_fleet(att, Default::default()) {
+                        eprintln!("ozbox: the hub was not attached: {e}");
+                    }
+                }
+                Err(e) => eprintln!("ozbox: the hub was not attached: {e}"),
+            }
+        }
     }
     app.use_demo_telegram(demo_telegram::enabled(
         simulated_metrics,

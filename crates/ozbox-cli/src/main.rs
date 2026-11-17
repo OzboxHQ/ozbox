@@ -48,6 +48,7 @@ mod helper_refresh;
 mod host_guard_cli;
 mod host_tools;
 mod hub_cli;
+mod hub_fleet;
 mod import_report;
 mod infra_cli;
 mod ingress_cli;
