@@ -45,6 +45,9 @@ pub struct Approved {
     pub digest: String,
 }
 
+/// The offer to approve with this computer's key: given the request id and its digest, what the key did.
+pub type InlineFn<'a> = &'a mut dyn FnMut(&str, &str) -> Inline;
+
 /// Everything the flow needs from its caller. Each part is a function so the flow is tested in process, against the real
 /// service, without a network.
 pub struct Flow<'a> {
@@ -54,7 +57,7 @@ pub struct Flow<'a> {
     pub say: &'a mut dyn FnMut(&str),
     /// The offer to approve with this computer's key, given the request id and its digest; `None` when this computer holds
     /// no key or nobody is at a terminal to say yes.
-    pub inline: Option<&'a mut dyn FnMut(&str, &str) -> Inline>,
+    pub inline: Option<InlineFn<'a>>,
     pub elapsed_ms: &'a dyn Fn() -> u64,
     pub stop: &'a AtomicBool,
     /// How long to wait, in milliseconds (at most a request's pending life).
@@ -202,5 +205,6 @@ pub fn ask_inline(input: &mut dyn std::io::BufRead, key: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 #[path = "approval_flow_tests.rs"]
 mod tests;
