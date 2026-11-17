@@ -915,7 +915,8 @@ fn a_launch_on_an_existing_interface_in_a_foreign_network_is_refused() {
     assert_eq!(
         decide(
             &change(),
-            &eni("eni-0eeeeeeeeeeeeeee0", OZBOX_SUBNET).with("aws:ResourceTag/ozbox-managed", "false")
+            &eni("eni-0eeeeeeeeeeeeeee0", OZBOX_SUBNET)
+                .with("aws:ResourceTag/ozbox-managed", "false")
         ),
         Decision::ExplicitDeny,
         "an interface tagged as someone else's, even inside an Oz Box subnet"
@@ -1016,7 +1017,8 @@ fn main_is_protected_by_its_name_as_well_as_its_tag() {
     // another box's snapshot still clones
     assert!(allowed(
         &change(),
-        &managed(ask("ec2:RunInstances", &snapshot("snap-dev"))).with("aws:ResourceTag/ozbox-box", "dev")
+        &managed(ask("ec2:RunInstances", &snapshot("snap-dev")))
+            .with("aws:ResourceTag/ozbox-box", "dev")
     ));
 }
 
@@ -1025,11 +1027,23 @@ fn main_is_protected_by_its_name_as_well_as_its_tag() {
 #[test]
 fn every_managed_policy_fits_iams_size_limit() {
     let mut v = vars();
-    v.regions = vec!["ap-southeast-3".into(), "us-east-1".into(), "eu-west-1".into()];
-    v.subnet_ids = (0..6).map(|i| format!("subnet-0123456789abcdef{i}")).collect();
+    v.regions = vec![
+        "ap-southeast-3".into(),
+        "us-east-1".into(),
+        "eu-west-1".into(),
+    ];
+    v.subnet_ids = (0..6)
+        .map(|i| format!("subnet-0123456789abcdef{i}"))
+        .collect();
     v.image_ids = (0..4).map(|i| format!("ami-0123456789abcdef{i}")).collect();
     v.fleet_manager_box = "a".repeat(40);
-    for d in [Doc::Read, Doc::Cost, Doc::Change, Doc::ChangeGuard, Doc::MainAssume] {
+    for d in [
+        Doc::Read,
+        Doc::Cost,
+        Doc::Change,
+        Doc::ChangeGuard,
+        Doc::MainAssume,
+    ] {
         let text = fleet_policy::render(d, &v).unwrap().to_string();
         let n = text.chars().filter(|c| !c.is_whitespace()).count();
         assert!(n <= 6144, "{d:?} is {n} characters");
