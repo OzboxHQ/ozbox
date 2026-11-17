@@ -13,6 +13,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
 
   - **`ozbox create` writes the box's SSH entry on this computer**, so `ssh ozbox-<name>` works with no extra step. The plan says so before anything changes; `--no-ssh-entry` skips it.
   - **`ozbox destroy <name> --no-final-snapshot` is for throwaway boxes.** You still type the name. The plan says no copy of `/work` is kept, and names any snapshots the box already has, which stay billed, with how to delete them first.
+  - **`ozbox destroy <name> --delete-snapshots` deletes the box's existing snapshots with it.** The plan lists each one with its size and what it costs a month, and you still type the name. Without the flag nothing changes: they are kept. Only snapshots made for that box are deleted; one another box was cloned from is refused, and the final snapshot this destroy takes is kept.
   - **A dashboard's people are given by id, not email.** `ozbox dashboard install --person` and `ozbox auth init --person` now refuse an email given as the id at once, and say the id to use and where the email goes (`--person jane,google=jane@example.com`).
 
   See [One box](/use-cases/one-box) and [Coding from anywhere](/use-cases/coding-from-anywhere).

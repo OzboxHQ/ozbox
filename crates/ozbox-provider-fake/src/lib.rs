@@ -91,6 +91,9 @@ struct State {
     /// Copies of old system disks that upgrades kept; never `/work` backups.
     #[serde(default)]
     system_copies: Vec<SystemCopy>,
+    /// Snapshot ids a test made the listing report as tagged to ANOTHER box (a provider answering with a foreign snapshot).
+    #[serde(default)]
+    foreign_tagged: Vec<String>,
 }
 
 /// A copy of a machine's system disk an upgrade kept (the sandbox's stand-in for a provider snapshot of it).
@@ -127,6 +130,14 @@ impl FakeBackend {
             .get(name.as_str())
             .map(|w| format!("fake-work-{w}"))
             .ok_or_else(|| Error::NotFound(name.to_string()))
+    }
+
+    /// For tests: make the listing report this snapshot as tagged to another box.
+    pub fn tag_snapshot_to_another_box(&self, id: &str) -> Result<()> {
+        self.mutate(|s| {
+            s.foreign_tagged.push(id.to_string());
+            Ok(())
+        })
     }
 
     pub fn state_file(&self) -> PathBuf {
@@ -481,7 +492,14 @@ impl Backend for FakeBackend {
                 size_bytes: meta.map(|m| m.size_bytes),
                 status: "completed".into(),
                 includes_work: true,
-                labels: BTreeMap::from([("ozbox-box".to_string(), e.spec.name.to_string())]),
+                labels: BTreeMap::from([(
+                    "ozbox-box".to_string(),
+                    if state.foreign_tagged.contains(id) {
+                        "someone-else".to_string()
+                    } else {
+                        e.spec.name.to_string()
+                    },
+                )]),
             }
         });
         let copies = state
@@ -502,6 +520,18 @@ impl Backend for FakeBackend {
                 ]),
             });
         Ok(work.chain(copies).collect())
+    }
+
+    fn check_delete_snapshots(&self, _rec: &BoxRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn snapshot_price(&self) -> Option<ozbox_core::SnapshotPrice> {
+        Some(ozbox_core::SnapshotPrice {
+            per_gb_month: 0.05,
+            currency_prefix: "$",
+            bytes_per_gb: 1_000_000_000,
+        })
     }
 
     fn delete_snapshot(&self, rec: &BoxRecord, id: &str) -> Result<()> {
@@ -1317,6 +1347,7 @@ mod tests {
             name: n.clone(),
             final_snapshot: false,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         assert!(plan.changes.iter().all(|c| c.kind != "snapshot.create"));
         assert_eq!(
@@ -1348,6 +1379,7 @@ mod tests {
                 name: n.clone(),
                 final_snapshot: false,
                 keep_old_system_disks: keep,
+                delete_snapshots: false,
             })?;
             let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
             if keep {
@@ -1368,6 +1400,121 @@ mod tests {
                 "keep={keep}"
             );
         }
+        Ok(())
+    }
+
+    fn destroy_op(n: &BoxName, final_snapshot: bool, delete_snapshots: bool) -> Operation {
+        Operation::Destroy {
+            name: n.clone(),
+            final_snapshot,
+            keep_old_system_disks: false,
+            delete_snapshots,
+        }
+    }
+
+    /// B4-11: by default a destroy keeps the box's snapshots; with --delete-snapshots the plan lists each with its size and monthly
+    /// cost, the typed name is still needed (high risk), planning (a dry run) deletes nothing, and apply deletes exactly those
+    /// snapshots while the final snapshot this destroy takes is kept.
+    #[test]
+    fn destroy_keeps_snapshots_by_default_and_deletes_exactly_this_boxs_when_asked() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, work, copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        let other = BoxName::new("other")?;
+        p.apply(&p.plan(&Operation::Create {
+            spec: BoxSpec::new(other.clone(), Size::S),
+        })?)?;
+        p.apply(&p.plan(&Operation::Snapshot {
+            name: other.clone(),
+        })?)?;
+        let other_snap = p.snapshots(&other)?.remove(0).id;
+
+        let kept = p.plan(&destroy_op(&n, false, false))?;
+        assert!(kept.changes.iter().all(|c| c.kind != "snapshot.delete"));
+        assert!(kept.notes.iter().any(|t| t.contains("--delete-snapshots")));
+
+        let plan = p.plan(&destroy_op(&n, true, true))?;
+        let del = plan
+            .changes
+            .iter()
+            .find(|c| c.kind == "snapshot.delete")
+            .ok_or("no snapshot.delete")?;
+        assert!(del.description.contains(&work), "{}", del.description);
+        assert!(del.description.contains("GB") && del.description.contains("a month"));
+        assert!(
+            !del.description.contains(&copy),
+            "the old-system copy has its own switch"
+        );
+        assert!(!del.description.contains(&other_snap));
+        assert_eq!(plan.max_risk(), Some(ozbox_core::Risk::High));
+        // a dry run is a plan: nothing was deleted
+        assert_eq!(p.snapshots(&n)?.len(), 2);
+
+        p.apply(&plan)?;
+        let left = p.backend().load()?;
+        let ids: Vec<_> = left
+            .retained_snapshots
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert!(!ids.contains(&work), "the existing snapshot is deleted");
+        assert_eq!(
+            ids.len(),
+            1,
+            "only the final snapshot this destroy took is kept: {ids:?}"
+        );
+        assert_eq!(
+            p.snapshots(&other)?[0].id,
+            other_snap,
+            "another box is untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_with_delete_snapshots_and_no_final_snapshot_keeps_nothing() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, _work, _copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        p.apply(&p.plan(&destroy_op(&n, false, true))?)?;
+        assert!(p.backend().load()?.retained_snapshots.is_empty());
+        Ok(())
+    }
+
+    /// A snapshot another box was cloned from is refused, with nothing changed (while planning, and again at apply).
+    #[test]
+    fn a_clone_source_snapshot_is_not_deleted_with_its_box() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, work, _copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        let clone = BoxName::new("clone")?;
+        p.apply(&p.plan(&Operation::Clone {
+            from: n.clone(),
+            to: clone.clone(),
+            snapshot: Some(work.clone()),
+        })?)?;
+        let before = std::fs::read_to_string(p.backend().state_file())?;
+        let err = p
+            .plan(&destroy_op(&n, true, true))
+            .err()
+            .ok_or("planned")?
+            .to_string();
+        assert!(err.contains(&work) && err.contains("clone"), "{err}");
+        assert_eq!(std::fs::read_to_string(p.backend().state_file())?, before);
+        // without the flag the destroy is fine, and the snapshot stays for the clone
+        p.apply(&p.plan(&destroy_op(&n, false, false))?)?;
+        Ok(())
+    }
+
+    /// A snapshot the listing reports as tagged to another box is never deleted.
+    #[test]
+    fn a_snapshot_tagged_to_another_box_is_refused() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n, work, _copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        p.backend().tag_snapshot_to_another_box(&work)?;
+        let err = p
+            .plan(&destroy_op(&n, true, true))
+            .err()
+            .ok_or("planned")?
+            .to_string();
+        assert!(err.contains("another box"), "{err}");
         Ok(())
     }
 }

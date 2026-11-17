@@ -148,9 +148,9 @@ recorded on the box ([ADR 0011](/adr/0011-no-sudo-one-audited-root-path)).
 ozbox destroy main --dry-run        # says it deletes the machine and /work, and keeps a final snapshot
 ozbox destroy main                  # asks you to type the name
 ozbox destroy scratch --no-final-snapshot   # a throwaway box: the plan says no copy of /work is kept; still type the name
+ozbox destroy scratch --delete-snapshots    # also delete its existing snapshots: the plan lists each with its size and monthly cost
 ```
 
 **Underneath:** a final snapshot is kept unless you pass `--no-final-snapshot`; the SSH entry and the stored host key are removed from this computer.
-Snapshots the box already has are kept and billed after it is gone; the plan says how many, and that `ozbox backup list
-&lt;name>` and `ozbox backup delete &lt;name> &lt;id>` remove them first.
-**Status:** Works (the plan's wording about kept snapshots is Preview: tested in CI, not yet run on a real box).
+Snapshots the box already has are kept and billed after it is gone; the plan says how many. Add `--delete-snapshots` to delete them in the same plan (each is listed with its size and an estimated monthly cost; the name is still typed). Only snapshots tagged to this box are deleted, and one that another box was cloned from is refused. The final snapshot this destroy takes is kept. Or remove them first with `ozbox backup list &lt;name>` and `ozbox backup delete &lt;name> &lt;id>`.
+**Status:** Works (the plan's wording about kept snapshots and `--delete-snapshots` are Preview: tested in CI, not yet run on a real box).

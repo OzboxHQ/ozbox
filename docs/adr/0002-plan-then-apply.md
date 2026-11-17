@@ -10,3 +10,10 @@ nothing, so every command is idempotent and safe to retry after a network failur
 
 **Cost.** Providers must be able to describe a change before making it. A provider that cannot do something says so while
 planning, never halfway through applying.
+
+**Amendment: destroy and snapshots.** A destroy keeps the box's existing snapshots by default (they are billed until deleted, and
+cannot be listed once the box is gone). `destroy --delete-snapshots` is an opt-in, additive field on the operation that puts
+their deletion in the same high-risk plan, each with its size and estimated monthly cost. It is decided while planning and
+again at apply, before the final snapshot is taken, so a snapshot made by this destroy is never in it. A snapshot is refused,
+with nothing changed, when it is not tagged to this box, is the pre-upgrade copy of a box that still exists, or another box was
+cloned from it. A provider that cannot delete snapshots refuses while planning.

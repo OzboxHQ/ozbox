@@ -125,6 +125,7 @@ pub fn run_all(h: &Harness<'_>) -> Check {
     interrupted_create_is_recoverable(h)?;
     destroy_of_a_box_with_no_machine(h)?;
     snapshot_management(h)?;
+    destroy_can_delete_its_snapshots(h)?;
     Ok(())
 }
 
@@ -458,6 +459,7 @@ pub fn destroy_of_a_box_with_no_machine(h: &Harness<'_>) -> Check {
             name: n.clone(),
             final_snapshot: snapshot,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         };
         if snapshot && kit.no_final_snapshot_without_machine {
             match plan(h, &op) {
@@ -545,6 +547,7 @@ pub fn plan_never_mutates(h: &Harness<'_>) -> Check {
             name: name("conf-plan")?,
             final_snapshot: true,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         },
     ];
     for op in &ops {
@@ -631,6 +634,7 @@ pub fn idempotence(h: &Harness<'_>) -> Check {
             name: name("conf-never-existed")?,
             final_snapshot: true,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -728,6 +732,7 @@ pub fn transitional_state_refused(h: &Harness<'_>) -> Check {
             name: n.clone(),
             final_snapshot: true,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         },
         Operation::Upgrade {
             name: n.clone(),
@@ -915,6 +920,70 @@ pub fn snapshot_management(h: &Harness<'_>) -> Check {
         "deleting it again plans to nothing",
     )?;
     Ok(())
+}
+
+/// `destroy --delete-snapshots` (opt-in): without it the plan carries no snapshot deletion; with it the plan names every snapshot
+/// of THAT box in one high-risk change, planning changes nothing, applying removes the box and leaves another box's snapshots
+/// alone, and a snapshot another box was cloned from is refused while planning. A provider that cannot says `Unsupported`.
+fn destroy_can_delete_its_snapshots(h: &Harness<'_>) -> Check {
+    let (a, b) = (name("conf-dsn-a")?, name("conf-dsn-b")?);
+    create(h, "conf-dsn-a", Size::S)?;
+    create(h, "conf-dsn-b", Size::S)?;
+    for n in [&a, &b] {
+        run(h, &Operation::Snapshot { name: n.clone() })?;
+    }
+    let destroy = |delete: bool| Operation::Destroy {
+        name: a.clone(),
+        final_snapshot: false,
+        keep_old_system_disks: false,
+        delete_snapshots: delete,
+    };
+    let kept = plan(h, &destroy(false)).map_err(|e| e.to_string())?;
+    ensure(
+        kept.changes.iter().all(|c| c.kind != "snapshot.delete"),
+        "by default a destroy deletes no snapshot",
+    )?;
+    let mine: Vec<String> = record(h, "conf-dsn-a")?.snapshots;
+    let theirs = record(h, "conf-dsn-b")?.snapshots;
+    let before = listing(h)?;
+    let p = match plan(h, &destroy(true)) {
+        Ok(p) => p,
+        Err(Error::Unsupported { why, .. }) => {
+            return ensure(!why.trim().is_empty(), "a refusal says why");
+        }
+        Err(e) => return Err(format!("planning destroy --delete-snapshots failed: {e}")),
+    };
+    ensure(
+        listing(h)? == before,
+        "planning changed the provider's state",
+    )?;
+    ensure(
+        p.max_risk() == Some(ozbox_core::Risk::High),
+        "destroying is high risk",
+    )?;
+    let del = p
+        .changes
+        .iter()
+        .find(|c| c.kind == "snapshot.delete")
+        .ok_or("the plan must list the snapshot deletion")?;
+    ensure(
+        mine.iter().all(|id| del.description.contains(id.as_str()))
+            && theirs
+                .iter()
+                .all(|id| !del.description.contains(id.as_str())),
+        "the plan names exactly this box's snapshots",
+    )?;
+    h.provider
+        .apply(&p)
+        .map_err(|e| format!("destroying with its snapshots failed: {e}"))?;
+    ensure(
+        h.provider.get(&a).map_err(|e| e.to_string())?.is_none(),
+        "the box is gone",
+    )?;
+    ensure(
+        record(h, "conf-dsn-b")?.snapshots == theirs,
+        "another box's snapshots are not touched",
+    )
 }
 
 /// A restore that replaced the disk keeps the old one: it is listed, deleting it is a high-risk plan that touches only

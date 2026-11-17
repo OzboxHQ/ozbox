@@ -417,6 +417,12 @@ pub enum Command {
         /// are deleted with the box, because ozbox cannot list them once it is gone.
         #[arg(long)]
         keep_old_system_disks: bool,
+        /// Also delete the snapshots (backups) this box already has. The plan lists each with its size and monthly cost, and
+        /// you type the box name to confirm. By default they are kept, and billed until you delete them. Only snapshots
+        /// tagged to this box are deleted; one still used by a box cloned from it is refused. A final snapshot taken by this
+        /// destroy is kept.
+        #[arg(long)]
+        delete_snapshots: bool,
     },
     /// The box modules and first-boot configuration this program renders: its version, their hashes, and the folder in use.
     Infra,

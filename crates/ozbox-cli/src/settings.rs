@@ -843,7 +843,8 @@ mod tests {
             &Operation::Destroy {
                 name: BoxName::new("a")?,
                 final_snapshot: true,
-                keep_old_system_disks: false
+                keep_old_system_disks: false,
+                delete_snapshots: false,
             }
         )
         .is_ok());

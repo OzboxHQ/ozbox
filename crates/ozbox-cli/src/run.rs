@@ -1051,12 +1051,14 @@ pub fn run(cli: Cli) -> Result<()> {
             name,
             no_final_snapshot,
             keep_old_system_disks,
+            delete_snapshots,
         } => mutate(
             p,
             Operation::Destroy {
                 name,
                 final_snapshot: !no_final_snapshot,
                 keep_old_system_disks,
+                delete_snapshots,
             },
             &flags(cli.yes, cli.dry_run, json),
         ),

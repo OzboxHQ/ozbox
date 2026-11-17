@@ -24,8 +24,8 @@ use std::sync::Arc;
 use ozbox_core::{
     Backend, BoxName, BoxRecord, BoxSpec, BoxState, Capabilities, CapacityRequest, CommandRunner,
     CommandSpec, DiskGb, Engine, Error, GpuKind, ImageInfo, MachineChoice, ModuleVars, OldWorkDisk,
-    Operation, ReleaseVerifier, ResizeMethod, Result, Size, SnapshotInfo, SnapshotKind, TofuModule,
-    RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
+    Operation, ReleaseVerifier, ResizeMethod, Result, Size, SnapshotInfo, SnapshotKind,
+    SnapshotPrice, TofuModule, RESUME_AFTER_LABEL, UPGRADE_TO_LABEL,
 };
 use serde::Deserialize;
 
@@ -2496,6 +2496,54 @@ impl Backend for AwsBackend {
             .collect())
     }
 
+    fn check_delete_snapshots(&self, _rec: &BoxRecord) -> Result<()> {
+        Ok(())
+    }
+
+    fn snapshot_price(&self) -> Option<SnapshotPrice> {
+        // EBS standard snapshot storage, US list price; other regions differ a little. Sizes are GiB.
+        Some(SnapshotPrice {
+            per_gb_month: 0.05,
+            currency_prefix: "$",
+            bytes_per_gb: 1_073_741_824,
+        })
+    }
+
+    fn snapshots_used_by_other_boxes(
+        &self,
+        rec: &BoxRecord,
+        snaps: &[SnapshotInfo],
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        // A volume made from a snapshot keeps its id (`SnapshotId`), so a clone's /work volume names its source.
+        let mut used = std::collections::BTreeMap::new();
+        for chunk in snaps.chunks(50) {
+            let ids = chunk
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let found: Volumes = self.at_rec(rec).run_json(&[
+                "ec2",
+                "describe-volumes",
+                "--filters",
+                &format!("Name=snapshot-id,Values={ids}"),
+            ])?;
+            for v in found.volumes {
+                let Some(snap) = v.snapshot_id.clone() else {
+                    continue;
+                };
+                let owner = tag(&v.tags, TAG_BOX).map(str::to_string);
+                if owner.as_deref() != Some(rec.spec.name.as_str()) {
+                    used.insert(
+                        snap,
+                        owner.unwrap_or_else(|| format!("(volume {})", v.volume_id)),
+                    );
+                }
+            }
+        }
+        Ok(used)
+    }
+
     fn delete_snapshot(&self, rec: &BoxRecord, id: &str) -> Result<()> {
         // Only a snapshot Oz Box made for THIS box is ever deleted: look at its tags first, never trust the id.
         let found = self.list_snapshots(rec)?;
@@ -4009,6 +4057,7 @@ Usage: ozbox secrets <COMMAND>",
             name: name.clone(),
             final_snapshot: false,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         assert_eq!(plan.max_risk(), Some(ozbox_core::Risk::High));
         assert!(plan
@@ -4043,6 +4092,7 @@ Usage: ozbox secrets <COMMAND>",
             name: name.clone(),
             final_snapshot: true,
             keep_old_system_disks: false,
+            delete_snapshots: false,
         })?;
         assert!(plan.changes.iter().any(|c| c.kind == "snapshot.create"));
         assert!(plan.notes.iter().any(|n| n.contains("deleted directly")));
@@ -6817,6 +6867,7 @@ Usage: ozbox secrets <COMMAND>",
             name: name.clone(),
             final_snapshot: false,
             keep_old_system_disks: keep,
+            delete_snapshots: false,
         }
     }
 
