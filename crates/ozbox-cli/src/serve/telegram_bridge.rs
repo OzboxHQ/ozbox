@@ -319,6 +319,17 @@ impl App {
     /// The box an act is about, with what the fleet record says about it.
     fn tg_target(&self, act: &ChatAct, conv: &str) -> Option<(String, BoxFacts)> {
         let name = match act {
+            // a group or the fleet is judged box by box when it is expanded, not as one box here
+            ChatAct::Address {
+                to: ozbox_core::chat_policy::address::Address::Fleet,
+                ..
+            } => return None,
+            ChatAct::Address {
+                to: ozbox_core::chat_policy::address::Address::Name(n),
+                ..
+            } if self.tg.store.data.marks.groups.contains_key(n) => return None,
+            ChatAct::Converse(_) if self.tg_sticky_fans_out(conv) => return None,
+            ChatAct::Converse(_) if self.tg_sticky_box(conv).is_some() => self.tg_sticky_box(conv),
             ChatAct::Switch(id) => self
                 .chat_book()
                 .and_then(|b| b.task(id).map(|t| t.spec.box_name.to_string())),
@@ -348,7 +359,7 @@ impl App {
     }
 
     /// The facts of this moment, for `decide` and again for `confirm`.
-    fn tg_context<'a>(
+    pub(super) fn tg_context<'a>(
         &self,
         who: &Sender,
         link: Option<&TgLink>,
@@ -383,7 +394,7 @@ impl App {
         (link_facts, ctx)
     }
 
-    fn tg_delegations(&self, link: Option<&TgLink>) -> Vec<DelegationFacts> {
+    pub(super) fn tg_delegations(&self, link: Option<&TgLink>) -> Vec<DelegationFacts> {
         link.and_then(|l| self.tg.store.link(&l.record.id))
             .map(|l| self.tg_facts(l).1)
             .unwrap_or_default()
@@ -586,6 +597,31 @@ impl App {
                 self.tg_reply(who, text, now);
             }
             ChatAct::Usage(key) => self.tg_reply(who, t(key, &[]), now),
+            ChatAct::BoxResume(_)
+            | ChatAct::BoxPause(_)
+            | ChatAct::BoxExtend { .. }
+            | ChatAct::BoxCreate { .. }
+            | ChatAct::BoxResize { .. } => self.tg_power(who, act, delegation, a.update_id, now),
+            ChatAct::Who => self.tg_show_to(who, now),
+            ChatAct::Boxes => self.tg_boxes(who, link, now),
+            ChatAct::Fleets => self.tg_fleets(who, link, now),
+            ChatAct::To(to) => self.tg_set_to(who, to, now),
+            ChatAct::Address { to, text } => {
+                self.tg_address(who, link, to, text, delegation, now)
+            }
+            // a plain message goes to the address set with /to, when one is set and no session is followed
+            ChatAct::Converse(text)
+                if self.tg_sticky(who.chat_id).is_some()
+                    && !self
+                        .state
+                        .chat
+                        .binds
+                        .contains_key(&conv_key(Channel::Telegram, &who.chat_id.to_string())) =>
+            {
+                if let Some(to) = self.tg_sticky(who.chat_id) {
+                    self.tg_address(who, link, &to, text, delegation, now);
+                }
+            }
             ChatAct::Fleet | ChatAct::BoxList => {
                 let s = self.fleet_summary();
                 self.tg_reply(who, s, now);
@@ -618,7 +654,7 @@ impl App {
         }
     }
 
-    fn tg_mark_used(&mut self, digest: &str, now: u64) {
+    pub(super) fn tg_mark_used(&mut self, digest: &str, now: u64) {
         if let Some(d) = self
             .tg
             .store
@@ -739,7 +775,7 @@ impl App {
     }
 
     /// Answer in the chat the message came from (sealed on the way out by `chat_deliver`).
-    fn tg_reply(&mut self, who: &Sender, text: String, now: u64) {
+    pub(super) fn tg_reply(&mut self, who: &Sender, text: String, now: u64) {
         self.chat_say(
             vec![super::chat_routes::Out {
                 announce: None,
@@ -781,10 +817,16 @@ impl App {
 
     /// What a refused-but-possible act says: the reason, and one link to the dashboard that opens nothing and decides nothing.
     fn tg_handoff(&mut self, who: &Sender, h: HandoffReason, now: u64) {
-        let (where_text, link_for_delete) = match self.chat_public_base() {
-            None => (t("tg.where_none", &[]), None),
+        self.tg_tell_where(who, h.message(), &[], "/chat", now);
+    }
+
+    /// The `{where}` part of a message: one pointer link to the dashboard page at `path`, with the host named, or words when
+    /// the dashboard has no public address. `true` when a link was made (so the message is deleted when it lapses).
+    pub(super) fn tg_where(&mut self, person: &str, path: &str, now: u64) -> (String, bool) {
+        match self.chat_public_base() {
+            None => (t("tg.where_none", &[]), false),
             Some(base) => {
-                let token = self.tg_pointer(&who.person, "/chat", now);
+                let token = self.tg_pointer(person, path, now);
                 let host = base
                     .split("://")
                     .nth(1)
@@ -799,17 +841,11 @@ impl App {
                             "tg.where",
                             &[("host", &host), ("url", &format!("{base}/go#{tok}"))],
                         ),
-                        Some(()),
+                        true,
                     ),
-                    None => (t("tg.where_none", &[]), None),
+                    None => (t("tg.where_none", &[]), false),
                 }
             }
-        };
-        let text = t(h.message(), &[("where", &where_text)]);
-        if link_for_delete.is_some() {
-            self.tg_send_tracked(who, text, now);
-        } else {
-            self.tg_reply(who, text, now);
         }
     }
 
@@ -827,7 +863,7 @@ impl App {
     }
 
     /// Send a message that carries a pointer link, remember its id, and delete it when the link lapses.
-    fn tg_send_tracked(&mut self, who: &Sender, text: String, now: u64) {
+    pub(super) fn tg_send_tracked(&mut self, who: &Sender, text: String, now: u64) {
         // the sealed copy never holds the token
         self.tg_record_out(who.chat_id, &text, now);
         let Ok(Some(token)) = self.secrets.get("telegram-bot-token") else {
@@ -870,7 +906,26 @@ impl App {
 
     /// Delete the messages whose link has lapsed (best effort: a bot can delete its own message for 48 hours), and close a
     /// pairing window that ran out.
+    /// Apply what `ozbox chat lock` and `ozbox chat unlink` asked for. Only those two acts are read: a request can make a link
+    /// less able, never more.
+    fn tg_cli_requests(&mut self, now: u64) {
+        let Some(dir) = self.tg.requests_dir.clone() else {
+            return;
+        };
+        for r in crate::chat_cli::take_requests(&dir) {
+            match r.act {
+                crate::chat_cli::RequestAct::Lock => {
+                    self.tg_do_lock(&r.link, "the command line", now);
+                }
+                crate::chat_cli::RequestAct::Unlink => {
+                    self.tg_do_revoke(&r.link, "revoked_from_cli", now);
+                }
+            }
+        }
+    }
+
     pub(super) fn tg_sweep(&mut self, now: u64) {
+        self.tg_cli_requests(now);
         if self
             .tg
             .window

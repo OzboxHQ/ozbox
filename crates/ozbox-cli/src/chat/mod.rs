@@ -10,6 +10,7 @@
 //! * [`links`]: one-time, expiring links from a chat to the dashboard for approvals that need a passkey.
 //! * [`ws`] and [`slack`]: Slack's Socket Mode over an outbound websocket (no inbound endpoint).
 //! * [`whatsapp`]: WhatsApp Cloud API messages through the signed webhook, with the 24-hour window.
+//! * [`remote`]: the delivery of a message to an agent on a worker box of a hub (interface built; the mesh adapter is Planned).
 //!
 //! Only linked people are heard. Text a person writes is their instruction; a forwarded or quoted message and anything an
 //! agent printed is data and is never acted on.
@@ -29,6 +30,7 @@ pub mod code;
 pub mod command;
 pub mod gateway;
 pub mod links;
+pub mod remote;
 pub mod slack;
 pub mod text;
 pub mod whatsapp;

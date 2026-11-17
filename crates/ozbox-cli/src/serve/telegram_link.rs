@@ -108,6 +108,15 @@ pub(super) struct TgRt {
     pub parse_failures: u32,
     /// Messages carrying a pointer link, to be deleted when it lapses: (chat, message id, expires).
     pub handoff_msgs: Vec<(i64, i64, u64)>,
+    /// What the bridge said, as structured messages (catalogue key and arguments), newest last and bounded. The rendering of a
+    /// key may change; what was said does not. Tests and the transcript view read it.
+    pub said: std::collections::VecDeque<super::telegram_acts::Said>,
+    /// Box changes started from a chat, waiting for their job to finish so the chat can be told.
+    pub power_jobs: Vec<super::telegram_acts::PowerJob>,
+    /// Messages addressed to boxes and sessions, and where each copy stands.
+    pub deliveries: Vec<super::telegram_acts::Tracked>,
+    /// The folder `ozbox chat lock` and `ozbox chat unlink` leave their requests in (the state's own folder).
+    pub requests_dir: Option<std::path::PathBuf>,
 }
 
 impl TgRt {
@@ -126,6 +135,10 @@ impl TgRt {
             backoff_step: 0,
             parse_failures: 0,
             handoff_msgs: Vec::new(),
+            said: std::collections::VecDeque::new(),
+            power_jobs: Vec::new(),
+            deliveries: Vec::new(),
+            requests_dir: None,
         }
     }
 
@@ -137,6 +150,7 @@ impl TgRt {
             Err(e) => rt.store_error = Some(e),
         }
         rt.transcript_path = Some(state.with_file_name("telegram-transcript.jsonl"));
+        rt.requests_dir = state.parent().map(std::path::Path::to_path_buf);
         rt
     }
 }
@@ -197,6 +211,24 @@ struct DelegationWish {
     days: Option<u64>,
     #[serde(default)]
     hub_ack: bool,
+    /// The caps of a power delegation (ADR 0050 §3); left out, the defaults ($10 a day, no create or resize).
+    #[serde(default)]
+    caps: Option<CapsWish>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CapsWish {
+    #[serde(default)]
+    max_size: Option<String>,
+    #[serde(default)]
+    daily_usd: Option<u32>,
+    #[serde(default)]
+    creates_per_day: Option<u32>,
+    #[serde(default)]
+    resumes_per_day: Option<u32>,
+    #[serde(default)]
+    running: Option<u32>,
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(req: &Req) -> Result<T, Resp> {
@@ -815,8 +847,12 @@ impl App {
         let known: Vec<String> = self
             .provider
             .list()
-            .map(|r| r.iter().map(|b| b.spec.name.to_string()).collect())
-            .unwrap_or_default();
+            .map(|r| r.iter().map(|b| b.spec.name.to_string()).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            // a worker box of a hub, reached over the hub's channel, may be delegated too
+            .chain(self.remote_agents.workers().into_iter().map(|w| w.name))
+            .collect();
         if v.is_empty() || v.len() > ozbox_core::chat_policy::records::MAX_DELEGATED_BOXES {
             return Err(Resp::error(
                 400,
@@ -1345,11 +1381,12 @@ impl App {
         for a in &w.acts {
             acts.push(match a.as_str() {
                 "converse" => DelegatedAct::Converse,
-                "power" | "run" => {
+                "power" => DelegatedAct::Power,
+                "run" => {
                     return Err(Resp::error(
                         409,
                         "not_available",
-                        "box power and /run arrive in a later release: only talking to coding agents can be delegated now",
+                        "/run arrives in a later release: talking to coding agents and box power can be delegated now",
                     ))
                 }
                 _ => return Err(Resp::error(400, "bad_request", "an act is converse, power or run")),
@@ -1375,11 +1412,32 @@ impl App {
             bot_id: link.record.bot_id,
             boxes,
             acts,
-            caps: Caps::default(),
+            caps: {
+                let mut c = Caps::default();
+                if let Some(cw) = &w.caps {
+                    if cw.max_size.is_some() {
+                        c.max_size = cw
+                            .max_size
+                            .as_ref()
+                            .and_then(|m| m.parse::<ozbox_core::Size>().ok())
+                            .map(|m| m.to_string());
+                    }
+                    c.daily_usd = cw.daily_usd.unwrap_or(c.daily_usd);
+                    c.creates_per_day = cw.creates_per_day.unwrap_or(c.creates_per_day);
+                    c.resumes_per_day = cw.resumes_per_day.unwrap_or(c.resumes_per_day);
+                    c.running = cw.running.unwrap_or(c.running);
+                }
+                c
+            },
             not_before_ms: now,
             expires_ms: now + life,
             hub_ack: w.hub_ack,
             with_link: false,
+        })
+        .and_then(|r: DelegationRecord| {
+            r.validate()
+                .map(|_| r)
+                .map_err(|e| Resp::error(400, "bad_request", &e.to_string()))
         })
     }
 
@@ -1637,6 +1695,12 @@ impl App {
             production: Vec<String>,
             #[serde(default)]
             hub: Option<String>,
+            /// Named groups a chat may address as `@<group>`. Left out: kept as they are.
+            #[serde(default)]
+            groups: Option<std::collections::BTreeMap<String, Vec<String>>>,
+            /// Per-box detail level for agent replies (`full`, `summary`, `metadata`). Left out: kept as they are.
+            #[serde(default)]
+            detail: Option<std::collections::BTreeMap<String, String>>,
         }
         let b: B = match parse(req) {
             Ok(b) => b,
@@ -1669,9 +1733,56 @@ impl App {
         let mut production = b.production;
         production.sort();
         production.dedup();
+        let old = std::mem::take(&mut self.tg.store.data.marks);
+        let groups = match b.groups {
+            None => old.groups.clone(),
+            Some(g) => {
+                let boxes: Vec<String> = self
+                    .provider
+                    .list()
+                    .map(|r| r.iter().map(|x| x.spec.name.to_string()).collect())
+                    .unwrap_or_default();
+                let bad = g.len() > 50
+                    || g.iter().any(|(name, members)| {
+                        !ok(name)
+                            || name.eq_ignore_ascii_case(ozbox_core::chat_policy::address::FLEET)
+                            || boxes.contains(name)
+                            || members.is_empty()
+                            || members.len() > 200
+                            || !members.iter().all(ok)
+                    });
+                if bad {
+                    self.tg.store.data.marks = old;
+                    return Resp::error(
+                        400,
+                        "bad_request",
+                        "a group has a name that is not a box's or `fleet`, and 1 to 200 box names",
+                    );
+                }
+                g
+            }
+        };
+        let detail = match b.detail {
+            None => old.detail.clone(),
+            Some(d) => {
+                if !d.iter().all(|(k, v)| {
+                    ok(k) && ozbox_core::chat_policy::reply::Detail::from_name(v).is_some()
+                }) {
+                    self.tg.store.data.marks = old;
+                    return Resp::error(
+                        400,
+                        "bad_request",
+                        "a detail level is full, summary or metadata",
+                    );
+                }
+                d
+            }
+        };
         self.tg.store.data.marks = crate::telegram_store::Marks {
             production,
             hub: b.hub,
+            groups,
+            detail,
         };
         if let Err(e) = self.tg.store.save() {
             return Resp::error(500, "telegram_store", &e);

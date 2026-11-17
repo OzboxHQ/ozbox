@@ -28,6 +28,7 @@ mod browser_tools;
 mod capped;
 mod channels;
 mod chat;
+mod chat_cli;
 mod cli;
 mod code;
 mod code_cli;

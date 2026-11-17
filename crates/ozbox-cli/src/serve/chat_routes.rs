@@ -83,7 +83,7 @@ pub struct ChatRt {
     pub(super) rate: RateLimit,
     throttle: BTreeMap<String, Throttle>,
     /// `<conv>|<task>` -> the answers already sent.
-    seen_turns: BTreeMap<String, u32>,
+    pub(super) seen_turns: BTreeMap<String, u32>,
     /// `<conv>|<task>|<what>` for things said once.
     announced: BTreeSet<String>,
     /// A notice that failed to send: how many times, and the earliest next try.
@@ -97,7 +97,7 @@ pub struct ChatRt {
     slack_stop: Option<Arc<AtomicBool>>,
     /// The last screen read from each attached terminal session.
     screens: BTreeMap<String, Vec<String>>,
-    next_tick_ms: u64,
+    pub(super) next_tick_ms: u64,
     next_terminal_ms: u64,
     /// Numbers told that WhatsApp's window had closed.
     told_closed: BTreeSet<String>,
@@ -263,7 +263,7 @@ impl App {
 
     /// The exact values that must never reach a chat: the keys and tokens this server keeps for chat and for models. Read
     /// when needed and dropped with the message, never stored here.
-    fn chat_secrets(&self) -> Vec<String> {
+    pub(super) fn chat_secrets(&self) -> Vec<String> {
         let mut names: Vec<String> = [
             "telegram-bot-token",
             "slack-app-token",
@@ -509,7 +509,7 @@ impl App {
         self.chat_say(outs, now);
     }
 
-    fn chat_exec(
+    pub(super) fn chat_exec(
         &mut self,
         channel: Channel,
         id: &str,
@@ -1267,7 +1267,7 @@ impl App {
         }
         self.chat.next_tick_ms = now + 1000;
         self.chat_slack_pump(now);
-        if self.state.chat.binds.is_empty() {
+        if self.state.chat.binds.is_empty() && self.state.chat.watch.is_empty() {
             return;
         }
         let Some(book) = self.chat_book() else { return };
@@ -1280,7 +1280,30 @@ impl App {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let mut outs: Vec<(String, Out)> = Vec::new();
-        for (key, b) in &binds {
+        // what each conversation hears from: the session it follows, and the sessions a message was addressed to
+        let mut heard: Vec<(String, Bind, Option<(String, String)>)> = binds
+            .iter()
+            .map(|(k, b)| (k.clone(), b.clone(), None))
+            .collect();
+        for (k, ws) in &self.state.chat.watch {
+            for w in ws {
+                let already = binds
+                    .iter()
+                    .any(|(bk, b)| bk == k && matches!(b, Bind::Task { id } if *id == w.task));
+                let msg = Some((w.msg_id.clone(), w.box_name.clone()));
+                if already {
+                    // the followed session's replies carry the message id too
+                    if let Some(h) = heard.iter_mut().find(|(hk, hb, _)| {
+                        hk == k && matches!(hb, Bind::Task { id } if *id == w.task)
+                    }) {
+                        h.2 = msg;
+                    }
+                } else {
+                    heard.push((k.clone(), Bind::Task { id: w.task.clone() }, msg));
+                }
+            }
+        }
+        for (key, b, msg) in &heard {
             let Some((chan, cid)) = key.split_once(':') else {
                 continue;
             };
@@ -1305,7 +1328,20 @@ impl App {
             let seen = self.chat.seen_turns.get(&seen_key).copied().unwrap_or(0);
             if task.turns > seen {
                 self.chat.seen_turns.insert(seen_key, task.turns);
-                if let Some(reply) = &task.last_reply {
+                if let (Some(reply), Channel::Telegram, Ok(chat)) =
+                    (&task.last_reply, channel, cid.parse::<i64>())
+                {
+                    // a Telegram chat gets the stronger redaction, the box's detail level and the attribution
+                    let text = self.tg_agent_reply(
+                        chat,
+                        task.spec.box_name.as_str(),
+                        tid,
+                        msg.as_ref().map(|(m, _)| m.as_str()),
+                        reply,
+                        now,
+                    );
+                    outs.push((key.clone(), mk(text, Vec::new())));
+                } else if let Some(reply) = &task.last_reply {
                     let (body, left) = text::summarise(reply, &secrets);
                     let msg = if left > 0 {
                         t(

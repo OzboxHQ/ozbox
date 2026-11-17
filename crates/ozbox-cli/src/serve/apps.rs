@@ -110,6 +110,8 @@ impl App {
             self.start_telegram();
         }
         self.tg_sweep(now_ms);
+        self.tg_deadlines(now_ms);
+        self.tg_remote_pump(now_ms);
         if now_ms >= self.schedule.next_alerts_ms && !self.schedule.alerts_busy {
             self.schedule.next_alerts_ms = now_ms + ALERT_EVERY_MS;
             self.start_alerts(now_ms);

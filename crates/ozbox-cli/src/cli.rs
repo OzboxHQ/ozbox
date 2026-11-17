@@ -547,6 +547,12 @@ pub enum Command {
         #[command(subcommand)]
         command: SecretsCommand,
     },
+    /// Telegram links on the dashboard of this machine: lock one so it can only read, or cut it. Both only make a chat less
+    /// able, so they need no passkey; the plan is shown first.
+    Chat {
+        #[command(subcommand)]
+        command: ChatCommand,
+    },
     /// Optional, anonymous usage counts. Off until you turn it on, and sent only to an address you choose.
     Telemetry {
         #[command(subcommand)]
@@ -1118,6 +1124,34 @@ pub enum PluginCommand {
     Revoke { name: String },
     /// Delete an added plugin and its approval.
     Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ChatCommand {
+    /// Lock a Telegram link (or every one): it can only read until a passkey in the dashboard lifts the lock.
+    Lock {
+        /// The link's id, as the dashboard's Account page shows it.
+        #[arg(long, conflicts_with = "all")]
+        link: Option<String>,
+        /// Every active link.
+        #[arg(long)]
+        all: bool,
+        /// The folder the dashboard keeps its state in. Default: beside the settings file.
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+    },
+    /// Cut a Telegram link (or every one): the chat is not answered any more and everything delegated to it ends.
+    Unlink {
+        /// The link's id, as the dashboard's Account page shows it.
+        #[arg(long, conflicts_with = "all")]
+        link: Option<String>,
+        /// Every link that is not already cut.
+        #[arg(long)]
+        all: bool,
+        /// The folder the dashboard keeps its state in. Default: beside the settings file.
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

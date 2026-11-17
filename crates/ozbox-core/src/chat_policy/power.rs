@@ -122,7 +122,7 @@ impl PowerRefusal {
             PowerRefusal::NotIdle(_) => "tg.power_not_idle",
             PowerRefusal::IdleUnknown => "tg.power_idle_unknown",
             PowerRefusal::NoDeadline => "tg.power_no_deadline",
-            PowerRefusal::ExtendedAlready => "tg.power_extended",
+            PowerRefusal::ExtendedAlready => "tg.power_extended_already",
         }
     }
 }

@@ -784,10 +784,11 @@ fn a_members_delegation_waits_for_an_owners_passkey_and_then_works() {
 }
 
 #[test]
-fn power_and_run_cannot_be_delegated_in_this_release_and_a_later_delegation_is_its_own_passkey() {
+fn run_cannot_be_delegated_in_this_release_and_a_later_delegation_is_its_own_passkey() {
     let mut r = Rig::new();
     let lid = r.link("owner", PHONE, None);
-    for act in ["power", "run"] {
+    // box power can be delegated now (see e2e.rs); /run cannot yet
+    for act in ["run"] {
         let (st, v) = r.call(
             "owner",
             "POST",
@@ -1094,7 +1095,7 @@ fn updates_that_are_not_a_private_text_message_from_the_linked_person_do_nothing
 #[test]
 fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delegation() {
     let mut r = Rig::new();
-    r.link("owner", PHONE, Some(&["alpha"]));
+    let lid = r.link("owner", PHONE, Some(&["alpha"]));
     r.tg.say(PHONE, "/new alpha start one");
     r.tick();
     assert_eq!(r.tasks(), 1);
@@ -1159,7 +1160,9 @@ fn no_refused_word_and_no_button_ever_reaches_an_executor_even_with_every_delega
     let acted: Vec<_> = chain
         .iter()
         .filter(|e| {
-            e.action == "telegram.act"
+            // this link's own entries: on a box the chain is the box's, shared with every other test
+            e.subject.as_deref() == Some(lid.as_str())
+                && e.action == "telegram.act"
                 && (e.detail.contains("act=refused.")
                     || e.detail.contains("act=box.")
                     || e.detail.contains("act=run"))
@@ -1717,3 +1720,5 @@ fn the_polling_lane_is_its_own_and_the_offset_moves_only_after_the_updates_are_r
         .iter()
         .any(|c| c.contains(&format!("offset={}", id + 1))));
 }
+
+mod e2e;

@@ -67,6 +67,7 @@ mod sched_routes;
 pub(crate) mod setup;
 mod sim_code;
 mod skills_routes;
+mod telegram_acts;
 mod telegram_bridge;
 mod telegram_link;
 #[cfg(test)]
@@ -323,6 +324,8 @@ pub struct App {
     runner: Arc<dyn CommandRunner>,
     secrets: Arc<dyn SecretStore>,
     http: Arc<dyn HttpClient>,
+    /// Agents on worker boxes of a hub, reached for chat over the hub's channel. None until the hub and the mesh are merged.
+    remote_agents: Arc<dyn crate::chat::remote::RemoteAgents>,
     prices: PriceCache,
     prices_path: Option<std::path::PathBuf>,
     state: ServerState,
@@ -486,6 +489,7 @@ impl App {
             runner: Arc::new(SystemRunner),
             secrets: Arc::new(crate::secrets::MemorySecrets::default()),
             http: Arc::new(UreqClient),
+            remote_agents: Arc::new(crate::chat::remote::NoRemote),
             prices: PriceCache::default(),
             prices_path: None,
             state: ServerState::default(),
@@ -568,6 +572,11 @@ impl App {
         self.secrets = secrets;
         self.sync_second_factor();
         self
+    }
+
+    #[cfg(test)]
+    fn set_remote_agents(&mut self, r: Arc<dyn crate::chat::remote::RemoteAgents>) {
+        self.remote_agents = r;
     }
 
     #[cfg(test)]

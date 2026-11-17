@@ -308,6 +308,9 @@ pub fn run(cli: Cli) -> Result<()> {
     if let Command::Telemetry { command } = &cli.command {
         return crate::telemetry_cli::run(command, cli.yes, cli.dry_run, json);
     }
+    if let Command::Chat { command } = &cli.command {
+        return crate::chat_cli::run(command, cli.yes, cli.dry_run, json);
+    }
     if let Command::Dashboard { command } = &cli.command {
         return crate::dashboard_cli::run(command, cli.yes, cli.dry_run, json);
     }
@@ -468,6 +471,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Permissions { .. }
         | Command::Audit { .. }
         | Command::Telemetry { .. }
+        | Command::Chat { .. }
         | Command::Plugin { .. }
         | Command::Init { .. }
         | Command::Harden { .. } => Ok(()),
