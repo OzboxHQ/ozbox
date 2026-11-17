@@ -1249,9 +1249,9 @@ pub enum IngressCommand {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
     },
-    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read. Once the box has a second
-    /// factor, this computer's software key cannot fetch it (it would let a program on this computer enrol its own passkey): a
-    /// laptop key that proves a touch, or root on the box, approves it.
+    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read. It is handed out with no
+    /// approval only until someone enrols a passkey or an authenticator in the dashboard; after that it is refused for good, and
+    /// you sign in with what you enrolled.
     SetupCode {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,

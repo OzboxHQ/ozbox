@@ -65,7 +65,19 @@ pub const SEALED_OPS: &[&str] = &[
 ];
 
 pub fn is_reserved(name: &str) -> bool {
-    name == KEY_NAME
+    name == KEY_NAME || name == SETUP_WINDOW_CLOSED
+}
+
+/// The store's record that the dashboard's first-day window is closed (a person enrolled a passkey or an authenticator in the
+/// dashboard). Its presence is the fact; nothing but the supervisor's `setup_code_close` writes it, the box socket can neither
+/// write nor delete it (a reserved name), and nothing in this program removes it: the window never reopens.
+pub const SETUP_WINDOW_CLOSED: &str = "setup-code-window-closed";
+
+/// Whether the first-day window is open: the dashboard has not yet said anyone enrolled a passkey or an authenticator. While it
+/// is open the first-time code is read through the sealed ingress route with no approval (ADR 0041, Amendment of 2026-11-17,
+/// "first-day window"). A store that cannot be read counts as closed.
+pub fn setup_window_open(store: &dyn SecretStore) -> bool {
+    matches!(store.exists(SETUP_WINDOW_CLOSED), Ok(false))
 }
 
 /// The service key, the box it speaks for, and the ids it has already opened.
@@ -280,6 +292,11 @@ impl SetupCode {
         Ok(())
     }
 
+    /// Forget the held code (the window closed: a person enrolled in the dashboard).
+    pub fn clear(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     pub fn get(&self, now_ms: u64) -> Option<String> {
         let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_ref() {
@@ -324,6 +341,25 @@ pub fn hand_over_setup_code(code: &str, now_ms: u64) -> bool {
 
 #[cfg(not(unix))]
 pub fn hand_over_setup_code(_: &str, _: u64) -> bool {
+    false
+}
+
+/// Tell the secrets service that a person has enrolled a passkey or an authenticator in the dashboard: the first-day window
+/// closes for good and the held code is forgotten. Called by the dashboard on every enrolment and at start when anyone is
+/// already enrolled (it is idempotent). True when the service took it. Only on a box whose dashboard runs as the supervisor user;
+/// anywhere else it does nothing.
+#[cfg(unix)]
+pub fn close_setup_window() -> bool {
+    let Some(sock) = std::env::var_os("OZBOX_SUPERVISOR_SOCKET").filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    crate::secrets_service::SocketSecrets::new(PathBuf::from(sock))
+        .call(json!({"op": "setup_code_close"}))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+pub fn close_setup_window() -> bool {
     false
 }
 
@@ -1013,6 +1049,21 @@ mod tests {
         store
             .set(crate::secrets_approval::ENROLLED_MARKER, "1")
             .unwrap();
+        // past the first-day window: somebody enrolled in the dashboard (the window has its own test)
+        assert!(handle_from(
+            &store,
+            &mac,
+            &gates,
+            Policy::Supervisor,
+            None,
+            r#"{"op":"setup_code_close"}"#
+        )
+        .contains("\"ok\":true"));
+        // closing forgets the held code, so the dashboard (restarted with every approver removed) hands over another
+        assert!(
+            handle_from(&store, &mac, &gates, Policy::Supervisor, None, &put)
+                .contains("\"ok\":true")
+        );
         let ask = |op: &str, approval: &str, id: &str| -> Value {
             let r = req(&ing, json!({"op": op, "approval": approval}), id, now).to_string();
             serde_json::from_str(&handle_from(
@@ -1095,5 +1146,169 @@ mod tests {
         assert_eq!(r["names"], json!(["K"]));
         assert_eq!(ask(r#"{"op":"set","name":"x","value":"y"}"#)["ok"], false);
         assert_eq!(ask(r#"{"op":"names","prefix":""}"#)["ok"], false);
+    }
+
+    /// The first-day window (ADR 0041, Amendment of 2026-11-17): while nobody has enrolled a passkey or an authenticator in the
+    /// dashboard, the sealed ingress route reads the first-time code with no approval, even on a box whose laptop key is pinned
+    /// (a second factor exists). The supervisor's close call, and nothing else, ends it for good: the code is forgotten, a
+    /// restart keeps it closed, and the box user's sockets can neither close it nor write or remove the record.
+    #[test]
+    fn the_first_day_window_reads_the_code_with_no_approval_until_the_first_enrolment_closes_it_for_good(
+    ) {
+        use crate::secrets_service::{handle_from, Policy};
+        const CODE: &str = "SENTL-B428W";
+        let (d, store, gates) = service();
+        let mac = mac(&store);
+        let ing = gates.ingress.get().unwrap().clone();
+        let now = crate::tokenmac::now_ms();
+        let put = |g: &Gates| {
+            let line =
+                json!({"op": "setup_code_put", "value": CODE, "msg": (now + 60_000).to_string()})
+                    .to_string();
+            assert!(
+                handle_from(&store, &mac, g, Policy::Supervisor, None, &line)
+                    .contains("\"ok\":true")
+            );
+        };
+        let ask = |g: &Gates, approval: &str, id: &str| -> Value {
+            let r = req(
+                &ing,
+                json!({"op": "setup_code", "approval": approval}),
+                id,
+                now,
+            )
+            .to_string();
+            serde_json::from_str(&handle_from(&store, &mac, g, Policy::Ingress, None, &r)).unwrap()
+        };
+        // `ozbox create` pinned a laptop key: a second factor exists, but the dashboard has nobody enrolled
+        store
+            .set(crate::secrets_approval::ENROLLED_MARKER, "1")
+            .unwrap();
+        put(&gates);
+        let open = ask(&gates, "", &format!("e1{:030}", 1));
+        assert_eq!(
+            (open["ok"].clone(), open["value"].clone()),
+            (json!(true), json!(CODE)),
+            "{open}"
+        );
+
+        // no socket but the supervisor's closes the window, and none can write or remove its record
+        let close = r#"{"op":"setup_code_close"}"#;
+        for p in [
+            Policy::Box,
+            Policy::BoxLocked,
+            Policy::Import,
+            Policy::Runner,
+            Policy::Broker,
+            Policy::BrokerLocked,
+            Policy::Ingress,
+            Policy::Unsealed,
+            Policy::Admin,
+        ] {
+            let o = handle_from(&store, &mac, &gates, p, None, close);
+            assert!(o.contains("\"ok\":false"), "{p:?}: {o}");
+            for line in [
+                json!({"op":"set","name":SETUP_WINDOW_CLOSED,"value":"1"}).to_string(),
+                json!({"op":"delete","name":SETUP_WINDOW_CLOSED}).to_string(),
+            ] {
+                if p == Policy::Admin {
+                    continue; // root may write any name; root is not the box user
+                }
+                let _ = handle_from(&store, &mac, &gates, p, None, &line);
+            }
+        }
+        assert!(
+            setup_window_open(store.as_ref()),
+            "still open: only the supervisor closes it"
+        );
+        // the box user cannot even sealed-ask for the close (it is not a sealed operation)
+        let sealed_close = req(
+            &ing,
+            json!({"op": "setup_code_close"}),
+            &format!("e2{:030}", 1),
+            now,
+        )
+        .to_string();
+        assert!(
+            handle_from(&store, &mac, &gates, Policy::Ingress, None, &sealed_close)
+                .contains("\"ok\":false")
+        );
+        assert!(setup_window_open(store.as_ref()));
+
+        // the dashboard's first enrolment closes it: the code is gone and the route without an approval is refused
+        let o = handle_from(&store, &mac, &gates, Policy::Supervisor, None, close);
+        assert!(o.contains("\"ok\":true"), "{o}");
+        assert!(!setup_window_open(store.as_ref()));
+        // neither the box user nor the dashboard can remove the record to reopen it
+        for p in [
+            Policy::Box,
+            Policy::BoxLocked,
+            Policy::Supervisor,
+            Policy::Import,
+        ] {
+            let line = json!({"op":"delete","name":SETUP_WINDOW_CLOSED}).to_string();
+            let _ = handle_from(&store, &mac, &gates, p, None, &line);
+            assert!(
+                !setup_window_open(store.as_ref()),
+                "{p:?} reopened the window"
+            );
+        }
+        let shut = ask(&gates, "", &format!("e3{:030}", 1));
+        assert_eq!(shut["ok"], false, "{shut}");
+        assert!(
+            shut["error"].as_str().unwrap().contains("already enrolled"),
+            "{shut}"
+        );
+        assert!(!shut.to_string().contains(CODE));
+        // the held code is forgotten: a dashboard approval finds nothing to hand out
+        let dash = gates
+            .approvals
+            .mint(
+                "setup-code",
+                "",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                now,
+                60_000,
+            )
+            .unwrap();
+        let none = ask(&gates, &dash, &format!("e4{:030}", 1));
+        assert_eq!(none["ok"], false);
+        assert!(!none.to_string().contains(CODE));
+        // a code put in later (a dashboard restarted with every approver removed by hand) still needs an approval
+        put(&gates);
+        assert_eq!(ask(&gates, "", &format!("e5{:030}", 1))["ok"], false);
+        // and a software laptop key never gives that approval (review H1): no code is made, and one that exists is refused
+        let soft = crate::secrets_signer::Signer::SoftwareKey("laptop".into());
+        assert!(gates
+            .approvals
+            .mint("setup-code", "", "", &soft, now, 60_000)
+            .is_err());
+        let sc = gates
+            .approvals
+            .mint_unchecked_for_test("setup-code", "", "", &soft)
+            .unwrap();
+        let r = ask(&gates, &sc, &format!("e6{:030}", 1));
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(!r.to_string().contains(CODE));
+
+        // a restart (a fresh service on the same store) keeps the window closed
+        let again = Gates::default();
+        let _ = again.ingress.set(ing.clone());
+        put(&again);
+        assert!(!setup_window_open(store.as_ref()));
+        assert_eq!(ask(&again, "", &format!("e7{:030}", 1))["ok"], false);
+
+        // sentinel: the code is in no file the service wrote (the store is sealed; the code is held in memory only)
+        for e in std::fs::read_dir(d.path()).unwrap().flatten() {
+            if e.path().is_file() {
+                let b = std::fs::read(e.path()).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&b).contains(CODE),
+                    "{} holds the code",
+                    e.path().display()
+                );
+            }
+        }
     }
 }

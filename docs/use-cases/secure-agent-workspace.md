@@ -99,8 +99,9 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    it is tried anyway. The same holds for a declaration whose commands take secrets from a Production environment.
    An import into `staging` whose key names say production or live, or whose values are live-mode keys (`sk_live_…`) or production
    addresses, is a Production import too. This computer's key also never approves a declaration or the box's own settings (its
-   first-time dashboard code, its store key's escrow, its tunnel token, who may approve): use a laptop key that needs a touch,
-   root on the box, or the dashboard where it offers the change.
+   store key's escrow, its tunnel token, who may approve): use a laptop key that needs a touch, root on the box, or the dashboard
+   where it offers the change. The dashboard's first-time code needs no approval until someone enrols in the dashboard
+   (`ozbox secrets ingress setup-code`), and is refused for good after.
    `--wait MINUTES` (1 to 30, default 30) limits the wait. Ctrl-C or running out of time stores nothing and changes nothing;
    the request expires by itself, and running the command again files a new one.
 

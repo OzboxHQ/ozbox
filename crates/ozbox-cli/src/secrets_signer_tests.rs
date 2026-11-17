@@ -275,6 +275,16 @@ fn a_software_key_never_approves_the_boxs_own_acts_on_the_legacy_path() {
         };
         assert!(e.contains(scope) && e.contains("passkey"), "{scope}: {e}");
     }
+    // past the first-day window (someone enrolled in the dashboard), with a first-time code held: only then is an approval
+    // what stands between a caller and the code
+    assert!(ok(
+        &r.ask(Policy::Supervisor, json!({"op":"setup_code_close"}))
+    ));
+    let held = r.ask(
+        Policy::Supervisor,
+        json!({"op":"setup_code_put","value":"HELDC-0DE42","msg":(crate::tokenmac::now_ms() + 60_000).to_string()}),
+    );
+    assert!(ok(&held), "{held}");
     for (op, scope) in [("kek_export", "kek-export"), ("setup_code", "setup-code")] {
         let code = r
             .gates
@@ -289,7 +299,10 @@ fn a_software_key_never_approves_the_boxs_own_acts_on_the_legacy_path() {
         let out = r.ask(Policy::Unsealed, json!({"op":op,"approval":code}));
         assert!(!ok(&out), "{scope}: {out}");
         assert!(err(&out).contains("passkey"), "{scope}: {out}");
-        assert!(!err(&out).contains(&code), "{out}");
+        assert!(
+            !err(&out).contains(&code) && !out.to_string().contains("HELDC"),
+            "{out}"
+        );
         // the refusal did not spend it, and it never becomes good
         assert!(!ok(
             &r.ask(Policy::Unsealed, json!({"op":op,"approval":code}))
