@@ -55,6 +55,8 @@ upgrade; tracks health incidents; and backs up `/work` with restic where the pro
 Unix socket only — nothing on a box listens on a network port.
 The daemon has two sockets (ADR 0040, decision 3). The box socket (`/run/ozboxd/ozboxd.sock`, group `ozbox`) is for the box user and
 what runs as it. The dashboard runs as `ozbox-supervisor`, which is not in the box user's group, and gets a socket of its own
+
+**Fleet credential holder (Preview, not turned on; ADR 0040 Amendment 2).** A user of its own, `ozbox-fleetcred`, is the only user on a box that may hold a fleet credential: a read session for the dashboard, and, for one plan at a time, a change session your computer made and sealed to it. It listens on one Unix socket and answers only the dashboard's user and the sealed route's user, by the kernel's word (`SO_PEERCRED`). It checks the owner's passkey against the list of passkeys your computer signed, records a plan as used (a file it fsyncs) before it applies, and hands the session to a transient apply user (`ozbox-fleetapply`) through standard input. The box user and the agents cannot reach it, and it never writes a credential to disk.
 (`/run/ozbox-supervisor-api/daemon.sock`) that answers one user and one table of routes: health, metrics, self-test, incidents,
 sessions, runs (list, start, log, input, cancel), files (read, and the writes inside the files jail), a checkpoint and the
 terminal. systemd binds that socket as root in a folder root owns and hands it to the daemon, so nothing the box user does to

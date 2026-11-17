@@ -35,7 +35,7 @@ impl Signer {
         }
     }
 
-    fn sign(&self, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn sign(&self, payload: &[u8]) -> Vec<u8> {
         match self {
             Signer::Ed(k) => k.sign(payload).as_ref().to_vec(),
             Signer::P256(k) => k

@@ -1,0 +1,273 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "NeverTouchTheFleetManager",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:RebootInstances",
+        "ec2:AttachVolume",
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyVolume",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:CreateSnapshot",
+        "ec2:CreateVolume",
+        "ec2:RunInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-fleet-manager": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverTouchTheFleetManagerByName",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:RebootInstances",
+        "ec2:AttachVolume",
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyVolume",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:CreateSnapshot",
+        "ec2:CreateVolume",
+        "ec2:RunInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-box": "${fleet_manager_box}"
+        }
+      }
+    },
+    {
+      "Sid": "NeverMarkAnythingAsTheFleetManager",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume",
+        "ec2:CreateSnapshot",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [
+            "ozbox-fleet-manager"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "NeverNameAnythingAsTheFleetManager",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume",
+        "ec2:CreateSnapshot",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-box": "${fleet_manager_box}"
+        }
+      }
+    },
+    {
+      "Sid": "NeverLaunchOnAnotherOwnersInterface",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:${account_id}:network-interface/eni-*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "AttachOnlyTheWindowsOwnBox",
+      "Effect": "Deny",
+      "Action": "ec2:AttachVolume",
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:instance/*",
+        "arn:aws:ec2:*:${account_id}:volume/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/ozbox-box": "${aws:PrincipalTag/ozbox-window-box}"
+        }
+      }
+    },
+    {
+      "Sid": "APlanWindowNamesItsBoxBeforeItAttaches",
+      "Effect": "Deny",
+      "Action": "ec2:AttachVolume",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "aws:userid": "*:plan-*"
+        },
+        "Null": {
+          "aws:PrincipalTag/ozbox-window-box": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverPassABoundRole",
+      "Effect": "Deny",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "iam:ResourceTag/ozbox-bound-instance": "false"
+        }
+      }
+    },
+    {
+      "Sid": "NoIamNoDirectKmsNoSecrets",
+      "Effect": "Deny",
+      "Action": [
+        "iam:Create*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Detach*",
+        "iam:Update*",
+        "iam:Delete*",
+        "iam:Add*",
+        "iam:Remove*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Set*",
+        "secretsmanager:*",
+        "ssm:GetParameter*",
+        "ssm:PutParameter",
+        "sts:AssumeRole",
+        "organizations:*",
+        "sso:*",
+        "account:*",
+        "events:*",
+        "cloudtrail:*",
+        "guardduty:*",
+        "servicequotas:RequestServiceQuotaIncrease"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoKmsExceptThroughEbs",
+      "Effect": "Deny",
+      "Action": "kms:*",
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "aws:ViaAWSService": "false"
+        }
+      }
+    },
+    {
+      "Sid": "NoShellOnAnyBox",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:StartSession",
+        "ssm:SendCommand",
+        "ssm:StartAutomationExecution",
+        "ec2-instance-connect:SendSSHPublicKey",
+        "ec2-instance-connect:SendSerialConsoleSSHPublicKey",
+        "ec2:GetSerialConsoleAccessStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoDataPathOut",
+      "Effect": "Deny",
+      "Action": [
+        "ebs:*",
+        "ec2:DeleteSnapshot",
+        "ec2:ModifySnapshotAttribute",
+        "ec2:ModifyImageAttribute",
+        "ec2:CopySnapshot",
+        "ec2:CreateImage",
+        "ec2:CreateStoreImageTask",
+        "ec2:ExportImage",
+        "ec2:CreateInstanceExportTask",
+        "ec2:CreateReplaceRootVolumeTask",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ec2:GetLaunchTemplateData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoRoleOrNetworkSwap",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:ReplaceIamInstanceProfileAssociation",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifyNetworkInterfaceAttribute",
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateInternetGateway",
+        "ec2:CreateRoute",
+        "ec2:CreateRouteTable",
+        "ec2:AllocateAddress",
+        "ec2:AssociateAddress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ResizeNeverTouchesUserDataDisksOrGroups",
+      "Effect": "Deny",
+      "Action": "ec2:ModifyInstanceAttribute",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "ec2:Attribute/UserData": "false"
+        }
+      }
+    },
+    {
+      "Sid": "ResizeNeverTouchesGroupsOrTermination",
+      "Effect": "Deny",
+      "Action": "ec2:ModifyInstanceAttribute",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "ec2:Attribute/GroupId": "false"
+        }
+      }
+    },
+    {
+      "Sid": "ResizeNeverTouchesProtection",
+      "Effect": "Deny",
+      "Action": "ec2:ModifyInstanceAttribute",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "ec2:Attribute/DisableApiTermination": "false"
+        }
+      }
+    }
+  ]
+}

@@ -54,6 +54,11 @@ variable "labels" {
     condition     = !contains(keys(var.labels), "ozbox-ingress") || can(regex("^[a-z2-7]{52}$", lookup(var.labels, "ozbox-ingress", "")))
     error_message = "The ozbox-ingress label must be an Ed25519 SSH public key in lowercase base32 (52 characters)."
   }
+  # ozbox-fleet-manager marks the box that manages the fleet; only the fleet_manager variable sets it (ADR 0040 §8).
+  validation {
+    condition     = !contains(keys(var.labels), "ozbox-fleet-manager")
+    error_message = "ozbox-fleet-manager is set by the fleet_manager variable, never as a label."
+  }
 }
 
 variable "work_snapshot_id" {
@@ -225,4 +230,10 @@ variable "session_policy_name" {
     condition     = can(regex("^ozbox-box-[a-z0-9-]{1,40}$", var.session_policy_name))
     error_message = "session_policy_name must start with ozbox-box- (the operator role may attach only a policy of that name)."
   }
+}
+
+variable "fleet_manager" {
+  type        = bool
+  default     = false
+  description = "This box manages the fleet from its own dashboard (ADR 0040). Tags the machine and its disks ozbox-fleet-manager=true, which the fleet roles are denied any change to: main can never stop, destroy, resize, snapshot or clone itself through them."
 }

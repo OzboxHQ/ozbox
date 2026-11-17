@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { PanelSheet, PanelSheetBody, PanelSheetContent, PanelSheetDescription, PanelSheetFooter, PanelSheetHeader, PanelSheetTitle } from '@/components/ui/panel-sheet';
 import type { Info } from '../api/types';
-import { fleetNotConnected, isDemo, showsFleetNotice } from '../lib/fleet';
+import { fleetNotConnected, isDemo, managedFromThisBox, showsFleetNotice } from '../lib/fleet';
 import { t } from '../lib/i18n';
 import type { Route } from '../lib/router';
 
@@ -27,12 +27,26 @@ export function FleetNotConnectedNotice({ info }: { info: Info | null }) {
   );
 }
 
-/** Above every page: the demo banner when the data is made up, the not-connected notice on the pages that show a fleet. */
+/** A box's dashboard that manages the fleet (ADR 0040): what every change needs, said before anyone starts one. */
+export function FleetManagedNotice() {
+  return (
+    <div role="status" data-testid="fleet-managed" className="rounded-md border bg-muted/50 px-3 py-2 text-sm">
+      <p className="font-semibold">{t('fleetnote.managed_title')}</p>
+      <p className="mt-0.5">{t('fleetnote.managed_body')}</p>
+    </div>
+  );
+}
+
+/** Above every page: the demo banner when the data is made up, the not-connected or managed notice on the pages that show a fleet. */
 export function FleetBanners({ route, info }: { route: Route; info: Info | null }) {
   const demo = isDemo(info);
   const nc = fleetNotConnected(info) && showsFleetNotice(route);
-  if (!demo && !nc) return null;
-  return <div className="px-4 pt-2 sm:px-6 sm:pt-3 xl:px-8">{demo ? <DemoBanner /> : <FleetNotConnectedNotice info={info} />}</div>;
+  const managed = managedFromThisBox(info) && showsFleetNotice(route);
+  if (!demo && !nc && !managed) return null;
+  let notice = <FleetManagedNotice />;
+  if (demo) notice = <DemoBanner />;
+  else if (nc) notice = <FleetNotConnectedNotice info={info} />;
+  return <div className="px-4 pt-2 sm:px-6 sm:pt-3 xl:px-8">{notice}</div>;
 }
 
 /** What opens instead of a flow that would change a fleet (create, pause, resize, clone, destroy). */

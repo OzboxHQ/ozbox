@@ -7,7 +7,7 @@
 #   - /work is a standalone volume, so replacing the instance (a new image) keeps the data
 
 locals {
-  tags = merge(var.labels, {
+  tags = merge(var.labels, var.fleet_manager ? { "ozbox-fleet-manager" = "true" } : {}, {
     "ozbox-box"     = var.box_name
     "ozbox-managed" = "true"
     "ozbox-region"  = var.region

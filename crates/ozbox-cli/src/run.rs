@@ -219,6 +219,10 @@ pub fn run(cli: Cli) -> Result<()> {
         .map_err(CliError::Msg);
     }
 
+    if let Command::Fleet { command } = &cli.command {
+        return crate::fleet_cli::run(command, cli.yes, cli.dry_run, json);
+    }
+
     if let Command::Harden {
         profile,
         region,
@@ -470,6 +474,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Telemetry { .. }
         | Command::Plugin { .. }
         | Command::Init { .. }
+        | Command::Fleet { .. }
         | Command::Harden { .. } => Ok(()),
         Command::Mesh { command } => {
             let boxes = p

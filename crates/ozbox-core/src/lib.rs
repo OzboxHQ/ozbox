@@ -23,6 +23,7 @@ pub mod daemon_scope;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod fleet_approvers;
 pub mod infra;
 pub mod memory_plan;
 pub mod metrics;

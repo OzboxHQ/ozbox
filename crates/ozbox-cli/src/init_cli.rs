@@ -864,6 +864,81 @@ pub fn harden(
     Ok(json!({ "plan": prepared, "applied": applied }))
 }
 
+/// `ozbox fleet enable`: the fleet manager's roles, made once with an administrator's sign-in (ADR 0040 §3).
+pub struct FleetEnableArgs {
+    pub profile: Option<String>,
+    pub region: Option<String>,
+    pub opts: crate::init::FleetOpts,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
+/// Plan, show, ask, apply. Returns what was done and the account the roles are in.
+pub fn fleet_enable(
+    a: &FleetEnableArgs,
+    init: &Init<'_>,
+    ask: &mut dyn Ask,
+    out: &mut dyn Write,
+) -> Result<(Value, String), String> {
+    let region = a
+        .region
+        .clone()
+        .or_else(|| {
+            crate::config::Config::load()
+                .ok()
+                .and_then(|c| c.aws.and_then(|s| s.region))
+        })
+        .ok_or_else(|| t("init.cli_need_region", &[]))?;
+    let target = Target {
+        provider: "aws".into(),
+        profile: a.profile.clone(),
+        region: Some(region),
+    };
+    target.validate().map_err(fail)?;
+    let id = init.sign_in(&target).map_err(fail)?;
+    let prepared = init
+        .plan_fleet_manager(&target, &id.account, &a.opts)
+        .map_err(fail)?;
+    show_plan(out, a.json, &prepared);
+    let args = Args {
+        provider: Some("aws".into()),
+        profile: a.profile.clone(),
+        region: None,
+        budget: None,
+        alert_email: None,
+        alert_from: None,
+        two_factor: false,
+        access: None,
+        issuer_package: None,
+        issuer_package_sha256: None,
+        yes: a.yes,
+        dry_run: a.dry_run,
+        json: a.json,
+    };
+    let mut applied = None;
+    if prepared.noop {
+        show(out, a.json, t("init.cli_nothing", &[]));
+    } else if confirm(&args, ask, "fleet manager roles")? {
+        applied = Some(init.apply(&target, &prepared).map_err(fail)?);
+    }
+    Ok((json!({ "plan": prepared, "applied": applied }), id.account))
+}
+
+pub fn run_fleet_enable_real(a: &FleetEnableArgs) -> Result<(Value, String), String> {
+    let paths = InitPaths::detect().ok_or_else(|| t("init.cli_no_home", &[]))?;
+    let http = UreqClient;
+    let latency = HttpLatency(&http);
+    let init = Init {
+        runner: &ozbox_core::SystemRunner,
+        http: &http,
+        latency: &latency,
+        paths,
+        retry_delay: std::time::Duration::from_secs(3),
+    };
+    fleet_enable(a, &init, &mut Terminal, &mut std::io::stdout())
+}
+
 pub fn run_harden_real(a: &HardenArgs) -> Result<(), String> {
     let paths = InitPaths::detect().ok_or_else(|| t("init.cli_no_home", &[]))?;
     let http = UreqClient;

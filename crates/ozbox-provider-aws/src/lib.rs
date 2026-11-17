@@ -12,6 +12,8 @@
 
 pub mod adopt;
 mod capacity;
+pub mod fleet_policy;
+pub mod fleet_session;
 pub mod init_actions;
 pub mod operator_policy;
 pub mod public_images;

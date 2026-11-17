@@ -503,6 +503,12 @@ pub enum Command {
         #[arg(long, default_value = "governance")]
         lock_mode: String,
     },
+    /// Let a box's dashboard manage your fleet, one plan at a time (Preview): set up the roles, sign who may confirm a change,
+    /// and open a change window from this computer. Nothing changes without a window you open and a passkey over the plan.
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
     /// Serve the web dashboard on this computer (loopback only, behind a random access token).
     Serve {
         /// A loopback address: 127.0.0.1 (default), ::1 or localhost. Anything else is refused.
@@ -2384,4 +2390,121 @@ pub enum FailoverCommand {
     Off,
     /// Whether it is on, and who holds the lease.
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetCommand {
+    /// Make the two fleet roles in your account (once, as an administrator, not your daily operator role) and remember, on this
+    /// computer, which box and credential holder they are for. Plan, then apply; it costs nothing.
+    Enable {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        /// The name of your Identity Center permission set for fleet windows.
+        #[arg(long, value_name = "NAME")]
+        window_permission_set: String,
+        /// A machine type a box's dashboard may launch or resize to (repeat for several), like m7i.xlarge.
+        #[arg(long = "machine-type", value_name = "TYPE", required = true)]
+        machine_types: Vec<String>,
+        /// An Oz Box image a box's dashboard may launch (repeat for several).
+        #[arg(long = "image-id", value_name = "AMI", required = true)]
+        image_ids: Vec<String>,
+        /// A subnet of your boxes' network (repeat for several).
+        #[arg(long = "subnet-id", value_name = "SUBNET", required = true)]
+        subnet_ids: Vec<String>,
+        /// The box whose dashboard manages the fleet. It is never changed from its own dashboard.
+        #[arg(long = "fleet-box", default_value = "main", value_parser = parse_name)]
+        fleet_box: BoxName,
+        #[arg(long, default_value_t = 500)]
+        max_volume_gb: u32,
+        #[arg(long, default_value_t = 6000)]
+        max_iops: u32,
+        #[arg(long, default_value_t = 500)]
+        max_throughput: u32,
+        /// Let the read role read the bill (only in an account that holds nothing but Oz Box).
+        #[arg(long)]
+        read_costs: bool,
+        /// The box's id and its secrets store's id, as the box reports them, and the credential holder's public key (hex):
+        /// pinned on this computer so a window and a signed list can only be sealed and signed for that box.
+        #[arg(long)]
+        box_id: Option<String>,
+        #[arg(long)]
+        store_id: Option<String>,
+        #[arg(long, value_name = "HEX")]
+        holder_key: Option<String>,
+        /// Your name for the audit trail (SourceIdentity is ozbox-<name>).
+        #[arg(long, default_value = "owner")]
+        person: String,
+        /// The approval key on this computer that signs windows and lists.
+        #[arg(long, default_value = "laptop")]
+        key: String,
+    },
+    /// Open a change window for ONE plan the box's dashboard showed: a session that can do exactly that plan, for a few
+    /// minutes, sealed to the box's credential holder. Needs your fleet-window sign-in.
+    Window {
+        plan_id: String,
+        /// The plan, as JSON (what the dashboard's plan shows).
+        #[arg(long, value_name = "FILE")]
+        plan_file: std::path::PathBuf,
+        /// How long the window stays open: 30m, 90s, 1h (at most one hour).
+        #[arg(long = "for", default_value = "30m")]
+        duration: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        /// A clone launches its source's machine type, which the plan does not carry.
+        #[arg(long, value_name = "TYPE")]
+        machine_type: Option<String>,
+        /// Where to write the sealed message for the credential holder.
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+    },
+    /// Which passkeys may confirm a fleet change. The credential holder trusts only a list signed by this computer.
+    Approvers {
+        #[command(subcommand)]
+        command: FleetApproversCommand,
+    },
+    /// (internal) Apply one plan with the change session on standard input. Run by the credential holder, never by hand.
+    #[command(hide = true)]
+    ApplyUnit,
+    /// (internal) Serve the credential holder's socket. Run as its own user by its service.
+    #[command(hide = true)]
+    HolderServe {
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        box_id: String,
+        #[arg(long)]
+        store_id: String,
+        #[arg(long)]
+        this_box: String,
+        #[arg(long, value_name = "HEX")]
+        laptop_key: String,
+        #[arg(long)]
+        dashboard_uid: u32,
+        #[arg(long)]
+        ingress_uid: u32,
+        #[arg(long)]
+        role_arn: String,
+        #[arg(long)]
+        apply_uid: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetApproversCommand {
+    /// Sign a list of passkeys (a JSON file with an "approvers" list) as version N. The file it writes is sent to the box's
+    /// credential holder over the sealed route; a lower version than the one in use is refused.
+    Sign {
+        #[arg(long, value_name = "FILE")]
+        credentials: std::path::PathBuf,
+        #[arg(long)]
+        version: u64,
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+    },
 }
