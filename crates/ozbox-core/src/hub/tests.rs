@@ -14,9 +14,9 @@ use crate::channel::wire::{
     VERSION,
 };
 
-const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
-const W1_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000001";
-const W2_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000002";
+pub(super) const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
+pub(super) const W1_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000001";
+pub(super) const W2_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000002";
 
 fn sample() -> Envelope {
     Envelope {
@@ -234,7 +234,7 @@ fn shape_checks() {
 
 // ---- decision D2: Production is refused ----------------------------------------------------------------------------
 
-fn decl(env: &str, names: &[&str]) -> KeyDeclaration {
+pub(super) fn decl(env: &str, names: &[&str]) -> KeyDeclaration {
     KeyDeclaration {
         env: env.into(),
         names: names.iter().map(|s| (*s).to_string()).collect(),
@@ -313,16 +313,16 @@ fn the_refusal_has_no_switch() {
 
 // ---- the hand-off over the in-memory channel -----------------------------------------------------------------------
 
-struct Fx {
-    net: MemTransport,
-    signers: BTreeMap<String, TestKey>,
-    roster_keys: TestRoster,
-    roster: BTreeMap<String, RosterEntry>,
-    hub_sealer: TestSealer,
-    w1_sealer: TestSealer,
+pub(super) struct Fx {
+    pub(super) net: MemTransport,
+    pub(super) signers: BTreeMap<String, TestKey>,
+    pub(super) roster_keys: TestRoster,
+    pub(super) roster: BTreeMap<String, RosterEntry>,
+    pub(super) hub_sealer: TestSealer,
+    pub(super) w1_sealer: TestSealer,
 }
 
-fn fx() -> Fx {
+pub(super) fn fx() -> Fx {
     let mut keys = BTreeMap::new();
     keys.insert(HUB_FP.to_string(), "k-main".to_string());
     keys.insert(W1_FP.to_string(), "k-w1".to_string());
@@ -363,7 +363,7 @@ fn fx() -> Fx {
 }
 
 impl Fx {
-    fn hub(&self) -> Hub<'_> {
+    pub(super) fn hub(&self) -> Hub<'_> {
         Hub {
             me: "main",
             my_fp: HUB_FP,
@@ -376,7 +376,7 @@ impl Fx {
         }
     }
 
-    fn worker(&self) -> WorkerEnd<'_> {
+    pub(super) fn worker(&self) -> WorkerEnd<'_> {
         WorkerEnd {
             me: "worker-1",
             hub: "main",
@@ -387,18 +387,18 @@ impl Fx {
         }
     }
 
-    fn hub_state(&self) -> HubState {
+    pub(super) fn hub_state(&self) -> HubState {
         HubState::new("main", HUB_FP, 7)
     }
 
-    fn worker_state(&self) -> WorkerState {
+    pub(super) fn worker_state(&self) -> WorkerState {
         WorkerState::new("worker-1", W1_FP, "main", HUB_FP, 7)
     }
 
     /// An envelope the hub's key signed, built by hand as a taken-over hub would: every field honest except what the test sets.
     /// `seq` and the times are the caller's; the incarnations are those the session `connect` made.
     #[allow(clippy::too_many_arguments)]
-    fn hub_message(
+    pub(super) fn hub_message(
         &self,
         hs: &HubState,
         ws: &WorkerState,
@@ -436,7 +436,7 @@ impl Fx {
     }
 }
 
-fn assign(feature: &str, keys: KeyDeclaration) -> Assign {
+pub(super) fn assign(feature: &str, keys: KeyDeclaration) -> Assign {
     Assign {
         orchestration: "orch-1".into(),
         feature: feature.into(),
@@ -452,7 +452,7 @@ fn assign(feature: &str, keys: KeyDeclaration) -> Assign {
 }
 
 /// Run the two-step `hello` both ways until both ends hold each other's incarnation.
-fn connect(f: &Fx, hs: &mut HubState, ws: &mut WorkerState, now: u64) {
+pub(super) fn connect(f: &Fx, hs: &mut HubState, ws: &mut WorkerState, now: u64) {
     let (hub, w) = (f.hub(), f.worker());
     w.hello(ws, now);
     for _ in 0..6 {
@@ -463,16 +463,16 @@ fn connect(f: &Fx, hs: &mut HubState, ws: &mut WorkerState, now: u64) {
     assert_eq!(ws.hub_inc(), hs.inc());
 }
 
-fn actions(a: &[crate::audit::NewEvent]) -> Vec<&str> {
+pub(super) fn actions(a: &[crate::audit::NewEvent]) -> Vec<&str> {
     a.iter().map(|l| l.action.as_str()).collect()
 }
 
 /// A taken-over hub sends a message outside its own queue: the worker will acknowledge it, so the hub's count must have moved.
-fn claim_seq(hs: &mut HubState) {
+pub(super) fn claim_seq(hs: &mut HubState) {
     hs.core.links.get_mut("worker-1").unwrap().out_seq += 1;
 }
 
-fn captured(f: &Fx, kind: &str) -> Vec<Sealed> {
+pub(super) fn captured(f: &Fx, kind: &str) -> Vec<Sealed> {
     f.net
         .capture
         .lock()

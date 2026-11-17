@@ -78,6 +78,9 @@ pub struct PeerState {
     pub report: WorkerReport,
     /// What this hub handed this worker: orchestration and feature.
     pub assigned: Vec<(String, String)>,
+    /// The fleet inbox's cards from this worker, by request id (ADR 0042 section 8). A view; the store is the worker's.
+    #[serde(default)]
+    pub approvals: BTreeMap<String, super::approvals::Card>,
 }
 
 /// Everything the hub keeps. Plain data: it serialises into its store.
@@ -85,6 +88,12 @@ pub struct PeerState {
 pub struct HubState {
     pub core: Core,
     pub peers: BTreeMap<String, PeerState>,
+    /// Each worker's approval service as enrolment pinned it (ADR 0042 section 8). A card from a worker with no pin is refused.
+    #[serde(default)]
+    pub service_pins: BTreeMap<String, super::approvals::ServicePin>,
+    /// Test lanes in flight, by lane run id (ADR 0042 section 7).
+    #[serde(default)]
+    pub lanes: BTreeMap<String, super::lane::LaneRun>,
 }
 
 impl HasCore for HubState {
@@ -103,6 +112,8 @@ impl HubState {
         HubState {
             core: Core::new(me, my_fp, my_fp, my_fp, epoch),
             peers: BTreeMap::new(),
+            service_pins: BTreeMap::new(),
+            lanes: BTreeMap::new(),
         }
     }
 
@@ -123,7 +134,7 @@ impl HubState {
         std::mem::take(&mut self.core.audit)
     }
 
-    fn note(&mut self, now: u64, action: &str, detail: String) {
+    pub(crate) fn note(&mut self, now: u64, action: &str, detail: String) {
         self.core.note(now, action, None, detail);
     }
 }
@@ -429,6 +440,8 @@ impl Hub<'_> {
                     }
                 }
             }
+            Kind::ApprovalRequest => super::approvals::take_request(st, from, &plain, now),
+            Kind::ShardResult => super::lane::take_result(st, from, &plain, now),
             Kind::Question | Kind::Blocked => {
                 peer.report
                     .questions

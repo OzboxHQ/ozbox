@@ -16,17 +16,32 @@
 //!   reports) persists through the channel's store when it runs as a service. It opens no network connection and no shell.
 //! * [`worker`]: the worker's side, the part the worker's own service runs.
 //! * [`mem`]: an in-memory transport for tests and for the fake fleet.
+//! * [`approvals`]: the approval path (ADR 0042 section 8). A worker's request comes back to `main` as a card from its service's
+//!   signed envelope; the person decides once on `main`; the decision travels back and **the worker's own service verifies it**
+//!   against the approver set pinned on the worker. A message can ask and never grant (ADR 0044): a decision body has no field
+//!   that grants, a worker never decides, and Production is never decided from `main` for a worker (D1, D2).
+//! * [`lane`]: test lanes (ADR 0042 section 7): the split, the shard messages, a lost worker's specs re-run elsewhere, and a
+//!   verdict that is never green while any spec has no passing result.
+//! * [`merge`]: the merge queue over the channel (ADR 0020 section 6): a worker's reported commit joins `main`'s queue, the test
+//!   runs through a lane, and what the queue finds goes back to the worker.
 //!
-//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery,
-//! the merge queue over the channel, test lanes, and the approval path. Signing and sealing are traits ([`wire::Signer`],
-//! [`wire::Sealer`]); the real ones are the secrets service's operations and `ozbox-seal`, wired in the next slice. A fleet role
-//! (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and that is the transport's job.
+//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery and
+//! nested hubs. Signing and sealing are traits ([`wire::Signer`], [`wire::Sealer`]); the real ones are the secrets service's
+//! operations and `ozbox-seal`. A fleet role (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and
+//! that is the transport's job.
 
+pub mod approvals;
 pub mod engine;
+pub mod lane;
 pub mod mem;
+pub mod merge;
 pub mod refusal;
 pub mod wire;
 pub mod worker;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_approvals;
+#[cfg(test)]
+mod tests_lane;

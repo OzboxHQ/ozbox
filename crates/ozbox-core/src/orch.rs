@@ -193,6 +193,9 @@ pub struct Feature {
     /// An answer or a changed contract has not yet reached the worker's engine.
     #[serde(default)]
     pub resume_pending: bool,
+    /// The exact commit a hub-route worker reported in its `result` (ADR 0042 section 5): the merge queue tests and merges this one.
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1069,6 +1072,7 @@ impl Orchestration {
             box_paused: false,
             box_destroyed: false,
             resume_pending: false,
+            commit: None,
         });
         self.spare_boxes.retain(|b| b != &box_name);
         if !req.claims.is_empty() {

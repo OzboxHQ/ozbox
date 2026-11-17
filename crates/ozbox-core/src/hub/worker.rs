@@ -24,6 +24,19 @@ use crate::channel::wire::{Crypto, Sealed, Sealer, Signer, Verifier};
 pub struct WorkerState {
     pub core: Core,
     pub tasks: Vec<Assign>,
+    /// Decisions `main` relayed, waiting for this box's own service to verify them ([`WorkerEnd::apply_decisions`]). Evidence only:
+    /// nothing here is a grant until the service has verified it.
+    #[serde(default)]
+    pub decisions: Vec<super::approvals::DecisionBody>,
+    /// Requests announced to the hub, and when (they are announced again every 30 seconds while pending).
+    #[serde(default)]
+    pub announced: super::approvals::Announced,
+    /// Lane shards handed to this worker, to run with the declared command.
+    #[serde(default)]
+    pub shards: Vec<super::lane::ShardAssign>,
+    /// What the hub said back about this worker's features (a merge conflict, failing tests, an answer).
+    #[serde(default)]
+    pub answers: Vec<super::merge::AnswerBody>,
 }
 
 impl HasCore for WorkerState {
@@ -44,6 +57,10 @@ impl WorkerState {
         WorkerState {
             core,
             tasks: Vec::new(),
+            decisions: Vec::new(),
+            announced: Default::default(),
+            shards: Vec::new(),
+            answers: Vec::new(),
         }
     }
 
@@ -183,6 +200,12 @@ impl WorkerEnd<'_> {
                     if code == CODE_UNSUPPORTED {
                         applied += 1;
                         self.unsupported(st, now, kind);
+                    } else if code == super::approvals::CODE_NOT_A_DECISION {
+                        st.note(
+                            now,
+                            super::approvals::AUDIT_WORKER_REFUSED,
+                            format!("kind={} code={code}", kind.name()),
+                        );
                     } else if code == CODE_VALUE_IN_DECLARATION {
                         st.note(
                             now,
@@ -206,6 +229,39 @@ impl WorkerEnd<'_> {
             applied += 1;
             match kind {
                 Kind::TaskAssign => self.assigned(st, now, &plain),
+                Kind::ApprovalDecision => {
+                    // the screen has already refused anything that is not exactly a decision body
+                    if let Ok(d) = serde_json::from_slice::<super::approvals::DecisionBody>(&plain)
+                    {
+                        if st.decisions.len() < 64 {
+                            st.decisions.push(d);
+                        } else {
+                            st.note(
+                                now,
+                                super::approvals::AUDIT_WORKER_REFUSED,
+                                "reason=backlog".into(),
+                            );
+                        }
+                    }
+                }
+                Kind::ShardAssign => {
+                    if let Ok(a) = serde_json::from_slice::<super::lane::ShardAssign>(&plain) {
+                        st.note(
+                            now,
+                            "worker.shard.assigned",
+                            format!("run={} shard={} specs={}", a.run, a.shard, a.specs.len()),
+                        );
+                        st.shards.push(a);
+                    }
+                }
+                Kind::Answer => {
+                    if let Ok(a) = serde_json::from_slice::<super::merge::AnswerBody>(&plain) {
+                        if st.answers.len() >= 200 {
+                            st.answers.remove(0);
+                        }
+                        st.answers.push(a);
+                    }
+                }
                 Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay => {
                     // the screen refuses these first; kept so a screen that ever lets one through still answers
                     self.unsupported(st, now, kind);
@@ -300,6 +356,111 @@ impl WorkerEnd<'_> {
         }
     }
 
+    /// Announce this box's pending requests to the hub: each one's signed envelope, again every 30 seconds while it is pending (the
+    /// hub does not rely on one delivery). Returns how many were sent.
+    pub fn announce_approvals(
+        &self,
+        st: &mut WorkerState,
+        svc: &dyn super::approvals::ApprovalService,
+        now: u64,
+    ) -> usize {
+        let pending = svc.pending(now);
+        let live: std::collections::BTreeSet<String> = pending
+            .iter()
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.canonical).ok())
+            .filter_map(|v| v["id"].as_str().map(str::to_string))
+            .collect();
+        st.announced.retain(|id, _| live.contains(id));
+        let mut sent = 0;
+        for signed in pending {
+            let Some(id) = serde_json::from_str::<serde_json::Value>(&signed.canonical)
+                .ok()
+                .and_then(|v| v["id"].as_str().map(str::to_string))
+            else {
+                continue;
+            };
+            if st
+                .announced
+                .get(&id)
+                .is_some_and(|t| now.saturating_sub(*t) < super::approvals::ANNOUNCE_EVERY_MS)
+            {
+                continue;
+            }
+            let Ok(b) = serde_json::to_vec(&super::approvals::RequestBody { signed }) else {
+                continue;
+            };
+            self.say(st, now, Kind::ApprovalRequest, &b);
+            st.announced.insert(id, now);
+            sent += 1;
+        }
+        sent
+    }
+
+    /// Hand each relayed decision to this box's own service, which verifies it. What the service says is reported back to the hub as
+    /// the worker's own status, so the person sees the worker's answer, not `main`'s relay.
+    pub fn apply_decisions(
+        &self,
+        st: &mut WorkerState,
+        svc: &mut dyn super::approvals::ApprovalService,
+        now: u64,
+    ) -> Vec<(String, Result<String, String>)> {
+        let mut out = Vec::new();
+        for d in std::mem::take(&mut st.decisions) {
+            let r = svc.decide_from_fleet(self.hub, &d, now);
+            match &r {
+                Ok(state) => {
+                    st.note(
+                        now,
+                        super::approvals::AUDIT_WORKER_DECIDED,
+                        format!(
+                            "request={} outcome={} state={state} via=fleet:{}",
+                            d.request_id,
+                            d.outcome.word(),
+                            self.hub
+                        ),
+                    );
+                    self.status(
+                        st,
+                        now,
+                        "-",
+                        "-",
+                        "approval",
+                        &format!("request {} is {state}", d.request_id),
+                    );
+                }
+                Err(why) => {
+                    st.note(
+                        now,
+                        super::approvals::AUDIT_WORKER_REFUSED,
+                        format!("request={} outcome={}", d.request_id, d.outcome.word()),
+                    );
+                    self.status(
+                        st,
+                        now,
+                        "-",
+                        "-",
+                        "approval-refused",
+                        &format!("request {}: {why}", d.request_id),
+                    );
+                }
+            }
+            out.push((d.request_id.clone(), r));
+        }
+        out
+    }
+
+    /// Report a lane shard's results (all at once, or as they come; `finished` when the runner is done).
+    pub fn shard_result(&self, st: &mut WorkerState, now: u64, r: &super::lane::ShardResult) {
+        if let Ok(b) = serde_json::to_vec(r) {
+            self.say(st, now, Kind::ShardResult, &b);
+        }
+    }
+
+    /// Ask the hub a question about a feature (`worker_ask`). A question asks; it never grants.
+    pub fn ask(&self, st: &mut WorkerState, now: u64, text: &str) {
+        self.say(st, now, Kind::Question, text.as_bytes());
+    }
+
     /// Send a message of a kind the hub alone may send. Exists only so a test can show the hub's reaction to it.
     #[cfg(test)]
     pub fn say_raw(&self, st: &mut WorkerState, now: u64, kind: Kind, plain: &[u8]) {
@@ -316,6 +477,16 @@ fn screen(kind: &str, _ext: &[u8], plain: &[u8]) -> Result<(), &'static str> {
             Err(CODE_UNSUPPORTED)
         }
         Some(Kind::TaskAssign) => declaration_is_names_only(plain),
+        // a message can ask and never grant: a decision is exactly its fields, so a grant, a token or a flag beside them is refused
+        // before the body is held
+        Some(Kind::ApprovalDecision) => {
+            serde_json::from_slice::<super::approvals::DecisionBody>(plain)
+                .map(|_| ())
+                .map_err(|_| super::approvals::CODE_NOT_A_DECISION)
+        }
+        Some(Kind::ShardAssign) => serde_json::from_slice::<super::lane::ShardAssign>(plain)
+            .map(|_| ())
+            .map_err(|_| super::approvals::CODE_NOT_A_DECISION),
         _ => Ok(()),
     }
 }
