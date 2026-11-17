@@ -16,14 +16,21 @@
 //!   reports) persists through the channel's store when it runs as a service. It opens no network connection and no shell.
 //! * [`worker`]: the worker's side, the part the worker's own service runs.
 //! * [`mem`]: an in-memory transport for tests and for the fake fleet.
+//! * [`net`]: the transport on a network. Workers dial out to the hub; the hub listens on a loopback or private address only;
+//!   a signed handshake under its own tag on each connection; order, retransmission, a replay window, back-pressure and honest
+//!   reachability at the transport layer. It carries sealed envelopes and never opens one.
+//! * [`conformance`]: what any transport must let the hub and its workers do; the in-memory and the network transport both pass it.
 //!
-//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery,
-//! the merge queue over the channel, test lanes, and the approval path. Signing and sealing are traits ([`wire::Signer`],
+//! What is **not** here: `ozbox-hubd` (the process the network reaches), enrolment and key attestation, sealed key delivery, the
+//! merge queue over the channel, test lanes, and the approval path. Signing and sealing are traits ([`wire::Signer`],
 //! [`wire::Sealer`]); the real ones are the secrets service's operations and `ozbox-seal`, wired in the next slice. A fleet role
 //! (ADR 0040) is not needed to *decide* a hand-off; it is needed to *reach* a box, and that is the transport's job.
 
+#[doc(hidden)]
+pub mod conformance;
 pub mod engine;
 pub mod mem;
+pub mod net;
 pub mod refusal;
 pub mod wire;
 pub mod worker;
