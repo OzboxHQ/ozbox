@@ -8,6 +8,16 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI"]} description="SSH right after create, throwaway boxes, clearer sign-in lists">
+  ## `ssh` works straight after `ozbox create`, and throwaway boxes leave nothing billed by surprise
+
+  - **`ozbox create` writes the box's SSH entry on this computer**, so `ssh ozbox-<name>` works with no extra step. The plan says so before anything changes; `--no-ssh-entry` skips it.
+  - **`ozbox destroy <name> --no-final-snapshot` is for throwaway boxes.** You still type the name. The plan says no copy of `/work` is kept, and names any snapshots the box already has, which stay billed, with how to delete them first.
+  - **A dashboard's people are given by id, not email.** `ozbox dashboard install --person` and `ozbox auth init --person` now refuse an email given as the id at once, and say the id to use and where the email goes (`--person jane,google=jane@example.com`).
+
+  See [One box](/use-cases/one-box) and [Coding from anywhere](/use-cases/coding-from-anywhere).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Dashboard"]} description="Boxes finish their first boot, and say when they did not">
   ## A box's first boot finishes setting up your coding agents, and the self-test says when it did not
 

@@ -646,6 +646,7 @@ pub fn run(cli: Cli) -> Result<()> {
             tools,
             profile,
             allow_first_boot_mismatch,
+            no_ssh_entry,
         } => {
             let settings = load_settings()?;
             let profile = match &profile {
@@ -773,7 +774,29 @@ pub fn run(cli: Cli) -> Result<()> {
                     None => Vec::new(),
                 }
             };
+            // This computer's SSH entry for the box is written after it is created (B4-11): said in the plan first.
+            let ssh_at = if kind == ProviderKind::Fake || no_ssh_entry {
+                None
+            } else {
+                ssh_dir()
+            };
+            let mut first_boot_notes = first_boot_notes;
+            if ssh_at.is_some() {
+                first_boot_notes.push(create_ssh_note(name.as_str()));
+            }
             mutate_with_notes(p, Operation::Create { spec }, &f, first_boot_notes)?;
+            if created {
+                if let (Some(dir), Ok(Some(rec))) = (&ssh_at, p.get(&name)) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let line =
+                        write_ssh_after_create(&SystemRunner, dir, &rec, &route_inputs(&config), now);
+                    if !json {
+                        println!("{line}");
+                    }
+                }
+            }
             if created && !ids.is_empty() {
                 tools_cli::after_create(
                     p,
@@ -1466,6 +1489,63 @@ struct Outcome<'a> {
 }
 
 /// plan, print, (nothing to do | dry run | confirm), apply, report.
+/// The plan line `create` adds: the SSH entry it writes on this computer once the box exists (B4-11).
+fn create_ssh_note(name: &str) -> String {
+    crate::messages::t(
+        "create.ssh_plan",
+        &[("box", name), ("alias", &sshconfig::host_alias(name))],
+    )
+}
+
+/// After a create: write the box's SSH entry (and the keys it names), as `connect --ssh --write` does, and say what happened
+/// in one line. Never fails the create, which has already happened: a box with no route yet, or a file that could not be
+/// written, says how to write it later.
+fn write_ssh_after_create(
+    runner: &dyn ozbox_core::CommandRunner,
+    dir: &std::path::Path,
+    rec: &BoxRecord,
+    inputs: &RouteInputs,
+    now_unix: u64,
+) -> String {
+    let name = rec.spec.name.as_str();
+    let Some(route) = sshconfig::routes(rec, inputs).into_iter().next() else {
+        return crate::messages::t("create.ssh_no_route", &[("box", name)]);
+    };
+    let block = sshconfig::block(name, &route);
+    let written = (|| -> Result<sshconfig::WriteReport> {
+        let _ = sshconfig::ensure_named_key(runner, dir, sshconfig::INGRESS_KEY_NAME);
+        let report = sshconfig::write_config(dir, name, &block, now_unix)?;
+        if matches!(route, sshconfig::Route::AwsSsm { .. }) {
+            sshconfig::ensure_key(runner, dir)?;
+        }
+        Ok(report)
+    })();
+    match written {
+        Ok(w) => {
+            let mut line = crate::messages::t(
+                "create.ssh_written",
+                &[
+                    ("box", name),
+                    ("file", &w.included_file.display().to_string()),
+                    ("alias", &sshconfig::host_alias(name)),
+                ],
+            );
+            if w.include_added {
+                line.push(' ');
+                line.push_str(&crate::messages::t(
+                    "create.ssh_include_added",
+                    &[("config", &w.main_config.display().to_string())],
+                ));
+            }
+            line
+        }
+        Err(e) => crate::messages::t(
+            "create.ssh_failed",
+            &[("box", name), ("why", &e.to_string())],
+        ),
+    }
+}
+
 /// After a destroy: the box's SSH entry and its host key go too. A convenience for this computer; never fails the
 /// destroy, which has already happened.
 fn forget_ssh_entry(name: &str, json: bool) {
@@ -2220,5 +2300,73 @@ mod snapshot_wait_tests {
         // a zero interval is looked at every second, and a wait is at least one look
         assert_eq!(snapshot_wait_polls(1, Duration::ZERO), 60);
         assert_eq!(snapshot_wait_polls(1, Duration::from_secs(600)), 1);
+    }
+}
+
+#[cfg(test)]
+mod create_ssh_tests {
+    use super::{create_ssh_note, write_ssh_after_create};
+    use crate::sshconfig::{self, RouteInputs};
+    use ozbox_core::{BoxName, BoxRecord, BoxSpec, BoxState, Size};
+
+    fn record(provider_id: Option<&str>) -> BoxRecord {
+        let mut r = BoxRecord {
+            spec: BoxSpec::new(BoxName::new("dev").unwrap(), Size::S),
+            state: BoxState::Running,
+            provider: "aws".into(),
+            provider_id: provider_id.map(str::to_string),
+            machine_type: None,
+            snapshots: vec![],
+            created_at: None,
+            last_activity_at: None,
+        };
+        r.spec.region = Some("us-east-1".into());
+        r
+    }
+
+    /// B4-11: the plan says the SSH entry will be written, and how to skip it, before anything is changed.
+    #[test]
+    fn the_create_plan_says_the_ssh_entry_is_written_and_how_to_skip_it() {
+        let n = create_ssh_note("dev");
+        assert!(
+            n.contains("~/.ssh/ozbox/config")
+                && n.contains("ssh ozbox-dev")
+                && n.contains("--no-ssh-entry")
+                && n.contains("Nothing on the box changes"),
+            "{n}"
+        );
+    }
+
+    /// B4-11: after create the box's SSH entry is written, exactly as `connect --ssh --write` writes it.
+    #[test]
+    fn after_create_the_ssh_entry_is_written_and_a_box_without_a_route_says_how_to_write_it_later() {
+        let dir = tempfile::tempdir().unwrap();
+        // the keys already exist, so nothing is generated
+        for k in [sshconfig::KEY_NAME, sshconfig::INGRESS_KEY_NAME] {
+            std::fs::write(dir.path().join(k), "k").unwrap();
+            std::fs::write(dir.path().join(format!("{k}.pub")), "ssh-ed25519 AAAA").unwrap();
+        }
+        let inputs = RouteInputs {
+            aws_region: Some("us-east-1".into()),
+            ..RouteInputs::default()
+        };
+        let runner = ozbox_core::RecordingRunner::new();
+        let rec = record(Some("i-0bbbbbbbbbbbbbbbb"));
+        let line = write_ssh_after_create(&runner, dir.path(), &rec, &inputs, 1);
+        assert!(line.contains("wrote the entry for dev") && line.contains("ssh ozbox-dev"), "{line}");
+        assert!(line.contains("Include"), "a first entry adds the Include line: {line}");
+        let conf = std::fs::read_to_string(dir.path().join("ozbox/config")).unwrap();
+        let want = sshconfig::block(
+            "dev",
+            &sshconfig::routes(&rec, &inputs).into_iter().next().unwrap(),
+        );
+        assert!(conf.contains(want.trim()), "{conf}");
+        assert!(runner.calls().is_empty(), "no key was generated");
+
+        // no machine id yet: no route, nothing written, and the line says how to write it later
+        let empty = tempfile::tempdir().unwrap();
+        let line = write_ssh_after_create(&runner, empty.path(), &record(None), &RouteInputs::default(), 1);
+        assert!(line.contains("ozbox connect dev --ssh --write"), "{line}");
+        assert!(!empty.path().join("ozbox").exists());
     }
 }
