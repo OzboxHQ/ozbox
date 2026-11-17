@@ -9,9 +9,7 @@
 //! box's role, and only a non-production environment are taken. Anything that looks like production is skipped and counted,
 //! the same rule as an import.
 
-use ozbox_core::{CommandRunner, CommandSpec};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::aws_native::{service_base, valid_region, AwsJson, Failure};
@@ -151,73 +149,73 @@ impl Backend for AwsSsm {
     }
 }
 
-/// OpenBao (a self-hosted vault), through the `bao` command and the environment it reads (`BAO_ADDR`, a token the unit
-/// supplies). The role's keys are one secret per project and environment holding `NAME=value` pairs, at
-/// `<mount>/<root>/<project>/<env>`.
-pub struct OpenBao<'a> {
-    pub runner: &'a dyn CommandRunner,
+/// OpenBao (a self-hosted vault, KV version 2), called natively (see [`crate::openbao`]: no `bao` command, which the box image
+/// does not carry). The address and a token come from the environment the unit supplies (`BAO_ADDR`, `BAO_TOKEN`); the token
+/// is read at each request and never kept. The role's keys are one secret per project and environment holding `NAME=value`
+/// pairs, at `<mount>/<root>/<project>/<env>`. A read is all or nothing: a refusal or an outage part way is an error, never a
+/// partial list (which would remove the keys it missed from memory).
+pub struct OpenBao {
+    pub vault: Option<crate::openbao::Bao>,
     pub mount: String,
 }
 
-impl Backend for OpenBao<'_> {
+pub const BAO_DENIED: &str =
+    "the vault refused this box's token (check the token's policy and the path)";
+pub const BAO_UNAVAILABLE: &str = "the vault could not be read (check the box's token, its address and that the box can reach it)";
+
+fn bao_error(f: crate::openbao::Failure) -> String {
+    match f {
+        crate::openbao::Failure::Denied => BAO_DENIED.to_string(),
+        _ => BAO_UNAVAILABLE.to_string(),
+    }
+}
+
+impl OpenBao {
+    /// The vault the environment names, with the mount given.
+    pub fn from_env(mount: String) -> Self {
+        Self {
+            vault: crate::openbao::Bao::from_env(),
+            mount,
+        }
+    }
+}
+
+impl Backend for OpenBao {
     fn label(&self) -> &'static str {
         "OpenBao"
     }
     fn fetch(&self, root: &str) -> Result<Vec<Param>, String> {
+        use crate::openbao::plain_segment;
+        let vault = self
+            .vault
+            .as_ref()
+            .ok_or_else(|| "the vault address is not set or not https://host[:port]".to_string())?;
         let root = root.trim_matches('/');
-        let list = self
-            .runner
-            .run(&CommandSpec::new("bao").args([
-                "kv",
-                "list",
-                "-format=json",
-                &format!("-mount={}", self.mount),
-                root,
-            ]))
-            .map_err(|_| "the bao command could not be started".to_string())?;
-        if list.status != Some(0) {
-            return Err("the vault could not be read (check the box's token and the path)".into());
-        }
         let mut out = Vec::new();
-        let projects: Vec<String> = serde_json::from_str(&list.stdout).unwrap_or_default();
-        for p in projects {
+        for p in vault.list(&self.mount, root).map_err(bao_error)? {
             let p = p.trim_end_matches('/');
-            let envs = self
-                .runner
-                .run(&CommandSpec::new("bao").args([
-                    "kv",
-                    "list",
-                    "-format=json",
-                    &format!("-mount={}", self.mount),
-                    &format!("{root}/{p}"),
-                ]))
-                .map_err(|_| "the bao command could not be started".to_string())?;
-            let envs: Vec<String> = serde_json::from_str(&envs.stdout).unwrap_or_default();
-            for e in envs {
+            if !plain_segment(p) {
+                continue;
+            }
+            for e in vault
+                .list(&self.mount, &format!("{root}/{p}"))
+                .map_err(bao_error)?
+            {
                 let e = e.trim_end_matches('/');
-                let got = self
-                    .runner
-                    .run(&CommandSpec::new("bao").args([
-                        "kv",
-                        "get",
-                        "-format=json",
-                        &format!("-mount={}", self.mount),
-                        &format!("{root}/{p}/{e}"),
-                    ]))
-                    .map_err(|_| "the bao command could not be started".to_string())?;
-                if got.status != Some(0) {
+                if !plain_segment(e) {
                     continue;
                 }
-                let v: Value = serde_json::from_str(&got.stdout).unwrap_or(Value::Null);
-                if let Some(map) = v["data"]["data"].as_object() {
-                    for (k, val) in map {
-                        if let Some(s) = val.as_str() {
-                            out.push(Param {
-                                path: format!("{root}/{p}/{e}/{k}"),
-                                value: Zeroizing::new(s.to_string()),
-                            });
-                        }
-                    }
+                let Some(fields) = vault
+                    .read(&self.mount, &format!("{root}/{p}/{e}"))
+                    .map_err(bao_error)?
+                else {
+                    continue;
+                };
+                for (k, value) in fields {
+                    out.push(Param {
+                        path: format!("{root}/{p}/{e}/{k}"),
+                        value,
+                    });
                 }
             }
         }
@@ -329,7 +327,7 @@ pub fn replace_memory(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use ozbox_core::{Output, RecordingRunner};
+    use serde_json::Value;
 
     const SENTINEL: &str = "SENTINEL-box-secret-0123456789abcdef";
 
@@ -628,9 +626,9 @@ mod tests {
     }
 
     #[test]
-    fn the_box_secrets_path_never_starts_the_aws_command() {
+    fn the_box_secrets_path_never_starts_a_program() {
         // a guard on the source: a loader that needs a program the image does not carry is the defect. Only the code before
-        // the tests, and not a comment, is read; the aws program is named by building the needle, so this file passes.
+        // the tests, and not a comment, is read; the programs are named by building the needles, so this file passes.
         let src = include_str!("box_secrets.rs");
         let code: String = src
             .split("\n#[cfg(test)]")
@@ -640,43 +638,126 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        // the OpenBao backend still runs `bao` (see the follow-up in the changelog); nothing here may run `aws`
-        let (ssm_part, _) = code.split_once("pub struct OpenBao").unwrap();
+        // nothing here may run a program: neither `aws` (the parameter store) nor `bao` (the vault)
         for needle in [
             ["CommandSpec::new(", "\"aws\")"].concat(),
+            ["CommandSpec::new(", "\"bao\")"].concat(),
             ["program: ", "\"aws\""].concat(),
             ["Command", "::new("].concat(),
+            ["Command", "Runner"].concat(),
             ["\"get-parameters", "-by-path\""].concat(),
             ["\"--with", "-decryption\""].concat(),
         ] {
-            assert!(!ssm_part.contains(&needle), "{needle}");
+            assert!(!code.contains(&needle), "{needle}");
         }
         assert!(
-            !ssm_part.contains("runner"),
-            "the parameter store takes no command runner"
+            !code.contains("runner"),
+            "no backend takes a command runner"
         );
     }
 
     #[test]
-    fn openbao_pairs_become_parameters() {
-        let r = RecordingRunner::new();
-        let ok = |s: &str| Output {
-            status: Some(0),
-            stdout: s.into(),
-            stderr: String::new(),
-        };
-        r.reply(ok("[\"app/\"]"));
-        r.reply(ok("[\"staging\"]"));
-        r.reply(ok(&format!(
-            "{{\"data\":{{\"data\":{{\"K\":\"{SENTINEL}\"}}}}}}"
-        )));
+    fn openbao_is_read_natively_all_three_levels_and_pairs_become_parameters() {
+        let v = crate::openbao::fakes::Vault::start();
+        v.put(
+            "secret/ozbox/main/app/staging",
+            &[("K", SENTINEL), ("J", "jjjjjjjj")],
+        );
+        v.put("secret/ozbox/main/app/test", &[("T", "tttttttt")]);
+        v.put("secret/ozbox/other/app/staging", &[("X", "another role")]);
         let b = OpenBao {
-            runner: &r,
+            vault: Some(v.client()),
             mount: "secret".into(),
         };
-        let p = b.fetch("ozbox/main").unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].path, "ozbox/main/app/staging/K");
+        let mut p: Vec<(String, String)> = b
+            .fetch("ozbox/main")
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.path, p.value.to_string()))
+            .collect();
+        p.sort();
+        assert_eq!(
+            p,
+            [
+                (
+                    "ozbox/main/app/staging/J".to_string(),
+                    "jjjjjjjj".to_string()
+                ),
+                ("ozbox/main/app/staging/K".into(), SENTINEL.into()),
+                ("ozbox/main/app/test/T".into(), "tttttttt".into()),
+            ]
+        );
+        let seen: Vec<String> = v
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| format!("{} {}", s.method, s.url))
+            .collect();
+        assert_eq!(seen[0], "GET /v1/secret/metadata/ozbox/main?list=true");
+        assert!(seen.iter().all(|s| s.starts_with("GET /v1/secret/")));
+        // they plan like any other provider's
+        let (items, _) = plan("ozbox/main", b.fetch("ozbox/main").unwrap());
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn a_vault_refusal_or_outage_part_way_is_an_error_never_a_partial_read_and_names_nothing() {
+        let v = crate::openbao::fakes::Vault::start();
+        v.put("secret/r/app/staging", &[("K", SENTINEL)]);
+        let b = OpenBao {
+            vault: Some(v.client()),
+            mount: "secret".into(),
+        };
+        *v.force.lock().unwrap() = Some((403, format!("denied {SENTINEL} r/app")));
+        let e = b.fetch("r").err().unwrap();
+        assert_eq!(e, BAO_DENIED);
+        *v.force.lock().unwrap() = Some((503, format!("sealed {SENTINEL}")));
+        assert_eq!(b.fetch("r").err().unwrap(), BAO_UNAVAILABLE);
+        for e in [BAO_DENIED, BAO_UNAVAILABLE] {
+            assert!(!e.contains(SENTINEL) && !e.contains(crate::openbao::fakes::TOKEN));
+        }
+        // no address configured: said, and nothing sent
+        let none = OpenBao {
+            vault: None,
+            mount: "secret".into(),
+        };
+        assert!(none.fetch("r").err().unwrap().contains("address"));
+    }
+
+    #[test]
+    fn openbao_works_with_no_bao_command_anywhere() {
+        // A read in a child process whose PATH holds nothing, so any attempt to start the `bao` command (the defect this
+        // replaces) would fail it. The child is this same test binary, asked for one test.
+        if std::env::var("OZBOX_BAO_NO_PROGRAM_CHILD").is_ok() {
+            let v = crate::openbao::fakes::Vault::start();
+            v.put("secret/r/app/test", &[("K", SENTINEL)]);
+            let b = OpenBao {
+                vault: Some(v.client()),
+                mount: "secret".into(),
+            };
+            let p = b.fetch("r").unwrap();
+            assert_eq!(p[0].value.as_str(), SENTINEL);
+            return;
+        }
+        let empty = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "box_secrets::tests::openbao_works_with_no_bao_command_anywhere",
+                "--nocapture",
+            ])
+            .env("OZBOX_BAO_NO_PROGRAM_CHILD", "1")
+            .env("PATH", empty.path())
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
     }
 
     #[test]
