@@ -81,6 +81,13 @@ pub struct PeerState {
     /// The fleet inbox's cards from this worker, by request id (ADR 0042 section 8). A view; the store is the worker's.
     #[serde(default)]
     pub approvals: BTreeMap<String, super::approvals::Card>,
+    /// The key declaration each task was assigned with (`orchestration/feature`), so a key ask is checked against the names the
+    /// task declared and the environment it was given, never against what the worker says.
+    #[serde(default)]
+    pub declared: BTreeMap<String, KeyDeclaration>,
+    /// Key asks received and not yet served ([`Hub::serve_key_asks`]). Names only.
+    #[serde(default)]
+    pub key_asks: Vec<super::keys::KeyAsk>,
 }
 
 /// Everything the hub keeps. Plain data: it serialises into its store.
@@ -267,6 +274,10 @@ impl Hub<'_> {
         let peer = st.peers.entry(worker.to_string()).or_default();
         peer.assigned
             .push((a.orchestration.clone(), a.feature.clone()));
+        peer.declared.insert(
+            super::keys::task_key(&a.orchestration, &a.feature),
+            a.keys.clone(),
+        );
         st.note(
             now,
             "hub.assign",
@@ -442,6 +453,30 @@ impl Hub<'_> {
             }
             Kind::ApprovalRequest => super::approvals::take_request(st, from, &plain, now),
             Kind::ShardResult => super::lane::take_result(st, from, &plain, now),
+            Kind::Blocked if super::keys::KeyAsk::parse(&plain).is_some() => {
+                // a key ask: names only, kept to be served by the hub through the issuer, never put in the questions
+                let Some(ask) = super::keys::KeyAsk::parse(&plain) else {
+                    return false;
+                };
+                if !peer.knows(&ask.orchestration, &ask.feature) || ask.orchestration == "-" {
+                    st.note(
+                        now,
+                        "hub.rejected",
+                        format!("from={from} reason=unassigned-feature kind=blocked"),
+                    );
+                } else if peer.key_asks.len() >= super::keys::MAX_PENDING_ASKS {
+                    st.note(
+                        now,
+                        AUDIT_REFUSED,
+                        format!(
+                            "side=hub worker={from} task={} code=too-many-asks",
+                            ask.feature
+                        ),
+                    );
+                } else {
+                    peer.key_asks.push(ask);
+                }
+            }
             Kind::Question | Kind::Blocked => {
                 peer.report
                     .questions

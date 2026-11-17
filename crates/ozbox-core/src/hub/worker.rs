@@ -8,8 +8,13 @@
 //! the hub, and queues what it says in that link's outbox, so a report is never lost to a gap in the session.
 
 use super::engine::{Assign, ResultBody, StatusBody};
+use super::keys::{
+    names_ok, DeliveryStore, KeyAsk, KeyDelivery, KeyRevoke, AUDIT_DELETED, AUDIT_STORED,
+    CODE_ASK_INVALID, CODE_DELIVERY_INVALID, CODE_NOT_ASSIGNED, CODE_NOT_DECLARED, CODE_STORE,
+};
 use super::refusal::{
-    refuse_production, AUDIT_REFUSED, CODE_UNSUPPORTED, CODE_VALUE_IN_DECLARATION,
+    refuse_production, KeyDeclaration, Refusal, AUDIT_REFUSED, CODE_PRODUCTION, CODE_UNSUPPORTED,
+    CODE_VALUE_IN_DECLARATION,
 };
 use super::wire::{Ext, Kind, Transport, WireError, PROFILE};
 #[cfg(test)]
@@ -169,15 +174,40 @@ impl WorkerEnd<'_> {
         }
     }
 
-    /// Take every message waiting for this worker. Returns how many were applied.
+    /// Take every message waiting for this worker. Returns how many were applied. Key delivery is answered `unsupported`: a worker
+    /// whose service can store a delivery polls with [`WorkerEnd::poll_keys`].
     pub fn poll(&self, st: &mut WorkerState, now: u64) -> usize {
+        self.poll_inner(st, now, None)
+    }
+
+    /// As [`WorkerEnd::poll`], with the worker's service behind it: a `keys.deliver` that passes the worker's own checks (D2, the task
+    /// held, the names declared) is handed to [`DeliveryStore::store_delivery`], which alone opens it; `keys.revoke` and `task.end`
+    /// delete that task's keys.
+    pub fn poll_keys(&self, st: &mut WorkerState, now: u64, store: &dyn DeliveryStore) -> usize {
+        self.poll_inner(st, now, Some(store))
+    }
+
+    fn poll_inner(
+        &self,
+        st: &mut WorkerState,
+        now: u64,
+        store: Option<&dyn DeliveryStore>,
+    ) -> usize {
         let mut msgs: Vec<Sealed> = Vec::new();
         while let Some(m) = self.net.recv(self.me) {
             msgs.push(m);
         }
         st.core.tick(now);
         let cx = self.cx();
-        let r = receive_round(&mut st.core, &PROFILE, &cx, &screen, now, &msgs);
+        let keyed = store.is_some();
+        let admit = move |kind: &str, ext: &[u8], plain: &[u8]| {
+            if keyed {
+                screen_keys(kind, ext, plain)
+            } else {
+                screen(kind, ext, plain)
+            }
+        };
+        let r = receive_round(&mut st.core, &PROFILE, &cx, &admit, now, &msgs);
         let mut applied = 0;
         for d in r.deliveries {
             let level_ok = Ext::decode(&d.ext).is_some_and(|e| e.level == 0 && e.via.is_empty());
@@ -205,6 +235,24 @@ impl WorkerEnd<'_> {
                             now,
                             super::approvals::AUDIT_WORKER_REFUSED,
                             format!("kind={} code={code}", kind.name()),
+                        );
+                    } else if code == CODE_DELIVERY_INVALID || code == CODE_PRODUCTION {
+                        st.note(
+                            now,
+                            AUDIT_REFUSED,
+                            format!(
+                                "side=worker worker={} task=- kind={} code={code}",
+                                self.me,
+                                kind.name()
+                            ),
+                        );
+                        self.status(
+                            st,
+                            now,
+                            "-",
+                            "-",
+                            "refused",
+                            "a key delivery was refused by this worker's own checks",
                         );
                     } else if code == CODE_VALUE_IN_DECLARATION {
                         st.note(
@@ -260,6 +308,33 @@ impl WorkerEnd<'_> {
                             st.answers.remove(0);
                         }
                         st.answers.push(a);
+                    }
+                }
+                Kind::KeysDeliver if store.is_some() => {
+                    if let Some(store) = store {
+                        self.delivered(st, now, &plain, store);
+                    }
+                }
+                Kind::KeysRevoke | Kind::TaskEnd if store.is_some() => {
+                    if let (Some(store), Ok(r)) =
+                        (store, serde_json::from_slice::<KeyRevoke>(&plain))
+                    {
+                        store.delete_task(&r.orchestration, &r.feature);
+                        if kind == Kind::TaskEnd {
+                            st.tasks.retain(|t| {
+                                !(t.orchestration == r.orchestration && t.feature == r.feature)
+                            });
+                        }
+                        st.note(
+                            now,
+                            AUDIT_DELETED,
+                            format!(
+                                "worker={} task={} reason={}",
+                                self.me,
+                                r.feature,
+                                kind.name()
+                            ),
+                        );
                     }
                 }
                 Kind::KeysDeliver | Kind::KeysRevoke | Kind::PinsSet | Kind::LaptopRelay => {
@@ -323,6 +398,124 @@ impl WorkerEnd<'_> {
         }
         self.status(st, now, &a.orchestration, &a.feature, "accepted", "");
         st.tasks.push(a);
+    }
+
+    /// A delivery that passed the screen: checked against the task this worker holds, then handed to its service.
+    fn delivered(&self, st: &mut WorkerState, now: u64, plain: &[u8], store: &dyn DeliveryStore) {
+        let Ok(d) = serde_json::from_slice::<KeyDelivery>(plain) else {
+            st.note(
+                now,
+                "worker.rejected",
+                "kind=keys.deliver reason=malformed".into(),
+            );
+            return;
+        };
+        let held = st
+            .tasks
+            .iter()
+            .find(|t| t.orchestration == d.orchestration && t.feature == d.feature);
+        let code = match held {
+            None => Some(CODE_NOT_ASSIGNED),
+            Some(t) if t.keys.env != d.env || d.names.iter().any(|n| !t.keys.names.contains(n)) => {
+                Some(CODE_NOT_DECLARED)
+            }
+            Some(_) => None,
+        };
+        let code = match code {
+            Some(c) => Err(c),
+            None => store.store_delivery(&d).map_err(|_| CODE_STORE),
+        };
+        match code {
+            Ok(()) => {
+                st.note(
+                    now,
+                    AUDIT_STORED,
+                    format!(
+                        "worker={} task={} env={} names={} request={}",
+                        self.me,
+                        d.feature,
+                        d.env,
+                        d.names.join(","),
+                        d.request_id
+                    ),
+                );
+                self.status(
+                    st,
+                    now,
+                    &d.orchestration,
+                    &d.feature,
+                    "working",
+                    "keys stored",
+                );
+            }
+            Err(c) => {
+                st.note(
+                    now,
+                    AUDIT_REFUSED,
+                    format!("side=worker worker={} task={} code={c}", self.me, d.feature),
+                );
+                self.status(
+                    st,
+                    now,
+                    &d.orchestration,
+                    &d.feature,
+                    "refused",
+                    "a key delivery for this task was refused by the worker",
+                );
+            }
+        }
+    }
+
+    /// Ask the hub for keys by name, for a task this worker holds. Only names its declaration lists, and never Production: refused
+    /// here before anything is sent (D2 on the worker, before the hub's own check).
+    pub fn ask_keys(
+        &self,
+        st: &mut WorkerState,
+        now: u64,
+        orchestration: &str,
+        feature: &str,
+        names: &[String],
+    ) -> Result<(), Refusal> {
+        let Some(t) = st
+            .tasks
+            .iter()
+            .find(|t| t.orchestration == orchestration && t.feature == feature)
+        else {
+            return Err(Refusal {
+                code: CODE_NOT_ASSIGNED,
+                message: "this worker does not hold that task".into(),
+            });
+        };
+        if !names_ok(names) || names.iter().any(|n| !t.keys.names.contains(n)) {
+            return Err(Refusal {
+                code: CODE_NOT_DECLARED,
+                message: "a worker asks only for keys its task declared, by name".into(),
+            });
+        }
+        refuse_production(&KeyDeclaration {
+            env: t.keys.env.clone(),
+            names: names.to_vec(),
+        })?;
+        let body =
+            serde_json::to_vec(&KeyAsk::new(orchestration, feature, names)).map_err(|_| {
+                Refusal {
+                    code: CODE_ASK_INVALID,
+                    message: "the ask could not be written".into(),
+                }
+            })?;
+        self.say(st, now, Kind::Blocked, &body);
+        Ok(())
+    }
+
+    /// The hub cannot be reached: delete every key this worker holds, at once (ADR 0042 section 5.3), and say so in the audit.
+    /// The hub agent calls this when its transport stops being connected ([`crate::hub::net::NetWorker::reach`]).
+    pub fn hub_lost(&self, st: &mut WorkerState, now: u64, store: &dyn DeliveryStore) {
+        store.delete_all();
+        st.note(
+            now,
+            AUDIT_DELETED,
+            format!("worker={} task=* reason=hub-lost", self.me),
+        );
     }
 
     pub fn report(
@@ -488,6 +681,30 @@ fn screen(kind: &str, _ext: &[u8], plain: &[u8]) -> Result<(), &'static str> {
             .map(|_| ())
             .map_err(|_| super::approvals::CODE_NOT_A_DECISION),
         _ => Ok(()),
+    }
+}
+
+/// The screen of a worker whose service can store a delivery. `keys.deliver` must be exactly a [`KeyDelivery`] whose labels are not
+/// Production (D2 on the worker, before the body is held for a gap); `keys.revoke` and `task.end` exactly a [`KeyRevoke`]. Anything
+/// else of those kinds is refused here, so its content is never held.
+fn screen_keys(kind: &str, ext: &[u8], plain: &[u8]) -> Result<(), &'static str> {
+    match Kind::parse(kind) {
+        Some(Kind::KeysDeliver) => {
+            let d =
+                serde_json::from_slice::<KeyDelivery>(plain).map_err(|_| CODE_DELIVERY_INVALID)?;
+            if !names_ok(&d.names) || d.sealed.is_empty() {
+                return Err(CODE_DELIVERY_INVALID);
+            }
+            refuse_production(&KeyDeclaration {
+                env: d.env,
+                names: d.names,
+            })
+            .map_err(|_| CODE_PRODUCTION)
+        }
+        Some(Kind::KeysRevoke | Kind::TaskEnd) => serde_json::from_slice::<KeyRevoke>(plain)
+            .map(|_| ())
+            .map_err(|_| CODE_DELIVERY_INVALID),
+        _ => screen(kind, ext, plain),
     }
 }
 

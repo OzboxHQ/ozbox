@@ -29,6 +29,8 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **On a box with no hub, `transport: hub` is refused by name** and the default `ssh` route works exactly as before.
   - **A worker is never given a Production key.** The hub refuses it, the worker refuses it again, and the off-box issuer refuses a worker. No setting turns this off; it comes back later, approved at your computer.
   - **A task never names keys.** A conductor that tries is refused, and the attempt is recorded.
+  - **A worker can ask for development or staging keys by name**, only the names its task declared. The values are sealed to that worker's own key and only its secrets service can open them; they are deleted when the task ends, and at once if the worker loses `main`.
+  - **Workers dial out to `main`** over your tailnet or the provider's private network; `main` never listens on a public address. Both ends prove who they are, a dropped connection comes back by itself, nothing is delivered twice or out of order, and a quiet worker shows as "not answering".
   - Every hand-off and refusal is in the audit record by name, never by value.
   - **On a box with a hub, the hub is the default** for a worker that belongs to it.
   - **A worker's approval requests come back to `main`.** They appear in `main`'s fleet inbox with the worker's name; you decide once with your passkey, and the worker checks your decision itself. `main` cannot approve on its own, a message that says "approved" grants nothing, and Production on a worker is never decided from `main`.

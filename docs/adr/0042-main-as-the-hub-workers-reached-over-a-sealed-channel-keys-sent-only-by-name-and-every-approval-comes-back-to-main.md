@@ -4,7 +4,7 @@
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub (none has one yet). **Built since (2026-11-17, for 0.3.0-beta, tested with fakes and, in CI, with real keys; never run on a real box):** the approval path over the channel (§8), test lanes (§7) and the merge queue over the channel (ADR 0020 §6), with `task_start` defaulting to the hub on a box that has one; `ozbox-hubd` (its socket, lifecycle, systemd units and self-test), **worker enrolment with key attestation**, and **the real signer and sealer** (the secrets service's channel operations and HPKE through `ozbox-seal`); what each leaves out is in the sections below. **Not built:** the registrars themselves (until they are, no worker can enrol on a real box), nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub (none has one yet). **Built since (2026-11-17, for 0.3.0-beta, tested with fakes and, in CI, with real keys; never run on a real box):** the approval path over the channel (§8), test lanes (§7) and the merge queue over the channel (ADR 0020 §6), with `task_start` defaulting to the hub on a box that has one; `ozbox-hubd` (its socket, lifecycle, systemd units and self-test), **worker enrolment with key attestation**, and **the real signer and sealer** (the secrets service's channel operations and HPKE through `ozbox-seal`); what each leaves out is in the sections below. the transport on a network (workers dial out; a signed handshake; order, retransmission, a replay window, back-pressure and honest reachability) and **sealed key delivery by name** (through the issuer seam, sealed to the attested key, Production refused on the hub, in front of the issuer and on the worker), all tested in CI; **Not built:** the registrars themselves (until they are, no worker can enrol on a real box), nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -1281,3 +1281,93 @@ added with the other mesh scopes.
 **What is unbuilt.** All of it: the receiver, the pinned approver set, the platform biometric prompt, the attested-key path, and the
 sandbox that holds a script to its declared keys and hosts. The G6 acceptance test does not cover it. It is **Planned**, not Proposed
 as working.
+
+## Amendment 2 (2026-11-17): built: the network transport and keys by name (Preview)
+
+Built and tested in CI with loopback sockets and fakes; **not run between two real boxes**. Code: `ozbox_core::hub::net`,
+`ozbox_core::hub::keys`, `ozbox_core::hub::conformance`.
+
+### 1. Who connects, and why no box gains an inbound port
+
+- **Workers dial out.** `NetWorker` connects to the hub's address on the tailnet or the private network and nothing on a worker
+  listens; a source guard fails the build if the worker's half of the transport ever names a listener.
+- **The hub listens on one address that is loopback or private** (RFC 1918, the shared range `100.64.0.0/10` a tailnet uses, IPv6
+  unique-local). The wildcard and every public address are refused when the hub starts, with a test per range. The route that brings a
+  worker there is the fleet's own: the tailnet's forward to a loopback port (as ADR 0030 does for SSH), or §3's one rule from the
+  workers' group, which only the setup identity makes. The transport adds no inbound rule, so `check-no-ingress.sh` is unchanged and
+  still holds. The Cloudflare tunnel stays **not offered** for this channel (§2, option d).
+
+### 2. The handshake (`ozbox-hub-handshake-v1`)
+
+Each connection proves both ends before a frame of data moves: the worker sends its name and a nonce; the hub answers a nonce; the
+worker signs both names, both nonces, its role and the numbers it resumes from with its roster key; the hub verifies it (one check, and
+only for a name in the roster: a stranger costs none), then signs the same with its own numbers. A worker that cannot verify the hub's
+signature against the key it pinned sends it nothing. The tag is the handshake's own, so a handshake signature is never an envelope's.
+A source that fails 20 handshakes in a minute is not answered for the rest of it; the hub holds at most 256 connections; a handshake
+has 10 seconds.
+
+### 3. What the transport does, and what stays the channel's
+
+The transport carries sealed envelopes and never opens, signs or reads a body. At its own layer it numbers frames per direction within a
+random session, keeps a window of 64 on the wire, retransmits on a timeout (1 s, doubling to 8 s), on an acknowledgement that does not
+move, and after a reconnect (resuming from what the other end says it has), puts early frames back in order, drops duplicates by number,
+**refuses an envelope it has already passed on, by its id and nonce, for as long as it is valid**, and drops (and counts) an envelope
+that is expired or that names another sender or receiver than the connection proved. A link holds at most 256 frames and 8 MiB for a
+peer that is not taking them; past that `send` refuses and the channel's outbox keeps the message for its next round. A receiver whose
+owner has not taken 256 envelopes stops reading, so the sender's link fills in turn. Every check is repeated end to end by the channel,
+which is the guarantee: the transport's are there to waste less and to say honestly what is reachable.
+
+**Reachability is said as it is:** per peer, never connected, connected since a time, or not answering since a time. A connection that
+hears nothing for three 30-second heartbeats is closed and shown as not answering, never as working. A worker reconnects with backoff
+from 1 to 30 seconds with jitter.
+
+**Conformance.** One suite drives the real hub and worker over a transport (hello both ways, an assignment accepted and reported,
+addressing, the Production refusal, fifty reports in order, a 200 KB body). The in-memory transport and the network transport on
+loopback both pass it, and the network one passes it again through a hostile proxy that drops, duplicates, reorders and cuts.
+
+### 4. Keys by name (§5, the development and staging path)
+
+1. **The worker asks by name**: a `blocked` message whose body is exactly `{waiting: "keys", orchestration, feature, names}`. No new
+   kind: the frozen kinds and their vectors are unchanged.
+2. **The hub checks** that the worker is in the roster and not quarantined, the task was assigned to it, every name is in the
+   declaration the task was assigned with (the hub keeps it with the assignment, never takes it from the worker), the declaration
+   is not Production by environment or by name, and the worker's key-delivery key is **attested** (`Attestations`: enrolment's,
+   never a key `main` reported). Only then does it ask the issuer path (`KeyIssuer`), with `issuer_guard` refusing Production in
+   front of it; an implementation calls the guard again itself.
+3. **The hub checks the answer** names the environment and names asked, and is not Production, and relays it as `keys.deliver`:
+   labels and sealed bytes. The hub never holds a value.
+4. **The worker checks again before the body is held**: Production by label is refused by its screen; then the task must be one it
+   holds and the names in its declaration; then the sealed bytes go to its service (`DeliveryStore::store_delivery`), which alone opens
+   them. The sealing is bound to the worker, the task, the request and the names (`delivery_aad`) under its own purpose.
+5. **Deletion**: `keys.revoke`, `task.end`, and at once on loss of the hub (`WorkerEnd::hub_lost`, which the worker's agent calls
+   when its transport stops being connected).
+
+**D2 holds in three places for this path** (the hub, in front of the issuer, the worker), each with negative tests, plus
+`ozbox-issuer`'s worker-class refusal for Production. Sentinel tests put a value through the real HPKE seal and show it only in the
+worker's service: never in the hub's or the worker's state, either audit trail, anything that crossed the transport, or a debug form.
+
+### What is not covered
+
+- **No real box.** Everything above ran on loopback in CI. The two-box run, the p50/p99 of §13 on the benchmark's shape and on gp3, and
+  the tailnet and private-network routes are owner runs.
+- **Frames are not authenticated one by one.** The handshake proves who connected; a party on the path of an unencrypted private
+  network can still drop, delay, reorder or replay frames inside a connection. Each of those the channel already refuses or survives
+  (signatures, sessions, order, the nonce window), and a forged acknowledgement can suppress a message, which is the same as dropping
+  it: the channel's own window resends it. On a tailnet, WireGuard covers the path.
+- **The implementations behind the seams are not built here**: the issuer's release for development and staging (the secrets service),
+  the worker service's `store_delivery` (its run-scoped noswap store), the attestation reader, and the real handshake signer (hubd's
+  handshake key). `ozbox-hubd` itself, its socket unit and its process separation are H2's.
+- **The value check (H3a's third line) is not built**: the checks here read labels.
+- **A refused key ask is audited on `main`; the worker is not told** in this release, so it waits until its lease.
+- **A `keys.deliver` waiting behind a gap is held in the worker's channel state in its sealed form**, which the hub agent cannot open.
+- **One thread per worker connection on the hub**, and a reconnect replaces an older connection of the same worker.
+- **The worker's dialer is TCP.** A worker that cannot reach the hub's address over TCP (no tailnet IP route, no private network) has no
+  route; a command dialer (for example a tailnet client's `nc`) is not built. The system tailnet client of §2 is not built either, so on a
+  box whose tailnet client runs as the box user the agent can cut the channel (§2 says so).
+- **The format freezes with this transport**: the envelope, the kinds, `level`, `via` and the handshake bytes. A change is now a new
+  version, not a revision.
+
+**Benchmark (§13).** Nothing runs unless a hub is configured: no listener, thread or timer on a box that does not use it, and nothing on
+create, resume, snapshot, exec, disk or DNS. On the hub path a message costs one frame write and an acknowledgement; a 1 KB round trip
+on loopback measured p50 about 0.65 ms and p99 about 1 ms (a debug build, the build machine, not the benchmark's shape and not
+published as a result). Keys arrive before a run, so `exec` and the agent's command path do not call the hub.

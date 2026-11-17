@@ -200,8 +200,8 @@ boxes instead, and `worker: reuse` uses idle boxes you already have, if your set
 ## 11. Main as the hub: handing a task to a worker over a channel (Preview)
 
 Today `main` reaches a worker through your computer's connection. The hub is the route that does not: a worker dials out to `main`,
-every message is signed and sealed, and no box is opened to the internet. **The first part is built and tested with fake boxes; no box
-has a hub yet, and none has run on a real cloud box.**
+every message is signed and sealed, and no box is opened to the internet. **Built and tested with fake boxes and a loopback network; no
+box has a hub yet, and none has run on a real cloud box.**
 
 - `task_start` takes `transport`: `hub` or `ssh`. On a box with a hub, `hub` is the default when the worker box is one of the hub's
   workers; otherwise `ssh` is, as before. On a box with no hub, `hub` is refused by name and nothing is added.
@@ -209,7 +209,13 @@ has a hub yet, and none has run on a real cloud box.**
   reported (accepted, working, the commit it finished with) beside the feature.
 - **A worker is never given a Production key in this release.** The hub refuses it, the worker refuses it again on its own, and the
   off-box issuer refuses a worker too. There is no setting that turns this off. A task also never names keys: a conductor that tries
-  is refused and it is recorded. Keys for development and staging reach a worker only with the sealed key delivery, which is not built.
+  is refused and it is recorded.
+- **A worker asks for development or staging keys by name**, only names its task declared. `main` checks the ask, the values are
+  sealed to that worker's own vouched-for key, and only the worker's secrets service can open them; `main`'s hub never holds a value.
+  The keys are deleted when the task ends, when they are revoked, and at once if the worker loses `main`.
+- **The connection:** a worker dials `main` over your tailnet or the provider's private network. `main` listens only on a private or
+  loopback address, never on a public one, and both ends prove who they are before anything moves. A lost connection is retried by
+  itself, nothing is delivered twice or out of order, and a worker that has gone quiet shows as "not answering", never as "working".
 - Every hand-off and every refusal is in the audit record, with names and never values.
 - **Approvals come back to `main`.** A request filed on a worker (in this release, a guard override) appears in `main`'s fleet inbox
   (`GET /v1/approvals/fleet`) with the worker's name. You decide it once with your passkey; `main` passes your decision on, and
