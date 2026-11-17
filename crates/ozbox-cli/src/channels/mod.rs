@@ -5,6 +5,7 @@
 //! A channel returns `Ok(detail)` or `Err(detail)`. A detail is a sentence for a person: it never holds a credential,
 //! an address, a phone number or a response body.
 
+pub mod aws;
 pub mod chat;
 pub mod mail;
 pub mod push;
@@ -27,8 +28,11 @@ pub struct Ctx {
     pub secrets: Arc<dyn SecretStore>,
     pub http: Arc<dyn HttpClient>,
     pub runner: Arc<dyn CommandRunner>,
-    /// The AWS profile for the channels that use the fleet's own AWS credentials.
+    /// The AWS profile for the channels that use the fleet's own AWS credentials. When set, those channels send through the
+    /// `aws` command (which reads profiles); when not, natively with [`Ctx::aws`].
     pub aws_profile: Option<String>,
+    /// The native AWS signer (credentials from the environment, or the box's role).
+    pub aws: Arc<crate::aws_native::AwsJson>,
 }
 
 impl Ctx {
@@ -171,7 +175,13 @@ pub mod testing {
         pub runner: Arc<RecordingRunner>,
     }
 
+    /// A rig whose AWS credentials come from no metadata service at all (nothing listens on the address).
     pub fn rig() -> Rig {
+        rig_with_aws("http://127.0.0.1:9")
+    }
+
+    /// A rig whose AWS credentials come from the fake metadata service at `imds`.
+    pub fn rig_with_aws(imds: &str) -> Rig {
         let http = Arc::new(FakeHttp::default());
         let secrets = Arc::new(MemorySecrets::default());
         let runner = Arc::new(RecordingRunner::new());
@@ -181,6 +191,7 @@ pub mod testing {
                 http: http.clone(),
                 runner: runner.clone(),
                 aws_profile: None,
+                aws: Arc::new(crate::aws_native::AwsJson::with_imds(imds)),
             },
             http,
             secrets,
