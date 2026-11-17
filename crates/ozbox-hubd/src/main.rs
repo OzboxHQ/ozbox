@@ -4,6 +4,9 @@
 //! ozbox-hubd serve     --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME] [--listen ADDR:PORT]
 //! ozbox-hubd self-test --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME]
 //! ozbox-hubd setup     BOX-ID [ADDR:PORT]   (as root: the units, folders and registrars file; the address workers dial)
+//! ozbox-hubd agent-setup NAME ADDR:PORT HUB-IDENTITY-FP   (as root, on a worker: the agent's unit)
+//! ozbox-hubd enrol     --name NAME --token-file PATH --attestation PATH --hub-addr ADDR:PORT --hub-identity-fp FP --secrets-socket PATH
+//! ozbox-hubd agent     --name NAME --hub-addr ADDR:PORT --hub-identity PATH --hub-identity-fp FP --secrets-socket PATH --hub-secrets-socket PATH [--hub NAME]
 //! ozbox-hubd ctl       --socket PATH OP [JSON]   (the owner's way to the daemon: roster, invite_plan, enrol_receive, ...)
 //! ozbox-hubd --version
 //! ```
@@ -63,6 +66,17 @@ fn main() -> ExitCode {
         println!("ozbox-hubd {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    if argv.first().map(String::as_str) == Some("agent-setup") {
+        let get = |i: usize| argv.get(i).map(String::as_str).unwrap_or_default();
+        return match ozbox_hubd::setup::run_agent(&ozbox_core::SystemRunner, get(1), get(2), get(3))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if argv.first().map(String::as_str) == Some("setup") {
         let box_id = argv.get(1).map(String::as_str).unwrap_or_default();
         let listen = argv.get(2).map(String::as_str);
@@ -76,6 +90,15 @@ fn main() -> ExitCode {
     }
     if argv.first().map(String::as_str) == Some("ctl") {
         return ctl(&argv);
+    }
+    if matches!(argv.first().map(String::as_str), Some("enrol" | "agent")) {
+        return match ozbox_hubd::workerbin::run(&argv) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ozbox-hubd: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
     let a = match parse(&argv) {
         Ok(a) => a,

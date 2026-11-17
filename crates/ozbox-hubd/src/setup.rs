@@ -6,6 +6,58 @@ use ozbox_core::{CommandRunner, CommandSpec};
 /// The setup script, as shipped in `infra/cloud-init/scripts/ozbox-hub-setup.sh`.
 pub const SCRIPT: &str = include_str!("../../../infra/cloud-init/scripts/ozbox-hub-setup.sh");
 
+/// The worker's agent setup script, as shipped in `infra/cloud-init/scripts/ozbox-hub-agent-setup.sh`.
+pub const AGENT_SCRIPT: &str =
+    include_str!("../../../infra/cloud-init/scripts/ozbox-hub-agent-setup.sh");
+
+/// The command that runs the agent's setup: the same shape, the script on standard input, and three words the script checks again.
+pub fn agent_spec(name: &str, addr: &str, fp: &str) -> Result<CommandSpec, String> {
+    if !ozbox_core::channel::wire::word_ok(name)
+        || addr.parse::<std::net::SocketAddr>().is_err()
+        || fp.is_empty()
+        || !fp.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return Err("the worker name, the hub's address or the fingerprint is not valid".into());
+    }
+    Ok(CommandSpec {
+        program: "bash".into(),
+        args: vec![
+            "-s".into(),
+            "--".into(),
+            name.into(),
+            addr.into(),
+            fp.into(),
+        ],
+        cwd: None,
+        env: Default::default(),
+        stdin: Some(AGENT_SCRIPT.as_bytes().to_vec()),
+        timeout_secs: Some(120),
+    })
+}
+
+/// Run the agent's setup (as root, on a worker).
+pub fn run_agent(
+    runner: &dyn CommandRunner,
+    name: &str,
+    addr: &str,
+    fp: &str,
+) -> Result<(), String> {
+    let out = runner
+        .run(&agent_spec(name, addr, fp)?)
+        .map_err(|e| e.to_string())?;
+    if !out.stdout.is_empty() {
+        print!("{}", out.stdout);
+    }
+    if !out.stderr.is_empty() {
+        eprint!("{}", out.stderr);
+    }
+    if out.status == Some(0) {
+        Ok(())
+    } else {
+        Err("the agent could not be set up; run as root: ozbox-hubd agent-setup <name> <addr:port> <fingerprint>".into())
+    }
+}
+
 /// The command that runs it: `bash -s -- <box-id>`, the script on standard input, no environment added. The box id is checked
 /// here and again by the script; a word that is not a box id is refused before anything runs.
 pub fn spec(box_id: &str, listen: Option<&str>) -> Result<CommandSpec, String> {

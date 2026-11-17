@@ -32,6 +32,7 @@ pub mod registrar;
 pub mod seams;
 pub mod selftest;
 pub mod setup;
+pub mod workerbin;
 
 #[cfg(test)]
 mod tests;
