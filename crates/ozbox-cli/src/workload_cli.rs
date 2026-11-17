@@ -37,8 +37,11 @@ pub struct ImportArgs<'a> {
     /// Names the person marked PUBLIC (`--public NAME`).
     pub public: &'a [String],
     pub on_box: Option<&'a str>,
-    /// An approval code from the dashboard, for a box whose dashboard has a second factor.
+    /// An approval code from the dashboard, for a box whose dashboard has a second factor. The fallback: without one, a box
+    /// that needs an approval is sent a request, and the command waits for it to be approved (`approval_flow`).
     pub approval: Option<&'a str>,
+    /// How long to wait for that request to be approved, in minutes (1 to 30).
+    pub wait_minutes: u64,
 }
 
 /// Making a production-looking key available to a box needs a person typing a word that cannot be pasted in by a script
@@ -137,6 +140,103 @@ fn rerun_command(a: &ImportArgs<'_>, allow: &[String]) -> String {
     }
     c.push("--yes".into());
     c.join(" ")
+}
+
+/// Ask the box for an approval of exactly these rows and wait for it (ADR 0041, B4-27). Returns the approved request's id
+/// and the salt its digest was made with, which the import then carries. Production is approved on the dashboard only;
+/// anything else may also be approved here with this computer's key, after the person says yes at the terminal.
+fn import_by_request(
+    runner: &dyn CommandRunner,
+    box_name: &str,
+    a: &ImportArgs<'_>,
+    rows: &[(&str, &str)],
+    input: &mut dyn BufRead,
+    tty: bool,
+) -> Result<(String, String), CliError> {
+    use crate::approval_flow::{ask_inline, file_and_wait, Flow, Inline};
+    let mut call = |v: &Value| {
+        ssh_receive(runner, box_name, v)
+            .map(|r| r["result"].clone())
+            .map_err(|e| e.to_string())
+    };
+    if !crate::approval_flow::box_files(&mut call, "import") {
+        return Err(CliError::Msg(t("approval.flow_needs_newer", &[])));
+    }
+    let salt = crate::approval_flow::new_salt()?;
+    let subject = crate::approval_flow::import_subject(a.project, a.env, rows, &salt)?;
+    let what = t(
+        "approval.flow_import_what",
+        &[
+            ("count", &rows.len().to_string()),
+            ("project", a.project),
+            ("env", a.env),
+        ],
+    );
+    const KEY: &str = "laptop";
+    let keys = crate::approval_key_cli::keychain();
+    let has_key = tty
+        && keys
+            .get(&format!("{}{KEY}", crate::approval_key::KEYCHAIN_PREFIX))
+            .ok()
+            .flatten()
+            .is_some();
+    let mut inline_fn = |id: &str, digest: &str| -> Inline {
+        if !ask_inline(input, KEY) {
+            return Inline::Declined;
+        }
+        let name = match ozbox_core::BoxName::new(box_name) {
+            Ok(n) => n,
+            Err(e) => return Inline::Refused(e.to_string()),
+        };
+        match crate::approval_laptop::pinned_ids(runner, &name).and_then(|ids| {
+            crate::approval_laptop::decide(
+                runner,
+                keys.as_ref(),
+                &ids,
+                &name,
+                id,
+                true,
+                Some(digest),
+                KEY,
+            )
+        }) {
+            Ok(_) => Inline::Approved,
+            Err(e) => Inline::Refused(e.to_string()),
+        }
+    };
+    let stop = stop_on_ctrl_c();
+    let start = std::time::Instant::now();
+    let elapsed = || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut say = |l: &str| eprintln!("{l}");
+    let mut flow = Flow {
+        call: &mut call,
+        say: &mut say,
+        inline: if has_key { Some(&mut inline_fn) } else { None },
+        elapsed_ms: &elapsed,
+        stop: &stop,
+        max_wait_ms: a
+            .wait_minutes
+            .clamp(1, crate::approval_flow::MAX_WAIT_MINUTES)
+            * 60_000,
+    };
+    let approved = file_and_wait(&mut flow, &subject, &what)?;
+    Ok((approved.id, salt))
+}
+
+/// A flag Ctrl-C sets, so a wait stops between polls and changes nothing (a second Ctrl-C ends the program at once).
+fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        let _ = signal_hook::flag::register_conditional_shutdown(
+            signal_hook::consts::SIGINT,
+            130,
+            std::sync::Arc::clone(&stop),
+        );
+        let _ =
+            signal_hook::flag::register(signal_hook::consts::SIGINT, std::sync::Arc::clone(&stop));
+    }
+    stop
 }
 
 /// `ozbox secrets import`: preview, then (with --yes) store here, or send to the box with --box. Values are never printed.
@@ -303,10 +403,27 @@ pub fn import(
                         )
                     }));
                 }
-                let req = json!({"op": "import", "project": a.project, "env": a.env,
+                let mut req = json!({"op": "import", "project": a.project, "env": a.env,
                     "allowed": allow_live, "text": std::env::var("USER").unwrap_or_default(),
                     "approval": a.approval.unwrap_or(""), "lines": send});
-                let v = ssh_receive(runner, b, &req)?;
+                let v = match ssh_receive(runner, b, &req) {
+                    // B4-27: the box needs an approval and none was given. Nothing was stored; file a request for exactly
+                    // these rows, wait for it, and send them again with it. No code is copied between commands.
+                    Err(CliError::Msg(e))
+                        if a.approval.is_none() && crate::approval_flow::needs_approval(&e) =>
+                    {
+                        let rows: Vec<(&str, &str)> = going
+                            .iter()
+                            .filter(|(l, _)| !needs_newer.contains(&l.name))
+                            .map(|(l, _)| (l.name.as_str(), l.value.as_str()))
+                            .collect();
+                        let (id, salt) = import_by_request(runner, b, a, &rows, input, tty)?;
+                        req["request_id"] = json!(id);
+                        req["salt"] = json!(salt);
+                        ssh_receive(runner, b, &req)?
+                    }
+                    other => other?,
+                };
                 let names = |k: &str| -> Vec<String> {
                     v[k].as_array()
                         .map(|x| {
@@ -1155,6 +1272,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         let e = import(
             &args,
@@ -1269,6 +1387,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         import(
             &args,
@@ -1384,6 +1503,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         import(
             &args,
@@ -1447,6 +1567,7 @@ mod tests {
             public: &[],
             on_box: None,
             approval: None,
+            wait_minutes: 30,
         };
         for json in [false, true] {
             let mut out = Vec::new();
@@ -1502,6 +1623,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         crate::ingress_client::testing::install("dev");
         let opened = |c: &ozbox_core::CommandSpec| {
@@ -1657,6 +1779,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         crate::ingress_client::testing::install("dev");
         // no terminal: refused, nothing sent, even with --yes
@@ -1720,6 +1843,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         };
         let r = RecordingRunner::new();
         import(
@@ -2043,6 +2167,7 @@ mod tests {
                 public,
                 on_box: Some("dev"),
                 approval: None,
+                wait_minutes: 30,
             };
             import(
                 &args,
@@ -2144,6 +2269,7 @@ mod tests {
             public: &[],
             on_box: Some("dev"),
             approval: None,
+            wait_minutes: 30,
         }
     }
 

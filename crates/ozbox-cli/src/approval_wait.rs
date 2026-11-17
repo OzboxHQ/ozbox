@@ -29,6 +29,8 @@ pub enum Waited {
     Stopped,
     /// The wait ran out or the service stopped answering.
     GaveUp(String),
+    /// The caller's own limit (shorter than a request's life) ran out; the request stands until it expires.
+    TimedOut,
 }
 
 /// One line for the person: where to decide, and that stopping the wait leaves the request.
@@ -48,13 +50,30 @@ pub fn wait_for_decision(
     stop: &AtomicBool,
 ) -> Waited {
     say(&waiting_line(id));
+    wait_quietly(call, id, MAX_WAIT_MS, elapsed_ms, stop)
+}
+
+/// The wait itself, with no waiting line of its own (the caller said where to decide) and a limit of the caller's choosing,
+/// never longer than [`MAX_WAIT_MS`]. A wait that runs out is [`Waited::TimedOut`], so the caller can say how long it waited.
+pub fn wait_quietly(
+    call: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    id: &str,
+    max_wait_ms: u64,
+    elapsed_ms: &dyn Fn() -> u64,
+    stop: &AtomicBool,
+) -> Waited {
+    let limit = max_wait_ms.min(MAX_WAIT_MS);
     let mut failures = 0;
     loop {
         if stop.load(Ordering::SeqCst) {
             return Waited::Stopped;
         }
-        if elapsed_ms() >= MAX_WAIT_MS {
-            return Waited::GaveUp("the wait ran out: ask again".into());
+        if elapsed_ms() >= limit {
+            return if limit < MAX_WAIT_MS {
+                Waited::TimedOut
+            } else {
+                Waited::GaveUp("the wait ran out: ask again".into())
+            };
         }
         match call(&json!({"op": "areq_await", "id": id, "wait_ms": POLL_MS})) {
             Ok(v) => {

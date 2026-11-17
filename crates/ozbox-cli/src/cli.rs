@@ -863,7 +863,8 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
+    /// nothing is stored without --yes. With --box, a box that needs an approval gets a request and this command waits
+    /// for you to approve it in the dashboard. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -889,11 +890,18 @@ pub enum SecretsCommand {
         /// this computer; the values travel on the SSH connection only, never in a file on the box or an argument.
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code the dashboard gave you after your passkey or authenticator code (Settings, Secrets). A box
-        /// whose dashboard has a second factor refuses the keys without one. An import into a Production environment takes
-        /// only the dashboard's code: a code this computer's key made (`ozbox secrets approve`) never approves Production.
+        /// The fallback: an approval code the dashboard gave you (Settings, Secrets). Without it, a box whose dashboard has
+        /// a second factor is sent an approval request for exactly these keys, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy. For a non-Production
+        /// import it also offers to approve with this computer's key. A code this computer's key made (`ozbox secrets
+        /// approve`) never approves Production.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// stored and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// The box end of `ozbox secrets import --box` and `ozbox env policy set --box`: reads one request line on standard
     /// input and hands it to the import socket. A person never runs it.

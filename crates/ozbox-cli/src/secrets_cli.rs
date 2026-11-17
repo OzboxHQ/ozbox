@@ -114,6 +114,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
             public,
             on_box,
             approval,
+            wait,
         } => crate::workload_cli::import(
             &crate::workload_cli::ImportArgs {
                 file,
@@ -124,6 +125,7 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
                 public,
                 on_box: on_box.as_ref().map(|b| b.as_str()),
                 approval: approval.as_deref(),
+                wait_minutes: *wait,
             },
             &ozbox_core::SystemRunner,
             &mut std::io::stdin().lock(),

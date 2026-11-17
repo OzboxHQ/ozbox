@@ -2,6 +2,7 @@
 
 mod agent_mcp;
 mod agent_mcp_cli;
+mod approval_flow;
 mod approval_key;
 mod approval_key_cli;
 mod approval_keystore;
@@ -128,12 +129,12 @@ mod secrets_file;
 mod secrets_ingress;
 mod secrets_persist;
 mod secrets_recover;
-mod secrets_signer;
-#[cfg(test)]
-mod secrets_signer_tests;
 mod secrets_restic;
 #[cfg(unix)]
 mod secrets_service;
+mod secrets_signer;
+#[cfg(test)]
+mod secrets_signer_tests;
 mod secrets_state;
 mod serve;
 mod settings;
