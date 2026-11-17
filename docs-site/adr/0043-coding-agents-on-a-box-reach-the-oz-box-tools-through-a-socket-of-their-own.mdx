@@ -98,6 +98,11 @@ tunnel it answers only its own public host, and it is the one process that holds
    `~/.claude.json` while it runs) changed it. For Codex it parses the result as TOML before writing and refuses (leaving the
    file exactly as it was) if the entry would break it. `remove` takes only our entry out. A refused engine makes the command
    exit non-zero and the setup step says so.
+   *Amendment (B4-12):* the setup step becomes the box user with `runuser` first. Where the calling service may not switch user
+   (an upgrade's first boot saw "cannot set user id"), it asks systemd to run the same command as the box user in a transient
+   unit of its own (`systemd-run --uid`, no terminal, `NoNewPrivileges`), retrying a systemd that is not ready a bounded number
+   of times. A refused engine is never retried. The outcome is recorded in `/etc/ozbox/first-boot-steps` (`agent_tools`), and
+   the self-test fails `first_boot_steps` on a failure, naming the step and `ozbox admin <box> -- ensure-supervisor`.
 7. **A program upgrade brings the door.** `ozbox admin <box> -- reinstall-ozboxd` runs the supervisor setup's `--socket-only`
    step, which now also brings an already-moved dashboard's unit up to date (the `RuntimeDirectory` the door's socket needs),
    restarts the dashboard once if it changed, and only then writes the engines' settings. **The new `ozbox` program is installed

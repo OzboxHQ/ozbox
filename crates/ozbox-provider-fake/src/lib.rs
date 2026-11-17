@@ -1305,6 +1305,38 @@ mod tests {
         Ok(())
     }
 
+    /// B4-11: a throwaway box is destroyed with `--no-final-snapshot`. The name must still be typed (the delete is high
+    /// risk), the plan says no copy of /work is kept, and snapshots the box already has are named as kept AND billed, with
+    /// how to delete them first (once the box is gone they cannot be listed through it).
+    #[test]
+    fn destroying_without_a_final_snapshot_says_nothing_is_kept_and_what_stays_billed() -> TestResult
+    {
+        let dir = tempfile::tempdir()?;
+        let (p, n, _work, _copy) = made_box_with_a_backup_and_a_copy(dir.path())?;
+        let plan = p.plan(&Operation::Destroy {
+            name: n.clone(),
+            final_snapshot: false,
+            keep_old_system_disks: false,
+        })?;
+        assert!(plan.changes.iter().all(|c| c.kind != "snapshot.create"));
+        assert_eq!(
+            plan.max_risk(),
+            Some(ozbox_core::Risk::High),
+            "the name is still typed"
+        );
+        assert!(plan
+            .notes
+            .iter()
+            .any(|t| t.contains("keeps no copy of /work")));
+        assert!(
+            plan.notes.iter().any(|t| t.contains("billed until deleted")
+                && t.contains(&format!("ozbox backup delete {n} <id>"))),
+            "{:?}",
+            plan.notes
+        );
+        Ok(())
+    }
+
     /// The copy holds the old store's key and cannot be reached once the box is gone: destroying the box removes it (the plan
     /// says so) unless the person keeps it, and a backup of /work is kept as before.
     #[test]
