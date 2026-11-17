@@ -1,9 +1,10 @@
 //! `ozbox-hubd`: the hub daemon on `main` (ADR 0042). Run by systemd as the user `ozbox-hub`; see `ozbox_hubd::daemon`.
 //!
 //! ```text
-//! ozbox-hubd serve     --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME]
+//! ozbox-hubd serve     --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME] [--listen ADDR:PORT]
 //! ozbox-hubd self-test --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME]
-//! ozbox-hubd setup     BOX-ID      (as root: the units, folders and registrars file)
+//! ozbox-hubd setup     BOX-ID [ADDR:PORT]   (as root: the units, folders and registrars file; the address workers dial)
+//! ozbox-hubd ctl       --socket PATH OP [JSON]   (the owner's way to the daemon: roster, invite_plan, enrol_receive, ...)
 //! ozbox-hubd --version
 //! ```
 
@@ -12,6 +13,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use ozbox_hubd::daemon::{bind, now_ms, Config, Hubd};
+use ozbox_hubd::nethost::NetHost;
 use ozbox_hubd::ops::SocketKeyOps;
 
 /// The name of the socket unit systemd hands the supervisor socket over from.
@@ -23,6 +25,7 @@ struct Args {
     cmd: String,
     cfg: Config,
     secrets: PathBuf,
+    listen: Option<std::net::SocketAddr>,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -39,7 +42,19 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         name: get("--name").unwrap_or_else(|| "main".into()),
     };
     let secrets = PathBuf::from(need(get("--secrets-socket"), "--secrets-socket")?);
-    Ok(Args { cmd, cfg, secrets })
+    let listen = match get("--listen") {
+        Some(l) => Some(
+            l.parse::<std::net::SocketAddr>()
+                .map_err(|_| format!("--listen is an address and a port\n{USAGE}"))?,
+        ),
+        None => None,
+    };
+    Ok(Args {
+        cmd,
+        cfg,
+        secrets,
+        listen,
+    })
 }
 
 fn main() -> ExitCode {
@@ -50,13 +65,17 @@ fn main() -> ExitCode {
     }
     if argv.first().map(String::as_str) == Some("setup") {
         let box_id = argv.get(1).map(String::as_str).unwrap_or_default();
-        return match ozbox_hubd::setup::run(&ozbox_core::SystemRunner, box_id) {
+        let listen = argv.get(2).map(String::as_str);
+        return match ozbox_hubd::setup::run(&ozbox_core::SystemRunner, box_id, listen) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");
                 ExitCode::FAILURE
             }
         };
+    }
+    if argv.first().map(String::as_str) == Some("ctl") {
+        return ctl(&argv);
     }
     let a = match parse(&argv) {
         Ok(a) => a,
@@ -86,7 +105,7 @@ fn main() -> ExitCode {
             }
         }
         "serve" => {
-            let hub = match Hubd::open(a.cfg.clone(), ops) {
+            let hub = match Hubd::open(a.cfg.clone(), ops.clone()) {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("ozbox-hubd: {e}");
@@ -108,6 +127,33 @@ fn main() -> ExitCode {
                     }
                 },
             };
+            // the network end: workers dial out to this address; nothing is opened unless the unit was set up with one
+            let _host = match a.listen {
+                Some(addr) => match NetHost::start(hub.clone(), ops.clone(), addr) {
+                    Ok(h) => {
+                        let h = Arc::new(h);
+                        let pump = h.clone();
+                        std::thread::spawn(move || {
+                            let mut tick = 0u64;
+                            loop {
+                                pump.pump(now_ms());
+                                tick += 1;
+                                if tick % 20 == 0 {
+                                    let _ = pump.sync_roster();
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        });
+                        eprintln!("ozbox-hubd: workers dial {}", h.local_addr());
+                        Some(h)
+                    }
+                    Err(e) => {
+                        eprintln!("ozbox-hubd: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => None,
+            };
             let running = match hub.serve(listener, path) {
                 Ok(r) => r,
                 Err(e) => {
@@ -126,6 +172,46 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `ozbox-hubd ctl --socket PATH OP [JSON]`: one request to the daemon's socket (as the supervisor's group or root), the answer
+/// printed. The JSON is the request's other fields: `ctl --socket S invite_plan '{"spec":{...}}'`.
+fn ctl(argv: &[String]) -> ExitCode {
+    let at = argv.iter().position(|a| a == "--socket");
+    let (Some(sock), Some(op)) = (
+        at.and_then(|i| argv.get(i + 1)).cloned(),
+        at.and_then(|i| argv.get(i + 2))
+            .cloned()
+            .filter(|o| !o.starts_with('{')),
+    ) else {
+        eprintln!("usage: ozbox-hubd ctl --socket PATH OP [JSON]");
+        return ExitCode::from(2);
+    };
+    let mut req = match argv.last().filter(|l| l.starts_with('{')) {
+        Some(j) => match serde_json::from_str::<serde_json::Value>(j) {
+            Ok(v) if v.is_object() => v,
+            _ => {
+                eprintln!("the JSON is not an object");
+                return ExitCode::from(2);
+            }
+        },
+        None => serde_json::json!({}),
+    };
+    req["op"] = serde_json::Value::String(op);
+    match ozbox_hubd::daemon::ask(std::path::Path::new(&sock), &req) {
+        Ok(v) => {
+            println!("{v}");
+            if v["ok"].as_bool() == Some(true) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
         }
     }
 }

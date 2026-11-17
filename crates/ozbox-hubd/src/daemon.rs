@@ -568,6 +568,15 @@ impl Hubd {
                 },
                 Err(_) => fail("that request is not valid"),
             },
+            // a worker's request, carried to the hub by whoever the owner trusts to carry it: it proves itself (the one-use token, a
+            // registrar's attestation and the worker's own signature), so the carrier adds nothing and cannot forge any of it
+            "enrol_receive" => match serde_json::from_value::<EnrolRequest>(v["request"].clone()) {
+                Ok(req) => match self.receive_enrolment(&req, now) {
+                    Ok(()) => ok(json!({ "worker": req.worker, "pending": true })),
+                    Err(e) => refusal(e),
+                },
+                Err(_) => fail("that request is not valid"),
+            },
             "enrol_pending" => match self.state() {
                 Ok(st) => ok(json!({ "pending": st.enrol.pending.values().map(|p| json!({
                     "worker": p.worker,

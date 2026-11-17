@@ -16,10 +16,28 @@ etc="${OZBOX_ETC:-/etc}"
 unit_dir="${OZBOX_SYSTEMD_DIR:-$etc/systemd/system}"
 tmpfiles_dir="${OZBOX_TMPFILES_DIR:-$etc/tmpfiles.d}"
 box_id="${1:-}"
+listen="${2:-}"
 
 if ! [[ "$box_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-  echo 'usage: ozbox-hubd setup <box-id> (the box id of this hub: letters, digits, dot, dash, underscore)' >&2
+  echo 'usage: ozbox-hubd setup <box-id> [<listen-address:port>] (the box id of this hub: letters, digits, dot, dash, underscore; the address workers dial, loopback or private only)' >&2
   exit 2
+fi
+
+# The address the hub listens on for workers (ADR 0042 section 3): loopback, a private range, or the tailnet's. Never a wildcard and
+# never a public address: the daemon refuses one too, and the unit's own IP filter allows nothing else. Empty: no network at all.
+listen_args=""
+families="AF_UNIX"
+ip_filter=""
+if [ -n "$listen" ]; then
+  ip_re='^(127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})$'
+  if ! [[ "$listen" =~ $ip_re ]] || [ "${BASH_REMATCH[4]}" -lt 1 ] || [ "${BASH_REMATCH[4]}" -gt 65535 ]; then
+    echo 'the listen address must be a loopback, private or tailnet IPv4 address and a port (for example 10.0.1.5:7443); a wildcard or a public address is refused' >&2
+    exit 2
+  fi
+  listen_args=" --listen $listen"
+  families="AF_UNIX AF_INET"
+  # the unit may reach only loopback, the private ranges and the tailnet's: nothing public, in either direction
+  ip_filter=$'IPAddressDeny=any\nIPAddressAllow=127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10'
 fi
 
 if ! id ozbox-hub >/dev/null 2>&1; then
@@ -74,7 +92,7 @@ Type=simple
 User=ozbox-hub
 Group=ozbox-hub
 Sockets=ozbox-hubd.socket
-ExecStart=/usr/local/bin/ozbox-hubd serve --dir /var/lib/ozbox-hub --socket /run/ozbox-hub/supervisor/hubd.sock --secrets-socket /run/ozbox-secrets/hub/hub.sock --registrars /etc/ozbox/hub-registrars.json --box-id ${box_id}
+ExecStart=/usr/local/bin/ozbox-hubd serve --dir /var/lib/ozbox-hub --socket /run/ozbox-hub/supervisor/hubd.sock --secrets-socket /run/ozbox-secrets/hub/hub.sock --registrars /etc/ozbox/hub-registrars.json --box-id ${box_id}${listen_args}
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -83,8 +101,10 @@ ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/ozbox-hub
 CapabilityBoundingSet=
-# Unix sockets only: the daemon binds no port and opens no connection to a network (ADR 0005)
-RestrictAddressFamilies=AF_UNIX
+# Unix sockets only unless a listen address was given at setup (then one IPv4 listener on a loopback, private or tailnet address,
+# and an IP filter that denies everything else): workers dial out to the hub, the hub opens no connection of its own (ADR 0005)
+RestrictAddressFamilies=${families}
+${ip_filter}
 PrivateDevices=true
 LimitCORE=0
 ProtectKernelModules=true

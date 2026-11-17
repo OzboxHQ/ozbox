@@ -3207,6 +3207,94 @@ fn the_hub_daemon_runs_as_its_own_user_from_a_socket_root_binds_and_reaches_no_n
     Ok(())
 }
 
+/// ADR 0042 section 3: with a listen address the hub's unit may reach a network, and only a loopback, private or tailnet one. A
+/// wildcard, a public address, a port out of range or a name is refused before anything is written, and the unit's own filter denies
+/// every other address in both directions. Without one the unit stays Unix-socket only.
+#[test]
+fn the_hub_listens_only_on_a_loopback_private_or_tailnet_address_and_its_unit_reaches_nothing_else(
+) -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    for name in ["id", "systemd-tmpfiles", "systemctl"] {
+        let p = bin.join(name);
+        fs::write(&p, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = [
+        ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+        ("OZBOX_HUB_NO_SYSTEMCTL", "1"),
+        ("PATH", path.as_str()),
+    ];
+    for bad in [
+        "0.0.0.0:7443",
+        ":7443",
+        "8.8.8.8:7443",
+        "1.1.1.1:443",
+        "172.32.0.1:7443",
+        "172.15.0.1:7443",
+        "100.128.0.1:7443",
+        "100.63.0.1:7443",
+        "10.0.0.1:0",
+        "10.0.0.1:70000",
+        "10.0.0.1",
+        "example.com:7443",
+        "[::]:7443",
+        "10.0.0.1:7443;id",
+    ] {
+        let r = sh(&script("ozbox-hub-setup.sh"), &["main-1", bad], &env)?;
+        assert!(!r.status.success(), "{bad} was accepted");
+        assert!(
+            !etc.join("systemd/system/ozbox-hubd.service").exists(),
+            "{bad} wrote a unit"
+        );
+    }
+    for good in [
+        "127.0.0.1:7443",
+        "10.1.2.3:7443",
+        "192.168.0.9:1",
+        "172.16.5.5:65535",
+        "100.100.1.1:7443",
+    ] {
+        let r = sh(&script("ozbox-hub-setup.sh"), &["main-1", good], &env)?;
+        assert!(r.status.success(), "{good}: {}", text(&r));
+        let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+        assert!(unit.contains(&format!("--listen {good}")), "{unit}");
+        assert!(
+            unit.contains("RestrictAddressFamilies=AF_UNIX AF_INET\n"),
+            "{unit}"
+        );
+        assert!(unit.contains("IPAddressDeny=any\n"), "{unit}");
+        let allow = unit
+            .lines()
+            .find(|l| l.starts_with("IPAddressAllow="))
+            .unwrap_or_default();
+        // only the loopback, the private ranges and the tailnet's: no wildcard, no public range
+        assert_eq!(
+            allow,
+            "IPAddressAllow=127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
+        );
+        assert!(
+            !unit.contains("AF_INET6")
+                && !unit.contains("0.0.0.0/0")
+                && !unit.contains("--listen 0.")
+        );
+    }
+    // and with none, the unit is what it was: Unix sockets only, no IP rule at all
+    let r = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(r.status.success(), "{}", text(&r));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+    assert!(unit.contains("RestrictAddressFamilies=AF_UNIX\n"));
+    assert!(!unit.contains("--listen") && !unit.contains("IPAddress") && !unit.contains("AF_INET"));
+    Ok(())
+}
+
 #[test]
 fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mode() -> R {
     let d = tempfile::tempdir()?;
