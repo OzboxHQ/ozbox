@@ -1083,6 +1083,47 @@ mod hub_handoff {
     }
 
     #[test]
+    fn with_a_hub_a_worker_of_it_gets_the_task_over_the_hub_by_default_and_its_commit_joins_the_merge_queue(
+    ) {
+        let h = hub_rig();
+        let id = start(&h.r);
+        let c = cond(&id);
+        let mut ws = connect(&h, &c);
+        // no transport named: the box is one of the hub's workers, so the hub carries it
+        let v =
+            h.r.tools
+                .call(
+                    &c,
+                    "task_start",
+                    &json!({"title":"a","brief":"b","box":"worker-1"}),
+                    20,
+                )
+                .unwrap();
+        let fid = v["feature"].as_str().unwrap().to_string();
+        let book = h.r.tools.store.load().unwrap();
+        let f = book
+            .orchestration(&id)
+            .unwrap()
+            .feature(&fid)
+            .unwrap()
+            .clone();
+        assert_eq!(f.transport, ozbox_core::orch::Transport::Hub);
+        let (sk, ss) = (TestKey("k-w1".into()), TestSealer { my_fp: W_FP.into() });
+        let w = worker_end(&h, &sk, &ss);
+        w.poll(&mut ws, 21);
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        w.finish(&mut ws, 23, &id, &fid, sha, "built");
+        h.r.tools.call(&c, "task_status", &json!({}), 24).unwrap();
+        let book = h.r.tools.store.load().unwrap();
+        let o = book.orchestration(&id).unwrap();
+        let f = o.feature(&fid).unwrap();
+        assert_eq!(f.state, ozbox_core::orch::FeatureState::InQueue);
+        assert_eq!(f.commit.as_deref(), Some(sha));
+        assert_eq!(o.merge_queue.len(), 1);
+        assert!(audit_actions(&h.r).contains(&"orchestration.hub_result".to_string()));
+    }
+
+    #[test]
     fn the_hub_route_is_refused_by_name_on_a_box_with_no_hub() {
         let r = rig(false);
         r.ops.boxes.lock().unwrap().push("worker-1".into());
@@ -1332,7 +1373,7 @@ mod hub_handoff {
             .call(
                 &cond(&id),
                 "task_start",
-                &json!({"title":"a","brief":"b","box":"worker-1"}),
+                &json!({"title":"a","brief":"b","box":"worker-1","transport":"ssh"}),
                 5,
             )
             .unwrap();

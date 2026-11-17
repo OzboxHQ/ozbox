@@ -174,7 +174,7 @@ pub fn tool_defs(role: &Role) -> Vec<Value> {
             "box_create" => def("box_create", "Make a new worker box from scratch, when the policy allows new boxes.", vec![orch_prop(), ("name", prop("string", "The new box's name.")), ("size", prop("string", "XS, S, M, L, XL, XXL, GPU-S or GPU-L.")), ("dry_run", prop("boolean", "Show the plan and change nothing."))], &["name"]),
             "box_pause" => def("box_pause", "Pause one of this orchestration's worker boxes. Never the conductor's box.", vec![orch_prop(), ("box", prop("string", "The worker box.")), ("dry_run", prop("boolean", "Show the plan and change nothing."))], &["box"]),
             "orchestration_start" => def("orchestration_start", "Start an orchestration: a goal, the conductor box and the limits. Limits can only be tighter than the person's settings.", vec![("goal", prop("string", "What the whole job is.")), ("conductor_box", prop("string", "The box holding the main branch.")), ("rules", prop("string", "The text of an ozbox.orchestration.md file, if there is one.")), ("max_workers", prop("integer", "Worker boxes at once.")), ("max_sub_agents", prop("integer", "Sub-agents per worker.")), ("max_spend_usd", prop("number", "One spend cap for the whole orchestration.")), ("start_conductor", prop("boolean", "Also start a conductor run on that box."))], &["goal", "conductor_box"]),
-            "task_start" => def("task_start", "Give a feature to a worker box: its brief, the files it owns and the contracts it builds against. Set dry_run to check it first.", vec![orch_prop(), ("title", prop("string", "A short name for the feature.")), ("brief", prop("string", "What to build.")), ("box", prop("string", "The worker box (one made with box_clone).")), ("claims", json!({"type":"array","items":{"type":"string"},"description":"Files, directories or globs the worker owns."})), ("contracts", json!({"type":"array","items":{"type":"string"},"description":"Contracts to build against."})), ("engine", prop("string", "The agent engine; default the orchestration's.")), ("model", prop("string", "provider/model for this worker.")), ("sub_agents", prop("integer", "Sub-agents the worker may use at once.")), ("max_spend_usd", prop("number", "A cap for this worker.")), ("max_minutes", prop("integer", "A time cap for this worker.")), ("branch", prop("string", "The feature branch.")), ("repo", prop("string", "The repository under /work/repos.")), ("keep", prop("boolean", "Keep the worker box after the merge.")), ("transport", prop("string", "ssh (default) or hub. Hub hands the task over the worker channel and is refused on a box that has none.")), ("dry_run", prop("boolean", "Check and show, change nothing."))], &["title", "brief"]),
+            "task_start" => def("task_start", "Give a feature to a worker box: its brief, the files it owns and the contracts it builds against. Set dry_run to check it first.", vec![orch_prop(), ("title", prop("string", "A short name for the feature.")), ("brief", prop("string", "What to build.")), ("box", prop("string", "The worker box (one made with box_clone).")), ("claims", json!({"type":"array","items":{"type":"string"},"description":"Files, directories or globs the worker owns."})), ("contracts", json!({"type":"array","items":{"type":"string"},"description":"Contracts to build against."})), ("engine", prop("string", "The agent engine; default the orchestration's.")), ("model", prop("string", "provider/model for this worker.")), ("sub_agents", prop("integer", "Sub-agents the worker may use at once.")), ("max_spend_usd", prop("number", "A cap for this worker.")), ("max_minutes", prop("integer", "A time cap for this worker.")), ("branch", prop("string", "The feature branch.")), ("repo", prop("string", "The repository under /work/repos.")), ("keep", prop("boolean", "Keep the worker box after the merge.")), ("transport", prop("string", "hub or ssh. Hub hands the task over the worker channel; it is the default when this box has one and the box is one of its workers, and it is refused on a box that has none.")), ("dry_run", prop("boolean", "Check and show, change nothing."))], &["title", "brief"]),
             "task_status" => def("task_status", "See a feature (or all of them), the open questions and the conductor's new messages.", vec![orch_prop(), ("feature", prop("string", "A feature id; leave out for all.")), ("since", prop("integer", "Only messages after this number."))], &[]),
             "task_message" => def("task_message", "Send a worker an instruction, or answer its question. A question marked for the person cannot be answered here.", vec![orch_prop(), ("feature", prop("string", "The feature id.")), ("text", prop("string", "The message.")), ("answer_to", prop("integer", "The question's number, to answer it.")), ("escalate", prop("boolean", "Pass the question up to the person instead of answering."))], &["text"]),
             "task_stop" => def("task_stop", "Stop or pause a feature's worker. Its work is saved to its branch first.", vec![orch_prop(), ("feature", prop("string", "The feature id.")), ("mode", prop("string", "stop or pause."))], &["feature"]),
@@ -746,7 +746,12 @@ impl Tools {
             return Err(ToolError::Refused("a worker cannot start features".into()));
         }
         let dry = flag(a, "dry_run");
-        let transport = self::s(a, "transport").unwrap_or("ssh");
+        // over the hub by default when this box has one and the named box is one of its workers; the laptop route otherwise
+        let default_transport = match (&self.hub, self::s(a, "box")) {
+            (Some(h), Some(b)) if h.roster.contains_key(b) => "hub",
+            _ => "ssh",
+        };
+        let transport = self::s(a, "transport").unwrap_or(default_transport);
         if !matches!(transport, "ssh" | "hub") {
             return Err(ToolError::Invalid("transport is ssh or hub".into()));
         }
@@ -964,9 +969,11 @@ impl Tools {
         // what the workers reported over the hub: taken in first, and what that turned up (a rejected message, a quarantine) is recorded
         let reports = match &self.hub {
             Some(h) => {
+                let mut snapshot = None;
                 let map = h
                     .with(now, |hub, st| {
                         hub.poll(st, now);
+                        snapshot = Some(st.clone());
                         let mut m: BTreeMap<(String, String), Value> = BTreeMap::new();
                         for (worker, p) in &st.peers {
                             for (o, f) in &p.assigned {
@@ -991,6 +998,14 @@ impl Tools {
                     actor: actor_of(s),
                 })
                 .map_err(store_err)?;
+                // a worker's finished commit joins the merge queue here (ADR 0020 section 6 over the channel)
+                if let Some(st) = snapshot {
+                    self.store
+                        .update(|b| {
+                            ozbox_core::hub::merge::admit_results(b, &st, now);
+                        })
+                        .map_err(store_err)?;
+                }
                 map
             }
             None => BTreeMap::new(),
