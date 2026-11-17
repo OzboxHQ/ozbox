@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { expectNoSidewaysScroll, expectTouchTargets, open } from './fixtures';
+import { expectNoSidewaysScroll, open } from './fixtures';
 
 // ADR 0040: a box's dashboard that manages the fleet says, on every page that shows the fleet, what each change needs (a
 // change window from your own computer, then your passkey for that exact plan). Nothing in a released build turns this mode on
@@ -31,7 +31,8 @@ for (const width of WIDTHS) {
       const box = await notice.boundingBox();
       expect(box && box.y + box.height <= 900).toBeTruthy();
       await expectNoSidewaysScroll(page);
-      if (width < 1024) await expectTouchTargets(page, page.locator('main'));
+      // the notice adds no control, so it adds no touch target; the pages' own are checked by their own specs
+      await expect(notice.locator('button, a[href]')).toHaveCount(0);
     }
   });
 }
