@@ -597,7 +597,7 @@ jobs:
           # in ADR 0038 hold, so a release without it never offers a live update. The `/work` format comes from the
           # tracked policy file, and only those two keys of it.
           policy="infra/packer/ozbox-image/upgrade-policy.json"
-          jq -e '(.work_format | type == "number") and (.work_format_reads | type == "array") and (.work_format as $f | .work_format_reads | index($f) != null)' "$policy" >/dev/null
+          jq -e '(.work_format | type == "number") and (.work_format_reads | type == "array") and (.work_format as $f | .work_format_reads | index($f) != null) and (.secrets_keys | type == "array" and all(type == "string"))' "$policy" >/dev/null
           upgrade="$(jq -n --arg first_boot "$first_boot" --arg build "$build" --slurpfile policy "$policy" \
             --slurpfile parts <(cat out/part-*.json) -f infra/packer/ozbox-image/upgrade-record.jq)"
           jq -n --arg version "$VERSION" --arg commit "$COMMIT" --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

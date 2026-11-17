@@ -43,6 +43,10 @@ pub struct UpgradeBlock {
     /// The `/work` formats this release reads (it must include its own).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_format_reads: Vec<u64>,
+    /// The kinds of key this release's secrets service opens a store with by itself (`file`, `kms`, ...), when the manifest
+    /// says (ADR 0029 Amendment 17). Empty for a release that does not say: the upgrade plan then goes by its version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets_keys: Vec<String>,
 }
 
 /// The `upgrade` record of one signed manifest.
@@ -128,11 +132,36 @@ pub fn upgrade_record(manifest_json: &str, arch: Option<&str>) -> UpgradeRecord 
     } else if !reads.is_empty() {
         return UpgradeRecord::Malformed("work_format_reads is set without a work_format".into());
     }
+    let mut secrets_keys = Vec::new();
+    match u.get("secrets_keys") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Array(a)) => {
+            for x in a {
+                match x.as_str() {
+                    Some(k)
+                        if !k.is_empty()
+                            && k.len() <= 16
+                            && k.bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) =>
+                    {
+                        secrets_keys.push(k.to_string())
+                    }
+                    _ => {
+                        return UpgradeRecord::Malformed(
+                            "secrets_keys holds something that is not a key kind".into(),
+                        )
+                    }
+                }
+            }
+        }
+        Some(_) => return UpgradeRecord::Malformed("secrets_keys is not a list".into()),
+    }
     UpgradeRecord::Present(UpgradeBlock {
         disk_generation: gen,
         live_from,
         work_format,
         work_format_reads: reads,
+        secrets_keys,
     })
 }
 
@@ -461,6 +490,7 @@ mod tests {
             live_from: live_from.map(str::to_string),
             work_format: Some(1),
             work_format_reads: vec![1],
+            secrets_keys: vec![],
         })
     }
 
@@ -480,6 +510,36 @@ mod tests {
                 record: Some(tgt.1),
             },
         )
+    }
+
+    /// ADR 0029 Amendment 17: the manifest may say which store keys the release's secrets service opens by itself.
+    #[test]
+    fn the_record_reads_the_secrets_key_kinds_and_refuses_anything_else() {
+        let gen = h('a');
+        let m = |extra: &str| {
+            format!(
+                r#"{{"upgrade": {{"disk_generation": "{gen}", "work_format": 1, "work_format_reads": [1]{extra}}}}}"#
+            )
+        };
+        match upgrade_record(&m(r#", "secrets_keys": ["file", "kms"]"#), None) {
+            UpgradeRecord::Present(b) => assert_eq!(b.secrets_keys, vec!["file", "kms"]),
+            o => panic!("{o:?}"),
+        }
+        match upgrade_record(&m(""), None) {
+            UpgradeRecord::Present(b) => assert!(b.secrets_keys.is_empty()),
+            o => panic!("{o:?}"),
+        }
+        for bad in [
+            r#", "secrets_keys": "kms""#,
+            r#", "secrets_keys": [1]"#,
+            r#", "secrets_keys": ["KMS"]"#,
+            r#", "secrets_keys": [""]"#,
+        ] {
+            assert!(
+                matches!(upgrade_record(&m(bad), None), UpgradeRecord::Malformed(_)),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

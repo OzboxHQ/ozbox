@@ -1,4 +1,5 @@
 {
   "work_format": 1,
-  "work_format_reads": [1]
+  "work_format_reads": [1],
+  "secrets_keys": ["file", "kms"]
 }
