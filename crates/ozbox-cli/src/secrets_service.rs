@@ -143,6 +143,9 @@ pub const BOX_REACH: &[ReachRow] = &[
     row(Exact("vapid-private-key"), BoxReach::None, true), // the key notifications to a person's devices are signed with
     row(Prefix("push-"), BoxReach::None, true), // a person's device subscriptions: whoever holds them can send to that device
     row(Prefix("subscription-"), BoxReach::None, true), // a subscription sign-in and its opt-in (ADR 0055): the dashboard's own user only
+    // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's own, never this store's
+    row(Prefix("tasks-sign-"), BoxReach::None, false),
+    row(Prefix("tasks-seal-"), BoxReach::None, false),
     // the store's own keys
     row(Exact("store-kek"), BoxReach::None, false), // the store's key-encryption key
     row(Exact(crate::tokenmac::KEYS_SECRET), BoxReach::None, false), // the keys sessions, setup codes and tokens are tagged with
