@@ -7,7 +7,8 @@
 #     may do what. Only the owner's own sign-in on their computer may assume it (a change window, one plan at a time).
 #   - obx-fleet-assume-read: the one permission main's role gets, attached to obx-main.
 #
-# The documents live in infra/aws/fleet-*.json, the one source the program and its tests read too. The tokens are filled here
+# The documents live beside this file (fleet-*.json, so the program carries them with the module), the one source the
+# program and its tests read too. The tokens are filled here
 # with the same rule `ozbox_provider_aws::fleet_policy::render` uses (a list replaces its quoted token), and a Rust test holds
 # the two to the same tokens. Invariants are in tests/invariants.tftest.hcl. Nothing here opens a port or makes a key.
 
@@ -15,7 +16,7 @@ data "aws_caller_identity" "this" {}
 
 locals {
   account = data.aws_caller_identity.this.account_id
-  docs    = "${path.module}/../../../aws"
+  docs    = path.module
 
   main_role_arn        = "arn:aws:iam::${local.account}:role/obx/obx-main"
   window_principal_arn = "arn:aws:iam::${local.account}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${var.window_permission_set}_*"

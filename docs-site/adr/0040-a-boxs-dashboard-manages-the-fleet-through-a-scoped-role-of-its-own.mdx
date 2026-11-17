@@ -755,7 +755,8 @@ and nothing in a released program turns it on: a box's dashboard still says "Fle
 
 **What is built.**
 
-1. **The role documents** (§3), in `infra/aws/`: `fleet-read-policy.json`, `fleet-cost-policy.json` (attached only when asked:
+1. **The role documents** (§3), beside the setup module in `infra/tofu/modules/aws-fleet-manager/` (so the program carries
+   them with the module): `fleet-read-policy.json`, `fleet-cost-policy.json` (attached only when asked:
    decision 4), `fleet-change-policy.json` (the allows) and `fleet-change-guard-policy.json` (the explicit denies; one document
    would pass the managed-policy size), and the two trusts, `fleet-read-trust-policy.json` (only `obx-main`) and
    `fleet-change-trust-policy.json` (only the owner's Identity Center window permission set, with a session named `plan-*` or

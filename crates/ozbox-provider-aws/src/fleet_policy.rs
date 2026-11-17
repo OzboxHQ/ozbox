@@ -1,4 +1,4 @@
-//! The fleet roles' IAM documents (ADR 0040 §3), from their one source (`infra/aws/fleet-*.json`), filled in for an account.
+//! The fleet roles' IAM documents (ADR 0040 §3), from their one source (`infra/tofu/modules/aws-fleet-manager/fleet-*.json`), filled in for an account.
 //!
 //! Two roles, both in the reserved namespace the daily operator cannot touch (`role/obx/`, names starting `obx-`):
 //!
@@ -45,7 +45,7 @@ impl Doc {
         Doc::MainAssume,
     ];
 
-    /// The file under `infra/aws/`.
+    /// The file in `infra/tofu/modules/aws-fleet-manager/`.
     pub fn file(self) -> &'static str {
         match self {
             Doc::Read => "fleet-read-policy.json",
@@ -60,13 +60,27 @@ impl Doc {
 
     pub fn template(self) -> &'static str {
         match self {
-            Doc::Read => include_str!("../../../infra/aws/fleet-read-policy.json"),
-            Doc::Cost => include_str!("../../../infra/aws/fleet-cost-policy.json"),
-            Doc::Change => include_str!("../../../infra/aws/fleet-change-policy.json"),
-            Doc::ChangeGuard => include_str!("../../../infra/aws/fleet-change-guard-policy.json"),
-            Doc::ReadTrust => include_str!("../../../infra/aws/fleet-read-trust-policy.json"),
-            Doc::ChangeTrust => include_str!("../../../infra/aws/fleet-change-trust-policy.json"),
-            Doc::MainAssume => include_str!("../../../infra/aws/fleet-main-assume-policy.json"),
+            Doc::Read => {
+                include_str!("../../../infra/tofu/modules/aws-fleet-manager/fleet-read-policy.json")
+            }
+            Doc::Cost => {
+                include_str!("../../../infra/tofu/modules/aws-fleet-manager/fleet-cost-policy.json")
+            }
+            Doc::Change => include_str!(
+                "../../../infra/tofu/modules/aws-fleet-manager/fleet-change-policy.json"
+            ),
+            Doc::ChangeGuard => include_str!(
+                "../../../infra/tofu/modules/aws-fleet-manager/fleet-change-guard-policy.json"
+            ),
+            Doc::ReadTrust => include_str!(
+                "../../../infra/tofu/modules/aws-fleet-manager/fleet-read-trust-policy.json"
+            ),
+            Doc::ChangeTrust => include_str!(
+                "../../../infra/tofu/modules/aws-fleet-manager/fleet-change-trust-policy.json"
+            ),
+            Doc::MainAssume => include_str!(
+                "../../../infra/tofu/modules/aws-fleet-manager/fleet-main-assume-policy.json"
+            ),
         }
     }
 }

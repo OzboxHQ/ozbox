@@ -369,7 +369,7 @@ machine types and images), assumed only by your own sign-in on your computer, th
 by `window_permission_set`, one plan at a time. `main`'s role is never in the change role's trust. The change role is denied
 anything tagged `ozbox-fleet-manager` (the box module's `fleet_manager = true` puts that tag on `main` and its disks) or carrying
 `main`'s box name (`fleet_manager_box`, which also covers `main`'s snapshots), IAM, direct KMS, secrets, shells, copying data out
-and swapping a role or network. A launch's network interface, new or existing, must be in one of `subnet_ids`. The documents are `aws/fleet-*.json`; the module and the
+and swapping a role or network. A launch's network interface, new or existing, must be in one of `subnet_ids`. The documents are the module's own `fleet-*.json` (the program carries them with it); the module and the
 program fill them the same way, and the tests evaluate the filled documents. An administrator applies the module once; the
 operator role cannot. **Nothing uses it yet**: the part on the box that would hold the credentials, the window command on your
 computer, the pool of box roles and the managed state bucket are not built (see the ADR's Amendment 1).
