@@ -181,11 +181,7 @@ pub fn receive(
             };
         }
     }
-    let fence = {
-        let mut b = [0u8; 8];
-        let _ = getrandom::getrandom(&mut b);
-        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
-    };
+    let fence = ozbox_core::fence::random_fence();
     let prompt = hooks::render(
         &trigger.template,
         verified.event.as_deref(),

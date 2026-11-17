@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
+  ## Your computer and a box can pass tasks instead of notes
+
+  Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box, and it leaves Preview when that proof passes.
+
+  - **A box runs the channel as a user of its own**, so an agent on the box can ask and answer through it but cannot read its keys. On your computer the channel's private keys are kept in your keychain, never in a file. A peer's words are always shown as untrusted (`--for-model` fences them for a model), a cancel is a request the other side decides, and the first contact finishes in one `ozbox tasks sync`.
+  - **`ozbox tasks`** sets up the two sides, sends a task, shows your inbox, answers, cancels, and explains why a task is stuck (`ozbox tasks why`).
+  - **A message can ask and never grant.** Saying "approved" in a task changes nothing, and text that looks like a key is refused on both sides and never stored.
+  - **Acts that need an approval are refused by name** until the passkey approval path exists, and a Production act is refused outright.
+  - A closed laptop is a normal state: the task waits and is delivered when you next sync.
+  - See [A task channel](/use-cases/task-channel) and [ADR 0044](/adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="Main as the hub (Preview)">
   ## `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
 

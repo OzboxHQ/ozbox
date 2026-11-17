@@ -351,6 +351,7 @@ pub fn t(key: &str, args: &[(&str, &str)]) -> String {
         .chain(crate::messages_secrets::EN.iter())
         .chain(crate::messages_orch::EN.iter())
         .chain(crate::messages_agent::EN.iter())
+        .chain(crate::messages_tasks::EN.iter())
         .chain(crate::messages_chat::EN.iter())
         .chain(crate::messages_hardening::EN.iter())
         .chain(crate::messages_infra::EN.iter())

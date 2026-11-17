@@ -10,6 +10,7 @@
 pub mod adopt;
 pub mod agent_engine;
 pub mod agent_line;
+pub mod agent_mesh;
 pub mod approval;
 pub mod approval_subject;
 pub mod approval_verify;
@@ -24,6 +25,7 @@ pub mod daemon_scope;
 pub mod engine;
 pub mod error;
 pub mod exec;
+pub mod fence;
 pub mod filelock;
 pub mod hub;
 pub mod infra;
