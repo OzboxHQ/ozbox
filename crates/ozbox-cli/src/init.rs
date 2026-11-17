@@ -5063,6 +5063,82 @@ mod tests {
         assert!(!main.contains("AmazonSSM"));
     }
 
+    fn fleet_opts() -> FleetOpts {
+        FleetOpts {
+            regions: vec!["us-east-1".into()],
+            machine_types: vec!["m7i.xlarge".into()],
+            image_ids: vec!["ami-0123456789abcdef0".into()],
+            subnet_ids: vec!["subnet-0123456789abcdef0".into()],
+            window_permission_set: "OzboxFleetWindow".into(),
+            fleet_manager_box: "main".into(),
+            max_volume_gb: 500,
+            max_iops: 6000,
+            max_throughput: 500,
+            read_costs: false,
+        }
+    }
+
+    #[test]
+    fn the_fleet_manager_roles_are_planned_once_for_the_account_and_nothing_is_applied() {
+        let e = key_env();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-fleet-manager")).unwrap();
+        queue_prologue(&e);
+        // no adoptable resource: no state list is asked for
+        e.runner.reply(out(2, "Plan: 8 to add, 0 to change, 0 to destroy.\n  # module.fleet.aws_iam_role.change will be created\n", ""));
+        let init = e.init();
+        let p = init
+            .plan_fleet_manager(&target(), "123456789012", &fleet_opts())
+            .unwrap();
+        assert_eq!(p.step, "fleet_manager");
+        assert!(!p.noop, "{p:?}");
+        assert!(p.summary.contains("obx-fleet-change"), "{}", p.summary);
+        let calls = e.runner.calls();
+        assert!(calls.iter().any(|c| c
+            .args
+            .iter()
+            .any(|a| a == "-backend-config=key=ozbox/fleet-manager/account.tfstate")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "apply")));
+        let main =
+            std::fs::read_to_string(e.dir.path().join("work/fleet-manager/us-east-1/main.tf"))
+                .unwrap();
+        assert!(main.contains("window_permission_set = \"OzboxFleetWindow\""));
+        assert!(main.contains("fleet_manager_box     = \"main\""));
+        assert!(main.contains("[\"m7i.xlarge\"]"));
+    }
+
+    #[test]
+    fn a_fleet_value_that_could_hide_hcl_or_a_policy_placeholder_is_refused_before_anything_is_written(
+    ) {
+        let e = key_env();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-fleet-manager")).unwrap();
+        for bad in [
+            FleetOpts {
+                window_permission_set: "X\"\n}".into(),
+                ..fleet_opts()
+            },
+            FleetOpts {
+                machine_types: vec!["m7i.xlarge\"]".into()],
+                ..fleet_opts()
+            },
+            FleetOpts {
+                image_ids: vec!["${x}".into()],
+                ..fleet_opts()
+            },
+            FleetOpts {
+                fleet_manager_box: "main\"".into(),
+                ..fleet_opts()
+            },
+        ] {
+            let init = e.init();
+            let err = init
+                .plan_fleet_manager(&target(), "123456789012", &bad)
+                .unwrap_err();
+            assert_eq!(err.code, "fleet_bad_value", "{bad:?}");
+        }
+        assert!(!e.dir.path().join("work/fleet-manager").exists());
+        assert!(e.runner.calls().is_empty());
+    }
+
     // ----- adopting what is already there (ADR 0053) -----
 
     const KEY_ID: &str = "1234abcd-12ab-34cd-56ef-1234567890ab";
