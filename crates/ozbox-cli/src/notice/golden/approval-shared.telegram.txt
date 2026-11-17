@@ -10,7 +10,7 @@
       [
         {
           "text": "Open in dashboard",
-          "url": "https://dash.example.com/approvals/R1a2b3c4"
+          "url": "https://dash.example.com/approvals?request=R1a2b3c4"
         }
       ]
     ]

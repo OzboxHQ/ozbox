@@ -8,8 +8,8 @@
 //! the person's role may decide it, and that the assertion was not used before. A viewer, a person who was taken off the
 //! list, and a dashboard with no sign-in decide nothing.
 //!
-//! **Chat never decides.** Nothing in this file is reachable from a chat handler, and a chat message only carries a link to
-//! `/approvals?request=<id>` (see `notify`).
+//! **Chat never decides.** Nothing in this file is reachable from a chat handler, and a chat message only carries a one-time
+//! link that opens `/approvals/<id>` (see `notice_reach`).
 
 use serde_json::{json, Value};
 
@@ -227,6 +227,11 @@ impl App {
         match out {
             Ok(v) => {
                 self.log_activity("approve_request", "", None, "ok");
+                // every link a message carried to this request now says it was decided
+                self.retire_pointers(&format!(
+                    "/approvals?request={}",
+                    crate::notice::path_id(id)
+                ));
                 Resp::json(
                     200,
                     &json!({"request": card(&with_viewer_can(&v["request"]))}),
@@ -258,6 +263,11 @@ impl App {
         match out {
             Ok(v) => {
                 self.log_activity("deny_request", "", None, "ok");
+                // every link a message carried to this request now says it was decided
+                self.retire_pointers(&format!(
+                    "/approvals?request={}",
+                    crate::notice::path_id(id)
+                ));
                 Resp::json(
                     200,
                     &json!({"request": card(&with_viewer_can(&v["request"]))}),
@@ -363,15 +373,15 @@ fn scope_words(scope: &str) -> String {
 
 impl App {
     /// A message for each request that is waiting for a person and has not been told yet: its details, who asked (as the
-    /// service sent it) and a link to the dashboard's approval page. **Never a decision**: the alert pipeline sends text to
-    /// Telegram, Slack, email and webhooks and has no button, no callback and no way to reach `areq_decide`; a test pins
+    /// service sent it) and a link to exactly that request in the dashboard, made for each person it reaches when it is sent
+    /// (`notice_reach`). **Never a decision**: the alert pipeline sends to Telegram, Slack, email and webhooks with at most a
+    /// URL button that only opens the dashboard, no callback and no way to reach `areq_decide`; a test pins
     /// that no chat handler can reach a request's state at all. Fields come from the card the service derived; the filer's
     /// `reason` is left out of a message (it is the box's word, not ours), and no value is ever in a card.
     pub(super) fn pending_request_alerts(&mut self, now_ms: u64) -> Vec<Alert> {
         let Ok(v) = self.areq("areq_list", json!({"role": "viewer"})) else {
             return Vec::new();
         };
-        let base = self.public_base();
         let mut out = Vec::new();
         let pending: Vec<&Value> = v["requests"]
             .as_array()
@@ -396,37 +406,59 @@ impl App {
             }
             let scope = r["scope"].as_str().unwrap_or("change");
             let mut lines = String::new();
+            let mut details = Vec::new();
             for f in r["display"].as_array().into_iter().flatten().take(6) {
-                lines.push_str(&format!(
-                    "{}: {}\n",
+                let (label, value) = (
                     plain(f["label"].as_str().unwrap_or("")),
-                    plain(f["value"].as_str().unwrap_or(""))
-                ));
+                    plain(f["value"].as_str().unwrap_or("")),
+                );
+                lines.push_str(&format!("{label}: {value}\n"));
+                details.push(crate::notice::Fact { label, value });
             }
             let q = &r["requester"];
-            let who = format!(
-                "{}{}",
-                plain(q["kind"].as_str().unwrap_or("unknown")),
-                q["uid"]
-                    .as_u64()
-                    .map_or(String::new(), |u| format!(" (uid {u})"))
+            let kind = plain(q["kind"].as_str().unwrap_or("unknown"));
+            let who = match q["uid"].as_u64() {
+                Some(u) => t(
+                    "notice.requester_uid",
+                    &[("kind", &kind), ("uid", &u.to_string())],
+                ),
+                None => kind,
+            };
+            let what = scope_words(scope);
+            let title = t("approval.notify_title", &[("what", &what)]);
+            // the record keeps the words without a link; each recipient's copy carries its own (see `notice_reach`)
+            let body = t(
+                "approval.notify_body",
+                &[
+                    ("lines", &lines),
+                    ("who", &who),
+                    ("link", &t("approval.notify_no_link", &[])),
+                ],
             );
-            let link = base.as_deref().map_or_else(
-                || t("approval.notify_no_link", &[]),
-                |b| format!("{}/approvals?request={id}", b.trim_end_matches('/')),
+            let mut n = crate::notice::Notice::new(
+                crate::notice::NoticeKind::ApprovalRequest,
+                t("notice.approval_title", &[("what", &what)]),
+                t("notice.approval_summary", &[]),
+            );
+            n.details = details;
+            n.asked_by = Some(who);
+            n.expires_ms = r["expires_at_ms"].as_u64().map(|e| e.max(now_ms));
+            n.created_ms = now_ms;
+            n.reference = Some(crate::notice::reference(id));
+            n.only_tells = true;
+            let n = n.opens(
+                format!("/approvals?request={}", crate::notice::path_id(id)),
+                t("notice.place_approvals", &[]),
             );
             out.push(Alert {
-                notice: None,
+                notice: Some(n),
                 reach: Default::default(),
                 key: format!("areq:{id}"),
                 kind: "approval_request".into(),
                 severity: Severity::Normal,
                 box_name: None,
-                title: t("approval.notify_title", &[("what", &scope_words(scope))]),
-                body: t(
-                    "approval.notify_body",
-                    &[("lines", &lines), ("who", &who), ("link", &link)],
-                ),
+                title,
+                body,
                 ts_ms: now_ms,
             });
         }
@@ -664,6 +696,117 @@ mod tests {
         );
         a.notified_requests.insert("R1".to_string());
         assert!(a.pending_request_alerts(6_000).is_empty());
+    }
+
+    /// The end-to-end path of a message's link: the alert is planned for two people's Telegram chats, each copy carries a
+    /// link made for its person, following it against the dashboard's own route lands on exactly that request for that
+    /// person only, opening it again is free, and once the request is decided the link says it was used.
+    #[test]
+    fn a_rendered_message_link_lands_on_its_request_for_its_person_only_and_then_reads_as_used() {
+        use crate::channels::routing::{Planned, Target};
+        use crate::notice::render::{Renderer, Telegram};
+        let store = Canned::new(vec![
+            (
+                "areq_list",
+                Ok(json!({"requests": [pending("R1")], "epoch": "e"})),
+            ),
+            ("areq_get", Ok(json!({"request": pending("R1")}))),
+        ]);
+        let mut a = app(store);
+        a.access.public_url = Some("https://dash.example.com/".into());
+        for (id, person) in [(7, "owner"), (8, "bob")] {
+            a.state.telegram.chats.push(crate::state::TelegramChat {
+                id,
+                name: person.into(),
+                person: Some(person.into()),
+            });
+        }
+        // the route reads the real clock, so the links are made on it
+        let now = super::super::unix_ms();
+        let mut alert = a.pending_request_alerts(now).remove(0);
+        let planned: Vec<(Planned, u32)> = vec![(
+            Planned {
+                person: None,
+                channel: "telegram".into(),
+                target: Target::Fleet("telegram".into()),
+            },
+            1,
+        )];
+        a.reach_alert(&mut alert, &planned, now);
+        let link = |p: &str| {
+            let v = Telegram::render(&alert.notice_for(Some(p)));
+            assert!(
+                v["text"].as_str().unwrap().contains("dash.example.com"),
+                "{v}"
+            );
+            v["reply_markup"]["inline_keyboard"][0][0]["url"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (mine, bobs) = (link("owner"), link("bob"));
+        assert!(
+            mine.starts_with("https://dash.example.com/go#") && mine != bobs,
+            "{mine}"
+        );
+        let token = |u: &str| u.split('#').nth(1).unwrap().to_string();
+        let open = |a: &mut App, tok: &str| {
+            a.handle(&req(
+                "POST",
+                "/v1/chat/links/open",
+                &json!({ "token": tok }).to_string(),
+            ))
+        };
+        // this dashboard's person (no sign-in here: "owner") lands on exactly R1
+        let r = open(&mut a, &token(&mine));
+        assert_eq!(r.status, 200);
+        let path = body(&r)["path"].as_str().unwrap().to_string();
+        assert_eq!(path, "/approvals?request=R1");
+        let (_, q) = path.split_once('?').unwrap();
+        let listed = a.handle(&req("GET", "/v1/approvals/requests", ""));
+        assert!(q == "request=R1" && body(&listed)["requests"][0]["id"] == "R1");
+        // opening is free (the in-app browser, then the real one)
+        assert_eq!(open(&mut a, &token(&mine)).status, 200);
+        // another person's link does nothing for this person, and says nothing more than a made-up one
+        let r = open(&mut a, &token(&bobs));
+        assert_eq!(r.status, 404);
+        assert_eq!(open(&mut a, &"0".repeat(48)).body, r.body);
+        // decided: every link to R1 now reads as used, to its own person
+        a.retire_pointers(&format!(
+            "/approvals?request={}",
+            crate::notice::path_id("R1")
+        ));
+        let r = open(&mut a, &token(&mine));
+        assert_eq!(r.status, 410);
+        assert!(String::from_utf8_lossy(&r.body).contains("link_used"));
+        assert_eq!(open(&mut a, &token(&bobs)).status, 404);
+        // nothing of the token is in what is kept
+        assert!(!serde_json::to_string(&a.state)
+            .unwrap()
+            .contains(&token(&mine)));
+    }
+
+    #[test]
+    fn with_no_public_address_the_message_says_where_to_go_instead_of_a_link() {
+        let store = Canned::new(vec![(
+            "areq_list",
+            Ok(json!({"requests": [pending("R1")], "epoch": "e"})),
+        )]);
+        let mut a = app(store);
+        let mut alert = a.pending_request_alerts(5_000).remove(0);
+        a.reach_alert(&mut alert, &[], 5_000);
+        for person in [Some("owner"), None] {
+            use crate::notice::render::{Renderer, Telegram, Text};
+            let n = alert.notice_for(person);
+            assert_eq!(n.action, Some(crate::notice::Action::Words));
+            let s = Text::render(&n);
+            assert!(
+                s.contains("Open your dashboard → Approvals") && s.contains("no public address"),
+                "{s}"
+            );
+            assert!(Telegram::render(&n).get("reply_markup").is_none());
+        }
+        assert!(a.chat.links.is_none(), "no token is made for nothing");
     }
 
     #[test]

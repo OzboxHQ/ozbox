@@ -47,8 +47,6 @@ pub const EN: &[(&str, &str)] = &[
     ("chat.finished", "{task} finished."),
     ("chat.failed", "{task} stopped with an error."),
     ("chat.needs_you", "{task} needs you: {why}. Open the dashboard to decide."),
-    ("chat.approval", "{task} wants to {action}. Decide it in the dashboard. {where}"),
-    ("chat.approval_risky", "{task} wants to {action}. This kind needs your passkey, so it opens the dashboard. {where}"),
     ("chat.sessions_none", "No coding agents are running in your repos on any box right now."),
     ("chat.sessions_head", "Coding agents in your repos (experimental to type into):"),
     ("chat.sessions_row", "{id}  {engine}  {repo}{branch}  {level}, {state}"),

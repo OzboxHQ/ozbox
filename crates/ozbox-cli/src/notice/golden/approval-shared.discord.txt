@@ -5,7 +5,7 @@
   "embeds": [
     {
       "color": 3108816,
-      "description": "A change was filed on a box and waits for a person with the right role.\n\n*This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.*\n\n[Open in dashboard](https://dash.example.com/approvals/R1a2b3c4)\nOpen it on dash.example.com → Approvals \\(sign in first\\).",
+      "description": "A change was filed on a box and waits for a person with the right role.\n\n*This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.*\n\n[Open in dashboard](https://dash.example.com/approvals?request=R1a2b3c4)\nOpen it on dash.example.com → Approvals \\(sign in first\\).",
       "fields": [
         {
           "inline": true,
@@ -52,7 +52,7 @@
         "text": "Ref R1a2b3c4"
       },
       "title": "🔐 Approve or deny: guard override",
-      "url": "https://dash.example.com/approvals/R1a2b3c4"
+      "url": "https://dash.example.com/approvals?request=R1a2b3c4"
     }
   ],
   "username": "Oz Box"

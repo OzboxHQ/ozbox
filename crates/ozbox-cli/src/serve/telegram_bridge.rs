@@ -743,6 +743,7 @@ impl App {
         self.chat_say(
             vec![super::chat_routes::Out {
                 announce: None,
+                notice: None,
                 channel: Channel::Telegram,
                 id: who.chat_id.to_string(),
                 text,
@@ -815,7 +816,7 @@ impl App {
 
     /// A pointer link: 24 random bytes held only as a keyed hash, bound to the person and a path the server chose, ten minutes.
     /// Opening it asks for nothing and consumes nothing.
-    fn tg_pointer(&mut self, person: &str, path: &str, now: u64) -> Option<String> {
+    pub(super) fn tg_pointer(&mut self, person: &str, path: &str, now: u64) -> Option<String> {
         if self.chat.links.is_none() {
             self.chat.links = crate::chat::links::Links::new().ok();
         }
@@ -908,12 +909,21 @@ impl App {
         token: &str,
         person: &str,
         now: u64,
-    ) -> Option<String> {
-        let links = self.chat.links.as_mut()?;
-        links
-            .peek(token, person, now)
-            .ok()
-            .and_then(|t| t.strip_prefix("path:").map(str::to_string))
+    ) -> Result<String, crate::chat::links::LinkError> {
+        use crate::chat::links::LinkError;
+        let links = self.chat.links.as_mut().ok_or(LinkError::Invalid)?;
+        links.peek(token, person, now).and_then(|t| {
+            t.strip_prefix("path:")
+                .map(str::to_string)
+                .ok_or(LinkError::Invalid)
+        })
+    }
+
+    /// Every pointer link to `path` is used: what it names was decided.
+    pub(super) fn retire_pointers(&mut self, path: &str) {
+        if let Some(l) = self.chat.links.as_mut() {
+            l.retire(&format!("path:{path}"));
+        }
     }
 }
 
@@ -931,10 +941,18 @@ fn gateway_text(act: &ChatAct, original: &str) -> String {
 pub(super) fn redact_for_record(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(i) = rest.find("/go#") {
-        out.push_str(&rest[..i + 4]);
+    // a pointer link (`/go#<token>`) and a chat page link (`?link=<token>`) alike
+    while let Some((i, n)) = [
+        rest.find("/go#").map(|i| (i, 4)),
+        rest.find("?link=").map(|i| (i, 6)),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    {
+        out.push_str(&rest[..i + n]);
         out.push_str("<link>");
-        let tail = &rest[i + 4..];
+        let tail = &rest[i + n..];
         let end = tail
             .find(|c: char| !c.is_ascii_alphanumeric())
             .unwrap_or(tail.len());

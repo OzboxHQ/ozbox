@@ -213,6 +213,14 @@ pub fn reference(id: &str) -> String {
     clean
 }
 
+/// An id as a path segment: only the characters an id is made of pass, so a path is never built from anything else.
+pub fn path_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(128)
+        .collect()
+}
+
 /// Any text leaving in a notice: key-shaped words removed, control characters taken out, and at most `max` characters.
 pub fn clean(text: &str, max: usize) -> String {
     let s = crate::chat::text::outgoing(text, &[], usize::MAX);

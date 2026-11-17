@@ -95,7 +95,7 @@
             "type": "plain_text"
           },
           "type": "button",
-          "url": "https://dash.example.com/approvals/R1a2b3c4"
+          "url": "https://dash.example.com/approvals?request=R1a2b3c4"
         }
       ],
       "type": "actions"

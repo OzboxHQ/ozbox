@@ -42,7 +42,10 @@ pub(crate) fn approval() -> Notice {
     n.expires_ms = Some(T0 + 2 * 3_600_000 + 5 * 60_000);
     n.reference = Some("R1a2b3c4".into());
     n.only_tells = true;
-    n.opens("/approvals/R1a2b3c4", t("notice.place_approvals", &[]))
+    n.opens(
+        "/approvals?request=R1a2b3c4",
+        t("notice.place_approvals", &[]),
+    )
 }
 
 fn agent_asks() -> Notice {
@@ -405,4 +408,88 @@ fn a_span_reads_in_words() {
     assert_eq!(span(5 * 60_000), "5 min");
     assert_eq!(span(125 * 60_000), "2 h 5 min");
     assert_eq!(span(72 * 3_600_000), "3 d");
+}
+
+/// The code of a file before its tests, without comment lines.
+fn code_of(src: &str) -> String {
+    let code = src.split("#[cfg(test)]").next().unwrap_or("");
+    code.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A channel adapter sends what `notice::render` made and builds no message text of its own: no alert title or body
+/// pasted into a request, no message body shape of its own.
+#[test]
+fn no_channel_adapter_formats_a_message_itself() {
+    let files: &[(&str, &str, &[&str])] = &[
+        (
+            "notify.rs",
+            include_str!("../notify.rs"),
+            &["\"text\":", "a.title)", "a.body)", "&a.title", "&a.body"],
+        ),
+        (
+            "telegram.rs",
+            include_str!("../telegram.rs"),
+            &["\"text\":", "parse_mode"],
+        ),
+        (
+            "channels/chat.rs",
+            include_str!("../channels/chat.rs"),
+            &[
+                "\"content\":",
+                "TextBlock",
+                "a.title",
+                "a.body",
+                "\"embeds\"",
+            ],
+        ),
+        (
+            "channels/sms.rs",
+            include_str!("../channels/sms.rs"),
+            &["[Oz Box]", "a.title", "a.body"],
+        ),
+        (
+            "channels/push.rs",
+            include_str!("../channels/push.rs"),
+            &["a.title", "a.body"],
+        ),
+        (
+            "channels/mail.rs",
+            include_str!("../channels/mail.rs"),
+            &["[Oz Box]", "a.title", "a.body"],
+        ),
+        (
+            "channels/routing.rs",
+            include_str!("../channels/routing.rs"),
+            &["&a.title", "&a.body"],
+        ),
+        (
+            "chat/slack.rs",
+            include_str!("../chat/slack.rs"),
+            &["a.title", "a.body"],
+        ),
+        (
+            "chat/whatsapp.rs",
+            include_str!("../chat/whatsapp.rs"),
+            &["a.title", "a.body"],
+        ),
+    ];
+    for (name, src, banned) in files {
+        let code = code_of(src);
+        for b in *banned {
+            assert!(
+                !code.contains(b),
+                "{name} formats a message itself ({b}): render it through notice::render"
+            );
+        }
+    }
+    // and the chat gateway's agent question goes out as a notice, not a sentence of its own
+    let chat_routes = code_of(include_str!("../serve/chat_routes.rs"));
+    assert!(
+        chat_routes.contains("NoticeKind::AgentAsks") && !chat_routes.contains("\"chat.approval")
+    );
+    let areq = code_of(include_str!("../serve/approval_requests.rs"));
+    assert!(areq.contains("NoticeKind::ApprovalRequest"));
 }

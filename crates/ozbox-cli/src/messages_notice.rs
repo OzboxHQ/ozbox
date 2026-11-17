@@ -36,4 +36,5 @@ pub const EN: &[(&str, &str)] = &[
     ("notice.agent_summary", "Task {task} stopped and is waiting for your answer."),
     ("notice.agent_risky", "Production, or a step that cannot be undone: the dashboard asks for your passkey again."),
     ("notice.requester_uid", "{kind} (uid {uid})"),
+    ("notice.link_used", "This link was used: the request it names has been decided. Open Approvals to see the decision."),
 ];

@@ -3,7 +3,7 @@
   "environment": "staging",
   "expires_ms": 1700007500000,
   "kind": "approval_request",
-  "path": "/approvals/R1a2b3c4",
+  "path": "/approvals?request=R1a2b3c4",
   "production": false,
   "project": "shop",
   "reference": "R1a2b3c4",

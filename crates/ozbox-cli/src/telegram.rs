@@ -305,6 +305,21 @@ impl<'a> Bot<'a> {
     }
 }
 
+/// A notice (a reply, or a structured message with its link button), for the places that only need "did it go". The error
+/// never carries the token.
+pub fn send_notice(
+    http: &dyn HttpClient,
+    token: &str,
+    chat_id: i64,
+    n: &crate::notice::Notice,
+) -> Result<(), String> {
+    let base = ApiBase::from_env(std::env::var("OZBOX_TELEGRAM_API_BASE").ok().as_deref());
+    Bot::new(http, token, &base)
+        .send_notice(chat_id, n)
+        .map(|_| ())
+        .map_err(|e| redact(&e.to_string(), token))
+}
+
 /// A plain message, for the places that only need "did it go". The error never carries the token.
 pub fn send_text(
     http: &dyn HttpClient,
