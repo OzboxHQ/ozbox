@@ -165,6 +165,15 @@ disk has not been measured.
 - **Approval fatigue** is the main residual risk once acts exist; the prompt rate and decision time are to be measured then.
 - **No approval path, no hub transport, no directory, no worker-to-worker tasks.**
 
+## Amendment (2026-11-17): the rule holds on the hub's channel too
+
+The worker channel of ADR 0042 now carries approvals, and it keeps this record's rule, with tests that try to break it: a decision
+body is exactly its fields (a grant, an `approved` flag or an `approval_ref` beside them is refused by the receiver's screen before it is
+held, and none of its words are kept); a question or a task that says "owner approved" changes nothing; the relaying end (`main`) has no
+way to make a decision, and the receiving worker's own service verifies the person's passkey assertion over a challenge it computes
+itself; a worker that sends a decision is quarantined; a Deny of a pending request is the one decision that needs no credential. The
+laptop-to-`main` mesh of this record still has no approval path: `push-ref` is still refused as `approval-path-not-built`.
+
 ## Consequences
 
 - The note relay between the laptop and `main` can end for questions, notes and status. Acts still go by the existing approved routes.

@@ -9,9 +9,11 @@ description: "Status. Accepted design; first slice built (2026-11-14, on feat/ma
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub (none has one yet). **Not built:** `ozbox-hubd`, enrolment and key attestation, sealed key
-delivery, the real signer and sealer (the secrets service and `ozbox-seal`), the transport on a network, the merge queue and test lanes
-over the channel, the approval path, nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub (none has one yet). **Built since (2026-11-17, `feat/hub-h4-approvals`, tested with fakes):**
+the approval path over the channel (§8), test lanes (§7) and the merge queue over the channel (ADR 0020 §6), with `task_start`
+defaulting to the hub on a box that has one; what each leaves out is in "The approval path, lanes and the merge queue" below.
+**Not built:** `ozbox-hubd`, enrolment and key attestation, sealed key delivery, the real signer and sealer (the secrets service and
+`ozbox-seal`), the transport on a network, nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -926,6 +928,62 @@ refusal with the network cut; a hand-made assignment with a Production declarati
   number reused below the 64-number window is a halt and never an acknowledgement. After a restore the audit log is brought up to date
   under the store's lock, the old numbering's pending events are dropped, and only then does the new epoch begin; the log de-duplicates by
   source epoch and number. The golden vectors are made by `crates/ozbox-core/testdata/channel_golden_vectors.py`.
+
+### The approval path, lanes and the merge queue over the channel (2026-11-17, tested with fakes)
+
+**Built** (`ozbox_core::hub::{approvals, lane, merge}`, the orchestration tools, the server's tick and the fleet inbox routes):
+
+- **The approval path (§8).** A request filed on a worker is announced by the worker as its service's **signed envelope**
+  (`approval.request`), again every 30 seconds while it is pending. `main` verifies the signature against the key it pinned for that
+  worker's service, recomputes the digest from the signed subject, and shows a card only for a **pending, unexpired** request; an envelope
+  that says "approved", a forged one and one from an unpinned worker are refused and audited (`hub.approval.rejected`). The card's
+  challenge is ADR 0041 §3's, computed from **the worker's** box id, store id, request id and digest, and the card carries those ids so a
+  browser can recompute it. The person decides once on `main` (`/v1/approvals/fleet`, the "decide approvals" role); `main`
+  relays the assertion (`approval.decision`, audited `hub.approval.relayed`) and **the worker's own service verifies it**: a credential in
+  the approver set pinned on the worker, the signature over the worker's own challenge for that outcome, the dashboard's origin, a touch
+  and user verification, a set that has not expired, then the request book's own rules (the role's cell, the counter, the assertion used
+  once). The worker reports its answer as its own status.
+- **A message can ask and never grant (ADR 0044), held by tests.** The decision body is exactly its fields: a body with a grant, an
+  `approved` flag or an `approval_ref` beside them is refused by the worker's screen before it is held, and none of its words are kept.
+  A question or an assignment that says "owner approved" changes nothing. `main` has no function that makes a decision; an approval
+  without the person's assertion is refused by the hub and, if a taken-over hub sends it anyway, by the worker. A worker that sends
+  `approval.decision` is quarantined. A relayed **Deny of a pending request** needs no assertion (fail safe).
+- **D1 and D2 on this path.** Production on a worker (a Production name, a Production-looking value, `secret-use`) is never decided
+  from `main`, and the scopes §3.2 keeps to a laptop key with presence (`import`, `policy`, `tunnel-token`, `box-secrets`, `host-guard`,
+  `signer-enroll`, and `worker-keys`, which is decided on `main`'s own service) are refused from `main` too: in this release only
+  `guard-override` is decided from `main`'s dashboard for a worker.
+- **Test lanes (§7).** A declared lane is split across N workers on the candidate's **exact commit**: by weight, longest first, with
+  every spec of one resource key on one worker in its listed order, and a key the hub does not know refused before anything starts.
+  Each shard names a **declared command id**, never an argument list. Only the worker that holds a shard may report it, and only for its
+  specs. A worker silent for 90 seconds is lost: its unfinished specs, and the **whole resource group** it held when part of it was
+  unfinished, go to another worker of the lane; its late answer is not counted. With no worker left the lane says it **cannot finish**.
+  **A lane is never green while any spec has no passing result**; a spec that failed and passed on its retry is recorded as flaky.
+- **The merge queue over the channel.** A worker's `result` with a **full commit id** joins the orchestration's merge queue with that
+  commit (`orchestration.hub_result`); a result from a worker that does not hold the feature, or without a full commit id, is not
+  taken, and the second is said to the conductor. The queue rebases and merges on `main` as before; with `test_lane_box = "hub:<lane>"`
+  the test runs through the lane on the reported commit. A conflict, failing specs, a lane that could not finish, a merge that was not
+  approved and a merge go back to the worker as an `answer`. **The person's merge approval is unchanged**: a green lane is a test
+  result, not the gate.
+- **The route.** `task_start` defaults to `transport: hub` when this box has a hub and the named box is one of its workers (ssh
+  otherwise, as before).
+
+**Not covered:**
+- **No hub is attached on any box yet.** The server's `attach_hub` is the seam the hub process uses; until it exists the routes answer
+  "this box has no worker channel".
+- **Agent-action asks (ADR 0022)** live in the supervisor's store, not the request book, and do not travel over the channel yet; nor
+  does a laptop's decision (`laptop.relay` is not built). Only requests in the worker's request book do.
+- **The worker's approval service** is the core's in-memory one in the tests; the secrets service's hub-agent socket still refuses an
+  approval from another box until it is given the approver set and calls the same verifier.
+- **Where the approver set comes from.** The set is taken as given (the route `main` cannot write: AWS parameter path, Hetzner
+  apply); `pins.set` stays refused. A cloned authenticator is caught per worker only (the counter is per box), as §8 says.
+- **One touch can be redirected below the Production tier** by a compromised `main` (§8's residual): the worker verifies the touch, not
+  what `main`'s page showed.
+- **Lanes.** The hub plans the files itself even for `split = "shard"` (so it can move a lost worker's part), and the worker passes
+  `--shard` only as a label; the comparison of the candidate's `list` with the base's, the merge of blob reports in an immutable copy,
+  artifact pulls and the lane history of durations are not built. The lanes come from the declaration the hub process passes in.
+- **The merged commit.** The lane tests the reported commit, but the queue's rebase and merge on `main` work on the feature's
+  **branch**, and nothing yet checks that the branch still points at that commit (`main` pulling the worker's bundle by hash, §5, is not
+  built). Until it is, a push to the branch after the result would be merged without the lane having tested it.
 
 ## 13. Benchmark (owner rule, 2026-11-12)
 
