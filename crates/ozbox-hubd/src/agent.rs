@@ -40,6 +40,11 @@ pub const HUB_LOST_AFTER_MS: u64 = 120_000;
 pub trait EngineFactory: Send {
     /// The engine for `engine` (an engine-neutral id; empty means the box's default). `Err` names why it cannot be started.
     fn make(&mut self, engine: &str) -> Result<Box<dyn AgentEngine>, String>;
+    /// The engine for one assigned task. The default is [`EngineFactory::make`] on the engine the task names; the real factory
+    /// also reads the task's lease, which is the run's time limit.
+    fn make_for(&mut self, a: &Assign) -> Result<Box<dyn AgentEngine>, String> {
+        self.make(a.engine.as_deref().unwrap_or(""))
+    }
 }
 
 /// The box's repository, as far as the agent needs it: the commit a finished task's branch points at, which is what the hub's
@@ -284,10 +289,14 @@ impl WorkerAgent {
     }
 
     fn start(&mut self, a: &Assign) -> Result<(), String> {
+        // D2 again, at the agent: the worker's screen refused a Production declaration before the task was held, and the agent
+        // does not trust that it was the only gate. A worker never runs a task that asks for Production, and never starts an
+        // engine for one.
+        ozbox_core::hub::refusal::refuse_production(&a.keys).map_err(|r| r.to_string())?;
         let engine = self
             .s
             .engines
-            .make(a.engine.as_deref().unwrap_or(""))
+            .make_for(a)
             .map_err(|e| format!("no engine could be started: {e}"))?;
         let sess = EngineSession::start(
             engine,

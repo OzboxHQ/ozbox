@@ -3,27 +3,33 @@
 //! Both reach the box's own secrets service on its sockets (the supervisor's for envelopes and key deliveries, the hub's for the
 //! handshake), pin the hub by the identity fingerprint the owner gave, and dial **out**: nothing on a worker listens.
 //!
-//! The agent here has no engine transport: a task it is handed is refused by name ("no engine could be started") until the box's
-//! own run transport is attached ([`NoEngines`]), and it keeps no approval service. It does connect, take enrolment's keys, take and
-//! delete key deliveries, report, and delete every key when the hub is lost. The engine path is proven with fakes
-//! (`ozbox_hubd::agent`'s harness); attaching the box's own runs is the remaining step.
+//! **The run path.** A task it is handed becomes a supervised run of this box (ADR 0014): queued in the box's task store
+//! (`--tasks`, else beside `OZBOX_SETTINGS`) through the one door every run uses, and run by the box's own supervisor with its Models
+//! routing, its credential broker, its subscription opt-in and its spend caps ([`crate::supervised`]). With no store the agent still
+//! connects, takes keys and reports, and every task is refused by name ([`NoEngines`]).
+//!
+//! **The approval service.** The worker's own secrets service on the supervisor socket ([`ServiceApprovals`]): the agent announces
+//! its pending requests and carries a relayed decision to it, and the service verifies the decision. Enrolment offers that service's
+//! public key and ids for the owner to pin.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ozbox_core::agent_engine::AgentEngine;
 use ozbox_core::hub::net::{enrol_over_net, NetWorker, TcpDialer, WorkerNetConfig};
 use ozbox_core::hub::worker::WorkerState;
+use ozbox_core::run::TaskStore;
 
 use crate::agent::{AgentSeams, EngineFactory, WorkerAgent, Workspace};
 use crate::crypto::{HandshakeSigner, HandshakeVerifier};
 use crate::daemon::now_ms;
-use crate::enrol::{make_request, Attestation};
-use crate::fleet::ServiceDeliveryStore;
+use crate::enrol::{make_request_with_pin, Attestation};
+use crate::fleet::{service_pin, ServiceApprovals, ServiceDeliveryStore};
 use crate::identity::Identity;
 use crate::ops::{KeyOps, SocketKeyOps};
 use crate::seams::worker_seams;
+use crate::supervised::SupervisedFactory;
 
 /// No engine on this box yet: every task is refused by name.
 pub struct NoEngines;
@@ -139,13 +145,17 @@ fn enrol(argv: &[String]) -> Result<(), String> {
     )
     .map_err(|_| "the attestation is not valid".to_string())?;
     let ops = SocketKeyOps::new(flag(argv, "--secrets-socket")?);
-    let req = make_request(
+    // the box's approval service, if it keeps a request journal: its public key and ids ride in the request (the proof covers them)
+    // and the owner confirms them in the enrolment plan
+    let pin = service_pin(&ops);
+    let req = make_request_with_pin(
         &ops,
         &name,
         token.trim(),
         attestation.clone(),
         &attestation.hub_identity_fp,
         now_ms(),
+        pin,
     )
     .map_err(|e| e.message)?;
     if attestation.hub_identity_fp != flag(argv, "--hub-identity-fp")? {
@@ -158,10 +168,19 @@ fn enrol(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where the box's task store is: `--tasks PATH`, else beside the settings file `OZBOX_SETTINGS` names (the place `ozbox serve` keeps
+/// it), else nowhere.
+fn tasks_path(argv: &[String]) -> Option<PathBuf> {
+    flag(argv, "--tasks").ok().map(PathBuf::from).or_else(|| {
+        std::env::var_os("OZBOX_SETTINGS").map(|p| PathBuf::from(p).with_file_name("tasks.json"))
+    })
+}
+
 /// The long-running agent.
 fn agent(argv: &[String]) -> Result<(), String> {
     let name = flag(argv, "--name")?;
     let hub_name = flag(argv, "--hub").unwrap_or_else(|_| "main".into());
+    let hub_name_for_runs = hub_name.clone();
     let hub = pinned_hub(
         Path::new(&flag(argv, "--hub-identity")?),
         &flag(argv, "--hub-identity-fp")?,
@@ -184,6 +203,19 @@ fn agent(argv: &[String]) -> Result<(), String> {
     );
     let state = WorkerState::new(&name, &seams.my_fp, &hub_name, &hub_fp, 1);
     let reach = net.clone();
+    let sup2 = sup.clone();
+    // the run path: the box's own supervisor, through its task store. Without a store the agent still connects and keeps keys, and
+    // every task is refused by name.
+    let engines: Box<dyn EngineFactory> = match tasks_path(argv) {
+        Some(p) => {
+            let mut f = SupervisedFactory::new(TaskStore::new(p), &hub_name_for_runs);
+            if let Ok(e) = flag(argv, "--default-engine") {
+                f.default_engine = e;
+            }
+            Box::new(f)
+        }
+        None => Box::new(NoEngines),
+    };
     let mut agent = WorkerAgent::new(
         AgentSeams {
             me: name.clone(),
@@ -198,8 +230,8 @@ fn agent(argv: &[String]) -> Result<(), String> {
                 ops: sup,
                 worker: name,
             }),
-            approvals: None,
-            engines: Box::new(NoEngines),
+            approvals: Some(Arc::new(Mutex::new(ServiceApprovals { ops: sup2 }))),
+            engines,
             workspace: Box::new(GitWorkspace {
                 root: PathBuf::from("/work/repos"),
             }),

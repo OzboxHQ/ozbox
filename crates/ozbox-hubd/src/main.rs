@@ -4,10 +4,10 @@
 //! ozbox-hubd serve     --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME] [--listen ADDR:PORT]
 //! ozbox-hubd self-test --dir DIR --socket PATH --secrets-socket PATH --registrars PATH --box-id ID [--name NAME]
 //! ozbox-hubd setup     BOX-ID [ADDR:PORT]   (as root: the units, folders and registrars file; the address workers dial)
-//! ozbox-hubd agent-setup NAME ADDR:PORT HUB-IDENTITY-FP   (as root, on a worker: the agent's unit)
+//! ozbox-hubd agent-setup NAME ADDR:PORT HUB-IDENTITY-FP [TASKS-FILE]   (as root, on a worker: the agent's unit; the box's task store)
 //! ozbox-hubd request   --name NAME --box-id ID --machine ID --orchestration ID --hub-identity-fp FP --secrets-socket PATH   (prints what your computer attests)
 //! ozbox-hubd enrol     --name NAME --token-file PATH --attestation PATH --hub-addr ADDR:PORT --hub-identity-fp FP --secrets-socket PATH
-//! ozbox-hubd agent     --name NAME --hub-addr ADDR:PORT --hub-identity PATH --hub-identity-fp FP --secrets-socket PATH --hub-secrets-socket PATH [--hub NAME]
+//! ozbox-hubd agent     --name NAME --hub-addr ADDR:PORT --hub-identity PATH --hub-identity-fp FP --secrets-socket PATH --hub-secrets-socket PATH [--hub NAME] [--tasks PATH] [--default-engine ID]
 //! ozbox-hubd ctl       --socket PATH OP [JSON]   (the owner's way to the daemon: roster, invite_plan, enrol_receive, ...)
 //! ozbox-hubd --version
 //! ```
@@ -69,8 +69,13 @@ fn main() -> ExitCode {
     }
     if argv.first().map(String::as_str) == Some("agent-setup") {
         let get = |i: usize| argv.get(i).map(String::as_str).unwrap_or_default();
-        return match ozbox_hubd::setup::run_agent(&ozbox_core::SystemRunner, get(1), get(2), get(3))
-        {
+        return match ozbox_hubd::setup::run_agent(
+            &ozbox_core::SystemRunner,
+            get(1),
+            get(2),
+            get(3),
+            argv.get(4).map(String::as_str),
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("{e}");

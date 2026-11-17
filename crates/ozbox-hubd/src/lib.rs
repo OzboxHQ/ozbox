@@ -13,6 +13,7 @@
 //!
 //! * [`agent`]: a worker's hub agent: the worker's end of the channel, the engine runs, keys by name, the loss rule.
 //! * [`nethost`]: the network end, inside the daemon: workers dial out, the daemon checks and spools, the roster follows enrolment.
+//! * [`supervised`]: the worker's real run path: a task is a supervised run of the box (ADR 0014), queued in its task store.
 //! * [`fleet`]: the three seams of sealed key delivery, backed by enrolment's attestations and the secrets service.
 //!
 //! What is **not** here: the registrars that vouch for a worker's keys on a real box (a separate crate module).
@@ -32,6 +33,7 @@ pub mod registrar;
 pub mod seams;
 pub mod selftest;
 pub mod setup;
+pub mod supervised;
 pub mod workerbin;
 
 #[cfg(test)]

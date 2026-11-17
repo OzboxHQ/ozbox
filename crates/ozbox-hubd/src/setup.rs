@@ -10,8 +10,14 @@ pub const SCRIPT: &str = include_str!("../../../infra/cloud-init/scripts/ozbox-h
 pub const AGENT_SCRIPT: &str =
     include_str!("../../../infra/cloud-init/scripts/ozbox-hub-agent-setup.sh");
 
-/// The command that runs the agent's setup: the same shape, the script on standard input, and three words the script checks again.
-pub fn agent_spec(name: &str, addr: &str, fp: &str) -> Result<CommandSpec, String> {
+/// The command that runs the agent's setup: the same shape, the script on standard input, and the words the script checks again
+/// (the optional fourth is the box's task store, the file the agent queues its tasks in).
+pub fn agent_spec(
+    name: &str,
+    addr: &str,
+    fp: &str,
+    tasks: Option<&str>,
+) -> Result<CommandSpec, String> {
     if !ozbox_core::channel::wire::word_ok(name)
         || addr.parse::<std::net::SocketAddr>().is_err()
         || fp.is_empty()
@@ -19,15 +25,27 @@ pub fn agent_spec(name: &str, addr: &str, fp: &str) -> Result<CommandSpec, Strin
     {
         return Err("the worker name, the hub's address or the fingerprint is not valid".into());
     }
+    let mut args = vec![
+        "-s".into(),
+        "--".into(),
+        name.into(),
+        addr.into(),
+        fp.into(),
+    ];
+    if let Some(t) = tasks {
+        if !t.starts_with('/')
+            || t.contains("..")
+            || !t
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
+        {
+            return Err("the tasks file is not an absolute path of plain characters".into());
+        }
+        args.push(t.into());
+    }
     Ok(CommandSpec {
         program: "bash".into(),
-        args: vec![
-            "-s".into(),
-            "--".into(),
-            name.into(),
-            addr.into(),
-            fp.into(),
-        ],
+        args,
         cwd: None,
         env: Default::default(),
         stdin: Some(AGENT_SCRIPT.as_bytes().to_vec()),
@@ -41,9 +59,10 @@ pub fn run_agent(
     name: &str,
     addr: &str,
     fp: &str,
+    tasks: Option<&str>,
 ) -> Result<(), String> {
     let out = runner
-        .run(&agent_spec(name, addr, fp)?)
+        .run(&agent_spec(name, addr, fp, tasks)?)
         .map_err(|e| e.to_string())?;
     if !out.stdout.is_empty() {
         print!("{}", out.stdout);
@@ -54,7 +73,7 @@ pub fn run_agent(
     if out.status == Some(0) {
         Ok(())
     } else {
-        Err("the agent could not be set up; run as root: ozbox-hubd agent-setup <name> <addr:port> <fingerprint>".into())
+        Err("the agent could not be set up; run as root: ozbox-hubd agent-setup <name> <addr:port> <fingerprint> [tasks-file]".into())
     }
 }
 

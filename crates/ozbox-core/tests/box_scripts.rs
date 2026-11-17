@@ -3366,6 +3366,35 @@ fn the_workers_hub_agent_dials_out_only_to_a_private_address_and_its_unit_binds_
     assert!(
         !etc.join("systemd/system/ozbox-hub-agent.socket").exists() && !unit.contains("--listen")
     );
+    // with no task store the unit names none (every task is refused by name); with one, the agent queues its tasks there and may
+    // write only that folder
+    assert!(!unit.contains("--tasks") && !unit.contains("ReadWritePaths"));
+    for bad in [
+        "relative/tasks.json",
+        "/a/../b.json",
+        "/a;id",
+        "/a b",
+        "/dir/",
+    ] {
+        let r = sh(
+            &script("ozbox-hub-agent-setup.sh"),
+            &["w1", "10.0.1.5:7443", fp, bad],
+            &env,
+        )?;
+        assert!(!r.status.success(), "{bad:?} was accepted");
+    }
+    let r = sh(
+        &script("ozbox-hub-agent-setup.sh"),
+        &["w1", "10.0.1.5:7443", fp, "/var/lib/ozbox-hub/tasks.json"],
+        &env,
+    )?;
+    assert!(r.status.success(), "{}", text(&r));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hub-agent.service"))?;
+    assert!(
+        unit.contains(" --tasks /var/lib/ozbox-hub/tasks.json\n")
+            && unit.contains("ReadWritePaths=/var/lib/ozbox-hub\n")
+            && unit.contains("ProtectSystem=strict")
+    );
     Ok(())
 }
 

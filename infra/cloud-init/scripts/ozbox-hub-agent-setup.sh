@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sets up the hub agent on a worker box (ADR 0042): the systemd unit that runs `ozbox-hubd agent`. Carried in the program and run as
-# root by `ozbox-hubd agent-setup <worker-name> <hub-address:port> <hub-identity-fingerprint>`; safe to run again. The unit is inert
+# root by `ozbox-hubd agent-setup <worker-name> <hub-address:port> <hub-identity-fingerprint> [tasks-file]`; safe to run again. The unit is inert
 # until /usr/local/bin/ozbox-hubd (a root-owned program) and /etc/ozbox/hub-identity.json (the hub's PUBLIC identity, which the owner
 # copies here) exist. Nothing here is a secret: the worker's keys are made and kept by this box's own secrets service.
 #
@@ -12,10 +12,23 @@ unit_dir="${OZBOX_SYSTEMD_DIR:-$etc/systemd/system}"
 name="${1:-}"
 addr="${2:-}"
 fp="${3:-}"
+# The box's task store (the file `ozbox serve` keeps its runs in): the agent queues each task it is handed there, as a supervised run,
+# and the box's own supervisor runs it. Optional; with none, every task is refused by name.
+tasks="${4:-}"
 
 if ! [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || ! [[ "$fp" =~ ^[0-9a-f-]{16,200}$ ]]; then
-  echo 'usage: ozbox-hubd agent-setup <worker-name> <hub-address:port> <hub-identity-fingerprint>' >&2
+  echo 'usage: ozbox-hubd agent-setup <worker-name> <hub-address:port> <hub-identity-fingerprint> [tasks-file]' >&2
   exit 2
+fi
+tasks_args=""
+tasks_rw=""
+if [ -n "$tasks" ]; then
+  if ! [[ "$tasks" =~ ^/[A-Za-z0-9._/-]{1,200}$ ]] || [[ "$tasks" == *..* ]] || [[ "$tasks" == */ ]]; then
+    echo 'the tasks file must be an absolute path made of letters, digits and . _ - /' >&2
+    exit 2
+  fi
+  tasks_args=" --tasks ${tasks}"
+  tasks_rw="ReadWritePaths=$(dirname "$tasks")"
 fi
 ip_re='^(127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}):([0-9]{1,5})$'
 if ! [[ "$addr" =~ $ip_re ]] || [ "${BASH_REMATCH[4]}" -lt 1 ] || [ "${BASH_REMATCH[4]}" -gt 65535 ]; then
@@ -43,7 +56,8 @@ Type=simple
 User=ozbox-hub
 Group=ozbox-hub
 SupplementaryGroups=ozbox-supervisor
-ExecStart=/usr/local/bin/ozbox-hubd agent --name ${name} --hub-addr ${addr} --hub-identity /etc/ozbox/hub-identity.json --hub-identity-fp ${fp} --secrets-socket /run/ozbox-secrets/supervisor/secrets.sock --hub-secrets-socket /run/ozbox-secrets/hub/hub.sock
+ExecStart=/usr/local/bin/ozbox-hubd agent --name ${name} --hub-addr ${addr} --hub-identity /etc/ozbox/hub-identity.json --hub-identity-fp ${fp} --secrets-socket /run/ozbox-secrets/supervisor/secrets.sock --hub-secrets-socket /run/ozbox-secrets/hub/hub.sock${tasks_args}
+${tasks_rw}
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
