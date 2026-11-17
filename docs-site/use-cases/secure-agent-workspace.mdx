@@ -106,9 +106,16 @@ supported on Hetzner Cloud, which cannot make a volume from a snapshot; use `cre
    after your passkey or authenticator) and pass it. A code made with this computer's own key (`ozbox secrets approve`) never
    approves Production: the box refuses to make one, and refuses one at import, and says where to approve instead. A box from
    before approval requests answers the import with that same sentence; `ozbox upgrade` it to get the flow above.
-   **Not yet:** the dashboard does not take a `.env` file itself (importing from the browser is planned); the tunnel token,
-   a declaration, the box's own secrets and a guard override from your computer still use a code. A guard override filed
-   on the box already waits for the dashboard ([ADR 0041](/adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on)).
+   **The other approved changes work the same way (Preview).** With no `--approval`, `ozbox env policy set FILE --project
+   &lt;p> --box &lt;name>` (a declaration), `ozbox dashboard install &lt;name> --token-stdin` (a new tunnel token for the box's
+   dashboard) and `ozbox box-secrets <name>` on Hetzner (the box's own secrets declaration) each file a request for exactly
+   that change, say `Waiting for approval in your dashboard: ...`, and go on once you approve it there. These are approved
+   **only on the dashboard** (passkey or authenticator code); this computer's key is never offered for them. The box binds
+   each request to what it approves: the declaration's own text, the token's digest (never the token), the declaration's
+   vault address. `env policy set` takes `--wait MINUTES`; the other two wait up to 30 minutes. A guard override filed on the
+   box already waits for the dashboard ([ADR 0041](/adr/0041-one-approval-model-a-request-the-box-files-a-person-decides-and-the-box-hands-on)).
+   **Not yet:** the dashboard does not take a `.env` file itself (importing from the browser is planned); `ozbox tunnel setup`
+   run on the box itself, removing a tunnel token, placing a vault token and a host guard change still use a code.
    These keys go to the box through its **ingress account**, not the box user's: the first request pins the box's key on your
    computer (and prints its fingerprint), and every request after it is sealed to that key, so a process on the way sees only
    ciphertext. A box made before this was added is refused with a sentence that says what to do (`ozbox upgrade <box>` gives it the account, on AWS and on Hetzner; if its store's key is in a file the one-time cost is a new secrets store); the old route is not used

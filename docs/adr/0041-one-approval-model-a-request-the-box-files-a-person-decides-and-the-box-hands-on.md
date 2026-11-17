@@ -1,6 +1,6 @@
 # 0041 — One approval model: the box files a request, a person decides it where they are, and the box hands the decision to the waiting operation
 
-**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** **Amended 2026-11-17 (B4-27): a change made from a computer files a request and waits for it, so no code is copied between commands; a person with no passkey may approve on the dashboard with an authenticator code, checked by the secrets service itself (see "Amendment of 2026-11-17 (B4-27)"; owner to confirm the authenticator part).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
+**Status.** Accepted. **Amended 2026-11-13: chat apps are notify-only for approvals, with no Approve, no Deny and no Stop (§3.1, §5; build note 50).** **Amended 2026-11-17: a software laptop key never approves Production on the code path either; the box records which signer made every code and refuses a software key's code for every Production act (see "Amendment of 2026-11-17").** **Amended 2026-11-17 (B4-27): a change made from a computer (an import, a declaration, a dashboard's tunnel token, the box's own secrets declaration) files a request and waits for it, so no code is copied between commands; a person with no passkey may approve on the dashboard with an authenticator code, checked by the secrets service itself (see "Amendment of 2026-11-17 (B4-27)"; owner to confirm the authenticator part).** Phases 1, 2 and 3 are built (phase 3: the guard hook files and waits, public values, file:line, bound overrides, large pushes). Written 2026-11-12. **Revised after the security review (2026-11-12)**: accept with changes,
 0 Critical, 6 High, 12 Medium, 6 Low, and the owner's decisions of the same day. This text is one current design that answers the
 review. **Phases 1 and 2 are built (see the notes below); phase 3 and the rest are not.** It amends ADR 0028 (item 4 and Amendments 1 to 3: the approval gate, codes and the laptop
 key), ADR 0023 (the commit barrier's override) and ADR 0029 Amendment 6 §3 and §6 (the ingress account and who may approve), and
@@ -1399,10 +1399,37 @@ refused for Production (as it should be, above), with little to say what to do i
 6. **Additive contract.** `--approval CODE` keeps working and is now the documented fallback; no flag or `--json` field was renamed
    or removed. `--wait` is new. The route and the `authenticator` factor word are additions.
 
-**Not done in this amendment** (each still takes a code, and says so): the tunnel token, a declaration, the box's own secrets and a
-host guard change sent from a computer. Their path is the same flow with their own subject: the service already files
-`tunnel-token` and `box-secrets` from the root helper, and refuses to file `policy` until it can derive the declaration's
-sensitivity itself. **A dashboard-native import** (Secrets, Import: a `.env` file chosen in the browser, names and fingerprints
+**Part 2 (2026-11-17): the same flow for the other changes a computer makes.**
+
+7. **A declaration** (`ozbox env policy set --box`, scope `policy`) is filed with its text, never a subject: the service parses
+   and checks it as the `policy` operation would, and works out the subject itself (`sha256` of its serialised form and of the
+   declaration it holds, or of nothing; sensitivity `ordinary`, because a workload declaration names no `host-guard` or
+   `tunnel-token` entry). A filer's digests and label are not read. The `policy` operation then takes `request_id`, works the
+   subject out again from what it was sent and what it holds, and spends the request with the write: a declaration changed
+   after the approval, or a held one that changed under it, is refused and the approval kept. `--wait` is new on `env policy set`.
+8. **A tunnel token** (`ozbox dashboard install --token-stdin`, scope `tunnel-token`) and **the box's own secrets declaration**
+   (`ozbox box-secrets` on a provider with no instance tags, scope `box-secrets`) are changes the root helper checks at its gate.
+   The computer files the subject `gate_subject` makes (one function, both sides): for a token, its kind and `sha256(token)`
+   (the code path's binding is that digest's first 32 digits); for a declaration, a `set` bound to its binding (so to its vault
+   address) or a `remove`. Once approved, the computer sends the change again with `req-<id>` where a code went (letters, digits
+   and dashes, so it passes the helper's request line and the installer's settings, and is never the shape of a code). The gate
+   recomputes the subject from what it sees (the gate now sends the token's full digest, read by root) and spends the request
+   from the admin socket. A request for another token, another declaration, or from a gate that sends no digest (an older
+   helper) is refused and kept.
+9. **Only the dashboard approves these three** (`software: never` in the rule table): the program never offers this
+   computer's key for them, and its waiting line says the dashboard alone decides. Production keeps the rule above for every
+   act. An import and a guard override are the only acts a software key may decide, outside Production.
+10. **What approves it and where, in every refusal.** The gate's refusal with no approval names the request path (run it from
+    your computer without `--approval` and approve it in the dashboard, Approvals) and the code fallback; the box's waiting line
+    for a guard override, the software-key refusal and `ozbox tunnel setup` on a box (where the box user cannot file a
+    `tunnel-token` request) name the same. The strings are in the message catalogue.
+11. **Additive.** `areq_capabilities` gains `policy_requests` and `gate_requests` (an older box answers neither, and the
+    command says to upgrade it or use a code); the gate takes `token_sha256`; `env policy set` gains `--wait`. Nothing was
+    renamed or removed, and `--approval CODE` stays the fallback everywhere.
+
+**Still not done** (each still takes a code, and says so): `ozbox tunnel setup` run on the box itself, removing a tunnel
+token, placing a vault token (`place-bao-token`) and a host guard change.
+**A dashboard-native import** (Secrets, Import: a `.env` file chosen in the browser, names and fingerprints
 only, the values sealed in the browser to the service key and relayed, a Production switch with the typed confirmation on the
 page) is Planned. It needs HPKE in the browser from an audited library (the suite uses ChaCha20-Poly1305, which WebCrypto does not
 have) and a relay of a sealed line on the supervisor socket, a new path into the service that needs its own decision.
@@ -1417,8 +1444,19 @@ refused key leaving the wait on the dashboard; the wait timing out cleanly with 
 Production-looking value in a non-Production import refused before filing. The dashboard's own check of the code: spent once, a
 wrong code refused, nobody signed in refused.
 
+**Tests of part 2.** In process, against the real service, per act: a declaration, a tunnel token and a box-secrets
+declaration (set and remove) are each refused with words the command recognises, filed, approved on the dashboard with an
+owner's authenticator code while the flow waits, and taken once by the `policy` operation or the gate; another declaration,
+another token, another vault address and a gate that sends no digest are refused with the approval kept; the filer's own
+declaration digests are never read; a software laptop key's decision of each is refused with the dashboard named, and the flow
+never offers it; the wait times out and Ctrl-C stops cleanly with nothing saved; the box user, on either box socket, can file,
+decide, spend at the gate, write by request or read none of them; the token is in no request line, answer, printed line, card
+or file.
+
 **Benchmark.** None: the approval gate, the import and the dashboard's approval sheet are not on a measured path.
 
 **Not proven on a real box.** Planned (Preview until then): `ozbox secrets import .env.production --project app --env production
 --box <box> --allow-live-all --yes` against a real box with a second factor, approved on the dashboard with a passkey and with an
-authenticator code, the command going on by itself.
+authenticator code, the command going on by itself. Part 2: `ozbox env policy set decl.json --project app --box <box>`, `printf '%s\n' "$TOKEN" | ozbox dashboard
+install <box> ... --token-stdin` and `ozbox box-secrets <hetzner-box> --backend openbao ...`, each with no `--approval`, approved
+on the dashboard, each command going on by itself.
