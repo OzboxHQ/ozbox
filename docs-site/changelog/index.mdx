@@ -8,6 +8,15 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Upgrades, imports and the dashboard tunnel">
+  ## Upgrades never skip a checkpoint behind your back, and imports explain every key
+
+  - **An upgrade or resize of a box with an older agent asks you to choose.** Such an agent cannot take the hidden snapshot, so the command now stops before anything changes, even with `--yes`, until you pick `--legacy-checkpoint` (the agent's own checkpoint, which writes a visible branch and pushes it where the box is set to push) or `--no-checkpoint` (go on without one). `--dry-run` still shows the plan.
+  - **`ozbox upgrade` takes the newer signed release.** An Oz image in your own account no longer keeps a box on an older release when a newer signed public release exists; the plan names your image as passed over. A public image that does not verify never replaces yours.
+  - **`ozbox secrets import --box` names every key the box did not store, with its reason**, so the count always adds up. A `.env` file saved with Windows line endings or a byte-order mark is read correctly.
+  - **The dashboard tunnel no longer warns about ping on every start.** New boxes let the tunnel open its ping socket; `ozbox upgrade` brings it to an existing box.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 
