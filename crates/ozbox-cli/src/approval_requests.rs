@@ -937,12 +937,9 @@ impl RequestService {
         now: u64,
     ) -> Result<Value, String> {
         let mut raw = v["subject"].clone();
-        match raw["scope"].as_str() {
-            // the matches of a guard override are the service's own scan of the text, never the filer's list
-            Some("guard-override") => {
-                derive_guard_fields(store, gates, &mut raw, v["scanned_text"].as_str(), now)?
-            }
-            _ => {}
+        // the matches of a guard override are the service's own scan of the text, never the filer's list
+        if raw["scope"].as_str() == Some("guard-override") {
+            derive_guard_fields(store, gates, &mut raw, v["scanned_text"].as_str(), now)?;
         }
         // A declaration change (B4-27) is filed with the declaration itself, never a subject: the service parses it, checks it
         // as the `policy` operation would, and works out the digests and the sensitivity from it and the declaration it holds.

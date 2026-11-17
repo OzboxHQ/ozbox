@@ -95,7 +95,6 @@ fn approve_while_waiting(
         max_wait_ms: 30 * 60_000,
     };
     let a = file_and_wait_with(&mut flow, filing, scope, false, "the change").unwrap();
-    drop(flow);
     (a, seen.into_inner(), lines, offered)
 }
 
