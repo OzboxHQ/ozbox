@@ -83,6 +83,17 @@ pub enum OrchState {
     Stopped,
 }
 
+/// How a feature was handed to its worker. Persisted, because state alone cannot tell a hub-route `Starting` (the task is
+/// already on the worker channel) from a laptop-route `Starting`: the server's tick, `claims_declare` and `reassign` must never
+/// send a hub-route feature down the laptop route (ADR 0042 section 12). An older Book has no field and loads as `Ssh`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    #[default]
+    Ssh,
+    Hub,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureState {
@@ -134,6 +145,9 @@ pub struct Feature {
     /// What to build, in the conductor's words (text from the conductor; a worker treats it as the job).
     pub brief: String,
     pub box_name: String,
+    /// The route the feature was handed over by. Never changed after the hand-over.
+    #[serde(default)]
+    pub transport: Transport,
     pub worker: WorkerPref,
     /// Whether this server made the box for the feature (so it may pause and later destroy it).
     #[serde(default)]
@@ -179,6 +193,9 @@ pub struct Feature {
     /// An answer or a changed contract has not yet reached the worker's engine.
     #[serde(default)]
     pub resume_pending: bool,
+    /// The exact commit a hub-route worker reported in its `result` (ADR 0042 section 5): the merge queue tests and merges this one.
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +559,16 @@ impl Orchestration {
             Ok(ClaimOutcome::Granted)
         } else {
             f.after = after.clone();
+            if f.transport == Transport::Hub {
+                // already on the worker channel: waiting would put it back in the tick's hands and start it a second time by
+                // the laptop route. It is failed with a reason instead (the conductor restarts it after the other merges).
+                if matches!(f.state, FeatureState::Planned | FeatureState::Starting) {
+                    f.state = FeatureState::Failed;
+                }
+                return Err(OrchError::Conflict(
+                    "that feature went over the worker channel and cannot wait for another: it was stopped. Start it again after the other merges.".into(),
+                ));
+            }
             if f.state == FeatureState::Planned || f.state == FeatureState::Starting {
                 f.state = FeatureState::Planned;
             }
@@ -1019,6 +1046,7 @@ impl Orchestration {
             title,
             brief,
             box_name: box_name.clone(),
+            transport: Transport::default(),
             worker,
             box_made: from_spare,
             repo: req.repo.clone().or_else(|| self.policy.repo.clone()),
@@ -1044,6 +1072,7 @@ impl Orchestration {
             box_paused: false,
             box_destroyed: false,
             resume_pending: false,
+            commit: None,
         });
         self.spare_boxes.retain(|b| b != &box_name);
         if !req.claims.is_empty() {
@@ -1064,7 +1093,7 @@ impl Orchestration {
         }
         self.features
             .iter()
-            .filter(|f| f.state == FeatureState::Planned)
+            .filter(|f| f.state == FeatureState::Planned && f.transport == Transport::Ssh)
             .filter(|f| {
                 f.after.iter().all(|a| {
                     self.feature(a)
@@ -1128,6 +1157,11 @@ impl Orchestration {
         let f = self.feature_mut(feature_id).ok_or(OrchError::NoFeature)?;
         if matches!(f.state, FeatureState::Merged) {
             return Err(OrchError::Conflict("that feature is already merged".into()));
+        }
+        if f.transport == Transport::Hub {
+            return Err(OrchError::Conflict(
+                "that feature went over the worker channel and cannot be reassigned until a task can be stopped over it (task.stop is not built yet)".into(),
+            ));
         }
         f.box_name = box_name.to_string();
         f.box_made = false;

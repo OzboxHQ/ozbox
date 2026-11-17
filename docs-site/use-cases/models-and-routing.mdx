@@ -11,7 +11,8 @@ spend.
 
 See [how to read the status](/use-cases#how-to-read-the-status). Provider settings, testing, prices and the usage view
 are built; using those choices inside real agent runs, and recording their usage, is being wired now
-([ADR 0015](/adr/0015-model-providers-and-local-ai)).
+([ADR 0015](/adr/0015-model-providers-and-local-ai)). Claude Code, Codex CLI and Gemini CLI can be started as runs on a
+box ([ADR 0056](/adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge)).
 
 ---
 
@@ -81,12 +82,52 @@ goes through the box daemon, which has not yet been proven on a real cloud box).
 
 **You want:** one agent writes the change, another reviews it.
 
-Start a Claude Code run to implement, then a Codex (or Gemini CLI) run on the same branch to review. Both appear on the
-board with their own cost.
+Start a Claude Code run to implement, then a Codex or Gemini CLI run on the same branch to review:
+
+```
+ozbox run start --engine claude-code --box main --repo shop-app --branch fix/flaky-test --prompt "Fix the flaky test"
+ozbox run start --engine codex --box main --repo shop-app --branch fix/flaky-test --prompt "Review the change on this branch"
+```
+
+Both appear on the board with their own cost, each priced against the provider its engine uses, under the same spend cap.
+
+**Status:** Preview (Codex CLI and Gemini CLI runs are built and tested with fakes of each program; neither has been started
+on a real box with a real account).
+
+## 7. Which engines can run on a box, and what each can do
+
+**You want:** to know which engines Oz Box can start for you, and what to expect from each.
+
+**Settings → Models** says, for each engine, whether it runs on a box. Oz Box starts Claude Code, Codex CLI and Gemini CLI
+headless on a box. The task goes to the program on its input, never on its command line, and each run gets only its own
+provider's token, never another engine's.
+
+| | Claude Code | Codex CLI | Gemini CLI |
+|---|---|---|---|
+| A conversation (the next message continues the same session) | yes | yes (one program start per message) | yes (one program start per message) |
+| The Oz Box tools inside a run | in orchestration runs | yes | not yet |
+| Your ask list refused command by command | yes | no: a run is kept to its workspace with no network, so pushes, downloads and remote shells fail | no: every shell command is refused in a run |
+| Stops and asks before a risky act | not yet | no | no |
+| Tokens counted | yes | yes | yes |
+| Cost reported by the engine | yes | no (Oz Box prices the tokens) | no (Oz Box prices the tokens) |
+
+OpenCode and Aider do not run on a box yet (Planned). You can still use them in a terminal on the box.
 
 **Status:** Preview.
 
-## 7. Private models on your own GPU box
+## 8. Agents on different engines working one task
+
+**You want:** Claude Code on `main` to hand part of a task to Codex on a worker, answer its question, and get its result.
+
+The two never see each other's program, vendor or keys. What crosses between them is the same whichever engines they are:
+the task, a question, an answer, the state, and the result with its commit. A question or an answer that looks like it holds
+a key is not sent. Saying "approved" in an answer approves nothing: an approval is decided only by a person, on the box where
+the act would happen.
+
+**Status:** Preview (built and tested with a fake Claude Code on one end and a fake Codex on the other, through the hub's
+channel in memory; the hub does not yet run between real boxes).
+
+## 9. Private models on your own GPU box
 
 **You want:** code that never leaves your machines, and no per-token cost.
 
@@ -101,7 +142,7 @@ OpenCode at it.
 **Status:** Preview (works in the demo; the box daemon now serves local models and the tool installer can install Ollama, but
 neither has been proven on a real GPU box yet).
 
-## 8. Your own OpenAI-compatible server
+## 10. Your own OpenAI-compatible server
 
 **You want:** to use an LM Studio, vLLM or Ollama server you already run on your network.
 
@@ -113,7 +154,7 @@ ozbox models add lab --kind openai_compatible --base-url http://10.0.0.20:8000/v
 metadata addresses and public plain-http are always refused.
 **Status:** Preview.
 
-## 9. See spend by model, engine and box
+## 11. See spend by model, engine and box
 
 **You want:** to know what each provider, model, engine and box costs.
 
@@ -126,7 +167,7 @@ Prices come with their source and the date they were checked, and you can enter 
 
 **Status:** Preview (stays empty until runs record usage, being wired now).
 
-## 10. Agents never see your real keys
+## 12. Agents never see your real keys
 
 **You want:** a prompt-injected agent to be unable to leak your provider key.
 

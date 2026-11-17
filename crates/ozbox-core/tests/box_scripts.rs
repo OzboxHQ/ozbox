@@ -3137,3 +3137,332 @@ fn the_daemon_starts_after_the_box_users_manager() {
     // never Requires: a manager that is held back (no /work yet) must not stop the daemon
     assert!(!unit.contains("Requires=user@"));
 }
+
+#[test]
+fn the_hub_daemon_runs_as_its_own_user_from_a_socket_root_binds_and_reaches_no_network() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    // stand-ins: the hub's user exists (the secrets setup made it), and every call is recorded
+    for name in ["id", "systemctl", "systemd-tmpfiles"] {
+        let p = bin.join(name);
+        let body = if name == "id" {
+            "#!/bin/sh\nexit 0\n".to_string()
+        } else {
+            format!(
+                "#!/bin/sh\necho \"{name} $@\" >> '{}'\n",
+                d.path().join("calls.log").display()
+            )
+        };
+        fs::write(&p, body)?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = [
+        ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+        ("OZBOX_HUB_NO_SYSTEMCTL", "1"),
+        ("PATH", path.as_str()),
+    ];
+    // a box id that is not one is refused before anything is written
+    let bad = sh(&script("ozbox-hub-setup.sh"), &["x;id"], &env)?;
+    assert!(!bad.status.success());
+    assert!(!etc.join("systemd/system/ozbox-hubd.service").exists());
+    let out = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(out.status.success(), "{}", text(&out));
+    let tmpfiles = fs::read_to_string(etc.join("tmpfiles.d/ozbox-hub.conf"))?;
+    // the state is the hub user's alone; the socket's folder is root's, entered by the supervisor's group
+    assert!(tmpfiles.contains("d /var/lib/ozbox-hub          0700 ozbox-hub ozbox-hub"));
+    assert!(tmpfiles.contains("d /run/ozbox-hub/supervisor   0750 root ozbox-supervisor"));
+    let sock = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.socket"))?;
+    assert!(sock.contains("ListenStream=/run/ozbox-hub/supervisor/hubd.sock"));
+    assert!(
+        sock.contains("FileDescriptorName=ozbox-hubd.socket") && sock.contains("SocketMode=0660")
+    );
+    // a socket unit never listens on a port
+    assert!(!sock.contains("ListenStream=0") && !sock.contains(":"));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+    assert!(unit.contains("User=ozbox-hub") && unit.contains("--box-id main-1"));
+    assert!(unit.contains("--secrets-socket /run/ozbox-secrets/hub/hub.sock"));
+    assert!(unit.contains("RestrictAddressFamilies=AF_UNIX"));
+    assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
+    assert!(unit.contains("CapabilityBoundingSet=\n"));
+    // no registrar until the laptop pins one; an existing file is never overwritten
+    let regs = etc.join("ozbox/hub-registrars.json");
+    assert_eq!(fs::read_to_string(&regs)?.trim(), r#"{"registrars":[]}"#);
+    fs::write(
+        &regs,
+        r#"{"registrars":[{"provider":"aws","public":"00"}]}"#,
+    )?;
+    let again = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(fs::read_to_string(&regs)?.contains("aws"));
+    // carried in the program, never in user-data
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    assert!(!t.contains("ozbox-hub-setup.sh"));
+    Ok(())
+}
+
+/// ADR 0042 section 3: with a listen address the hub's unit may reach a network, and only a loopback, private or tailnet one. A
+/// wildcard, a public address, a port out of range or a name is refused before anything is written, and the unit's own filter denies
+/// every other address in both directions. Without one the unit stays Unix-socket only.
+#[test]
+fn the_hub_listens_only_on_a_loopback_private_or_tailnet_address_and_its_unit_reaches_nothing_else(
+) -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    for name in ["id", "systemd-tmpfiles", "systemctl"] {
+        let p = bin.join(name);
+        fs::write(&p, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = [
+        ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+        ("OZBOX_HUB_NO_SYSTEMCTL", "1"),
+        ("PATH", path.as_str()),
+    ];
+    for bad in [
+        "0.0.0.0:7443",
+        ":7443",
+        "8.8.8.8:7443",
+        "1.1.1.1:443",
+        "172.32.0.1:7443",
+        "172.15.0.1:7443",
+        "100.128.0.1:7443",
+        "100.63.0.1:7443",
+        "10.0.0.1:0",
+        "10.0.0.1:70000",
+        "10.0.0.1",
+        "example.com:7443",
+        "[::]:7443",
+        "10.0.0.1:7443;id",
+    ] {
+        let r = sh(&script("ozbox-hub-setup.sh"), &["main-1", bad], &env)?;
+        assert!(!r.status.success(), "{bad} was accepted");
+        assert!(
+            !etc.join("systemd/system/ozbox-hubd.service").exists(),
+            "{bad} wrote a unit"
+        );
+    }
+    for good in [
+        "127.0.0.1:7443",
+        "10.1.2.3:7443",
+        "192.168.0.9:1",
+        "172.16.5.5:65535",
+        "100.100.1.1:7443",
+    ] {
+        let r = sh(&script("ozbox-hub-setup.sh"), &["main-1", good], &env)?;
+        assert!(r.status.success(), "{good}: {}", text(&r));
+        let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+        assert!(unit.contains(&format!("--listen {good}")), "{unit}");
+        assert!(
+            unit.contains("RestrictAddressFamilies=AF_UNIX AF_INET\n"),
+            "{unit}"
+        );
+        assert!(unit.contains("IPAddressDeny=any\n"), "{unit}");
+        let allow = unit
+            .lines()
+            .find(|l| l.starts_with("IPAddressAllow="))
+            .unwrap_or_default();
+        // only the loopback, the private ranges and the tailnet's: no wildcard, no public range
+        assert_eq!(
+            allow,
+            "IPAddressAllow=127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
+        );
+        assert!(
+            !unit.contains("AF_INET6")
+                && !unit.contains("0.0.0.0/0")
+                && !unit.contains("--listen 0.")
+        );
+    }
+    // and with none, the unit is what it was: Unix sockets only, no IP rule at all
+    let r = sh(&script("ozbox-hub-setup.sh"), &["main-1"], &env)?;
+    assert!(r.status.success(), "{}", text(&r));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hubd.service"))?;
+    assert!(unit.contains("RestrictAddressFamilies=AF_UNIX\n"));
+    assert!(!unit.contains("--listen") && !unit.contains("IPAddress") && !unit.contains("AF_INET"));
+    Ok(())
+}
+
+/// ADR 0042: the worker's hub agent runs as the hub's user, dials out only, and reaches nothing but a loopback, private or tailnet
+/// address; a wildcard, a public address or a bad word is refused before anything is written.
+#[test]
+fn the_workers_hub_agent_dials_out_only_to_a_private_address_and_its_unit_binds_nothing() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    for name in ["id", "systemctl"] {
+        let p = bin.join(name);
+        fs::write(&p, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let env = [
+        ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+        ("OZBOX_HUB_NO_SYSTEMCTL", "1"),
+        ("PATH", path.as_str()),
+    ];
+    let fp = "aaaa-bbbb-cccc-dddd-eeee";
+    for bad in [
+        ("w1", "0.0.0.0:7443", fp),
+        ("w1", "8.8.8.8:7443", fp),
+        ("w1", "10.0.0.1:0", fp),
+        ("w1", "10.0.0.1:7443;id", fp),
+        ("x;id", "10.0.0.1:7443", fp),
+        ("w1", "10.0.0.1:7443", "$(id)"),
+    ] {
+        let r = sh(
+            &script("ozbox-hub-agent-setup.sh"),
+            &[bad.0, bad.1, bad.2],
+            &env,
+        )?;
+        assert!(!r.status.success(), "{bad:?} was accepted");
+        assert!(
+            !etc.join("systemd/system/ozbox-hub-agent.service").exists(),
+            "{bad:?} wrote a unit"
+        );
+    }
+    let r = sh(
+        &script("ozbox-hub-agent-setup.sh"),
+        &["w1", "10.0.1.5:7443", fp],
+        &env,
+    )?;
+    assert!(r.status.success(), "{}", text(&r));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hub-agent.service"))?;
+    assert!(
+        unit.contains("User=ozbox-hub")
+            && unit.contains("--name w1")
+            && unit.contains("--hub-addr 10.0.1.5:7443")
+    );
+    assert!(
+        unit.contains("RestrictAddressFamilies=AF_UNIX AF_INET\n")
+            && unit.contains("IPAddressDeny=any\n")
+    );
+    assert!(unit.contains(
+        "IPAddressAllow=127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10"
+    ));
+    assert!(
+        unit.contains("ProtectSystem=strict")
+            && unit.contains("NoNewPrivileges=true")
+            && unit.contains("CapabilityBoundingSet=\n")
+    );
+    // it listens on nothing: no socket unit, no listen flag
+    assert!(
+        !etc.join("systemd/system/ozbox-hub-agent.socket").exists() && !unit.contains("--listen")
+    );
+    // with no task store the unit names none (every task is refused by name); with one, the agent queues its tasks there and may
+    // write only that folder
+    assert!(!unit.contains("--tasks") && !unit.contains("ReadWritePaths"));
+    // the fabric is the agent's and is served on a local socket in a folder of the agent's group; still no network listener
+    assert!(
+        unit.contains("--fabric-socket /run/ozbox-hub-agent/fabric.sock")
+            && unit.contains("RuntimeDirectory=ozbox-hub-agent\n")
+            && unit.contains("RuntimeDirectoryMode=0750\n")
+    );
+    for bad in [
+        "relative/tasks.json",
+        "/a/../b.json",
+        "/a;id",
+        "/a b",
+        "/dir/",
+    ] {
+        let r = sh(
+            &script("ozbox-hub-agent-setup.sh"),
+            &["w1", "10.0.1.5:7443", fp, bad],
+            &env,
+        )?;
+        assert!(!r.status.success(), "{bad:?} was accepted");
+    }
+    let r = sh(
+        &script("ozbox-hub-agent-setup.sh"),
+        &["w1", "10.0.1.5:7443", fp, "/var/lib/ozbox-hub/tasks.json"],
+        &env,
+    )?;
+    assert!(r.status.success(), "{}", text(&r));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-hub-agent.service"))?;
+    assert!(
+        unit.contains(" --tasks /var/lib/ozbox-hub/tasks.json\n")
+            && unit.contains("ReadWritePaths=/var/lib/ozbox-hub\n")
+            && unit.contains("ProtectSystem=strict")
+    );
+    Ok(())
+}
+
+#[test]
+fn the_task_router_gets_a_user_of_its_own_and_the_sockets_split_by_directory_mode() -> R {
+    let d = tempfile::tempdir()?;
+    let bin = d.path().join("bin");
+    fs::create_dir_all(&bin)?;
+    // stand-ins for the commands that need root: the user exists after "useradd", and every call is recorded
+    for name in ["id", "useradd", "passwd", "systemctl", "systemd-tmpfiles"] {
+        let p = bin.join(name);
+        let body = if name == "id" {
+            "#!/bin/sh\nexit 1\n".to_string()
+        } else {
+            format!(
+                "#!/bin/sh\necho \"{name} $@\" >> '{}'\n",
+                d.path().join("calls.log").display()
+            )
+        };
+        fs::write(&p, body)?;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    }
+    let etc = d.path().join("etc");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = sh(
+        &script("ozbox-mesh-setup.sh"),
+        &[],
+        &[
+            ("OZBOX_ETC", etc.to_str().unwrap_or_default()),
+            ("OZBOX_MESH_NO_SYSTEMCTL", "1"),
+            ("PATH", &path),
+        ],
+    )?;
+    assert!(out.status.success(), "{}", text(&out));
+    let calls = fs::read_to_string(d.path().join("calls.log")).unwrap_or_default();
+    assert!(
+        calls.contains("useradd --system")
+            && calls.contains("ozbox-mesh")
+            && calls.contains("passwd --lock"),
+        "{calls}"
+    );
+    let tmpfiles = fs::read_to_string(etc.join("tmpfiles.d/ozbox-mesh.conf"))?;
+    // the directory modes decide who may connect: the box user's group for the agent and relay sockets, root alone for admin
+    assert!(tmpfiles.contains("/var/lib/ozbox-mesh      0700 ozbox-mesh ozbox-mesh"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/agent    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/relay    0750 ozbox-mesh ozbox"));
+    assert!(tmpfiles.contains("/run/ozbox-mesh/admin    0700 ozbox-mesh ozbox-mesh"));
+    let unit = fs::read_to_string(etc.join("systemd/system/ozbox-mesh.service"))?;
+    assert!(
+        unit.contains("User=ozbox-mesh") && unit.contains("tasks serve --dir /var/lib/ozbox-mesh")
+    );
+    assert!(unit.contains("ProtectSystem=strict") && unit.contains("NoNewPrivileges=true"));
+    // carried in the program (user-data has a hard size limit), run once at first boot through it
+    let t = read("infra/cloud-init/box.yaml.tftpl");
+    assert!(
+        !t.contains("ozbox-mesh-setup.sh"),
+        "the router's setup is not in user-data"
+    );
+    assert!(t.contains("/usr/local/bin/ozbox tasks router-setup ||"));
+    Ok(())
+}

@@ -100,6 +100,10 @@ for (const width of WIDTHS) {
       await expect(card.getByText('Key saved')).toBeVisible();
       expect(await page.content()).not.toContain(SENTINEL);
 
+      // each engine says whether it can run on a box: the three with an adapter can, the others say not yet
+      for (const engineId of ['claude-code', 'codex', 'gemini-cli']) await expect(page.getByTestId(`engine-runs-${engineId}`)).toHaveText('Runs on a box (Preview)');
+      await expect(page.getByTestId('engine-runs-opencode')).toContainText('not yet (Planned)');
+
       // which engine uses which model: Claude Code may use Bedrock, and the list offers only providers it can use
       await page.getByTestId('engine-claude-code').getByRole('button', { name: 'Choose for Claude Code' }).click();
       const eng = page.getByTestId('engine-sheet');

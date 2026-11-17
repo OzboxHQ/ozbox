@@ -49,9 +49,31 @@ pub struct BoxPin {
     /// only for what the owner allocated to it.
     #[serde(default)]
     pub allowed: Vec<String>,
+    /// What this box is, as the owner classified it (ADR 0042 section 5). **A pin is a worker unless it positively says
+    /// `main`**: `None` (an older pin, or one nobody classified) is refused Production exactly like a worker, so a missing
+    /// value can never open the door. The class is exactly as trusted as the approver list beside it: both are the owner's
+    /// own edit of this config, and enrolment becomes its only writer later. The cost, stated: every pin written before this
+    /// field existed (including `main`'s) is refused Production at the issuer until it is classified once.
+    #[serde(default)]
+    pub class: Option<BoxClass>,
+}
+
+/// The owner's classification of a pinned box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxClass {
+    /// `main`: may be given Production, through the approval the scope asks for.
+    Main,
+    /// A worker: never given Production (decision D2).
+    Worker,
 }
 
 impl BoxPin {
+    /// Refused Production as a worker: everything not positively classified `main`.
+    fn counts_as_worker(&self) -> bool {
+        self.class != Some(BoxClass::Main)
+    }
+
     fn allows(&self, secret: &str) -> bool {
         self.allowed.iter().any(|a| {
             a == secret
@@ -235,6 +257,8 @@ pub enum Error {
     Audit,
     Reader(String),
     Seal,
+    /// Decision D2: a worker box is never given Production in this release.
+    ProductionToWorker,
 }
 
 impl std::fmt::Display for Error {
@@ -271,6 +295,9 @@ impl std::fmt::Display for Error {
             }
             Error::Reader(_) => f.write_str("the secret could not be read"),
             Error::Seal => f.write_str("the release could not be sealed to the box"),
+            Error::ProductionToWorker => f.write_str(
+                "a worker box, or a box the owner has not classified, is never given a Production value in this release: run the step on `main` with its own approval, or classify main once in the issuer's config (`\"class\": \"main\"` beside the approver list)",
+            ),
         }
     }
 }
@@ -385,6 +412,19 @@ impl Issuer<'_> {
         }
         if pin.caller.is_empty() || pin.caller != caller {
             return Err(Error::WrongCaller);
+        }
+        // the worker check comes after the caller check, so only the box's own caller can write this audit line or learn that
+        // a box is classified as a worker; it still runs before anything is allocated or read
+        if pin.counts_as_worker() {
+            self.audit(
+                "refused-worker",
+                "-",
+                &format!(
+                    "box={} secret={} run={}",
+                    scope.box_id, scope.secret, scope.run_id
+                ),
+            )?;
+            return Err(Error::ProductionToWorker);
         }
         if !pin.allows(&scope.secret) {
             return Err(Error::NotAllocated);
@@ -626,6 +666,15 @@ impl Issuer<'_> {
             .boxes
             .get(&scope.box_id)
             .ok_or(Error::UnknownBox)?;
+        if pin.counts_as_worker() {
+            // an approval filed before the box was marked a worker is not honoured for it either
+            self.audit(
+                "refused-worker",
+                request_id,
+                &format!("box={} secret={}", scope.box_id, scope.secret),
+            )?;
+            return Err(Error::ProductionToWorker);
+        }
         let use_no = used + 1;
         self.audit(
             "release",
@@ -764,6 +813,7 @@ mod tests {
                 service_key: key.public(),
                 caller: CALLER.into(),
                 allowed: vec!["prod/*".into()],
+                class: Some(BoxClass::Main),
             },
         );
         cfg.approvers = vec![
@@ -1384,6 +1434,140 @@ mod tests {
         w3.cfg.boxes.get_mut("dev").unwrap().allowed = vec!["prod/db-url".into()];
         let r3 = w3.rand();
         assert!(w3.issuer(&r3).request(w3.scope(), CALLER, NOW).is_ok());
+    }
+
+    #[test]
+    fn a_worker_box_is_refused_production_on_a_request_and_on_a_release_and_it_is_audited() {
+        // decision D2 (ADR 0042): hard-coded, no setting. The pin says what the box is; the refusal does not depend on anything else.
+        let mut w = world();
+        // an approval made while the box was an ordinary box...
+        let request_id = {
+            let r = w.rand();
+            let i = w.issuer(&r);
+            let ch = i.request(w.scope(), CALLER, NOW).unwrap();
+            i.approve(
+                &ch.request_id,
+                "mac",
+                Proof::Signature(w.laptop.sign(&ch.message).as_ref()),
+                NOW + 1,
+            )
+            .unwrap();
+            ch.request_id
+        };
+        // ...is not honoured once the box is enrolled as a worker
+        w.cfg.boxes.get_mut("dev").unwrap().class = Some(BoxClass::Worker);
+        let r = w.rand();
+        let i = w.issuer(&r);
+        assert_eq!(
+            i.release(&request_id, CALLER, NOW + 2),
+            Err(Error::ProductionToWorker)
+        );
+        assert_eq!(
+            i.request(w.scope(), CALLER, NOW + 3),
+            Err(Error::ProductionToWorker)
+        );
+        let log = w.log.lines.borrow();
+        assert_eq!(
+            log.iter()
+                .filter(|l| l.starts_with("refused-worker"))
+                .count(),
+            2
+        );
+        assert!(
+            !log.iter().any(|l| l.starts_with("release ")),
+            "nothing was released"
+        );
+        assert!(w.reader.calls.borrow().is_empty(), "no value was read");
+    }
+
+    #[test]
+    fn a_box_pinned_by_a_config_written_before_box_classes_is_never_released_production() {
+        // D2, end to end at the issuer, written only against what the issuer offered before box classes existed (a pin read from
+        // JSON with no class, the request, a present laptop key's approval, the release), so this test runs unchanged on the old
+        // code. There it fails: the request is filed, the laptop approves it and the value is read and released to the box, which
+        // may be a fleet worker. Here the request is refused, nothing is approved or read, and nothing is released.
+        let mut w = world();
+        let old = w.cfg.boxes["dev"].clone();
+        let pin: BoxPin = serde_json::from_value(serde_json::json!({
+            "store_id": old.store_id,
+            "service_key": old.service_key,
+            "caller": old.caller,
+            "allowed": old.allowed,
+        }))
+        .unwrap();
+        w.cfg.boxes.insert("dev".into(), pin);
+        let r = w.rand();
+        let i = w.issuer(&r);
+        let got = i.request(w.scope(), CALLER, NOW);
+        if let Ok(ch) = &got {
+            // what the old code allowed: a present laptop key approves, the box asks for the value
+            let _ = i.approve(
+                &ch.request_id,
+                "mac",
+                Proof::Signature(w.laptop.sign(&ch.message).as_ref()),
+                NOW + 1,
+            );
+            let _ = i.release(&ch.request_id, CALLER, NOW + 2);
+        }
+        assert!(
+            w.reader.calls.borrow().is_empty(),
+            "a Production value was read for a box that is not classified main"
+        );
+        assert!(
+            !w.log
+                .lines
+                .borrow()
+                .iter()
+                .any(|l| l.starts_with("release ")),
+            "a Production value was released to a box that is not classified main"
+        );
+        assert!(got.is_err(), "the request itself is refused");
+    }
+
+    #[test]
+    fn a_pin_is_a_worker_unless_it_positively_says_main() {
+        for (class, refused) in [
+            (None, true),
+            (Some(BoxClass::Worker), true),
+            (Some(BoxClass::Main), false),
+        ] {
+            let mut w = world();
+            w.cfg.boxes.get_mut("dev").unwrap().class = class;
+            let r = w.rand();
+            let got = w.issuer(&r).request(w.scope(), CALLER, NOW);
+            assert_eq!(
+                matches!(got, Err(Error::ProductionToWorker)),
+                refused,
+                "class={class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_old_pin_with_no_class_is_refused_and_the_error_names_the_one_edit_that_fixes_it() {
+        let pin: BoxPin = serde_json::from_str(
+            r#"{"store_id":"s","service_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#,
+        )
+        .unwrap();
+        assert_eq!(pin.class, None);
+        assert!(pin.counts_as_worker());
+        let msg = Error::ProductionToWorker.to_string();
+        assert!(msg.contains("class") && msg.contains("main") && msg.contains("approver list"));
+    }
+
+    #[test]
+    fn a_wrong_caller_cannot_write_the_worker_refusal_or_learn_a_box_is_a_worker() {
+        let mut w = world();
+        w.cfg.boxes.get_mut("dev").unwrap().class = Some(BoxClass::Worker);
+        let r = w.rand();
+        let got = w.issuer(&r).request(w.scope(), "someone-else", NOW);
+        assert_eq!(got, Err(Error::WrongCaller));
+        assert!(!w
+            .log
+            .lines
+            .borrow()
+            .iter()
+            .any(|l| l.starts_with("refused-worker")));
     }
 
     #[test]

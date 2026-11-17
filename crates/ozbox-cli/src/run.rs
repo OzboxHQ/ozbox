@@ -145,6 +145,14 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             return crate::runs_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
         }
+        Command::Tasks { command } => {
+            let f = crate::runs_cli::Flags {
+                json,
+                dry_run: cli.dry_run,
+                yes: cli.yes,
+            };
+            return crate::tasks_cli::run(command, &f).map_err(|e| CliError::Msg(e.to_string()));
+        }
         Command::Orch { command } => {
             let f = crate::runs_cli::Flags {
                 json,
@@ -302,6 +310,16 @@ pub fn run(cli: Cli) -> Result<()> {
         };
         return crate::cost_cli::run(command, kind, &route_inputs(&config), &f);
     }
+    if let Command::Hub { command } = &cli.command {
+        return crate::hub_cli::run(
+            command,
+            crate::hub_cli::Flags {
+                yes: cli.yes,
+                dry_run: cli.dry_run,
+                json,
+            },
+        );
+    }
     if let Command::Plugin { command } = &cli.command {
         return crate::plugin_cli::run(command, cli.yes, cli.dry_run, json);
     }
@@ -454,6 +472,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Cost { .. }
         | Command::Run { .. }
         | Command::Orch { .. }
+        | Command::Tasks { .. }
         | Command::Adopt { .. }
         | Command::State { .. }
         | Command::HostGuard { .. }
@@ -469,6 +488,7 @@ pub fn run(cli: Cli) -> Result<()> {
         | Command::Audit { .. }
         | Command::Telemetry { .. }
         | Command::Plugin { .. }
+        | Command::Hub { .. }
         | Command::Init { .. }
         | Command::Harden { .. } => Ok(()),
         Command::Mesh { command } => {

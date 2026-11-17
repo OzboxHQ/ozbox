@@ -119,6 +119,13 @@ pub fn valid_name(name: &str) -> bool {
         "tunnel-token-",
         "trigger-secret-",
         "approval-key-",
+        // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's, never the store's
+        "tasks-sign-",
+        "tasks-seal-",
+        // the laptop registrar's key and a Hetzner worker's one-time creation secret (`ozbox hub`); laptop only, see
+        // `hub_cli::is_laptop_only`
+        "hub-registrar-",
+        "hub-creation-",
     ]
     .iter()
     .any(|p| {

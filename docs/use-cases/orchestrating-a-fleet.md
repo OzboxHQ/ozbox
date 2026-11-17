@@ -192,10 +192,70 @@ boxes instead, and `worker: reuse` uses idle boxes you already have, if your set
 
 ---
 
+## 11. Main as the hub: handing a task to a worker over a channel (Preview)
+
+Today `main` reaches a worker through your computer's connection. The hub is the route that does not: a worker dials out to `main`,
+every message is signed and sealed, and no box is opened to the internet. **Built and tested with fake boxes and a loopback network; no
+box has a hub yet, and none has run on a real cloud box.**
+
+- `task_start` takes `transport`: `hub` or `ssh`. On a box with a hub, `hub` is the default when the worker box is one of the hub's
+  workers; otherwise `ssh` is, as before. On a box with no hub, `hub` is refused by name and nothing is added.
+- Over the hub the task is handed to the worker at once, never started by the laptop route, and `task_status` shows what the worker
+  reported (accepted, working, the commit it finished with) beside the feature.
+- **A worker is never given a Production key in this release.** The hub refuses it, the worker refuses it again on its own, and the
+  off-box issuer refuses a worker too. There is no setting that turns this off. A task also never names keys: a conductor that tries
+  is refused and it is recorded.
+- **A worker asks for development or staging keys by name**, only names its task declared. `main` checks the ask, the values are
+  sealed to that worker's own vouched-for key, and only the worker's secrets service can open them; `main`'s hub never holds a value.
+  The keys are deleted when the task ends, when they are revoked, and at once if the worker loses `main`.
+- **The connection:** a worker dials `main` over your tailnet or the provider's private network. `main` listens only on a private or
+  loopback address, never on a public one, and both ends prove who they are before anything moves. A lost connection is retried by
+  itself, nothing is delivered twice or out of order, and a worker that has gone quiet shows as "not answering", never as "working".
+- Every hand-off and every refusal is in the audit record, with names and never values.
+- **Approvals come back to `main`.** A request filed on a worker (in this release, a guard override) appears in `main`'s fleet inbox
+  (`GET /v1/approvals/fleet`) with the worker's name. You decide it once with your passkey; `main` passes your decision on, and
+  **the worker checks it itself** against the approvers your laptop set on it. `main` cannot approve anything on its own, a message
+  that says "approved" grants nothing, and Production on a worker is never decided from `main`.
+- **The merge queue takes a worker's finished commit.** When a worker reports the commit it finished, the feature joins `main`'s merge
+  queue with that commit. With `test_lane_box: hub:<lane>` the tests run split across workers on that commit, and the lane is never
+  green while a test has no passing result; a worker that stops answering has its tests moved to another. A conflict or failing tests go
+  back to the worker. Your approval to merge is unchanged.
+- **The hub is integrated (Preview, tested end to end in CI, never run on a real box).** `ozbox-hubd setup <box-id> <address:port>` (as root, on
+  `main`) sets up the hub daemon, which listens on a loopback or private address only; a worker joins with a one-use invite, an
+  attestation from a registrar you pinned (your computer's, or the AWS claim service's) and proof that it holds the attested key,
+  sent to the hub's own listener; you confirm the plan and it is on the roster, with no other step. It then dials out, takes tasks,
+  runs them on whichever engine the task names, asks for staging keys by name, sends its approvals to `main`'s fleet inbox, and its
+  finished commits go through the merge queue and lanes. Agents on different workers, even on different engines and providers, can
+  message each other and share reviewed memory and skills (see [Agents that talk](agents-talk.md)). On a worker, a task is a run of that
+  box's own supervisor (its Models routing, its credential broker, its subscription choice and its spend caps apply, and a task you stop on
+  `main` stops there), and the worker's messages and memory go through its agent. **Your approvers reach each worker** with `ozbox hub approvers`:
+  `targets` and `sync` on `main`, `sign` on your own computer. Your computer signs the passkeys your dashboard lists, one list per
+  worker, and `main` only carries them: the worker checks your signature itself against an approval key the box already trusts, and
+  refuses an unsigned, forged, older, expired or other-box list, so `main` cannot change who approves. `status` shows the version each
+  worker holds. Re-sign with a higher version before the 90 days (or the days you chose) run out; an expired list decides nothing.
+  **Not done:** none of this has run on a real box yet (that is the owner's run). The registrars are built
+  (Preview, CI only; never run against real AWS or a real box); an AWS worker needs the claim service, which is not deployed.
+- **The registrars that vouch for a worker are built** (Preview, CI only; never run against real AWS or a real box). On AWS a worker
+  proves it is the EC2 instance it claims with the identity document AWS signs, checked against AWS's published certificate for its
+  region, the account, the region, the instance's age and the one-use token. For Hetzner and machines you own, your own computer is
+  the registrar: `ozbox hub attest` shows what it would sign and signs after you confirm, and refuses on a box. `ozbox hub repin`,
+  as root on `main`, pins or rotates which registrars the hub trusts; with none pinned no worker can enrol (the self-test says so).
+  Not done: the AWS claim service that would call the AWS check is not deployed, and the first real AWS-signed document is still to be
+  verified.
+
+Design: [ADR 0042](../adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main.md).
+
 ## What is not done yet
 
 - **A real cloud box and a real agent.** Everything here is tested with fake boxes and a simulated agent.
+- **A real worker's run.** The worker's run path is built (a task is queued as a run of the worker's own box and run by its supervisor) and
+  tested end to end with fake programs; it has not run on a real box. The AWS claim service that would call the AWS registrar is not
+  deployed. Section 11 is the part that is built.
+- **Over the hub:** a laptop's decision on a worker, an agent's own permission asks (only requests in the worker's request book travel),
+  and the lane's comparison of the test list with the base branch and its report merge. The check that a branch still points at the
+  commit the lane tested is built, and the conductor box's merger reads the branch's head from the remote for it, so it rests on the actual
+  head and not only the commit a worker reported.
 - **A message into a worker that is mid-turn.** It is typed in only when the worker's run is a conversation; otherwise the answer waits until the worker ends its turn, then resumes it from its branch.
 - **A claims check inside the engine** before each edit (an engine hook). The tool and the worker's instructions carry it today.
-- **The test-lane box** for the merge queue, and the **stdio** transport for the tools.
+- The **stdio** transport for the tools.
 - **Sub-agent limits inside the engine.** They are given to the worker as an instruction and bounded by the box's admission cap.

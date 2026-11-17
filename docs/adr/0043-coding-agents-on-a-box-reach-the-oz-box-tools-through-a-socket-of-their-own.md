@@ -115,3 +115,9 @@ tunnel it answers only its own public host, and it is the one process that holds
 - **Benchmark.** Nothing here is on a benchmark headline metric (the `realworld` suites start no engines). Every engine the
   box user starts, runs included, now spawns one bridge process and makes one socket round trip at start-up (milliseconds), and
   a run's engine is refused there. The hop adds one socket write and read per call over an open connection; the test in `crates/ozbox-cli/src/agent_mcp/tests.rs` prints it (laptop-shaped; not a 4 vCPU box measurement).
+
+**Amended by [0057](0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data.md) (2026-11-17, Preview).** The door's tool list gains the five messaging tools (`messages_post`,
+`messages_get`, `messages_thread`, `messages_ack`, `participants_list`) for every role. A terminal agent's address on the fabric is
+`agent:<box>/t-<session code>`, made from the door's own code, never from the agent; its program word is shown as its engine, as a
+claim. The reads are reads to the permission engine; posting and acknowledging are sandbox writes. A message read through the door is
+data and approves nothing.

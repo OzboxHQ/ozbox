@@ -46,6 +46,16 @@ each with a "what is not covered" list), the [shared responsibility](/shared-res
 [hardening checklist](/hardening-checklist). Oz Box describes controls; it makes no claim of certification or
 compliance.
 
+## Who may approve on a worker box (hub, Preview)
+
+When `main` is a hub, a worker's request is decided once on `main`'s dashboard with your passkey, and **the worker's own approval
+service checks the decision**, against a list of approvers that **your own computer signed**. `ozbox hub approvers sign` signs it
+(refused on a box); `main` only carries it, and the worker accepts it only if the signature verifies with an approval key the worker
+already trusted, the list names that worker, it has not expired and its version is higher than the one held. A message from `main`
+alone, a forged or older list, or a list for another box changes nobody's approvals, so a taken-over `main` can delay, hide or deny, and
+cannot make a worker approve. Lists expire (90 days at most); re-sign before then. Production is never decided from `main`. Not covered:
+a stolen approval key on your computer can sign a list (revoke it on the box), and none of this has run on a real box yet.
+
 ## What a chat app can and cannot do (Telegram, Preview)
 
 Telegram is not private: bot messages are not end to end encrypted, and the vendor has no data agreement with the project. Never type

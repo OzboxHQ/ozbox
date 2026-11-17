@@ -265,3 +265,54 @@ fn a_box_that_cannot_be_reached_waits_and_says_why() {
         .unwrap_err()
         .contains("not known"));
 }
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn the_head_is_read_from_the_remote_after_a_fetch_and_is_pending_while_the_box_works() {
+    let (mut m, a) = merger(
+        2,
+        Box::new(|argv: &[String]| {
+            if argv.iter().any(|x| x == "rev-parse") {
+                (0, format!("{SHA}\n"))
+            } else {
+                (0, String::new())
+            }
+        }),
+    );
+    // the first asks answer pending (the box is still running a step): the merge is never decided on a guess
+    assert_eq!(
+        m.head_step(Some("billing"), "feat/x").unwrap(),
+        HeadRead::Pending
+    );
+    let got = finish(
+        || m.head_step(Some("billing"), "feat/x"),
+        |r| *r == HeadRead::Pending,
+    );
+    assert_eq!(got, HeadRead::Known(Some(SHA.into())));
+    let started = a.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    // a fetch first (the head is the remote's now), then the remote-tracking ref, both as argv arrays
+    assert_eq!(started[0][3..], ["fetch", "--prune", "origin"]);
+    assert_eq!(started[1][3], "rev-parse");
+    assert_eq!(started[1].last().unwrap(), "refs/remotes/origin/feat/x");
+}
+
+#[test]
+fn a_branch_the_remote_does_not_have_has_no_head_and_is_an_error_not_unknown() {
+    let (mut m, _) = merger(
+        0,
+        Box::new(|argv: &[String]| {
+            if argv.iter().any(|x| x == "rev-parse") {
+                (1, String::new())
+            } else {
+                (0, String::new())
+            }
+        }),
+    );
+    let e = m.head_step(Some("billing"), "feat/gone").unwrap_err();
+    assert!(e.contains("not on the remote"), "{e}");
+    // output that is not a commit is not one either
+    let (mut m, _) = merger(0, Box::new(|_| (0, "not a sha".to_string())));
+    assert!(m.head_step(Some("billing"), "feat/x").is_err());
+}

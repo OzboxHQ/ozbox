@@ -562,6 +562,11 @@ pub enum Command {
         #[command(subcommand)]
         command: MeshCommand,
     },
+    /// The registrars that vouch for a worker box's identity: pin them on `main`, or sign for a worker from your own computer.
+    Hub {
+        #[command(subcommand)]
+        command: HubCommand,
+    },
     /// The outbound tunnel that reaches the dashboard from outside (your own account, token and domain).
     Tunnel {
         #[command(subcommand)]
@@ -576,6 +581,11 @@ pub enum Command {
     Run {
         #[command(subcommand)]
         command: RunCommand,
+    },
+    /// Tasks between two endpoints (a laptop and a box, or two boxes): typed, signed, ordered, with a state and an audit record.
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
     },
     /// Orchestrations: one agent hands features to worker boxes. Start, follow, answer, merge.
     Orch {
@@ -843,6 +853,10 @@ pub enum SecretsCommand {
         /// shrink to what the box user needs, and the supervisor alone can issue run tokens and ask for an approval.
         #[arg(long)]
         supervisor_socket: Option<std::path::PathBuf>,
+        /// The hub daemon's socket (a directory only the secrets user and `ozbox-hub` may enter): the hub's public identity, its
+        /// handshake signature and an enrolment token's tag, and nothing that opens or signs a message (ADR 0042).
+        #[arg(long)]
+        hub_socket: Option<std::path::PathBuf>,
         /// Where the box's own secrets are kept while the box is up: a file on tmpfs, sealed under the same key. Without
         /// it the service holds none.
         #[arg(long)]
@@ -1135,6 +1149,84 @@ pub enum TelemetryCommand {
     Off,
     /// Send today's event now (it must be on).
     Send,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubCommand {
+    /// On `main`, as root: pin, rotate or remove the registrars the hub trusts to vouch for a worker. With no option it lists them.
+    /// A rotation is `--add KEY --provider P --remove FINGERPRINT` in one step.
+    Repin {
+        /// The Ed25519 public key (64 hex characters) of the registrar to trust.
+        #[arg(long, value_name = "PUBLIC-KEY")]
+        add: Option<String>,
+        /// Which workers it may vouch for: aws (the claim service), hetzner or own (your computer).
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// The fingerprint of a registrar to stop trusting.
+        #[arg(long, value_name = "FINGERPRINT")]
+        remove: Option<String>,
+        /// The registrars file (default /etc/ozbox/hub-registrars.json).
+        #[arg(long, value_name = "PATH")]
+        registrars: Option<std::path::PathBuf>,
+    },
+    /// On your own computer: make the registrar key that signs for Hetzner workers and machines you own, and print its public half to pin.
+    RegistrarKey,
+    /// On your own computer: read a worker's attestation request, show what you would sign, and sign it after you confirm. Refused on a box.
+    Attest {
+        /// The request `main` prepared (JSON).
+        #[arg(long, value_name = "FILE")]
+        request: std::path::PathBuf,
+        /// Write the signed attestation here (default: print it).
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Who may approve on your workers: sign your approvers on your own computer, send them from `main`, and see what each worker holds.
+    Approvers {
+        #[command(subcommand)]
+        command: HubApproversCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubApproversCommand {
+    /// On `main`: list the workers an approver list can be made for (their names and ids) and the version each holds. Writes a file to
+    /// take to your computer with `--out`.
+    Targets {
+        /// Write the list here (JSON) instead of printing it.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+    /// On your own computer: sign the people who may approve (the passkeys your dashboard lists, a JSON file with an "approvers" list)
+    /// for each worker in a targets file, with your computer's approval key. Refused on a box. A worker takes only a version higher than
+    /// the one it holds.
+    Sign {
+        /// The workers (from `ozbox hub approvers targets --out`).
+        #[arg(long, value_name = "FILE")]
+        targets: std::path::PathBuf,
+        /// The passkeys that may approve: the file `ozbox fleet approvers sign` also reads.
+        #[arg(long, value_name = "FILE")]
+        credentials: std::path::PathBuf,
+        /// The version of this list; it must be higher than the one each worker holds.
+        #[arg(long)]
+        version: u64,
+        /// How many days the list stays valid (1 to 90). A worker decides nothing from `main` once it has expired.
+        #[arg(long, default_value_t = 30)]
+        valid_days: u64,
+        /// Which of your computer's approval keys signs (default laptop).
+        #[arg(long, default_value = "laptop")]
+        key_id: String,
+        /// Write the signed bundle here.
+        #[arg(long, value_name = "FILE")]
+        out: std::path::PathBuf,
+    },
+    /// On `main`: show the plan, then hand a signed bundle to the hub to carry to each worker. Each worker checks your signature itself
+    /// and refuses anything else, so `main` cannot change who approves.
+    Sync {
+        #[arg(long, value_name = "FILE")]
+        bundle: std::path::PathBuf,
+    },
+    /// On `main`: the version each worker has been sent and says it holds, and any refusal it gave.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2116,6 +2208,137 @@ pub enum PolicyCommand {
     Show {
         #[arg(long)]
         project: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TasksCommand {
+    /// Create this endpoint's keys and name. Run once on each side.
+    Init {
+        #[arg(long)]
+        name: String,
+    },
+    /// Print this endpoint's public identity, to hand to the other side by a way you trust.
+    Identity,
+    /// Pin the other side's identity (shows fingerprints first). `--via-arg` is one word of the command that reaches its `ozbox`;
+    /// repeat it for each word (for example `--via-arg ssh --via-arg my-box --via-arg /usr/local/bin/ozbox`, naming the program by
+    /// its absolute path so nothing on the other side's `PATH` can stand in for it). It is run as an argument list, never through a shell.
+    Pin {
+        /// A file from `ozbox tasks identity`, or `-` for standard input.
+        file: std::path::PathBuf,
+        #[arg(long = "via-arg", allow_hyphen_values = true)]
+        via_arg: Vec<String>,
+        /// Change an existing pin (a new epoch after a restore, or new keys). Compare the fingerprints first.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Start a task for a pinned peer. It is held here and delivered on the next sync.
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// Read the text from standard input.
+        #[arg(long)]
+        stdin: bool,
+        /// A note: nothing is asked, nothing is expected back.
+        #[arg(long)]
+        note: bool,
+        /// Give up after this many minutes (default 1440).
+        #[arg(long)]
+        minutes: Option<u64>,
+    },
+    /// Ask the peer to push one commit to one branch. Acts that need an approval are refused until the passkey approval path
+    /// exists, and a Production act is refused outright.
+    PushRef {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        remote: String,
+        #[arg(long = "ref")]
+        r#ref: String,
+        #[arg(long)]
+        sha: String,
+        /// The environment the push is for (for example staging). Anything not known to be non-Production counts as Production.
+        #[arg(long)]
+        env: String,
+    },
+    /// What is waiting for you: tasks you received that are not finished, and anything with news.
+    Inbox {
+        #[arg(long)]
+        all: bool,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// One task with its messages, or (with no id) the pinned peers and what waits to be sent.
+    Status {
+        id: Option<String>,
+        /// Wrap every piece of text a peer wrote in a fenced block marked untrusted, for a model to read as data.
+        #[arg(long)]
+        for_model: bool,
+    },
+    /// Answer a task, and optionally move its state (only the side that received it may).
+    Reply {
+        id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        /// working, input-required, completed, failed or canceled (the last also answers a cancel the other side asked for).
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Ask for a task to stop. A cancel is a request: the other side decides.
+    Cancel { id: String },
+    /// Why a task is where it is, and who acts next.
+    Why { id: String },
+    /// Send what is waiting and take what the peer has, once.
+    Sync {
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Keep syncing every few seconds and print what is new. It runs only while you keep it open.
+    Watch {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        every: u64,
+        #[arg(long, hide = true)]
+        rounds: Option<u64>,
+    },
+    /// The answering side of a sync (run by the other side through its `--via` command). Not for people.
+    #[command(hide = true)]
+    Exchange {
+        #[arg(long)]
+        peer: String,
+    },
+    /// Record that this endpoint's store was restored from a backup. It moves to a new epoch, so nothing captured before is
+    /// accepted; every peer must pin the new epoch. On a box this needs root.
+    Restored,
+    /// Set up the box's task router as root: a system user of its own, its socket directories and the unit that runs `tasks serve`
+    /// as that user. First-boot configuration runs it; safe to run again. The setup is carried in this program, not in user-data.
+    #[command(hide = true)]
+    RouterSetup,
+    /// Run the box's task router as a service of its own (a system user that agents cannot read as). Not for people: the unit that
+    /// `ozbox tasks router-setup` writes runs it.
+    #[command(hide = true)]
+    Serve {
+        /// The directory that holds the key, the state and the mesh audit log. Only the service user may enter it.
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        agent_socket: std::path::PathBuf,
+        #[arg(long)]
+        relay_socket: std::path::PathBuf,
+        #[arg(long)]
+        admin_socket: std::path::PathBuf,
     },
 }
 

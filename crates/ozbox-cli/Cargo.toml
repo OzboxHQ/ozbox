@@ -21,6 +21,7 @@ ozbox-seal = { path = "../ozbox-seal" }
 ozbox-listenfd = { path = "../ozbox-listenfd" }
 ozbox-plugin = { path = "../ozbox-plugin", features = ["host"] }
 ozboxd = { path = "../ozboxd" }
+ozbox-hubd = { path = "../ozbox-hubd" }
 ozbox-provider-fake = { path = "../ozbox-provider-fake" }
 ozbox-provider-hcloud = { path = "../ozbox-provider-hcloud" }
 ozbox-provider-aws = { path = "../ozbox-provider-aws" }

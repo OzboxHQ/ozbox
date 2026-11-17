@@ -59,6 +59,9 @@ pub enum Policy {
     /// handler makes it. It carries the powers the import socket held before (a project's keys and declaration, a signer's
     /// enrolment, an approval's challenge and signature), now reachable only through the account a person's computer uses.
     Unsealed,
+    /// The hub daemon's socket (a folder only the secrets user and `ozbox-hub` may enter, ADR 0042): the hub's public identity,
+    /// the handshake signature and an enrolment token's tag. Nothing that opens a body or signs an envelope.
+    Hub,
 }
 
 impl Policy {
@@ -71,6 +74,7 @@ impl Policy {
             Policy::Import => "import",
             Policy::Supervisor => "supervisor",
             Policy::Ingress | Policy::Unsealed => "ingress",
+            Policy::Hub => "hub",
         }
     }
 }
@@ -104,6 +108,8 @@ pub fn box_may_write(name: &str) -> bool {
         && !crate::audit_service::is_audit_secret(name)
         && !crate::approval_key::is_reserved(name)
         && !crate::secrets_ingress::is_reserved(name)
+        && !ozbox_hubd::keys::is_reserved(name)
+        && !crate::hub_cli::is_laptop_only(name)
 }
 
 /// The store's own keys and records: not something the owner or an agent put there.
@@ -114,6 +120,8 @@ pub fn is_system_name(name: &str) -> bool {
         || crate::audit_service::is_audit_secret(name)
         || crate::approval_key::is_reserved(name)
         || crate::secrets_ingress::is_reserved(name)
+        || ozbox_hubd::keys::is_reserved(name)
+        || crate::hub_cli::is_laptop_only(name)
         || name.starts_with("workload-policy.")
 }
 
@@ -300,6 +308,8 @@ pub struct Gates {
     /// Whether a key whose attestation verified counts as a presence key. Off until a real key has been proved on a box
     /// (root's flag file turns it on); unset reads as off, so every key is a software key.
     pub presence_keys: std::sync::OnceLock<bool>,
+    /// The hub's keys (ADR 0042), made the first time a `hub_` operation is asked for and kept here after.
+    pub hub_keys: std::sync::Mutex<Option<Arc<ozbox_hubd::keys::HubKeys>>>,
 }
 
 /// What a call says when the connection itself failed: the socket is missing or nothing is listening on it (the service is not
@@ -757,6 +767,18 @@ pub fn handle_from(
             }
         }
     }
+    // the hub's channel keys (ADR 0042) are answered by the hub's own module, which decides what each socket may ask
+    if line.contains("\"hub_") {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v["op"].as_str().is_some_and(|o| o.starts_with("hub_")) {
+                let out = match crate::secrets_hub::answer(store, gates, policy, &v) {
+                    Ok(r) => json!({"ok": true, "result": r}),
+                    Err(e) => json!({"ok": false, "error": e}),
+                };
+                return out.to_string();
+            }
+        }
+    }
     // a laptop key's operations (ADR 0028) are answered by their own module
     if line.contains("\"approval_") {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
@@ -855,7 +877,9 @@ pub fn handle_from(
                                     || (boxy(n)
                                         && n != crate::secrets_approval::ENROLLED_MARKER
                                         && !crate::audit_service::is_audit_secret(n)
-                                        && !crate::approval_key::is_reserved(n))
+                                        && !crate::approval_key::is_reserved(n)
+                                        && !ozbox_hubd::keys::is_reserved(n)
+                                        && !crate::hub_cli::is_laptop_only(n))
                             })
                             .collect(),
                     ),
@@ -1452,6 +1476,7 @@ pub(crate) fn scan_text(
             || crate::audit_service::is_audit_secret(&name)
             || crate::approval_key::is_reserved(&name)
             || crate::secrets_ingress::is_reserved(&name)
+            || ozbox_hubd::keys::is_reserved(&name)
             || name.starts_with("workload-policy.")
         {
             continue;

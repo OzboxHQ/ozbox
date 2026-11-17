@@ -649,6 +649,9 @@ pub struct Book {
     pub audit_epoch: String,
     /// The highest audit record number already handed to the chain.
     pub audit_chained: u64,
+    /// The last record of the hub's worker channel already copied into this audit (its source epoch and number): the hub's events
+    /// are handed over by number, so a crash between the two writes repeats none and loses none.
+    pub hub_channel_src: Option<(String, u64)>,
     /// Permission modes, rules and Production grants (`crate::permissions`).
     pub perms: crate::permissions::PermConfig,
     /// Orchestrations: one conductor agent handing features to worker boxes (`crate::orch`).

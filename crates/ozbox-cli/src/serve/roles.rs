@@ -78,6 +78,8 @@ pub(super) fn classify_named(method: &str, path: &str) -> Option<Need> {
         ["orchestrations", "settings"] => read_or(SettingsChange),
         ["orchestrations", "rules", "check"] => Need::Read,
         ["orchestrations", ..] => read_or(RunStart),
+        // the fleet inbox: a member may decide a worker's guard override as on this box; the worker's own service re-checks the role
+        ["approvals", "fleet", ..] => read_or(ApprovalDecide),
         ["approval-requests", ..] => read_or(ApprovalDecide),
         ["approval-policy"] => read_or(SettingsChange),
         // Telegram links (ADR 0050): looking is for anyone signed in; making a link or a delegation is working, and the passkey is

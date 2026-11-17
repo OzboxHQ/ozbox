@@ -296,7 +296,9 @@ attestation. The row for each scope is ADR 0042 §8's; this ADR supplies the mec
 A worker never accepts a code, and its `OZBOX_GUARD_APPROVAL` fallback is off. Where a worker may receive a Production value, and
 how a worker's approver set is pinned on a provider, are ADR 0042's decisions and are not restated here. Verification of a
 cross-box assertion is built in ADR 0042's phase H4, with the same function as above; the record format is frozen in this ADR's
-phase 1 so that it needs no change.
+phase 1 so that it needs no change. **Built (2026-11-17, tested with fakes):** `ozbox_core::hub::approvals::verify_fleet_decision` checks the
+assertion's signature against the worker's pinned approver set and hands the request book the decision, whose own rules run again; the
+secrets service answers it (2026-11-17, second pass; ADR 0042, "Integration"): `areq_hub_pending`, `areq_hub_decide` and `areq_hub_pin` on the socket the hub agent holds today (the supervisor's; a socket class of its own for the agent is not made), verified in the service against an approver set only root writes (`areq_hub_set_approvers`, admin socket; the sequence number never goes back and the set expires). Tested; not run on a real box.
 
 ## 4. What a decision binds: the subject, per scope
 

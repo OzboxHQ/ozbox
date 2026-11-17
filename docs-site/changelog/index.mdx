@@ -8,6 +8,79 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="0.3.0-beta: a hub for your worker boxes (Preview)">
+  ## Oz Box 0.3.0-beta: your boxes can work as one fleet from a hub, and you can set it up step by step
+
+  Until now a worker box could be handed a task, but nothing carried it there for real. `main` can now be the hub: worker boxes join it, dial out to it, take tasks, ask for the keys they need by name, and send their finished work to the merge queue. **Preview:** the whole path is tested end to end in one process on the real parts, with a Claude Code program and a Codex program working side by side; it has not run on real boxes yet, and a real worker's own run transport is not attached to the hub agent, so a task handed to a real worker is refused by name for now.
+
+  - **`ozbox-hubd setup <box-id> <address:port>`** sets up the hub on `main`; it listens only on a loopback, private or tailnet address and never on a public one. **`ozbox-hubd agent-setup`**, **`request`**, **`enrol`** and **`agent`** do the worker's side. The step-by-step is in [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
+  - **A worker joins by sending its request to the hub itself,** with a one-use invite and an attestation from your computer (or, on AWS, the claim service). You confirm a plan and it is on the roster; there is no list to edit by hand.
+  - **A worker's approval requests appear in your fleet inbox on `main`;** you decide once with your passkey and the worker checks your decision itself.
+  - **`ozbox hub approvers`** puts your approvers on each worker: `sign` (on your own computer) signs the passkeys your dashboard lists for each worker, `sync` (on `main`) sends them, `status` shows what each worker holds. The worker checks your signature itself and refuses anything else, so `main` cannot change who approves, and a newer list that drops a person stops their passkey approving.
+  - **Keys reach a worker by name, sealed to it.** Production never does: it is refused in four places, and a worker deletes its keys when its task ends or the hub is out of reach for two minutes.
+  - **A task you hand a worker runs as a run of that worker's own box,** so its Models routing, its credential broker, its subscription choice and its spend caps all apply; a task you stop on `main` stops the run on the worker, and the worker's messages and shared memory go through its agent. Production is refused at the agent too.
+  - **A branch is merged only while it still points at the commit its tests ran on,** and the box doing the merge reads the branch's head from the remote to check it.
+  - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [Agents that talk](/use-cases/agents-talk).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Codex CLI and Gemini CLI runs (Preview)">
+  ## Codex CLI and Gemini CLI run on a box, and agents on different engines work one task together
+
+  Until now only Claude Code could be started as a run; a run on another engine was accepted and then refused. Oz Box now starts Codex CLI and Gemini CLI on a box too, and an agent on one engine can hand work to, ask, answer and get a result from an agent on another. **Preview:** built and tested with fakes of each program; no Codex or Gemini CLI run has been started on a real box with a real account yet.
+
+  - **`ozbox run start --engine codex` and `--engine gemini-cli`** work like Claude Code runs: the board, caps, approvals and spend apply, and each run is priced against its own provider under the same spend cap.
+  - **Each run holds only its own provider's token.** A Codex run never sees the token a Claude Code run was given, and the reverse.
+  - **What crosses between two agents is the same whichever engines they are:** the task, a question, an answer, the state and the result. Saying "approved" in an answer approves nothing, and text that looks like a key is not sent.
+  - **Settings → Models says which engines run on a box.** OpenCode and Aider do not yet (use them in a terminal on the box).
+  - Not every engine can do everything: Codex keeps a run to its workspace with no network instead of refusing your ask list command by command, and Gemini CLI runs do not reach the Oz Box tools yet. See [Models and routing](/use-cases/models-and-routing) sections 6 to 8 and [ADR 0056](/adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge).
+
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Agents talk to each other and to you (Preview)">
+  ## Agents on different boxes and engines can message each other, share what they learned, and answer you in your chats
+
+  Until now two agents on two boxes could only talk through an orchestration's conductor, and a note one agent wrote stayed on its own box. Now every agent has an address and a mailbox, whatever its engine or model, and the same five tools on every box. **Preview:** built and tested with a hub and two boxes over a simulated network; it is switched on in the server of a box that is a hub, and has not run on a real box.
+
+  - **Five tools for every agent:** `participants_list`, `messages_post`, `messages_get` (it can wait for a message), `messages_thread` and `messages_ack`. A sender sees each message go from queued to accepted, delivered and read.
+  - **Only your own agents talk to each other,** and only those that share a box, a project or an orchestration. Another person's agents are never visible.
+  - **Memory and skills reach every box, only as you approved them.** A note an agent proposes on one box waits for you on `main`; once you approve it, your agents on the same project on other boxes can read it, with the box it came from. A skill you approved for a project works for its agents on every box.
+  - **A chat is a participant.** A message from Telegram or WhatsApp to an agent, a group or your fleet goes in as you, and each reply comes back to your chats once, naming the agent, its box and its engine.
+  - **A message never approves, grants or releases anything,** and text that looks like a key is refused and never stored.
+  - See [Agents talk to each other and to you](/use-cases/agents-talk) and [ADR 0057](/adr/0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
+  ## Your computer and a box can pass tasks instead of notes
+
+  Questions, answers and status between you and an agent on a box now travel as tasks with a state, an acknowledgement and an audit record, signed and sealed so they cannot be forged, replayed or reordered. **Preview:** built and tested with fakes and a real two-endpoint run of the program; not yet run against a real box, and it leaves Preview when that proof passes.
+
+  - **A box runs the channel as a user of its own**, so an agent on the box can ask and answer through it but cannot read its keys. On your computer the channel's private keys are kept in your keychain, never in a file. A peer's words are always shown as untrusted (`--for-model` fences them for a model), a cancel is a request the other side decides, and the first contact finishes in one `ozbox tasks sync`.
+  - **`ozbox tasks`** sets up the two sides, sends a task, shows your inbox, answers, cancels, and explains why a task is stuck (`ozbox tasks why`).
+  - **A message can ask and never grant.** Saying "approved" in a task changes nothing, and text that looks like a key is refused on both sides and never stored.
+  - **Acts that need an approval are refused by name** until the passkey approval path exists, and a Production act is refused outright.
+  - A closed laptop is a normal state: the task waits and is delivered when you next sync.
+  - See [A task channel](/use-cases/task-channel) and [ADR 0044](/adr/0044-the-agent-mesh-a-task-channel-where-a-message-can-ask-and-never-grant).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Main as the hub (Preview)">
+  ## `main` can hand a task to a worker over a channel of its own, and a worker is never given Production
+
+  Until now `main` reached a worker through your computer's connection. This release adds the first part of a route that does not: `task_start` takes `transport: hub`, the task goes to the worker as a signed, sealed message, and `task_status` shows what the worker reported. **Preview:** built and tested with fake boxes only; no box has a hub yet, and it has not run on a real cloud box.
+
+  - **On a box with no hub, `transport: hub` is refused by name** and the default `ssh` route works exactly as before.
+  - **A worker is never given a Production key.** The hub refuses it, the worker refuses it again, and the off-box issuer refuses a worker. No setting turns this off; it comes back later, approved at your computer.
+  - **A task never names keys.** A conductor that tries is refused, and the attempt is recorded.
+  - **A worker can ask for development or staging keys by name**, only the names its task declared. The values are sealed to that worker's own key and only its secrets service can open them; they are deleted when the task ends, and at once if the worker loses `main`.
+  - **Workers dial out to `main`** over your tailnet or the provider's private network; `main` never listens on a public address. Both ends prove who they are, a dropped connection comes back by itself, nothing is delivered twice or out of order, and a quiet worker shows as "not answering".
+  - Every hand-off and refusal is in the audit record by name, never by value.
+  - **On a box with a hub, the hub is the default** for a worker that belongs to it.
+  - **A worker's approval requests come back to `main`.** They appear in `main`'s fleet inbox with the worker's name; you decide once with your passkey, and the worker checks your decision itself. `main` cannot approve on its own, a message that says "approved" grants nothing, and Production on a worker is never decided from `main`.
+  - **A worker's finished commit goes through `main`'s merge queue**, with its tests split across workers on that exact commit and never reported green while a test has no result. A conflict or failing tests go back to the worker; your approval to merge is unchanged.
+  - **The hub's daemon and how a worker joins.** `ozbox-hubd setup <box-id>` sets up the hub on `main` and `ozbox-hubd self-test` checks it. A worker joins only with a one-use invite, an attestation from a registrar your setup pinned and proof that it holds the attested key, and the hub plans the enrolment before it applies it. A Production box, `main` itself, an unknown box or a replayed attestation is refused. Messages are sealed to each worker's attested key and signed by keys only the secrets service holds. No worker can enrol on a real box until a registrar exists.
+  - **The registrars that vouch for a worker.** On AWS a worker proves it is the instance it claims with the identity document AWS signs; for Hetzner and machines you own, your own computer signs after you confirm a plan (`ozbox hub attest`, refused on a box). `ozbox hub repin` pins or rotates which registrars the hub trusts, and `ozbox hub registrar-key` makes your computer's key. Not yet: the AWS service that calls the AWS check is not deployed, and no real AWS document has been verified.
+  - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

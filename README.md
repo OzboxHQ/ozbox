@@ -41,8 +41,11 @@ cloud account, the dashboard runs on **your** computer or behind **your** domain
   ([ADR 0017](docs/adr/0017-credential-broker-per-run-tokens.md), [ADR 0018](docs/adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md)).
 - **A fleet, not a pet.** The system disk is rebuilt from a signed image; your work lives on a separate persistent `/work`
   disk that survives pausing, resizing and upgrading.
-- **Any engine, any cloud.** Bring the coding agent you prefer (Claude Code first; Codex, Gemini CLI, Aider and OpenCode use
-  the same interface) and the model provider you prefer, hosted or open-weight. AWS and Hetzner Cloud are supported by one
+- **Any engine, any cloud.** Bring the coding agent you prefer and the model provider you prefer, hosted or open-weight.
+  Oz Box starts Claude Code, Codex CLI and Gemini CLI as runs on a box (Preview), and agents on different engines work one
+  task through the same messages, each holding only its own provider's token
+  ([ADR 0056](docs/adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge.md));
+  Aider and OpenCode run in a terminal on the box (as runs: Planned). AWS and Hetzner Cloud are supported by one
   provider interface ([ADR 0003](docs/adr/0003-provider-interface.md)).
 
 ## Try it
@@ -135,6 +138,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox permissions show\|mode\|grant\|revoke\|check` | The default mode, the active rules, and time-boxed Production grants; rules are edited in the dashboard |
 | `ozbox audit list\|verify\|seal` | The tamper-evident audit log, and a check that nothing in it was changed |
 | `ozbox memory` · `ozbox skills` | Notes in git that agents read once you approve them; skills usable only after you approve their exact files |
+| `ozbox tasks` | Typed, signed tasks between your computer and a box (questions, answers, status), with a state and an audit record; acts are refused until the passkey approval path exists. Preview |
 | `ozbox orch` | One conductor agent hands features to worker boxes, with claims, contracts, a mailbox and a merge queue |
 | `ozbox schedule` · `ozbox trigger` | Agent runs on a schedule in your time zone, or started by signed webhooks |
 | `ozbox models` · `ozbox cost` | Your model providers, which engine uses which model, usage and prices; the real cloud bill beside the estimate |
@@ -168,6 +172,8 @@ at any time; `--access` answers it without a prompt.
 | `ozbox tunnel setup\|status\|remove` | The outbound tunnel that reaches the dashboard from outside, with your own account |
 | `ozbox auth init` | The sign-in settings for a dashboard on a shared machine |
 | `ozbox dashboard install <name>` | Run the dashboard and its tunnel as a service on one of your boxes, as a user of its own (never the box user) |
+| `ozbox hub repin\|registrar-key\|attest` | The registrars that vouch for a worker box: `repin` (as root on `main`) pins, rotates or lists them; `registrar-key` and `attest` (on your own computer, refused on a box) make your registrar key and sign a worker's attestation after you confirm a plan. Preview |
+| `ozbox hub approvers targets\|sign\|sync\|status` | Who may approve on your workers: `sign` (on your own computer, refused on a box) signs the passkeys your dashboard lists for each worker after you confirm a plan; `sync` (on `main`) shows the plan and sends them; `targets` and `status` list the workers and the version each holds. Each worker checks your signature itself, so `main` cannot change who approves. Preview |
 | `ozbox mesh setup\|policy\|allow\|join\|status` | Reach your boxes over a Headscale tailnet you run yourself; the access rules are generated from your boxes and deny box-to-box traffic by default |
 | `ozbox plugin list\|add\|approve` | Provider and tunnel plugins, run only after you approve the exact program |
 | `ozbox telemetry status\|preview\|on\|off` | Optional anonymous usage counts; off until you turn it on, sent only to an address you choose |
@@ -235,7 +241,7 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration (including `main` as a hub that workers dial out to, enrol with, and take tasks from, with keys delivered by name and sealed to the worker, and the whole path run end to end in CI; not yet on a real box; [ADR 0042](docs/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main.md)), agents messaging each other across boxes and engines with shared reviewed memory and skills (the [conversation fabric](docs/use-cases/agents-talk.md), attached to the server of a hub box; [ADR 0057](docs/adr/0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data.md)), schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 
@@ -271,7 +277,7 @@ The code is Apache-2.0 and everything in it is open; there is no paid edition. T
 
 | Path | What lives there |
 |---|---|
-| `crates/` | Rust: the `ozbox` CLI, the `ozboxd` box daemon, the providers and the shared core |
+| `crates/` | Rust: the `ozbox` CLI, the `ozboxd` box daemon, the `ozbox-hubd` hub daemon (Preview), the providers and the shared core |
 | `packages/` | TypeScript: the web dashboard |
 | `infra/` | Image builds (Packer) and provider modules (OpenTofu) |
 | `catalog/` | The tools catalogue: pinned, checksum-verified downloads |

@@ -95,6 +95,8 @@ export const enModels = {
   'models.engine_fallback_model': 'Fallback model name',
   'models.engine_clear': 'Clear the choice',
   'models.engine_unset': 'Not chosen',
+  'models.engine_runs_preview': 'Runs on a box (Preview)',
+  'models.engine_runs_planned': 'Runs on a box: not yet (Planned). Use it in a terminal on the box.',
   'models.engine_override_note': 'Box {box} uses {provider} / {model}',
   'models.engine_incompatible': 'Not compatible with this engine',
   'models.usage_title': 'Usage and estimated spend',

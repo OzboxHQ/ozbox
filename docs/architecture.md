@@ -11,7 +11,7 @@ This is a public, high-level sketch. It will grow as components are built.
  ozbox CLI / API ──▶ control plane ──▶ provider modules ──▶ cloud or VPS
 ```
 
-- **Rust** for the CLI and daemons; **TypeScript** for engine adapters and the dashboard.
+- **Rust** for the CLI, the daemons and the engine adapters; **TypeScript** for the dashboard.
 - **gRPC** between components; **REST and webhooks** for integrations.
 - **Immutable image, persistent disk:** upgrading a box means a new image on the same work disk.
 - **No inbound network:** every connection is a tunnel the box dials out to.
@@ -35,6 +35,13 @@ structural guard against any inbound rule. Each module's variables and outputs a
   (`HCLOUD_TOKEN` read per call, never kept). Clone is unsupported (Hetzner cannot restore a volume from a snapshot).
 - `ozbox-provider-aws` - AWS: lifecycle through OpenTofu, runtime actions through the `aws` CLI (no SDK).
 - `ozbox-cli` - the `ozbox` binary: plan, show, confirm, apply for every mutation; `--dry-run`, `--yes`, `--json`.
+- `ozbox-hubd` - the hub daemon on `main` (ADR 0042, Preview): runs as its own user `ozbox-hub` from a socket unit, checks and spools
+  workers' signed, sealed messages for the supervisor, enrols workers (an invite, an attested request, then plan and apply), and holds
+  no private key: the channel's keys are in the secrets service, which gives the daemon's socket only the handshake signature and an
+  enrolment token's tag. It binds no network port (`RestrictAddressFamilies=AF_UNIX`).
+  Its worker side, `ozbox-hubd agent` (Preview), dials out to the hub and runs what it is handed as a run of the worker's own box (queued in
+  the box's task store and run by its supervisor), announces the worker's approval requests, and runs the worker's end of the conversation
+  fabric, served to the box's tool host on a local socket.
 
 ## The box daemon (`ozboxd`)
 
@@ -133,6 +140,14 @@ need a fresh second factor for the risky kinds. Every decision is recorded in th
 inbox and their settings in the dashboard, and `ozbox run` and `ozbox approvals` on the command line, all use the same
 `/v1` calls.
 
+An engine is an adapter (`ozbox_core::agent_engine::AgentEngine`): Claude Code (`claude_code`), and Codex CLI and Gemini CLI
+(`codex_cli`, `gemini_cli`, over `headless`, which starts one process per turn and resumes the program's own session for the
+next message). Each starts its program through the box daemon with the task on standard input and only its own vendor
+family's credentials in the environment. What any engine reports is translated once into the engine-neutral turn model
+(`ozbox_core::engine_turn`: task, ask, reply, tool use, usage, state, result), which is also what the hub carries in its own
+message kinds, so agents on different engines and providers work one task without either seeing the other's program, vendor
+or keys (ADR 0056).
+
 ## What an agent can do on a box
 
 A run on a box reaches its working tools over MCP, from the same server as the orchestration tools: a shell, git, files, a
@@ -150,6 +165,14 @@ On a box where the dashboard runs as its own user, the worker, its Chromium and 
 (`ozbox-browser`): a root launcher, reachable only by the dashboard's user, starts the worker inside a systemd sandbox and
 hands the connection to it as its input and output, so the sealed channel is still the only way in and nothing new listens.
 The profiles are in a folder only that user opens; the recordings and released documents are readable by the box's group.
+
+**Agents talk to each other and to people (ADR 0057, Preview).** The same tool server offers every agent five messaging tools
+(`messages_post`, `messages_get`, `messages_thread`, `messages_ack`, `participants_list`). Messages wait in ordered mailboxes held by
+the hub (`main`), one per participant (`agent:<box>/<session>`, `person:<id>`, `group:`, `fleet:`). A worker box keeps a replica of its
+own agents' mailboxes and queues their posts; the two talk over the hub's transport as their own profile of the signed, sealed channel,
+under a `<box>.fabric` endpoint. The hub also sends each worker the approved memory notes and approved skills its agents may read, and
+takes their memory proposals back for a person to review. A chat gateway posts a person's message in as that person and collects the
+agents' replies. A message is data: nothing in the fabric approves, grants or releases anything. The fabric is attached to the server of a box that is a hub (ADR 0042, "Integration"; Preview).
 
 ## Secrets
 

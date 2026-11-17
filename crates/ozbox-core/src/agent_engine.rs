@@ -98,6 +98,11 @@ pub enum EngineEvent {
     TurnDone(String),
     /// The agent's own id for this conversation, so it can be continued after a pause.
     Session(String),
+    /// The agent used a tool. Only the tool's name (`Read`, `shell`, `edit`, a server's tool): its input and output may hold
+    /// anything, so they never leave the adapter. Shown as a line of the run's log.
+    ToolUse {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
