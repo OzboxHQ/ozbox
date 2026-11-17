@@ -89,7 +89,7 @@ describe('subscription sign-ins (ADR 0054)', () => {
   const reasons = ['terms_forbid_storing', 'opt_in_engine_reads_login', 'no_remote_sign_in', 'terms_forbid_other_tools', 'login_location_not_documented', 'no_subscription'];
 
   it('every server id, reason, status and sign-in kind has words in the catalogue', () => {
-    for (const id of ids) expect(has(`models.sub_plan_${id}`), id).toBe(true);
+    for (const id of ids) expect(has(`models.sub_plan_${id.replace(/-/g, "_")}`), id).toBe(true);
     for (const r of reasons) expect(has(`models.sub_reason_${r}`), r).toBe(true);
     for (const k of Object.values(SUB_STATUS_LABEL)) expect(en[k]).toBeTruthy();
     for (const k of Object.values(SUB_SIGNIN_LABEL)) expect(en[k]).toBeTruthy();
@@ -101,7 +101,7 @@ describe('subscription sign-ins (ADR 0054)', () => {
     expect(subscriptionRows([sub({ id: 'new-engine-plan' })], has)).toEqual([]);
     const [row] = subscriptionRows([sub({ sources: ['https://example.com/a', 'javascript:alert(1)', 'http://example.com/b', 'not a url'] })], has);
     expect(row?.links).toEqual(['https://example.com/a']);
-    expect(row?.plan).toBe('models.sub_plan_codex-chatgpt');
+    expect(row?.plan).toBe('models.sub_plan_codex_chatgpt');
   });
 
   it('the words name the one opt-in and say what an agent could read', () => {

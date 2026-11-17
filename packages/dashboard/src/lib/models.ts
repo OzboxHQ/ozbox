@@ -114,7 +114,7 @@ function inCatalogue(key: string, has: (k: string) => boolean): MessageKey | nul
 export function subscriptionRows(subs: SubscriptionInfo[] | undefined, has: (k: string) => boolean): { sub: SubscriptionInfo; plan: MessageKey; reason: MessageKey; links: string[] }[] {
   const out: { sub: SubscriptionInfo; plan: MessageKey; reason: MessageKey; links: string[] }[] = [];
   for (const sub of subs ?? []) {
-    const plan = inCatalogue(`models.sub_plan_${sub.id}`, has);
+    const plan = inCatalogue(`models.sub_plan_${sub.id.replace(/-/g, "_")}`, has);
     const reason = inCatalogue(`models.sub_reason_${sub.reason}`, has);
     if (!plan || !reason || !(sub.status in SUB_STATUS_LABEL)) continue;
     const links = sub.sources.filter((u) => {
