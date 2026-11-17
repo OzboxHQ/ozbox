@@ -84,6 +84,7 @@ mod metadata_guard;
 mod model_engines;
 mod model_prices;
 mod model_providers;
+mod model_subscriptions;
 mod model_usage;
 mod models;
 mod models_cli;

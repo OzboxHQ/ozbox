@@ -46,6 +46,8 @@ impl App {
             &json!({
                 "kinds": kinds,
                 "engines": model_engines::rows(),
+                // ADR 0054: which engines can use a subscription sign-in, and why not; ids, codes and vendor links only
+                "subscriptions": crate::model_subscriptions::rows(),
                 "price_table_as_of": model_prices::TABLE_AS_OF,
             }),
         )
@@ -581,6 +583,10 @@ mod tests {
             .iter()
             .any(|k| k["id"] == "bedrock" && k["own_cloud"] == true));
         assert_eq!(v["engines"].as_array().unwrap().len(), 5);
+        // additive (ADR 0054): every subscription row is shown with its honest status, and none is "available" yet
+        let subs = v["subscriptions"].as_array().unwrap();
+        assert!(!subs.is_empty());
+        assert!(subs.iter().all(|s| s["kind"] == "subscription" && s["status"] != "available"));
     }
 
     #[test]
