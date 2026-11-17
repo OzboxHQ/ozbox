@@ -819,8 +819,7 @@ impl App {
     /// and say whether the message was someone else's words.
     pub(super) fn chat_gate(
         &mut self,
-        channel: Channel,
-        id: &str,
+        (channel, id): (Channel, &str),
         person: &str,
         text: &str,
         forwarded: bool,
@@ -1238,8 +1237,7 @@ impl App {
     pub(super) fn tg_agent_reply(
         &mut self,
         to: &str,
-        box_name: &str,
-        session: &str,
+        (box_name, session): (&str, &str),
         msg_id: Option<&str>,
         reply: &str,
         untrusted: bool,
@@ -1313,7 +1311,14 @@ impl App {
             };
             let text =
                 // a worker's answer came over the mesh from another machine: untrusted, so summary at most (ADR 0050 §5)
-                self.tg_agent_reply(&to, &r.box_name, &r.session, Some(&r.msg_id), &r.text, true, now);
+                self.tg_agent_reply(
+                    &to,
+                    (&r.box_name, &r.session),
+                    Some(&r.msg_id),
+                    &r.text,
+                    true,
+                    now,
+                );
             let who = self.tg_sender_of_conv(&to, "", thread.clone());
             self.tg_reply_notice(
                 &who,

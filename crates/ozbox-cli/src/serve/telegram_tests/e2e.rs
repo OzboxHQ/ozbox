@@ -530,8 +530,7 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
     let conv = format!("telegram:{PHONE}");
     let shown = r.app.tg_agent_reply(
         &conv,
-        "alpha",
-        "t1",
+        ("alpha", "t1"),
         None,
         &format!("here https://dash.example.com/approve and {secret} \u{1b}[31mred"),
         false,
@@ -549,7 +548,7 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
         .insert("alpha".into(), "metadata".into());
     let meta = r
         .app
-        .tg_agent_reply(&conv, "alpha", "t1", None, "anything at all", false, t0);
+        .tg_agent_reply(&conv, ("alpha", "t1"), None, "anything at all", false, t0);
     assert!(!meta.contains("anything at all"));
     assert_eq!(
         r.last_said("tg.reply_metadata").unwrap().arg("box"),
@@ -775,8 +774,7 @@ fn whatsapp_goes_through_the_same_decide() {
     });
     let t0 = super::unix_ms();
     r.app.chat_gate(
-        crate::chat::gateway::Channel::Whatsapp,
-        "2348000000001",
+        (crate::chat::gateway::Channel::Whatsapp, "2348000000001"),
         "owner",
         "/box resume alpha",
         false,
@@ -788,8 +786,7 @@ fn whatsapp_goes_through_the_same_decide() {
         .iter()
         .any(|x| x.key == "tg.channel_ceiling" && x.to == "whatsapp:2348000000001"));
     r.app.chat_gate(
-        crate::chat::gateway::Channel::Whatsapp,
-        "2348000000001",
+        (crate::chat::gateway::Channel::Whatsapp, "2348000000001"),
         "owner",
         "@alpha hello there",
         false,

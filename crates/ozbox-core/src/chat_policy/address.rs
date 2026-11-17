@@ -177,6 +177,27 @@ pub fn expand(
     e
 }
 
+/// The conversation fabric's address for one expanded target (the hub contract's mapping): a session is
+/// `agent:<box>/<session>`; a box with no session yet has no fabric address (the gateway resolves it to a session first).
+pub fn fabric_target(t: &Target) -> Option<String> {
+    t.session
+        .as_ref()
+        .map(|s| format!("agent:{}/{}", t.box_name, s))
+}
+
+/// The fabric's address for a whole address, when it names a group or the fleet: `group:<name>`, `fleet:<person>`.
+pub fn fabric_group(
+    a: &Address,
+    person: &str,
+    groups: &BTreeMap<String, Vec<String>>,
+) -> Option<String> {
+    match a {
+        Address::Fleet => Some(format!("fleet:{person}")),
+        Address::Name(n) if groups.contains_key(n) => Some(format!("group:{n}")),
+        _ => None,
+    }
+}
+
 /// The boxes a person may see in `/boxes`: every non-Production box the delegation names. A Production box is listed as
 /// metadata by `/fleet`, never here.
 pub fn reachable(boxes: &[BoxReach]) -> Vec<&BoxReach> {
@@ -414,6 +435,31 @@ mod tests {
         assert_eq!(e.skipped, vec![("prod".into(), Skip::Production)]);
         let e = expand(&Address::Name("nope".into()), &fleet(), &groups());
         assert_eq!(e.skipped, vec![("nope".into(), Skip::Unknown)]);
+    }
+
+    #[test]
+    fn targets_map_to_the_fabrics_addresses() {
+        let t = Target {
+            box_name: "alpha".into(),
+            session: Some("t3".into()),
+            online: true,
+            remote: false,
+        };
+        assert_eq!(fabric_target(&t).as_deref(), Some("agent:alpha/t3"));
+        let t = Target { session: None, ..t };
+        assert_eq!(fabric_target(&t), None);
+        assert_eq!(
+            fabric_group(&Address::Fleet, "ada", &groups()).as_deref(),
+            Some("fleet:ada")
+        );
+        assert_eq!(
+            fabric_group(&Address::Name("web".into()), "ada", &groups()).as_deref(),
+            Some("group:web")
+        );
+        assert_eq!(
+            fabric_group(&Address::Name("alpha".into()), "ada", &groups()),
+            None
+        );
     }
 
     #[test]

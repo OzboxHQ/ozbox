@@ -1363,8 +1363,7 @@ impl App {
                     // and the attribution; a reply to an addressed message is threaded under it
                     let text = self.tg_agent_reply(
                         key,
-                        task.spec.box_name.as_str(),
-                        tid,
+                        (task.spec.box_name.as_str(), tid),
                         msg.as_ref().map(|(m, _)| m.as_str()),
                         reply,
                         false,
@@ -1636,8 +1635,7 @@ impl App {
                     // through the same act table and decide as Telegram; replies to it are threaded under it
                     let thread = Some(ts).filter(|t| !t.is_empty());
                     self.chat_gate(
-                        Channel::Slack,
-                        &user,
+                        (Channel::Slack, &user),
                         &person,
                         &body,
                         forwarded,
@@ -1783,8 +1781,7 @@ impl App {
                         Some(_) => {}
                         // through the same act table and decide as Telegram
                         None => self.chat_gate(
-                            Channel::Whatsapp,
-                            &m.from,
+                            (Channel::Whatsapp, &m.from),
                             &person,
                             &m.text,
                             m.forwarded,
