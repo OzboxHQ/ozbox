@@ -537,3 +537,64 @@ fn a_production_looking_value_in_a_non_production_import_is_refused_before_anyth
     );
     assert!(!e.contains(live));
 }
+
+/// B4-29 with B4-27: the box user (an agent) gets no authenticator seed and no way to use one through anything this flow added.
+/// The service reads the seed only for a decision that came in as the supervisor; on the box sockets the seed is not readable,
+/// an authenticator decision is refused before any seed is read, and no answer to the box user carries the seed or a code.
+#[test]
+fn an_agent_cannot_obtain_or_use_an_authenticator_code_through_the_approval_flow() {
+    let r = rig();
+    let salt = new_salt().unwrap();
+    let subject = import_subject("app", "production", &[("K", SENTINEL)], &salt).unwrap();
+    let id = r
+        .laptop(&json!({"op":"areq_file","subject":subject}))
+        .unwrap()["request"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = code_now();
+    let mut seen = Vec::new();
+    for policy in [Policy::Box, Policy::BoxLocked] {
+        // the seed is not readable by name, and its name is not even listed
+        for v in [
+            json!({"op":"get","name":"totp-alice"}),
+            json!({"op":"exists","name":"totp-alice"}),
+            json!({"op":"names"}),
+        ] {
+            seen.push(r.raw(policy, &v));
+        }
+        // an authenticator decision from the box user's side is refused, with the right code or without one
+        for c in [code.as_str(), ""] {
+            let d = r.raw(
+                policy,
+                &json!({"op":"areq_decide","id":id,"outcome":"approve","person":"alice","role":"owner",
+                        "surface":"dashboard","factor":"authenticator","code":c}),
+            );
+            assert_eq!(d["ok"], false, "{d}");
+            seen.push(d);
+        }
+        // what the box user may read of the request says nothing about the factor's secret
+        seen.push(r.raw(policy, &json!({"op":"areq_get","id":id})));
+        seen.push(r.raw(policy, &json!({"op":"areq_list"})));
+    }
+    // still pending: nothing the box user did approved it
+    let list = r.raw(
+        Policy::Supervisor,
+        &json!({"op":"areq_list","role":"owner"}),
+    );
+    assert_eq!(list["result"]["requests"][0]["state"], "pending", "{list}");
+    for v in &seen {
+        let s = v.to_string();
+        assert!(
+            !s.contains(TOTP_SECRET),
+            "the seed reached the box user: {s}"
+        );
+        assert!(
+            !s.contains("totp-alice"),
+            "the seed's name reached the box user: {s}"
+        );
+        assert!(!s.contains(SENTINEL), "{s}");
+    }
+    // the supervisor identity still approves with the person's code
+    assert_eq!(r.dashboard_approve_with_code(&id, &code)["ok"], true);
+}
