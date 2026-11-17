@@ -1220,11 +1220,12 @@ pub fn handle_from(
         // ingress key (and, on AWS, the AWS sign-in that opens the session); no process of the box user can. Once closed, the
         // code needs an approval, which a software laptop key never gives (review H1).
         (Policy::Unsealed, "setup_code") => {
-            let first_day = crate::secrets_ingress::setup_window_open(store);
+            let refusal = crate::secrets_ingress::setup_window_refusal(store, now);
+            let first_day = refusal.is_none();
             let gate = if first_day {
                 Ok(String::new())
             } else if r.approval.is_empty() {
-                Err(crate::messages::t("ingress.setup_window_closed", &[]))
+                Err(crate::messages::t(refusal.unwrap_or("ingress.setup_window_closed"), &[]))
             } else {
                 gates.require(store, "setup-code", "", "", &r.approval, now)
             };
@@ -1341,6 +1342,20 @@ pub fn handle_from(
                     ..Resp::ok()
                 },
                 Err(e) => Resp::fail(&e.0),
+            }
+        }
+        // Root alone can start the first-day window's day again (never after the first enrolment closed it): the box user,
+        // the dashboard and the owner's sealed route cannot.
+        (Policy::Admin, "setup_window_extend") => {
+            match store.exists(crate::secrets_ingress::SETUP_WINDOW_CLOSED) {
+                Ok(false) => match store.set(crate::secrets_ingress::SETUP_WINDOW_STARTED, &now.to_string()) {
+                    Ok(()) => {
+                        gates.audit_event(store, "secrets.setup-code.window-extended", "", "via=admin");
+                        Resp::ok()
+                    }
+                    Err(e) => Resp::fail(&e.0),
+                },
+                _ => Resp::fail("the first-day window was closed by an enrolment and never reopens"),
             }
         }
         (Policy::Admin, "unenroll") => match store.delete(crate::secrets_approval::ENROLLED_MARKER)
@@ -1718,6 +1733,8 @@ pub fn serve_gates(
     broker: Option<Arc<Broker>>,
     gates: Arc<Gates>,
 ) {
+    // the first-day window's clock starts with the box's first service start and survives every restart
+    crate::secrets_ingress::start_setup_window(store.as_ref(), crate::tokenmac::now_ms());
     let mac = Arc::new(TokenMac::new(store.clone() as Arc<dyn SecretStore>));
     let gate = Arc::new(IssuerGate::default());
     let mut handles = Vec::new();
