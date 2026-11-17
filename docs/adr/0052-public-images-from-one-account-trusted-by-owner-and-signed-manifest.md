@@ -15,7 +15,11 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
   order:
   1. an image named with `--image`, or `image` under `[aws]`: used as named (create already did this);
   2. the newest Oz image **in the caller's own account** (tagged `ozbox-image` and `ozbox-managed`), verified as before: an image
-     the caller built or copied is a deliberate choice, and a fork that builds its own never reaches the public ones;
+     the caller built or copied is a deliberate choice, and a fork that builds its own never reaches the public ones (it sets
+     `image_publisher` to its own account or `none`). *Amended 2026-11-17:* a deliberate choice is not a reason to stay behind. When
+     the publisher's newest **verified** public release (step 3) is newer than the own image's release, and is one this program can
+     use (or the own one is not), the public image is used and the own one is named in the plan as passed over. A public image that
+     does not verify, or a public lookup that cannot be made, never displaces the own image;
   3. otherwise the newest **public** image that is **owned by the publisher account** (`372115812457`, a constant in
      `ozbox-provider-aws`, overridable with `image_publisher` under `[aws]`, or turned off with `none`) **and** whose release lists
      that exact image id for that region in the **signed release manifest**, verified by the one existing path
@@ -96,7 +100,8 @@ who published it, and the signed manifest says that the project's workflow built
 signed manifest is the part nobody else can forge.
 
 **Cost.** One more `describe-images` (and, once per process, a manifest download and a signature check) the first time `create`
-resolves a default image; nothing on a box that is created from a named image, and nothing on `resume`. `create` from a public
+resolves a default image (since the 2026-11-17 amendment also when the account has images of its own, to compare them with the
+public release); nothing on a box that is created from a named image, and nothing on `resume`. `create` from a public
 image needs `curl` and `cosign` on the person's computer, as `upgrade` already does. A fork has to publish its images from its
 own account and set `image_publisher` and `release_repo` to trust them.
 

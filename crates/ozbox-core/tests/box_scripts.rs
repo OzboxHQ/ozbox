@@ -3137,3 +3137,73 @@ fn the_daemon_starts_after_the_box_users_manager() {
     // never Requires: a manager that is held back (no /work yet) must not stop the daemon
     assert!(!unit.contains("Requires=user@"));
 }
+
+// ---- cloudflared's ICMP socket: the secrets user's group is inside ping_group_range (B4-18 item 10) ----
+
+/// The block of `ozbox-secrets-setup.sh` that writes the ping-range drop-in, run on its own with the paths and group id
+/// pointed at a temporary folder.
+fn ping_range(range: &str, gid: &str) -> Option<String> {
+    let s = read("infra/cloud-init/scripts/ozbox-secrets-setup.sh");
+    let start = s.find("# >>> ping-range").expect("the ping-range block");
+    let end = s
+        .find("# <<< ping-range")
+        .expect("the end of the ping-range block");
+    let d = tempfile::tempdir().unwrap();
+    let block = d.path().join("block.sh");
+    fs::write(&block, format!("set -euo pipefail\n{}", &s[start..end])).unwrap();
+    let proc_file = d.path().join("ping_group_range");
+    fs::write(&proc_file, format!("{range}\n")).unwrap();
+    let o = sh(
+        &block,
+        &[],
+        &[
+            ("OZBOX_PING_RANGE_FILE", &proc_file.to_string_lossy()),
+            ("OZBOX_SYSCTL_D", &d.path().to_string_lossy()),
+            ("OZBOX_PING_GID", gid),
+        ],
+    )
+    .unwrap();
+    assert!(o.status.success(), "{}", text(&o));
+    fs::read_to_string(d.path().join("60-ozbox-cloudflared-ping.conf")).ok()
+}
+
+#[test]
+fn the_secrets_users_group_is_put_inside_ping_group_range_and_the_range_is_never_narrowed() {
+    let line = |r: &str, g: &str| {
+        ping_range(r, g)
+            .and_then(|t| {
+                t.lines()
+                    .find(|l| l.starts_with("net."))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    };
+    // the kernel's empty default ("1 0"): just this group
+    assert_eq!(line("1\t0", "998"), "net.ipv4.ping_group_range = 998 998");
+    // already inside: unchanged
+    assert_eq!(
+        line("0\t2147483647", "998"),
+        "net.ipv4.ping_group_range = 0 2147483647"
+    );
+    // outside: widened to take it in, never narrowed
+    assert_eq!(
+        line("1000 2000", "998"),
+        "net.ipv4.ping_group_range = 998 2000"
+    );
+    assert_eq!(
+        line("100 200", "998"),
+        "net.ipv4.ping_group_range = 100 998"
+    );
+    // a range or a group id that is not a number: nothing is written
+    assert_eq!(ping_range("garbage", "998"), None);
+    assert_eq!(ping_range("1 0", "not-a-group"), None);
+    // the cloudflared units run under that group, and the drop-in is applied before they are started
+    let s = read("infra/cloud-init/scripts/ozbox-secrets-setup.sh");
+    let unit = &s[s.find("EOF_CLOUDFLARED").unwrap()..];
+    assert!(unit.contains("Group=ozbox-secrets"));
+    let applied = s.find("sysctl --system").unwrap();
+    let started = s
+        .find("systemctl enable --now ozbox-secrets.service ozbox-cloudflared.service")
+        .unwrap();
+    assert!(s.find("# >>> ping-range").unwrap() < applied && applied < started);
+}

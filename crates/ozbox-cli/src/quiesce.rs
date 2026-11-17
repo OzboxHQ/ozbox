@@ -223,13 +223,36 @@ impl Pace for RealPace {
     }
 }
 
-/// What the person asked for: `--strict-checkpoint` and `--legacy-checkpoint`.
+/// What the person asked for: `--strict-checkpoint`, `--legacy-checkpoint` and `--no-checkpoint`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mode {
     /// Refuse to go on unless the box was fully ready.
     pub strict: bool,
     /// On a box whose agent is older, use its own (visible, possibly pushing) checkpoint instead of going on without one.
     pub legacy: bool,
+    /// On a box whose agent is older, go on without any checkpoint: the person said so by name.
+    pub none: bool,
+}
+
+/// A box whose agent is older can either use its own checkpoint (a visible branch that it may push) or go on with none.
+/// Neither is chosen for the person (plan, then apply: what happens is decided before the confirmation, and `--yes` only
+/// confirms what the plan said), so the command is refused before anything changes until one of the two is named. A dry
+/// run is never refused: it shows the plan and the choice.
+pub fn older_choice(
+    service: &Service,
+    mode: Mode,
+    box_name: &str,
+) -> Result<Option<String>, String> {
+    if *service != Service::Older || mode.strict {
+        return Ok(None);
+    }
+    if mode.legacy {
+        return Ok(Some(t("quiesce.chosen_legacy", &[("box", box_name)])));
+    }
+    if mode.none {
+        return Ok(Some(t("quiesce.chosen_none", &[("box", box_name)])));
+    }
+    Err(t("quiesce.choose_older", &[("box", box_name)]))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -443,6 +466,18 @@ pub fn perform(agent: &dyn BoxAgent, rec: &BoxRecord, o: &Opts, pace: &dyn Pace)
         Ok((404 | 405, _)) => {
             return if o.mode.legacy && !strict {
                 legacy(agent, rec, &name)
+            } else if o.mode.none && !strict {
+                // the person chose no checkpoint by name (`--no-checkpoint`): told, never asked again
+                Quiesced {
+                    step: Step::new(
+                        StepOutcome::Skipped,
+                        t("quiesce.none_chosen", &[("box", &name)]),
+                    ),
+                    proceed: true,
+                    reconfirm: false,
+                    touched: Touched::No,
+                    older: true,
+                }
             } else {
                 not_ready(
                     StepOutcome::Skipped,
@@ -813,7 +848,7 @@ mod tests {
     fn strict() -> Mode {
         Mode {
             strict: true,
-            legacy: false,
+            ..Mode::default()
         }
     }
 
@@ -1103,8 +1138,8 @@ mod tests {
     fn the_older_checkpoint_is_used_only_behind_its_own_flag_and_says_what_it_does() {
         let a = Scripted::new(Box::new(|_, _| Ok((405, json!({})))));
         let mode = Mode {
-            strict: false,
             legacy: true,
+            ..Mode::default()
         };
         let q = perform(&a, &rec(), &Opts::command(mode), &FakePace(Cell::new(0)));
         assert!(a.calls.lock().unwrap().contains(&"checkpoint".to_string()));
@@ -1121,9 +1156,62 @@ mod tests {
         let mode = Mode {
             strict: true,
             legacy: true,
+            ..Mode::default()
         };
         let q = perform(&a, &rec(), &Opts::command(mode), &FakePace(Cell::new(0)));
         assert!(!q.proceed);
+        assert!(!a.calls.lock().unwrap().contains(&"checkpoint".to_string()));
+    }
+
+    #[test]
+    fn an_older_agent_needs_a_named_choice_and_no_checkpoint_is_never_asked_again() {
+        // no choice: refused, naming both flags
+        let e = older_choice(&Service::Older, Mode::default(), "main").unwrap_err();
+        assert!(
+            e.contains("--legacy-checkpoint") && e.contains("--no-checkpoint"),
+            "{e}"
+        );
+        assert!(
+            e.contains("PUSHES") && e.contains("Nothing was changed"),
+            "{e}"
+        );
+        // each named choice is said in the plan
+        let legacy = Mode {
+            legacy: true,
+            ..Mode::default()
+        };
+        assert!(older_choice(&Service::Older, legacy, "main")
+            .unwrap()
+            .unwrap()
+            .contains("visible branch"));
+        let none = Mode {
+            none: true,
+            ..Mode::default()
+        };
+        assert!(older_choice(&Service::Older, none, "main")
+            .unwrap()
+            .unwrap()
+            .contains("NOT snapshotted"));
+        // a current agent, an unknown one and strict (which refuses an older box itself) ask for nothing
+        assert_eq!(
+            older_choice(&Service::Available, Mode::default(), "main"),
+            Ok(None)
+        );
+        assert_eq!(
+            older_choice(&Service::Unknown("x".into()), Mode::default(), "main"),
+            Ok(None)
+        );
+        assert_eq!(older_choice(&Service::Older, strict(), "main"), Ok(None));
+        // --no-checkpoint at apply: no checkpoint, no POST of anything else, and no second question
+        let a = Scripted::new(Box::new(|_, _| Ok((404, json!({})))));
+        let q = perform(&a, &rec(), &Opts::command(none), &FakePace(Cell::new(0)));
+        assert!(q.proceed && !q.reconfirm && q.older);
+        assert_eq!(q.step.outcome, StepOutcome::Skipped);
+        assert!(
+            q.step.detail.contains("--no-checkpoint"),
+            "{}",
+            q.step.detail
+        );
         assert!(!a.calls.lock().unwrap().contains(&"checkpoint".to_string()));
     }
 
@@ -1155,8 +1243,8 @@ mod tests {
         assert!(!q.proceed);
         // a legacy flag does not turn a 503 into the legacy path either
         let mode = Mode {
-            strict: false,
             legacy: true,
+            ..Mode::default()
         };
         perform(&a, &rec(), &Opts::command(mode), &FakePace(Cell::new(0)));
         assert!(!a.calls.lock().unwrap().contains(&"checkpoint".to_string()));
