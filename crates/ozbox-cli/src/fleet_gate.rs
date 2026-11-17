@@ -16,6 +16,10 @@
 //! own, not the dashboard's), and it answers only "is a window open for this plan, and until when". Nothing in this module
 //! can return, print or serialize a session.
 
+// Built and tested, but nothing outside the tests constructs the gate yet: the credential holder it needs is not built
+// (ADR 0040, Amendment 1). The dashboard server already runs it on every apply when one is set.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::VecDeque;
 
 use ozbox_core::approval_subject::Encoder;
