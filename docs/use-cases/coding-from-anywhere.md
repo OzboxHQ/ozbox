@@ -260,12 +260,12 @@ dashboard's terminal and on the box's desktop.
 
 In the editor itself the keys are your browser's own and need nothing from Oz Box.
 
-**Copying out of tmux.** The terminals run in tmux, which takes the mouse. Hold Shift while you drag (Option on a Mac)
-to select with the terminal's own selection, then copy with the keys above; this works in both terminals. In the
-dashboard's terminal a plain drag also works: when you let go, tmux copies it and the dashboard puts it on your clipboard.
-In the browser IDE a plain drag selects inside tmux only, and the copy stays on the box (paste it there with Ctrl+B,
-then `]`). In the dashboard's terminal, **Copy** with nothing selected opens the text on the screen in a box you can
-select from, which is also the way to copy on a phone or a tablet (press and hold).
+**Copying out of tmux.** The terminals run in tmux, which takes the mouse. Drag to select (or double-click a word): when
+you let go, tmux copies it and it lands on your clipboard, in both the browser IDE and the dashboard's terminal. After
+setting up or updating the IDE, reload its tab once. Or hold Shift while you drag (Option on a Mac) to select with the
+terminal's own selection, then copy with the keys above. In the dashboard's terminal, **Copy** with nothing selected
+opens the text on the screen in a box you can select from, which is also the way to copy on a phone or a tablet (press
+and hold).
 
 **Your browser.**
 - **Chrome, Edge and Brave** ask once to see the clipboard: choose **Allow**. After that every paste works.
@@ -273,30 +273,39 @@ select from, which is also the way to copy on a phone or a tablet (press and hol
   may first show a small **Paste** button to click. In the dashboard's terminal, a tmux selection reaches your clipboard
   only if you let go within about five seconds of starting the drag; after that it offers a **Copy** button instead.
 - **Safari:** Cmd+C and Cmd+V work; right-click **Paste** may first show a small **Paste** button to click.
+- **Firefox and Safari** may refuse a copy made by dragging in tmux in the browser IDE; if it does not arrive, hold Shift
+  (Option on a Mac) while you drag.
 - **The dashboard's terminal** never pastes without you: its **Paste** button reads the clipboard only when pressed, and
   when the browser will not hand it over, a box opens where you paste with the keyboard.
 - **The desktop** shares your clipboard both ways, up to 1 MB per copy. Chrome, Edge and Brave do it by themselves once
   you allow clipboard access. In Firefox and Safari, open the desktop's side panel and use its **Clipboard** box to move
   text in and out.
 
-**What a program on the box can and cannot do.** A program in the terminal can put text on your clipboard (that is how
-tmux copies), but only right after you pressed a key or clicked; otherwise the dashboard's terminal asks you first, and a
-copy larger than about a million characters is refused. A program can never read your clipboard through the dashboard's
-terminal or through tmux. Copy buttons for secrets (a webhook secret, a one-time code, a share link) copy only when you
-press them, and say that the secret is now on your clipboard.
+**What a program on the box can and cannot do.** A program on the box can put text on your clipboard, never read it.
+- In the dashboard's terminal, a program's copy (OSC 52, which is how tmux copies there) is written only right after
+  you pressed a key or clicked; otherwise you are asked first. A copy larger than about a million characters is refused.
+- In the browser IDE, a tmux copy reaches the IDE window through a small Oz Box extension that listens on a socket only
+  the box user can open. It writes only while that IDE window is in front with a terminal open, says "Copied N
+  characters from the terminal" in the status bar every time, and refuses more than a million characters. Anything that
+  runs as the box user (your coding agents included) can reach that socket, just as it can already make tmux copy; that
+  is the boundary. A program's own OSC 52 copy does not reach your clipboard in the browser IDE.
+- Neither terminal, nor tmux, ever answers a program's request to read your clipboard.
+- Copy buttons for secrets (a webhook secret, a one-time code, a share link) copy only when you press them, and say that
+  the secret is now on your clipboard.
 
-**Underneath:** Oz Box ships terminal key bindings for the browser IDE and tmux settings that send copies to your
-clipboard. It merges them into your own settings and never overwrites your keys; it only takes back an entry an earlier
-Oz Box added that stopped Ctrl+V pasting on Windows and Linux. A box set up by an earlier version is offered the update
-the next time you run `ozbox ide <box>`. A keybindings file with comments other than at the top is
-left alone: there, remove the `ctrl+v` line that says `-workbench.action.terminal.paste` yourself.
+**Underneath:** Oz Box ships terminal key bindings for the browser IDE, tmux settings that send copies to your
+clipboard (tmux's `copy-command`, only when you have not set your own), and the small IDE extension above. It merges the
+settings into your own and never overwrites your keys; it only takes back an entry an earlier Oz Box added that stopped
+Ctrl+V pasting on Windows and Linux. A box set up by an earlier version is offered the update the next time you run
+`ozbox ide <box>`. A keybindings file with comments other than at the top is left alone: there, remove the `ctrl+v`
+line that says `-workbench.action.terminal.paste` yourself.
 
 **Status:**
 - Browser IDE terminal with the Linux keys in Chrome: **Works** (Ctrl+V, Ctrl+Shift+V, Ctrl+C to copy a selection and
   Ctrl+C to stop a command, run on a real box against its own IDE). Mac and Windows keys, Firefox and Safari:
   **Preview**. The earlier "Works" here was wrong for Windows and Linux: Ctrl+V typed `^V` instead of pasting.
-- Browser IDE terminal, a plain drag in tmux: **does not reach your clipboard** (the IDE did not pass tmux's copy on in
-  that run); use Shift-drag (Option-drag on a Mac).
+- Browser IDE terminal, drag or double-click in tmux to copy: **Works** in Chrome (run on a real box with the shipped
+  extension and tmux settings); Firefox and Safari: **Preview**.
 - Dashboard terminal (the keys, multi-line paste, copies from tmux and other programs, the Copy box): **Preview**
   (tested in Chrome against a real shell in CI; not yet run on a real box, or in Firefox or Safari).
 - The desktop's clipboard: **Preview**.
