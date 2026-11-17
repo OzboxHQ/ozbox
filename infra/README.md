@@ -411,3 +411,11 @@ done
 ```
 
 Packer is validated in CI (`packer validate -syntax-only`); building an image needs cloud credentials and is a release step.
+
+## The fleet manager's roles (`modules/aws-fleet-manager`, Preview)
+
+`ozbox fleet enable --window-permission-set <name> --machine-type <type> --image-id <ami> --subnet-id <subnet>` plans and applies this
+module once, signed in as an administrator (the daily operator role is denied every role under `/obx/`). It makes `obx-fleet-read`
+and `obx-fleet-change` and their policies, with one state for the account (`ozbox/fleet-manager/account.tfstate`), and costs
+nothing. A change is made only inside a window opened with `ozbox fleet window`, which assumes `obx-fleet-change` with a session
+policy built from the one plan. See ADR 0040 Amendments 1 and 2.

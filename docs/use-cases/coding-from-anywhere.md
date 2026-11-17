@@ -194,9 +194,11 @@ permitted in the same way, and none shows demo data on a box. A dashboard that m
 designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md). Its first part is
 built and tested with stand-ins, never on a real account (**Preview**): the cloud roles it would use (it may change only Oz Box's
 own boxes, never itself, and never who may do what), and the step where each change is planned, shown, and applied only inside
-a change window opened from your own computer and after you confirm that exact plan with your passkey. Nothing turns it on
-yet, because the part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the
-fleet is not connected.
+a change window opened from your own computer and after you confirm that exact plan with your passkey. The part that holds the fleet's credentials on the box (a user of its own, which gets a session your computer made for one
+plan, and checks your passkey against a list your computer signed) is also built and tested with stand-ins (**Preview**), as
+are `ozbox fleet enable`, `ozbox fleet window` and `ozbox fleet approvers sign` on your computer. Nothing turns it on yet,
+because the box's service, the dashboard's last step and the sealed delivery are not built, so a box's dashboard still says
+the fleet is not connected.
 
 **The terminal, Files and Tools say what they are.** The terminal names its box before it connects ("Connecting to main…"),
 and once the shell is up it says "Connected to main, as the box user". That shell is started by the box's own agent, never by
