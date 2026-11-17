@@ -7,6 +7,7 @@
 //! * [`seams`]: those put together for the hub (`HubService`) and for a worker.
 //! * [`enrol`]: invites, requests, attestations, plan and apply.
 //! * [`daemon`]: `ozbox-hubd` itself: verify, spool, enrol, handshake, and its socket.
+//! * [`registrar`]: the registrars that vouch for a worker (AWS claim path, your computer, `repin`).
 //! * [`selftest`]: what must hold before it is trusted.
 //! * [`setup`]: the units and folders, written by the script this program carries.
 //!
@@ -21,6 +22,7 @@ pub mod enrol;
 pub mod identity;
 pub mod keys;
 pub mod ops;
+pub mod registrar;
 pub mod seams;
 pub mod selftest;
 pub mod setup;

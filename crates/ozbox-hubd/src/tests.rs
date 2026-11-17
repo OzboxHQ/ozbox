@@ -28,7 +28,7 @@ use crate::seams::{hub_seams, worker_seams};
 // ---- fixtures -------------------------------------------------------------------------------------------------------
 
 #[derive(Default)]
-struct MemStore(Mutex<BTreeMap<String, String>>);
+pub(crate) struct MemStore(Mutex<BTreeMap<String, String>>);
 
 impl KeyStore for MemStore {
     fn get(&self, name: &str) -> Result<Option<Zeroizing<String>>, String> {
@@ -53,25 +53,25 @@ impl MemStore {
     }
 }
 
-struct End {
-    store: MemStore,
-    keys: Arc<HubKeys>,
+pub(crate) struct End {
+    pub(crate) store: MemStore,
+    pub(crate) keys: Arc<HubKeys>,
 }
 
-fn end() -> End {
+pub(crate) fn end() -> End {
     let store = MemStore::default();
     let keys = Arc::new(HubKeys::load_or_create(&store).unwrap());
     End { store, keys }
 }
 
 impl End {
-    fn ops(&self, caller: Caller) -> Arc<dyn KeyOps> {
+    pub(crate) fn ops(&self, caller: Caller) -> Arc<dyn KeyOps> {
         Arc::new(LocalKeyOps {
             keys: self.keys.clone(),
             caller,
         })
     }
-    fn id(&self) -> Identity {
+    pub(crate) fn id(&self) -> Identity {
         self.keys.identity().clone()
     }
 }
@@ -91,8 +91,8 @@ fn registrar(provider: Provider) -> Registrar {
     Registrar { pair, reg }
 }
 
-const NOW: u64 = 1_800_000_000_000;
-const HUB_BOX: &str = "main-box";
+pub(crate) const NOW: u64 = 1_800_000_000_000;
+pub(crate) const HUB_BOX: &str = "main-box";
 
 struct World {
     _tmp: tempfile::TempDir,
