@@ -273,6 +273,18 @@ impl ozbox_core::channel::audit::AuditSink for BookSink<'_> {
     }
 }
 
+/// Record the hub's pending audit events in the task book (by number, so a repeat records none), as `actor`.
+pub fn record_hub_audit(
+    store: &TaskStore,
+    hub: &ozbox_core::hub::engine::HubService,
+    actor: &str,
+) -> std::io::Result<()> {
+    hub.drain_audit(&BookSink {
+        store,
+        actor: actor.to_string(),
+    })
+}
+
 /// The same, over a book the caller already holds under the store's lock (the store cannot be taken again).
 struct HeldBookSink<'a, 'b> {
     book: std::sync::Mutex<&'a mut Book>,

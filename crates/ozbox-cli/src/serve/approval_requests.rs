@@ -90,6 +90,7 @@ impl App {
             ["requests", id, "challenge"] if post => self.approval_challenge(req, id),
             ["requests", id, "approve"] if post => self.approval_approve(req, id),
             ["requests", id, "deny"] if post => self.approval_deny(req, id),
+            ["fleet", rest @ ..] => self.fleet_approvals_route(req, rest),
             _ => Resp::error(404, "not_found", "no such route"),
         }
     }

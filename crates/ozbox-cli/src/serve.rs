@@ -50,6 +50,7 @@ mod code_routes;
 mod cost_routes;
 mod demo_telegram;
 mod files;
+mod fleet_approvals;
 mod lane;
 #[cfg(test)]
 mod lane_tests;

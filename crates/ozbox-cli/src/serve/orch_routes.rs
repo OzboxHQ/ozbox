@@ -120,6 +120,10 @@ pub struct OrchRt {
     merger: Option<Box<dyn Merger + Send>>,
     merger_box: Option<String>,
     next_tick_ms: u64,
+    /// The worker channel (ADR 0042), when this box is a hub. Attached by [`App::attach_hub`]; `None` keeps the laptop route.
+    pub(super) hub: Option<Arc<ozbox_core::hub::engine::HubService>>,
+    /// The declared test lanes the merge queue may run over the hub (`test_lane_box = "hub:<name>"`).
+    pub(super) lanes: std::collections::BTreeMap<String, ozbox_core::hub::merge::LaneDecl>,
 }
 
 fn bad(msg: &str) -> Resp {
@@ -216,7 +220,9 @@ impl App {
         let mut host = HostTools::new(store.clone(), backend, Arc::new(OpsFacts(Arc::clone(&ops))));
         host.browser = Some(browser);
         let tools = Arc::new(Composite {
-            orch: Tools::new(store, ops).with_memory(self_memory),
+            orch: Tools::new(store, ops)
+                .with_memory(self_memory)
+                .with_hub(self.orch.hub.clone()),
             host,
         });
         self.orch.tools = Some(Arc::clone(&tools));
@@ -225,6 +231,24 @@ impl App {
         self.orch.mcp = Some(Arc::clone(&server));
         self.runs.host.set_mcp(Some(Arc::clone(&server)));
         Some(server)
+    }
+
+    /// Make this box a hub (ADR 0042): the orchestration tools hand tasks over it, the merge queue takes its workers' commits and
+    /// runs declared lanes across them, and the fleet inbox shows its workers' requests. Called when the server starts, before
+    /// the tools do: tools already running keep the route they were made with, so a later call is refused.
+    // the hub process attaches itself here when it starts the server; until it exists only the tests call this
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn attach_hub(
+        &mut self,
+        hub: Arc<ozbox_core::hub::engine::HubService>,
+        lanes: std::collections::BTreeMap<String, ozbox_core::hub::merge::LaneDecl>,
+    ) -> Result<(), &'static str> {
+        if self.orch.mcp.is_some() || self.orch.tools.is_some() {
+            return Err("the orchestration tools are already running without the hub: restart the server to attach it");
+        }
+        self.orch.hub = Some(hub);
+        self.orch.lanes = lanes;
+        Ok(())
     }
 
     fn orch_boxes(&self) -> Vec<Value> {
@@ -327,7 +351,19 @@ impl App {
             host: &mut host,
             handles,
         };
+        let hub = self.orch.hub.clone();
+        let lanes = self.orch.lanes.clone();
+        // what the workers reported over the hub comes in first: a finished commit joins its merge queue
+        let hub_seen = hub.as_ref().and_then(|h| {
+            h.with(now_ms, |hub, st| {
+                hub.poll(st, now_ms);
+                st.clone()
+            })
+        });
         let acts = self.runs_update(|b| {
+            if let Some(st) = &hub_seen {
+                ozbox_core::hub::merge::admit_results(b, st, now_ms);
+            }
             let mut ready = |f: &ozbox_core::orch::Feature| running(&f.box_name);
             let acts = b.tick_orchestrations(&mut chan, &mut ready, now_ms);
             if let Some(m) = merger.as_deref_mut() {
@@ -338,13 +374,42 @@ impl App {
                     .map(|o| o.id.clone())
                     .collect();
                 for id in ids {
-                    merge_step(b, &id, m, now_ms);
+                    match &hub {
+                        // over the hub: a lane runs the test on the reported commit, and the worker is told what the queue found
+                        Some(h) => {
+                            let commits = ozbox_core::hub::merge::reported_commits(b, &id);
+                            h.with(now_ms, |hub, st| {
+                                let step = {
+                                    let mut hm = ozbox_core::hub::merge::HubMerger {
+                                        inner: &mut *m,
+                                        hub,
+                                        st: &mut *st,
+                                        lanes: &lanes,
+                                        commits,
+                                        now: now_ms,
+                                    };
+                                    merge_step(b, &id, &mut hm, now_ms)
+                                };
+                                if let Some(s) = step {
+                                    let _ = ozbox_core::hub::merge::return_to_worker(
+                                        hub, st, b, &id, &s, now_ms,
+                                    );
+                                }
+                            });
+                        }
+                        None => {
+                            merge_step(b, &id, m, now_ms);
+                        }
+                    }
                 }
             }
             acts
         });
         self.runs.host = host;
         self.orch.merger = merger;
+        if let (Some(h), Some(store)) = (&hub, self.runs.store.clone()) {
+            let _ = crate::orch_tools::record_hub_audit(&store, h, "supervisor");
+        }
         let Ok(acts) = acts else { return };
         for (oid, act) in acts {
             self.orch_box_action(&store, &oid, &act, now_ms);
@@ -431,7 +496,8 @@ impl App {
         let store = self.runs.store.clone()?;
         Some(
             Tools::new(store, Arc::new(SnapshotOps(self.orch_boxes())))
-                .with_memory(self.memory_host.clone()),
+                .with_memory(self.memory_host.clone())
+                .with_hub(self.orch.hub.clone()),
         )
     }
 

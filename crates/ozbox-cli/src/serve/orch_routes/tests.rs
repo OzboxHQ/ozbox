@@ -551,3 +551,154 @@ fn a_persons_own_agent_can_start_its_first_orchestration_and_list_boxes_when_not
         1
     );
 }
+
+// ---- the fleet inbox: a worker's request decided on main, verified by the worker ------------------------------------
+
+#[test]
+fn the_fleet_inbox_shows_a_workers_request_and_relays_the_persons_passkey_decision_which_the_worker_verifies(
+) {
+    use ozbox_core::approval::{Requester, RequesterKind, Role, State};
+    use ozbox_core::approval_subject::{from_hex, GuardHook, Ids, Subject};
+    use ozbox_core::hub::approvals::{ApprovalService, Approver, ApproverSet, MemApprovals};
+    use ozbox_core::hub::engine::{HubService, HubState, RosterEntry};
+    use ozbox_core::hub::mem::{MemTransport, TestKey, TestRoster, TestSealer};
+    use ozbox_core::hub::testkit::{test_rp, Passkey};
+    use ozbox_core::hub::worker::{WorkerEnd, WorkerState};
+    use std::sync::{Arc, Mutex};
+
+    const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
+    const W_FP: &str = "bb00000000000000000000000000000000000000000000000000000000000001";
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    // with no hub the inbox says so, and nothing is decided
+    let (s, v) = call(&mut a, "GET", "/v1/approvals/fleet", Value::Null);
+    assert_eq!((s, v["available"].clone()), (200, json!(false)));
+
+    let net = Arc::new(MemTransport::default());
+    let mut keys = std::collections::BTreeMap::new();
+    keys.insert(HUB_FP.to_string(), "k-main".to_string());
+    keys.insert(W_FP.to_string(), "k-w1".to_string());
+    let mut roster = std::collections::BTreeMap::new();
+    roster.insert(
+        "worker-1".to_string(),
+        RosterEntry {
+            key_fp: W_FP.into(),
+        },
+    );
+    let ids = Ids {
+        box_id: "worker-1".into(),
+        store_id: "store-w1".into(),
+    };
+    let mut svc = MemApprovals::new(ids.clone()).unwrap();
+    let owner = Passkey::new("cred-owner").unwrap();
+    svc.approvers = Some(ApproverSet {
+        seq: 1,
+        expires_ms: u64::MAX,
+        rp: test_rp(),
+        approvers: vec![Approver {
+            credential_id: owner.id.clone(),
+            public_key_hex: owner.public_hex(),
+            person: "owner".into(),
+            role: Role::Owner,
+        }],
+    });
+    let mut hs = HubState::new("main", HUB_FP, 1);
+    hs.pin_service("worker-1", svc.pin());
+    let hub = Arc::new(HubService {
+        me: "main".into(),
+        my_fp: HUB_FP.into(),
+        roster,
+        signer: Arc::new(TestKey("k-main".into())),
+        verifier: Arc::new(TestRoster(keys.clone())),
+        sealer: Arc::new(TestSealer {
+            my_fp: HUB_FP.into(),
+        }),
+        net: net.clone(),
+        state: Mutex::new(hs),
+        store: None,
+    });
+    a.attach_hub(Arc::clone(&hub), Default::default()).unwrap();
+
+    let (wk, ws_seal, wroster) = (
+        TestKey("k-w1".into()),
+        TestSealer { my_fp: W_FP.into() },
+        TestRoster(keys),
+    );
+    let w = WorkerEnd {
+        me: "worker-1",
+        hub: "main",
+        signer: &wk,
+        verifier: &wroster,
+        sealer: &ws_seal,
+        net: net.as_ref(),
+    };
+    let mut ws = WorkerState::new("worker-1", W_FP, "main", HUB_FP, 1);
+    let now = super::super::unix_ms();
+    w.hello(&mut ws, now);
+    for _ in 0..4 {
+        call(&mut a, "GET", "/v1/approvals/fleet", Value::Null);
+        w.poll(&mut ws, super::super::unix_ms());
+    }
+    // the worker's agent files a guard override on its own box; the worker announces it
+    let subject = Subject::GuardOverride(GuardHook::Commit {
+        repo_path_hash: "1".repeat(64),
+        hook_kind: "pre-commit".into(),
+        tree_id: "a".repeat(40),
+        matches: Vec::new(),
+        scanned_text_hash: "2".repeat(64),
+    });
+    svc.file(
+        now,
+        "r1",
+        subject,
+        Requester::new(RequesterKind::BoxUser, Some(1000)),
+    )
+    .unwrap();
+    assert_eq!(
+        w.announce_approvals(&mut ws, &svc, super::super::unix_ms()),
+        1
+    );
+    let (s, v) = call(&mut a, "GET", "/v1/approvals/fleet", Value::Null);
+    assert_eq!(s, 200);
+    let card = v["cards"][0].clone();
+    assert_eq!(
+        (card["worker"].as_str(), card["request_id"].as_str()),
+        (Some("worker-1"), Some("r1"))
+    );
+    assert_eq!(card["decidable_here"], true);
+    // the person signs the card's challenge with a passkey; main relays it
+    let ch: [u8; 32] = from_hex(card["approve_challenge"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let ev = owner.assert(&test_rp(), &ch, 0x05, 3).unwrap();
+    let body = json!({"outcome":"approve","subject_digest": card["subject_digest"], "passkey": ev});
+    let (s, _) = call(
+        &mut a,
+        "POST",
+        "/v1/approvals/fleet/worker-1/r1/decide",
+        body,
+    );
+    assert_eq!(s, 202);
+    // without an assertion the relay is refused, and nothing reaches the worker as an approval
+    let (s, _) = call(
+        &mut a,
+        "POST",
+        "/v1/approvals/fleet/worker-1/r1/decide",
+        json!({"outcome":"approve","subject_digest": card["subject_digest"]}),
+    );
+    assert_eq!(s, 409);
+    assert_eq!(svc.state_of("r1"), Some(State::Pending));
+    let t = super::super::unix_ms();
+    w.poll(&mut ws, t);
+    let out = w.apply_decisions(&mut ws, &mut svc, t);
+    assert_eq!(out.len(), 1);
+    assert_eq!(svc.state_of("r1"), Some(State::Approved));
+    // the relay is in this box's audit trail
+    let book = a.runs.store.clone().unwrap().load().unwrap();
+    assert!(book
+        .audit
+        .iter()
+        .any(|e| e.action == "hub.approval.relayed"));
+    let _ = svc.pending(t);
+}

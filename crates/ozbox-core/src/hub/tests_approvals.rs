@@ -3,9 +3,6 @@
 
 #![allow(clippy::unwrap_used)]
 
-use ring::rand::SystemRandom;
-use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
-
 use super::approvals::{
     ApprovalService, Approver, ApproverSet, DecisionBody, MemApprovals, AUDIT_REJECTED,
     AUDIT_RELAYED, AUDIT_SHOWN, AUDIT_WORKER_DECIDED, AUDIT_WORKER_REFUSED,
@@ -23,10 +20,7 @@ use crate::approval_verify::ExpectedRp;
 pub(super) const NOW: u64 = 1_000_000;
 
 pub(super) fn rp() -> ExpectedRp {
-    ExpectedRp {
-        rp_id: "dash.example.com".into(),
-        origin: "https://dash.example.com".into(),
-    }
+    super::testkit::test_rp()
 }
 
 fn worker_ids() -> Ids {
@@ -36,28 +30,18 @@ fn worker_ids() -> Ids {
     }
 }
 
-/// A WebAuthn credential, as the owner's authenticator holds it.
-pub(super) struct Passkey {
-    pub(super) id: String,
-    key: EcdsaKeyPair,
-}
+/// The test credential, with the panicking constructors a test wants.
+pub(super) struct Passkey(super::testkit::Passkey);
 
 impl Passkey {
     pub(super) fn new(id: &str) -> Passkey {
-        let rng = SystemRandom::new();
-        let pk = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
-        Passkey {
-            id: id.into(),
-            key: EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pk.as_ref(), &rng)
-                .unwrap(),
-        }
+        Passkey(super::testkit::Passkey::new(id).unwrap())
     }
 
     pub(super) fn public_hex(&self) -> String {
-        to_hex(self.key.public_key().as_ref())
+        self.0.public_hex()
     }
 
-    /// What a browser makes for `challenge` on `rp`: authenticator data with the flags and counter, client data, a signature.
     pub(super) fn assert(
         &self,
         rp: &ExpectedRp,
@@ -65,41 +49,12 @@ impl Passkey {
         flags: u8,
         counter: u32,
     ) -> PasskeyEvidence {
-        let mut ad = ring::digest::digest(&ring::digest::SHA256, rp.rp_id.as_bytes())
-            .as_ref()
-            .to_vec();
-        ad.push(flags);
-        ad.extend_from_slice(&counter.to_be_bytes());
-        let cd = format!(
-            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{}"}}"#,
-            b64url(challenge),
-            rp.origin
-        )
-        .into_bytes();
-        let mut payload = ad.clone();
-        payload.extend_from_slice(ring::digest::digest(&ring::digest::SHA256, &cd).as_ref());
-        let sig = self.key.sign(&SystemRandom::new(), &payload).unwrap();
-        PasskeyEvidence {
-            credential_id: self.id.clone(),
-            authenticator_data: to_hex(&ad),
-            client_data: to_hex(&cd),
-            signature: to_hex(sig.as_ref()),
-        }
+        self.0.assert(rp, challenge, flags, counter).unwrap()
     }
-}
 
-fn b64url(b: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for c in b.chunks(3) {
-        let n = (u32::from(c[0]) << 16)
-            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*c.get(2).unwrap_or(&0));
-        for i in 0..=c.len() {
-            out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
-        }
+    fn id(&self) -> String {
+        self.0.id.clone()
     }
-    out
 }
 
 fn hex64(c: char) -> String {
@@ -137,7 +92,7 @@ fn world() -> World {
         expires_ms: NOW + 7 * 86_400_000,
         rp: rp(),
         approvers: vec![Approver {
-            credential_id: owner.id.clone(),
+            credential_id: owner.id(),
             public_key_hex: owner.public_hex(),
             person: "owner".into(),
             role: Role::Owner,

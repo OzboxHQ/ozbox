@@ -36,6 +36,7 @@ pub mod lane;
 pub mod mem;
 pub mod merge;
 pub mod refusal;
+pub mod testkit;
 pub mod wire;
 pub mod worker;
 
