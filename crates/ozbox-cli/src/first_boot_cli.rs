@@ -73,6 +73,7 @@ pub fn run(words: &[String]) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
