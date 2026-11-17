@@ -9,7 +9,7 @@ dials out to, never an open port. You can pause it, resize it, clone it, throw i
 Nothing is hosted by this project. There is no Oz Box cloud, account, relay or default domain: the boxes live in **your**
 cloud account, the dashboard runs on **your** computer or behind **your** domain, and the keys are **yours**.
 
-> **Status: Beta (0.2.0-beta.3).** The single box is real and has been used on a real cloud account. **Beta does not mean
+> **Status: Beta (0.3.0-beta.1).** The single box is real and has been used on a real cloud account. **Beta does not mean
 > every feature has been proven:** anything marked **Preview** is built and tested in CI but has not been run on a real box,
 > and the agent-side controls are mostly in that group. [What works and what does not](#status) says exactly what.
 
@@ -56,8 +56,8 @@ anything, and never uses `sudo`. Pre-releases are skipped when you ask for "the 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/OzboxHQ/ozbox/main/scripts/install.sh
 less install.sh                                   # read it first
-sh install.sh --version 0.2.0-beta.3              # puts ozbox in ~/.local/bin
-ozbox --version                                   # ozbox 0.2.0-beta.3
+sh install.sh --version 0.3.0-beta.1              # puts ozbox in ~/.local/bin
+ozbox --version                                   # ozbox 0.3.0-beta.1
 ```
 
 Nothing else is published for this release: no Homebrew formula, no crates.io or npm package. To build the program
@@ -226,7 +226,7 @@ claim of certification or compliance.
 
 ## Status
 
-Oz Box is in **Beta**, version 0.2.0-beta.3. The latest 0.2.x release is the supported one (see [SECURITY.md](SECURITY.md)),
+Oz Box is in **Beta**, version 0.3.0-beta.1. The latest 0.3.x release is the supported one (see [SECURITY.md](SECURITY.md)),
 and the signed program is published on GitHub Releases only (no package-manager packages yet). A Beta may still break between
 releases (see [docs/releases.md](docs/releases.md)). We mark every worked example with one of three words, and update them as things are proven:
 
