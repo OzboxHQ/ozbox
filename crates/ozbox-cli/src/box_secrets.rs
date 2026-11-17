@@ -89,7 +89,7 @@ impl AwsSsm {
         Self::build(AwsJson::new(), region, None)
     }
 
-    fn build(client: AwsJson, region: &str, base: Option<&str>) -> Self {
+    pub(crate) fn build(client: AwsJson, region: &str, base: Option<&str>) -> Self {
         Self {
             client,
             region: region.to_string(),

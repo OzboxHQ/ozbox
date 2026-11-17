@@ -88,6 +88,9 @@ pub struct AwsJson {
     imds: String,
     /// Read `AWS_ACCESS_KEY_ID` and friends first. Off for a client built for a test, so a developer's own keys never answer.
     env_creds: bool,
+    /// Plain `http://127.0.0.1:` is accepted for the service: only for a client built for the loopback stand-ins of this
+    /// module's tests and of the shipped program's own round trip (`crate::native_check`). Every other client calls https only.
+    loopback: bool,
     creds: Mutex<Option<Creds>>,
 }
 
@@ -96,6 +99,7 @@ impl AwsJson {
         Self {
             imds: IMDS_BASE.into(),
             env_creds: true,
+            loopback: false,
             creds: Mutex::new(None),
         }
     }
@@ -103,9 +107,17 @@ impl AwsJson {
     /// A client reading only the metadata service at `imds` (a loopback fake in tests).
     #[cfg(test)]
     pub fn with_imds(imds: &str) -> Self {
+        Self::for_loopback(imds)
+    }
+
+    /// A client for loopback stand-ins only: the metadata service at `imds` (on 127.0.0.1), no keys from the environment, and
+    /// plain http to 127.0.0.1 for the service. It never reaches a real AWS address over plain http, and it is built only by
+    /// the tests and by `crate::native_check`, which starts the stand-ins it talks to.
+    pub(crate) fn for_loopback(imds: &str) -> Self {
         Self {
             imds: imds.trim_end_matches('/').to_string(),
             env_creds: false,
+            loopback: true,
             creds: Mutex::new(None),
         }
     }
@@ -248,13 +260,12 @@ impl AwsJson {
         target: &str,
         body: Zeroizing<Vec<u8>>,
     ) -> Result<Zeroizing<Vec<u8>>, Failure> {
-        // plain http is for the loopback fakes in this module's tests only: a real call is always https
-        #[cfg(test)]
-        let rest = base
-            .strip_prefix("https://")
-            .or_else(|| base.strip_prefix("http://"));
-        #[cfg(not(test))]
-        let rest = base.strip_prefix("https://");
+        // plain http only to 127.0.0.1, and only for a loopback client (the tests' fakes, the program's own round trip): a
+        // real call is always https
+        let rest = base.strip_prefix("https://").or_else(|| {
+            base.strip_prefix("http://")
+                .filter(|r| self.loopback && r.starts_with("127.0.0.1:"))
+        });
         let host = rest.ok_or(Failure::Unavailable)?.trim_end_matches('/');
         let mut req = HttpRequest::new("POST", format!("https://{host}/"), Guard::Public)
             .header("Content-Type", "application/x-amz-json-1.1")

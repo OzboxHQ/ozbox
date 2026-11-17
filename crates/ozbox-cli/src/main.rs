@@ -88,6 +88,7 @@ mod model_providers;
 mod model_usage;
 mod models;
 mod models_cli;
+mod native_check;
 mod netguard;
 mod notify;
 mod notify_config;

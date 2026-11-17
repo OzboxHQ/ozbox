@@ -807,6 +807,10 @@ pub struct CodeFlags {
 pub enum SecretsCommand {
     /// Names and ages of the stored secrets. Never a value.
     Status,
+    /// Run this program's own key-service and parameter-store clients through a signed round trip against loopback stand-ins
+    /// it starts itself (no network, no keys; the image build runs it). Not for typing by hand.
+    #[command(hide = true)]
+    NativeCheck,
     /// Move the store to a new key-encryption key: kms, tpm2 or keychain.
     RotateKek {
         #[arg(long, value_name = "KIND")]

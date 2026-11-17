@@ -39,6 +39,7 @@ pub mod release;
 pub mod roles;
 pub mod run;
 pub mod secret_shape;
+pub mod secrets_phase;
 pub mod size;
 pub mod skill_front;
 pub mod skill_hidden;

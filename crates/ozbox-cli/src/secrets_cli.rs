@@ -21,6 +21,21 @@ pub fn run(command: &SecretsCommand, json: bool, yes: bool, dry_run: bool) -> Re
     }
     let yes = effective_yes(yes, dry_run);
     match command {
+        SecretsCommand::NativeCheck => {
+            let c = crate::native_check::run().map_err(CliError::Msg)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({"ok": true, "kms_requests": c.kms_requests, "ssm_requests": c.ssm_requests, "parameters": c.parameters})
+                );
+            } else {
+                println!(
+                    "native-check: ok ({} signed key-service requests, {} signed parameter-store requests, {} parameters read)",
+                    c.kms_requests, c.ssm_requests, c.parameters
+                );
+            }
+            Ok(())
+        }
         SecretsCommand::Status => {
             let s = match open_from_env() {
                 Ok(s) => s,
@@ -301,7 +316,10 @@ fn dry_run_of(command: &SecretsCommand, json: bool) -> Option<Result<(), CliErro
         Some(Ok(()))
     };
     match command {
-        SecretsCommand::Status | SecretsCommand::Import { .. } | SecretsCommand::Approve { .. } => {
+        SecretsCommand::Status
+        | SecretsCommand::NativeCheck
+        | SecretsCommand::Import { .. }
+        | SecretsCommand::Approve { .. } => {
             None
         }
         SecretsCommand::ApprovalKey { command: K::List { .. } } => None,
@@ -965,6 +983,7 @@ fn serve(
             .ok()
             .and_then(|t| crate::secrets_state::previous_failing_since(&t)),
     );
+    use ozbox_core::secrets_phase::Phase;
     let not_ready = |m: &str, code: &str| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -995,14 +1014,17 @@ fn serve(
             // Not configured is a state, not a crash: say why where the box user can read it, and exit with a code the
             // unit does not restart on (a restart every few seconds changes nothing and hides the reason).
             StartFailure::Config(m) => {
-                write_state(&state, &not_ready(&m, "config"));
+                write_state(&state, &not_ready(&m, "config").with_phase(Phase::Stopped));
                 eprintln!("the secrets service is not ready: {m}");
                 std::process::exit(NOT_READY_EXIT);
             }
             // The store is there and its key is gone with no copy anywhere: the one state in which the store may be set
             // aside (`ozbox admin <box> -- recover-secrets`), so it has a code of its own.
             StartFailure::NoEscrow(m) => {
-                write_state(&state, &not_ready(&m, crate::secrets_state::NO_ESCROW_CODE));
+                write_state(
+                    &state,
+                    &not_ready(&m, crate::secrets_state::NO_ESCROW_CODE).with_phase(Phase::Stopped),
+                );
                 eprintln!("the secrets service is not ready: {m}");
                 std::process::exit(NOT_READY_EXIT);
             }
@@ -1011,7 +1033,8 @@ fn serve(
             // store can be set aside for a new one.
             StartFailure::KindMismatch { message, stored } => {
                 let st = not_ready(&message, crate::secrets_state::KIND_MISMATCH_CODE)
-                    .with_store_kek(&stored);
+                    .with_store_kek(&stored)
+                    .with_phase(Phase::Stopped);
                 write_state(&state, &st);
                 eprintln!("the secrets service is not ready: {message}");
                 std::process::exit(NOT_READY_EXIT);
@@ -1021,9 +1044,14 @@ fn serve(
             // vault token placed in the meantime is seen).
             StartFailure::Transient(m) => {
                 if attempt == attempts {
+                    // the sentence keeps its words for a person; the self-test reads the typed `phase` line
                     write_state(
                         &state,
-                        &not_ready(&format!("{m} (starting again)"), "transient"),
+                        &not_ready(
+                            &format!("{m} {}", ozbox_core::secrets_phase::LEGACY_GAVE_UP),
+                            "transient",
+                        )
+                        .with_phase(Phase::GaveUp),
                     );
                     eprintln!("the secrets service could not start: {m}");
                     std::process::exit(1);
@@ -1033,7 +1061,8 @@ fn serve(
                     &not_ready(
                         &format!("{m} (trying again in {} s)", delay.as_secs()),
                         "transient",
-                    ),
+                    )
+                    .with_phase(Phase::Retrying),
                 );
                 eprintln!("the secrets service could not start, trying again: {m}");
                 std::thread::sleep(delay);
