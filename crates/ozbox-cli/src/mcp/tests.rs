@@ -115,7 +115,7 @@ fn tools_list_and_call_work_for_a_conductor_and_return_content_and_structured_co
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 27);
     assert!(names.contains(&"task_start") && !names.contains(&"orchestration_start"));
     let r = s.handle(
         &post(
@@ -156,7 +156,7 @@ fn a_worker_token_sees_its_tools_and_cannot_call_a_conductor_tool() {
     let s = server();
     let t = s.issue(worker(), None, 0, 1000).unwrap().token;
     let v = body(&s.handle(&post(Some(&t), &[], &rpc("tools/list", json!({}))), 1));
-    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 16);
     let v = body(&s.handle(
         &post(
             Some(&t),
