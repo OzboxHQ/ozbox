@@ -276,6 +276,8 @@ impl App {
         };
         let now = super::unix_ms();
         let alert = crate::notify::Alert {
+            notice: None,
+            reach: Default::default(),
             key: format!("demo:{now}:{}", b.title.len()),
             kind: "demo".into(),
             severity: if b.urgent {

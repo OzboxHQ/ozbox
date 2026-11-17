@@ -1,0 +1,13 @@
+{
+  "box": "api",
+  "environment": "production",
+  "expires_ms": null,
+  "kind": "agent_asks",
+  "path": "/chat",
+  "production": true,
+  "project": null,
+  "reference": "a-7",
+  "summary": "Task t-42 stopped and is waiting for your answer.",
+  "title": "Approve or deny: push to main",
+  "url": null
+}

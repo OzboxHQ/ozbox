@@ -1,0 +1,19 @@
+{
+  "disable_web_page_preview": true,
+  "link_preview_options": {
+    "is_disabled": true
+  },
+  "parse_mode": "HTML",
+  "protect_content": true,
+  "reply_markup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "Open in dashboard",
+          "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    ]
+  },
+  "text": "🔐 <b>Approve or deny: guard override</b>\nA change was filed on a box and waits for a person with the right role.\n\n<b>Box</b> main · <b>Project</b> shop · <b>Environment</b> staging\n<b>Hook</b>: commit (pre-commit)\n<b>Repository</b>: /work/shop\n<b>Asked by</b>: box-user (uid 1000)\n⚠️ <b>Risk</b>: Skips the secret scan for one commit.\n⏳ Expires in 2 h 5 min\n\n<i>This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.</i>\nOpen it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Approvals.\n<code>Ref R1a2b3c4</code>"
+}

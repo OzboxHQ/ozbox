@@ -1,0 +1,13 @@
+{
+  "box": "main",
+  "environment": "staging",
+  "expires_ms": 1700007500000,
+  "kind": "approval_request",
+  "path": "/approvals/R1a2b3c4",
+  "production": false,
+  "project": "shop",
+  "reference": "R1a2b3c4",
+  "summary": "A change was filed on a box and waits for a person with the right role.",
+  "title": "Approve or deny: guard override",
+  "url": "https://dash.example.com/approvals/R1a2b3c4"
+}

@@ -1,0 +1,7 @@
+Box main: the work disk is 96% full
+Grow the work disk, or clear space, before it fills.
+
+Box: main
+
+Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.
+https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef

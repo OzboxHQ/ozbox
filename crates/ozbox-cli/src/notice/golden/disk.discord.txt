@@ -1,0 +1,21 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "embeds": [
+    {
+      "color": 13643824,
+      "description": "Grow the work disk, or clear space, before it fills.\n\n[Open in dashboard](https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef)\nOpen it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Boxes → main.",
+      "fields": [
+        {
+          "inline": true,
+          "name": "Box",
+          "value": "main"
+        }
+      ],
+      "title": "🚨 Box main: the work disk is 96% full",
+      "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "username": "Oz Box"
+}

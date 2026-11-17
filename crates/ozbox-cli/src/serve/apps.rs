@@ -2979,6 +2979,8 @@ mod tests {
         let now = NOON;
         a.state.alerts.sent_ms = vec![now; notify::HOURLY_CAP];
         let alert = notify::Alert {
+            notice: None,
+            reach: Default::default(),
             key: "k".into(),
             kind: "disk".into(),
             severity: notify::Severity::Normal,

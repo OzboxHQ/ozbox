@@ -416,6 +416,8 @@ impl App {
                 |b| format!("{}/approvals?request={id}", b.trim_end_matches('/')),
             );
             out.push(Alert {
+                notice: None,
+                reach: Default::default(),
                 key: format!("areq:{id}"),
                 kind: "approval_request".into(),
                 severity: Severity::Normal,

@@ -1,0 +1,90 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "emoji": true,
+        "text": "🤖 Approve or deny: push to main 🔴 PRODUCTION",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Task t-42 stopped and is waiting for your answer.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "fields": [
+        {
+          "emoji": true,
+          "text": "Box: api",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Environment: production",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Asked by: Claude Code",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Why: open a pull request",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Risk: Production, or a step that cannot be undone: the dashboard asks for your passkey again.",
+          "type": "plain_text"
+        }
+      ],
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "emoji": true,
+          "text": "This message only tells you. Nothing in a chat approves, denies or cancels: decide in the dashboard, with your passkey.",
+          "type": "plain_text"
+        },
+        {
+          "emoji": true,
+          "text": "Ref a-7",
+          "type": "plain_text"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "text": {
+        "emoji": true,
+        "text": "Open it on dash.example.com. The link works once, only for you, for 10 minutes; after that, open the dashboard → Chat.",
+        "type": "plain_text"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "action_id": "open_dashboard",
+          "style": "primary",
+          "text": {
+            "emoji": true,
+            "text": "Open in dashboard",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "Approve or deny: push to main"
+}

@@ -15,7 +15,8 @@ use serde_json::{json, Value};
 
 use super::{clip, http_detail, one_line, Ctx, SendResult};
 use crate::netguard::{Guard, HttpRequest};
-use crate::notify::Alert;
+use crate::notice::render::{Discord, Renderer, Teams, WhatsappTemplate};
+use crate::notice::Notice;
 use crate::notify_config::{e164_ok, WhatsappConfig};
 
 /// The Graph API version the request is written against.
@@ -88,7 +89,7 @@ pub fn whatsapp_result(status: u16, body: &str) -> SendResult {
     }
 }
 
-pub fn whatsapp(ctx: &Ctx, cfg: &WhatsappConfig, to: &str, a: &Alert) -> SendResult {
+pub fn whatsapp(ctx: &Ctx, cfg: &WhatsappConfig, to: &str, n: &Notice) -> SendResult {
     let token = ctx.need("whatsapp-token", "WhatsApp access token")?;
     if cfg.phone_number_id.is_empty() || cfg.template.is_empty() || cfg.language.is_empty() {
         return Err("the phone number id, the template or its language is not set".into());
@@ -96,8 +97,9 @@ pub fn whatsapp(ctx: &Ctx, cfg: &WhatsappConfig, to: &str, a: &Alert) -> SendRes
     if !e164_ok(to) {
         return Err("the WhatsApp number is not in international format".into());
     }
+    let (title, body) = WhatsappTemplate::render(n);
     ctx.call(
-        whatsapp_request(&token, cfg, to, &a.title, &a.body),
+        whatsapp_request(&token, cfg, to, &title, &body),
         whatsapp_result,
     )
 }
@@ -117,13 +119,9 @@ pub fn discord_host_ok(url: &str) -> bool {
     }) && url.contains("/api/webhooks/")
 }
 
-pub fn discord_request(url: &str, a: &Alert) -> HttpRequest {
-    HttpRequest::new("POST", url, Guard::Public).json(&json!({
-        "content": clip(&format!("**{}**\n{}", one_line(&a.title), a.body), 1900),
-        // A message from an alert never pings anyone by itself.
-        "allowed_mentions": { "parse": [] },
-        "username": "Oz Box",
-    }))
+/// The message is the notice's Discord rendering; a message from an alert never pings anyone by itself.
+pub fn discord_request(url: &str, n: &Notice) -> HttpRequest {
+    HttpRequest::new("POST", url, Guard::Public).json(&Discord::render(n))
 }
 
 pub fn discord_result(status: u16, _body: &str) -> SendResult {
@@ -135,9 +133,9 @@ pub fn discord_result(status: u16, _body: &str) -> SendResult {
     }
 }
 
-pub fn discord(ctx: &Ctx, a: &Alert) -> SendResult {
+pub fn discord(ctx: &Ctx, n: &Notice) -> SendResult {
     let url = ctx.need("discord-webhook-url", "Discord webhook address")?;
-    ctx.call(discord_request(&url, a), discord_result)
+    ctx.call(discord_request(&url, n), discord_result)
 }
 
 // ---------- Microsoft Teams ----------
@@ -155,23 +153,9 @@ pub fn teams_host_ok(url: &str) -> bool {
     })
 }
 
-pub fn teams_request(url: &str, a: &Alert) -> HttpRequest {
-    HttpRequest::new("POST", url, Guard::Public).json(&json!({
-        "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "contentUrl": null,
-            "content": {
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                "type": "AdaptiveCard",
-                "version": "1.4",
-                "body": [
-                    { "type": "TextBlock", "text": one_line(&a.title), "weight": "Bolder", "size": "Medium", "wrap": true },
-                    { "type": "TextBlock", "text": clip(&a.body, 3000), "wrap": true },
-                ],
-            },
-        }],
-    }))
+/// The message is the notice's Adaptive Card.
+pub fn teams_request(url: &str, n: &Notice) -> HttpRequest {
+    HttpRequest::new("POST", url, Guard::Public).json(&Teams::render(n))
 }
 
 pub fn teams_result(status: u16, _body: &str) -> SendResult {
@@ -182,9 +166,9 @@ pub fn teams_result(status: u16, _body: &str) -> SendResult {
     }
 }
 
-pub fn teams(ctx: &Ctx, a: &Alert) -> SendResult {
+pub fn teams(ctx: &Ctx, n: &Notice) -> SendResult {
     let url = ctx.need("teams-webhook-url", "Teams webhook address")?;
-    ctx.call(teams_request(&url, a), teams_result)
+    ctx.call(teams_request(&url, n), teams_result)
 }
 
 fn host_of(url: &str) -> Option<String> {
@@ -270,7 +254,7 @@ mod tests {
     #[test]
     fn whatsapp_needs_its_settings_and_a_valid_number_before_it_sends() {
         let g = rig();
-        let a = test_alert(1);
+        let a = test_alert(1).notice_for(None);
         assert!(whatsapp(&g.ctx, &wa(), "+2348012345678", &a)
             .unwrap_err()
             .contains("token"));
@@ -288,11 +272,14 @@ mod tests {
 
     #[test]
     fn discord_never_pings_and_only_discord_hosts_are_accepted() {
-        let a = test_alert(1);
+        let a = test_alert(1).notice_for(None);
         let r = discord_request("https://discord.com/api/webhooks/1/abc", &a);
         let v = json_body(&r);
         assert_eq!(v["allowed_mentions"]["parse"], json!([]));
-        assert!(v["content"].as_str().unwrap().starts_with("**Test alert"));
+        assert!(v["embeds"][0]["title"]
+            .as_str()
+            .unwrap()
+            .contains("Test alert"));
         assert!(discord_host_ok("https://discord.com/api/webhooks/1/abc"));
         assert!(discord_host_ok("https://discordapp.com/api/webhooks/1/abc"));
         for bad in [
@@ -314,7 +301,7 @@ mod tests {
 
     #[test]
     fn teams_gets_an_adaptive_card_in_a_message_envelope() {
-        let a = test_alert(1);
+        let a = test_alert(1).notice_for(None);
         let r = teams_request("https://prod-12.westus.logic.azure.com/workflows/abc", &a);
         let v = json_body(&r);
         assert_eq!(v["type"], "message");
@@ -345,7 +332,7 @@ mod tests {
     #[test]
     fn each_chat_channel_goes_through_the_guarded_client_and_keeps_secrets_out_of_errors() {
         let g = rig();
-        let a = test_alert(1);
+        let a = test_alert(1).notice_for(None);
         g.secrets
             .set(
                 "discord-webhook-url",
