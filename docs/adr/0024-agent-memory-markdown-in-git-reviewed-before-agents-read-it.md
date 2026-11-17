@@ -29,3 +29,9 @@ service.
 **Cost.** SQLite is built from source into the program (a C compiler is needed to build Oz Box, as before for the TLS stack's
 build tools). Notes are small by design (8 KB, 500 per scope). Two computers each keep their own memory repository; sharing one
 across computers is `git pull` and `git push` by a person, not a feature of this decision.
+
+**Amended by [0056](0056-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data.md) (2026-11-17, Preview).** An agent on a worker box reads the memory walls it is bound to through the
+same tools: the hub sends that box only the **approved** notes of the `person:`, `box:` and `project:` walls its own agents may
+read, with who wrote each note, on which box, and who reviewed it. An agent there still only proposes: its `memory_write` travels to
+the hub and is filed pending, credited to the agent's fabric address and box, for a person to review here. The scopes and the review
+are unchanged; a note's provenance gains the box it was written on.

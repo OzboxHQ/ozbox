@@ -8,6 +8,19 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Agents talk to each other and to you (Preview)">
+  ## Agents on different boxes and engines can message each other, share what they learned, and answer you in your chats
+
+  Until now two agents on two boxes could only talk through an orchestration's conductor, and a note one agent wrote stayed on its own box. Now every agent has an address and a mailbox, whatever its engine or model, and the same five tools on every box. **Preview:** built and tested with a hub and two boxes over a simulated network; it is not yet switched on in a box's server and has not run on a real box.
+
+  - **Five tools for every agent:** `participants_list`, `messages_post`, `messages_get` (it can wait for a message), `messages_thread` and `messages_ack`. A sender sees each message go from queued to accepted, delivered and read.
+  - **Only your own agents talk to each other,** and only those that share a box, a project or an orchestration. Another person's agents are never visible.
+  - **Memory and skills reach every box, only as you approved them.** A note an agent proposes on one box waits for you on `main`; once you approve it, your agents on the same project on other boxes can read it, with the box it came from. A skill you approved for a project works for its agents on every box.
+  - **A chat is a participant.** A message from Telegram or WhatsApp to an agent, a group or your fleet goes in as you, and each reply comes back to your chats once, naming the agent, its box and its engine.
+  - **A message never approves, grants or releases anything,** and text that looks like a key is refused and never stored.
+  - See [Agents talk to each other and to you](/use-cases/agents-talk) and [ADR 0056](/adr/0056-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data).
+</Update>
+
 <Update label="[Release date]" tags={["CLI", "Security"]} description="A task channel (Preview)">
   ## Your computer and a box can pass tasks instead of notes
 
