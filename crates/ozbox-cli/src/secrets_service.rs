@@ -143,12 +143,11 @@ pub const BOX_REACH: &[ReachRow] = &[
     row(Exact("vapid-private-key"), BoxReach::None, true), // the key notifications to a person's devices are signed with
     row(Prefix("push-"), BoxReach::None, true), // a person's device subscriptions: whoever holds them can send to that device
     row(Prefix("subscription-"), BoxReach::None, true), // a subscription sign-in and its opt-in (ADR 0055): the dashboard's own user only
-    // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's own, never this store's
-    // the hub's own records (ADR 0042, in the hub branch, not yet merged): root and the service only, never the box user; the
-    // supervisor does not read them back (revisit with the hub PR if its design needs it to)
+    // the hub's own records (ADR 0042): root and the service only, never the box user; the supervisor does not read them back
     row(Prefix("hub-key-"), BoxReach::None, false),
     row(Prefix("hub-release-"), BoxReach::None, false),
     row(Prefix("hub-delivered-"), BoxReach::None, false),
+    // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's own, never this store's
     row(Prefix("tasks-sign-"), BoxReach::None, false),
     row(Prefix("tasks-seal-"), BoxReach::None, false),
     // the store's own keys
