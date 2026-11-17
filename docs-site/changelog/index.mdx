@@ -8,6 +8,17 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Security"]} description="0.2.0-beta.4: clearer upgrades on AWS">
+  ## Upgrades tag the system disk, keep your project repositories, and say what to do next
+
+  - **A new system disk is tagged the moment AWS creates it**, so on the upgrade after next the pre-upgrade copy is no longer refused as "not tagged ozbox-managed". A box whose disk was made by an older version still needs its disk tagged once by an account administrator: the refusal now gives the exact command, or you can pass `--no-pre-upgrade-snapshot`.
+  - **Ordinary project repositories are saved before an upgrade.** A repository was skipped as a "home or dotfiles repository" just because it held a committed `.npmrc` or `.docker` folder. Now only your home folder, or a repository holding an untracked credentials folder at its top level, is left out, and the report names which.
+  - **After a new secrets store, the report tells you how to pin its key.** It shows the new fingerprint and, at a terminal, offers to pin it after you type the box name. Nothing is replaced without that confirmation, so the next `ozbox secrets import --box` no longer fails first.
+  - **A Production import says why an approval was refused.** Production imports need an approval from the dashboard (passkey or authenticator), not this computer's key, and `ozbox secrets approve --scope import --env production` now says so instead of making a code that cannot work.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

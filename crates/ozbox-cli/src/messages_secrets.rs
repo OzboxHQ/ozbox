@@ -73,6 +73,7 @@ pub const EN: &[(&str, &str)] = &[
     ("approval_key.no_local", "This computer has no key named {id}. Enrol one with `ozbox secrets approval-key enroll`."),
     ("approval_key.bad_answer", "The box answered in a way this program does not understand."),
     ("approval_key.code", "Approval code for {scope} (use it once, within minutes): {code}"),
+    ("approval_key.production_needs_dashboard", "Production imports need an approval from the dashboard (passkey or authenticator), not this computer's key. Nothing was asked of {box} and no code was made. Open the dashboard, ask for an approval of an import into {env}, and run the import with --approval and that code."),
     ("approval_key.dry_run", "Dry run: no approval code was made. A real run would ask {box} for a challenge, sign it with this computer's key {key}, and print a single-use code for {scope}."),
     ("approval_key.pinned", "This computer's approval key ({id}) is pinned on the new box: it is the box's first approver, and the private half stays in this computer's keychain."),
     ("approval_key.not_pinned", "No approval key was pinned on the new box ({why}). Until a passkey is enrolled in the box's dashboard, changes to its secrets are allowed without a second factor, and a laptop key cannot be enrolled from the box."),
@@ -89,6 +90,11 @@ pub const EN: &[(&str, &str)] = &[
   pinned: {pinned}
   now:    {now}
 Only do this if you know why the box's key changed. Type {word} to confirm: "),
+    ("ingress.repin_unchanged", "Secrets route: the key this computer pins for {box} is still the right one."),
+    ("ingress.repin_needed", "Secrets route: {box} started a new secrets store, so its secrets service has a new key. This computer still pins the old one ({old}), so `ozbox secrets import --box {box}` will refuse until you pin the new one ({now}). Run `ozbox secrets ingress pin --box {box} --replace` in a terminal: it shows both fingerprints and asks you to type the box name. Check that the new fingerprint it shows is {now}."),
+    ("ingress.repin_declined", "Secrets route: that was not the confirmation, so nothing was changed. {box} has a new secrets service key ({now}) and this computer still pins the old one ({old}). When you are ready, run `ozbox secrets ingress pin --box {box} --replace`; the new fingerprint it shows should be {now}."),
+    ("ingress.repin_done", "Secrets route: this computer now pins {box}'s new secrets service key (fingerprint {now}, replacing {old}), so `ozbox secrets import --box {box}` works again."),
+    ("ingress.repin_unread", "Secrets route: {box} started a new secrets store, so its secrets service has a new key, but the key could not be read now ({why}). This computer still pins the old one ({old}). Once the box is running, run `ozbox secrets ingress pin --box {box} --replace` in a terminal and type the box name when asked."),
     ("ingress.pin_not_confirmed", "That was not the confirmation (or there is no terminal), so the pin was not changed."),
     ("ingress.pin_done", "{box}: {state}, fingerprint {fingerprint}."),
     ("ingress.escrowed", "Kept a copy of {box}'s store key in this computer's keychain. `ozbox upgrade` puts it back through the ingress route when the system disk is replaced. It was not printed."),

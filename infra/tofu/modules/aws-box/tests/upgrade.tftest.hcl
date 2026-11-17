@@ -130,6 +130,37 @@ run "a_same_image_replace_writes_the_new_first_boot_tag" {
   }
 }
 
+# The system disk of a replaced machine. The daily operator role may put a FIRST tag on a disk only at the moment the disk is
+# created, so an upgrade that builds a new machine must build it with a system disk that already says ozbox-managed and which box
+# it is. (A box whose disk was made without the tags cannot have them added later: the next upgrade's pre-upgrade snapshot of that
+# disk is refused, which is what happened on a real box.) `ignore_changes` shields a disk that is KEPT, never one that is created.
+run "a_replaced_machine_gets_a_system_disk_that_is_tagged_when_it_is_created" {
+  command = plan
+
+  plan_options {
+    replace = [aws_instance.box]
+  }
+
+  variables {
+    image_id = "ami-0fedcba9876543210"
+  }
+
+  assert {
+    condition = (
+      aws_instance.box.volume_tags["ozbox-managed"] == "true" &&
+      aws_instance.box.volume_tags["ozbox-box"] == "dev-1" &&
+      aws_instance.box.volume_tags["ozbox-role"] == "root" &&
+      aws_instance.box.volume_tags["team"] == "example"
+    )
+    error_message = "the launch of a replaced machine must tag the volume it creates (volume_tags) with ozbox-managed, ozbox-box, its role and the caller's labels: the one way the operator's role may put a first tag on a new disk"
+  }
+
+  assert {
+    condition     = aws_instance.box.root_block_device[0].encrypted == true && aws_instance.box.root_block_device[0].delete_on_termination == true
+    error_message = "a replaced machine's system disk is encrypted and goes with the machine"
+  }
+}
+
 run "the_first_boot_hash_must_be_a_lowercase_sha256" {
   command = plan
 

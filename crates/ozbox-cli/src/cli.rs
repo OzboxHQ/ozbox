@@ -948,7 +948,8 @@ pub enum SecretsCommand {
         #[command(subcommand)]
         command: IngressCommand,
     },
-    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes).
+    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes). Not for
+    /// a Production import: that needs an approval from the dashboard (passkey or authenticator), and this refuses it up front.
     Approve {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,

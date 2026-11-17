@@ -18,6 +18,12 @@ locals {
   # machine is created and never in place (see ignore_changes below), so it always names the user data it booted with.
   first_boot_tag = var.first_boot_sha256 == "" ? {} : { "ozbox-first-boot" = var.first_boot_sha256 }
 
+  # What the machine's system disk is created with. The operator's role may put a FIRST tag on a volume only through the launch
+  # call (`ec2:CreateAction = RunInstances`), never on a volume that already exists, so they ride the launch's volume tag
+  # specification (`volume_tags`, which AWS applies while it creates the disk). A disk made without them can never be snapshotted by
+  # the pre-upgrade copy (it must be `ozbox-managed`), and nothing but an account administrator can tag it afterwards.
+  root_volume_tags = merge(local.tags, { "ozbox-role" = "root" })
+
   # Patch Manager finds a box by this tag (its name has a space, which AWS requires).
   patch_tag = var.patch_group == null ? {} : { "Patch Group" = var.patch_group }
 
@@ -289,9 +295,15 @@ resource "aws_instance" "box" {
     encrypted             = true
     kms_key_id            = var.kms_key_arn
     delete_on_termination = true
-    # Tagged at the moment the disk exists (the operator's role may tag only on create, or a resource that is already ozbox-managed).
-    tags = merge(local.tags, { "ozbox-role" = "root" })
+    # No `tags` here: the provider refuses them together with volume_tags, and applies a block's own tags with a separate call after
+    # the machine is running, which the operator's role cannot make for a disk that already exists (and so a box made with only these
+    # ended up with an untagged system disk).
   }
+
+  # The launch's own volume tag specification: AWS applies it as the disk is created, which is the one moment the operator's role
+  # may put a first tag on a volume (`ec2:CreateAction = RunInstances`). Never changed in place (see ignore_changes): the /work volume
+  # is attached to this machine too and is not ours to relabel from here.
+  volume_tags = local.root_volume_tags
 
   tags = merge(local.tags, local.box_secrets, local.patch_tag, local.first_boot_tag)
 
@@ -310,8 +322,9 @@ resource "aws_instance" "box" {
     # the new machine from the current configuration, with fresh user data.
     # The first-boot tag follows the user data: an in-place change (a resize) must not relabel a machine that booted with
     # older user data, so it is written only when the machine is created.
-    ignore_changes = [user_data_base64, tags["ozbox-first-boot"], root_block_device[0].tags]
-    # The system disk is tagged when it is created (see root_block_device above), and never again in place. A box made by an
+    ignore_changes = [user_data_base64, tags["ozbox-first-boot"], root_block_device[0].tags, volume_tags]
+    # The system disk is tagged when it is created (see volume_tags above), and never again in place. The block's own tags are named
+    # here too, so a box made with them (an earlier version) plans nothing. A box made by an
     # earlier version has a system disk with no tags at all, and the operator's AWS role may put a first tag on a disk only at
     # the moment it is created (it may change tags only on a resource that already carries ozbox-managed), so a plan that tagged
     # the old disk in place would be refused part way through an apply. Nothing reads a volume's tags: the machine is the

@@ -77,6 +77,10 @@ pub struct Report {
     /// When the person accepted a new store: the old one set aside on the new machine and a new one started. Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secrets_recovery: Option<Step>,
+    /// When a new secrets store was started in this run: whether this computer's pinned key for the box's secrets service still
+    /// matches, and the one command that fixes it (or that it was fixed, at the person's typed confirmation). Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets_pin: Option<Step>,
     /// Laptop keys the box trusts that may have been enrolled by the box user under older rules (see
     /// [`review_signers`]). Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1403,6 +1407,21 @@ pub(super) fn command(
                 )
             },
             memory_guard: &memory_guard_step,
+            secrets_pin: &|rec| {
+                if simulated {
+                    return None;
+                }
+                let name = rec.spec.name.as_str();
+                crate::ingress_repin::after_new_store(
+                    &ozbox_core::SystemRunner,
+                    &crate::ingress_client::FilePins(
+                        crate::ingress_client::FilePins::default_path(),
+                    ),
+                    name,
+                    !f.json && !f.yes && crate::ingress_repin::at_a_terminal(),
+                    &mut crate::ingress_repin::confirm_on_terminal(name),
+                )
+            },
             refresh_ssh: &|previous, after| refresh_ssh_entry(&for_ssh, previous, after),
             review_signers: &|rec| {
                 if simulated {
@@ -1445,6 +1464,9 @@ pub(super) struct Around<'a> {
     /// Put the memory guard on the running box, live (`None`: nothing to say, as on a box that cannot be asked).
     pub memory_guard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub refresh_ssh: &'a dyn Fn(Option<&str>, &BoxRecord) -> Step,
+    /// After a new secrets store was started in this run: check, and with a person at a terminal offer to replace, this computer's
+    /// pin of the box's secrets service key (`None`: nothing to say).
+    pub secrets_pin: &'a dyn Fn(&BoxRecord) -> Option<Step>,
     /// After everything: laptop keys the box trusts with no record of how they were enrolled.
     pub review_signers: &'a dyn Fn(&BoxRecord) -> Option<Step>,
     /// What this program renders at first boot, and what the person asked about it.
@@ -2551,6 +2573,12 @@ pub(super) fn execute(
         settled.backup,
         settled.recovery,
     );
+    // a new store means a new service key: this computer's pin of the old one would refuse the next import
+    let secrets_pin = (accepted && report_ready(&ready))
+        .then(|| p.get(&name).ok().flatten())
+        .flatten()
+        .and_then(|after| (around.secrets_pin)(&after));
+    // (before the services and the dashboard are put back: what they send to the box's secrets service is sealed to the pinned key)
     // Only when the box answered: a box that did not cannot be asked what is running.
     let services = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(&name).ok().flatten())
@@ -2600,6 +2628,7 @@ pub(super) fn execute(
         memory_guard,
         secrets_store: store,
         secrets_recovery,
+        secrets_pin,
         approvers,
         old_system_disk,
         old_system_disk_snapshot,
@@ -2611,6 +2640,9 @@ pub(super) fn execute(
         println!("{}", report.ready.detail);
         if let Some(r) = &report.secrets_recovery {
             println!("{}", r.detail);
+        }
+        if let Some(p) = &report.secrets_pin {
+            println!("{}", p.detail);
         }
         if let Some(a) = &report.approvers {
             println!("{}", a.detail);
@@ -2793,6 +2825,7 @@ mod tests {
                 restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
                 review_signers: &|_| None,
                 place_escrow: &|_, _| None,
                 first_boot: FirstBootOpts {
@@ -2893,6 +2926,7 @@ mod tests {
                 restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                secrets_pin: &|_| None,
                 review_signers: &|_| None,
                 place_escrow: &|_, _| None,
                 first_boot: FirstBootOpts::default(),
@@ -2927,6 +2961,66 @@ mod tests {
             .into_iter()
             .filter(|s| s.labels.contains_key(ozbox_provider_aws::PURPOSE_TAG))
             .collect())
+    }
+
+    /// A new secrets store means a new service key, and the laptop's pin of the old one refuses the next import. The upgrade checks
+    /// the pin exactly when it started a new store (the person accepted one), and not when the store was kept or nothing was
+    /// accepted.
+    #[test]
+    fn the_pin_is_checked_exactly_when_a_new_secrets_store_was_started() -> TestResult {
+        for (fate, accept, expect) in [
+            (StoreFate::Lost, true, true),
+            (StoreFate::AlreadyLost, true, true),
+            (StoreFate::KeyHeld, true, true),
+            (StoreFate::Kept, true, false),
+            (StoreFate::Kept, false, false),
+            (StoreFate::KeptByLaptop, true, false),
+        ] {
+            let d = tempfile::tempdir()?;
+            let (p, n) = fresh_box(d.path())?;
+            let asked = std::cell::Cell::new(0u32);
+            execute(
+                &p,
+                &FirstBootBox {
+                    record: Err("no route".into()),
+                },
+                n.clone(),
+                Some("fake-image-2".into()),
+                false,
+                &Flags {
+                    yes: true,
+                    dry_run: false,
+                    json: true,
+                },
+                Waits::default(),
+                &Around {
+                    store_check: &|_, _| StoreCheck {
+                        fate,
+                        detail: "the store's key is in a file on the system disk".into(),
+                    },
+                    accept_new_store: accept,
+                    old_disk: OldDisk::NotOffered,
+                    recover: &|_, _| None,
+                    restore_backups: &|_, _| None,
+                    restore_services: &|_, _| None,
+                    restore_dashboard: &|_, _| None,
+                    memory_guard: &|_, _| None,
+                    refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                    secrets_pin: &|_| {
+                        asked.set(asked.get() + 1);
+                        None
+                    },
+                    review_signers: &|_| None,
+                    place_escrow: &|_, _| None,
+                    first_boot: FirstBootOpts::default(),
+                    strict_checkpoint: false,
+                    legacy_checkpoint: false,
+                },
+            )
+            .map_err(|e| format!("{fate:?} accept={accept}: {e}"))?;
+            assert_eq!(asked.get(), u32::from(expect), "{fate:?} accept={accept}");
+        }
+        Ok(())
     }
 
     /// The incident: a store whose key is a file on the system disk (or that cannot be told) was lost with the disk, and the
@@ -4439,6 +4533,7 @@ mod tests {
                         Some(Step::new(StepOutcome::Done, "in place"))
                     },
                     refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                    secrets_pin: &|_| None,
                     review_signers: &|_| None,
                     place_escrow: &|_, _| None,
                     first_boot: FirstBootOpts {

@@ -98,3 +98,31 @@ then failed with "Systems Manager refused", and an administrator pasted the stat
 by hand to allow that read but not the sends passes the check and fails at the command, which then says what it needs. Nothing widens:
 no `kms:` action and no first tag on an existing disk (amendment 1) reach the operator.
 
+
+## Amendment 3 (2026-11-17): the system disk is tagged by the launch itself (`volume_tags`), not by its block's own tags
+
+**What happened.** Amendment 1 (point 2) relied on the module tagging the system disk when it creates it, through the
+`root_block_device` block's own `tags`. A box made or upgraded that way still had an untagged system disk, and its next upgrade's
+pre-upgrade copy was refused ("not tagged ozbox-managed"), so the person had to pass `--no-pre-upgrade-snapshot`. The AWS provider
+applies a block's own tags with a separate `CreateTags` call after the machine is running. By then the disk exists, and the operator
+role may put a first tag on a resource only as it is created (`TagOnCreateOnly`, `ec2:CreateAction`), so that call cannot succeed.
+
+**Decision.**
+
+1. **The launch carries the tags.** The machine's `volume_tags` (the launch's own tag specification) holds the box's tags plus
+   `ozbox-role=root`. AWS applies them inside `RunInstances`, which is the one moment the operator role may tag a new volume. No
+   statement is added to any policy.
+2. **The block carries none.** The provider refuses a block's own `tags` together with `volume_tags`, so the block has none.
+3. **Creation only.** `volume_tags` is in `ignore_changes`, next to the block's old tags. A plan never retags a disk in place,
+   including the attached `/work` volume, which the provider would otherwise also read as one of the machine's volumes. A box made
+   by an earlier version plans nothing new.
+4. **The refusal shows the way out.** For a disk made untagged, the pre-upgrade snapshot refusal gives the administrator's one
+   `aws ec2 create-tags` command for that disk (with its region), or `--no-pre-upgrade-snapshot`. The new system disk the upgrade
+   makes is tagged from the start.
+
+`infra/tofu/modules/aws-box/tests/upgrade.tftest.hcl` (a replaced machine) and `invariants.tftest.hcl` pin the tags, and
+`box_module_root_volume_tags.rs` pins the shape (no block tags, `volume_tags` ignored after creation).
+
+**What is not covered.** This is tested with mock providers only. That the operator role's `RunInstances` with this tag
+specification tags the disk has not yet been seen on a real account. A disk made by an earlier version still needs its one
+administrator command.
