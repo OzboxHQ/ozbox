@@ -205,13 +205,20 @@ has a hub yet, and none has run on a real cloud box.**
   off-box issuer refuses a worker too. There is no setting that turns this off. A task also never names keys: a conductor that tries
   is refused and it is recorded. Keys for development and staging reach a worker only with the sealed key delivery, which is not built.
 - Every hand-off and every refusal is in the audit record, with names and never values.
+- **The hub's own daemon and how a worker joins are built too** (Preview, tested with real keys in CI, never run on a real box).
+  `ozbox-hubd setup <box-id>` (as root, on `main`) sets up the hub daemon; `ozbox-hubd self-test` says what holds. A worker joins only
+  with a one-use invite, an attestation from a registrar your setup pinned, and proof that it holds the attested key; the hub then plans
+  the enrolment and applies it. A Production box, `main` itself, an unknown box, a replayed attestation or a key that is not the
+  attested one is refused. Message bodies are sealed to the worker's attested key and signed by keys the secrets service holds. **Until
+  a registrar is built, no worker can enrol on a real box** (the self-test says so).
 
 Design: [ADR 0042](../adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main.md).
 
 ## What is not done yet
 
 - **A real cloud box and a real agent.** Everything here is tested with fake boxes and a simulated agent.
-- **The worker channel's network side** (the listener, enrolment, sealed key delivery, test lanes). Section 11 is the part that is built.
+- **The worker channel's network side** (the transport a worker dials out on, sealed key delivery, test lanes) and the registrars that
+  vouch for a worker's keys. Section 11 is the part that is built.
 - **A message into a worker that is mid-turn.** It is typed in only when the worker's run is a conversation; otherwise the answer waits until the worker ends its turn, then resumes it from its branch.
 - **A claims check inside the engine** before each edit (an engine hook). The tool and the worker's instructions carry it today.
 - **The test-lane box** for the merge queue, and the **stdio** transport for the tools.

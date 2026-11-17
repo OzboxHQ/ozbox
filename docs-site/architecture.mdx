@@ -40,6 +40,10 @@ structural guard against any inbound rule. Each module's variables and outputs a
   (`HCLOUD_TOKEN` read per call, never kept). Clone is unsupported (Hetzner cannot restore a volume from a snapshot).
 - `ozbox-provider-aws` - AWS: lifecycle through OpenTofu, runtime actions through the `aws` CLI (no SDK).
 - `ozbox-cli` - the `ozbox` binary: plan, show, confirm, apply for every mutation; `--dry-run`, `--yes`, `--json`.
+- `ozbox-hubd` - the hub daemon on `main` (ADR 0042, Preview): runs as its own user `ozbox-hub` from a socket unit, checks and spools
+  workers' signed, sealed messages for the supervisor, enrols workers (an invite, an attested request, then plan and apply), and holds
+  no private key: the channel's keys are in the secrets service, which gives the daemon's socket only the handshake signature and an
+  enrolment token's tag. It binds no network port (`RestrictAddressFamilies=AF_UNIX`).
 
 ## The box daemon (`ozboxd`)
 

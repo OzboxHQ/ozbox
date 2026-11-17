@@ -9,9 +9,11 @@ description: "Status. Accepted design; first slice built (2026-11-14, on feat/ma
 (`ozbox_core::hub`): the frozen envelope and message kinds pinned by golden vectors, the hub's assign and report-reading logic over
 signing, sealing and transport traits, the worker's side, an in-memory transport; **decision D2 as code in three places** (the hub, the
 worker, and `ozbox-issuer`), each with negative tests and an audit word; and `task_start transport=hub` with `task_status` reading the
-workers' reports, on a box that has a hub (none has one yet). **Not built:** `ozbox-hubd`, enrolment and key attestation, sealed key
-delivery, the real signer and sealer (the secrets service and `ozbox-seal`), the transport on a network, the merge queue and test lanes
-over the channel, the approval path, nested hubs. The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
+workers' reports, on a box that has a hub (none has one yet). **Second slice built** (2026-11-17, for 0.3.0-beta, section 12):
+`ozbox-hubd` (its socket, lifecycle, systemd units and self-test), **worker enrolment with key attestation** (plan, then apply), and
+**the real signer and sealer** (the secrets service's channel operations and HPKE through `ozbox-seal`), all tested in CI with real keys
+and never run on a real box. **Not built:** sealed key delivery, the transport on a network, the merge queue and test lanes over the
+channel, the approval path, nested hubs, and the registrars themselves (the claim service's registration and the laptop's pin). The fleet role of ADR 0040 is not a prerequisite of this slice: it is how a
 real box is *reached*, which is the transport's job. It builds on ADR 0020 (orchestration, built with
 fakes), ADR 0040 (the fleet role, on `feat/box-dashboard-fleet`), ADR 0041 (the approval model, on `feat/approval-model`) and ADR
 0029 with Amendment 9 (the ingress route, sealed delivery and the issuer, on `feat/prod-secrets-p1`). It **amends ADR 0005** (§3)
@@ -893,6 +895,61 @@ Production by a test that runs unchanged on, and fails on, the issuer as it was.
 **For the next slice, once a real channel exists:** the acceptance test of this ADR, plus the D2 negatives on two real boxes (the hub's
 refusal with the network cut; a hand-made assignment with a Production declaration sent past the hub's check is refused by the worker).
 
+### The second slice (2026-11-17): the daemon, enrolment and the real signer and sealer
+
+**Built, tested in CI with real keys** (crate `ozbox-hubd`, the secrets service's `hub_` operations, `ozbox-hub-setup.sh`):
+
+- **The channel identity, in the secrets service.** Each service makes the four purpose keys of section 1 (channel signing, channel
+  sealing, key delivery, handshake) and a token MAC key the first time a `hub_` operation is asked for, and stores them under names that
+  begin with `hub-key-`. The box socket cannot read, write, delete or list those names, and the content scan skips them. The operations
+  are split by socket: **the supervisor's** signs worker-channel envelopes and enrolment proofs and opens message bodies; **the hub's**
+  (a new folder only `ozbox-hub` may enter) signs the handshake and tags enrolment tokens; root's reads the public identity; every other
+  socket gets nothing. A signature is made only over bytes that begin with that purpose's domain tag, so the channel key cannot sign an
+  approval, a decision or a mesh message. A body opens only with the channel purpose: a key-delivery ciphertext does not open as a body.
+- **The real seams.** `ServiceSigner` asks the service to sign. `ServiceSealer` seals with HPKE (`ozbox-seal`, the suite of ADR 0029
+  Amendment 9) to the receiver's **attested** sealing key, found by the fingerprint the roster names, and asks the service to open. The
+  verifier checks Ed25519 against the attested signing key. The channel's traits are unchanged: a peer is still named by one string, its
+  channel fingerprint, and a fingerprint that no enrolment attested seals and verifies nothing. The golden vectors are repeated in
+  `ozbox-hubd` and round-trip through the real signer and sealer; a full assign, report and result runs on real keys through the daemon.
+- **`ozbox-hubd`.** It runs as `ozbox-hub`, from a socket unit (systemd binds the socket as root, in a folder the supervisor's group may
+  enter), with `RestrictAddressFamilies=AF_UNIX`: it binds no port and dials nothing. It checks every worker message before anything else
+  sees it (shape, an enrolled sender, sealed for this hub's key, the sender's signature against its attested key), then writes it to an
+  fsynced spool, and only then accepts it. It never opens a body: its socket to the service has no operation that opens or signs one,
+  and its self-test checks that. The supervisor takes the inbound spool and queues outbound messages over the daemon's socket; a message
+  not sealed for the worker's attested key is refused there. Refusals are audited by code, at most once a minute per code.
+- **The handshake.** The daemon answers a worker's challenge with the hub's identity, signed by the handshake key. The worker accepts it
+  only if the identity's fingerprint (all four public keys) is the one it pinned at first boot, so a worker learns every hub key from one
+  pinned fingerprint.
+- **Enrolment, planned then applied.** An invite is planned, then applied: applying makes a one-use token (24 random bytes, 30 minutes,
+  bound to the worker's name) and returns it once; the hub keeps only the service's HMAC of it. The worker presents the token, its
+  identity, an **attestation** signed by a registrar whose key root pinned in `/etc/ozbox/hub-registrars.json` (`main`'s hub logic cannot
+  write it), and a **proof**: its channel key's signature over this hub, its name, the attestation and a fresh time and nonce. The request
+  is screened and held as pending; the enrolment is then planned and applied, and apply checks everything again before the key enters the
+  roster and the token is burnt. A plan made before the roster changed is refused. **Refused, each with its own code and test:** an
+  unknown box, a wrong or expired token, an unpinned registrar or a forged attestation, a registrar for another provider, an attestation
+  for another hub, machine (AWS: the instance the hub created; Hetzner: the Cloud Network address) or orchestration, a stale attestation,
+  a key that is not the attested one, a replayed attestation or proof, a second enrolment of a worker, a key or box another worker has,
+  and **a Production box**: anything not attested as `worker`, attested for an environment that is or may be Production (an unknown one
+  counts as Production), or `main` itself. A removed worker's key is not accepted again for seven days.
+- **Sentinels.** No private key, token or token MAC appears in the daemon's state, its socket's answers, a plan, an audit line, a refusal,
+  a self-test line or any `Debug` output; no message body appears in the daemon's state.
+
+**What this slice does not cover:** the registrars themselves (the claim service's registration under the pool role, and the laptop's
+signature for Hetzner and own machines) are not built, so on a real box no worker can enrol yet and the self-test says so; the worker's
+side of enrolment runs only in tests (`ozbox-hub-agent` is not built); the network transport is not built, so the daemon's worker side
+is called in-process; the daemon's handshake proves the hub to the worker, and the worker is authenticated by its signed messages and its
+enrolment proof, not by a handshake of its own; `ozbox hub repin` and the succession statement are not built; the program
+`ozbox-hubd` is not yet in the machine image or the release archive.
+
+**By hand on a real box** (one box, no worker):
+1. As root: `ozbox-hubd setup <box-id>`. `systemctl status ozbox-hubd.socket` is active; `/run/ozbox-hub/supervisor` is `0750
+   root:ozbox-supervisor`; `/etc/ozbox/hub-registrars.json` is `0644 root` and holds no registrar.
+2. Restart the secrets service with the new unit; `ls -ld /run/ozbox-secrets/hub` is `0750 ozbox-secrets:ozbox-hub`.
+3. As `ozbox-hub`: `ozbox-hubd self-test ...` (the unit's flags) prints `ok` for the state folder, the socket folder, the secrets
+   service, the handshake and "cannot sign an envelope or open a body", and `FAIL registrars: no registrar is pinned`.
+4. As the box user, one JSON line to `/run/ozbox-secrets/box/box.sock`: `{"op":"hub_identity"}` is refused, and `{"op":"names"}` lists
+   no `hub-key-` name.
+
 ### Owner decisions on the first slice (2026-11-14)
 
 - **Hub-route features and the server's tick.** *Amended in review (2026-11-14; the first version kept the rule by state alone).* **The persisted transport is owner-ratified 2026-11-15** (it was delegated).
@@ -1080,7 +1137,10 @@ instance from a bound role. None carries a Critical or High alone: the design as
 - On Hetzner a paused server still bills; only deletion, which needs the laptop, stops cost.
 - A sub-hub is a worker that can lie to its children. It cannot approve for them, create them or hold their keys. It ships after
   G6.
-- A box whose service predates the channel operations cannot be a worker.
+- A box whose service predates the channel operations cannot be a worker. Since the second slice, a service makes its channel identity
+  the first time it is asked; a box upgraded from before keeps its other secrets unchanged.
+- **Enrolment needs a registrar, and none is built yet** (second slice). Until the claim service registers keys on AWS and the laptop
+  signs for Hetzner and own machines, the hub refuses every worker with `unknown-registrar`, by design.
 - **Proven on AWS only, once the G6 run is done. Hetzner, own machines, nested hubs and Production to a worker are Planned.** Until
   the run, every part is Planned.
 

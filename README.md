@@ -272,7 +272,7 @@ The code is Apache-2.0 and everything in it is open; there is no paid edition. T
 
 | Path | What lives there |
 |---|---|
-| `crates/` | Rust: the `ozbox` CLI, the `ozboxd` box daemon, the providers and the shared core |
+| `crates/` | Rust: the `ozbox` CLI, the `ozboxd` box daemon, the `ozbox-hubd` hub daemon (Preview), the providers and the shared core |
 | `packages/` | TypeScript: the web dashboard |
 | `infra/` | Image builds (Packer) and provider modules (OpenTofu) |
 | `catalog/` | The tools catalogue: pinned, checksum-verified downloads |

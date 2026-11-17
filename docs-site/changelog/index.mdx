@@ -30,6 +30,7 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **A worker is never given a Production key.** The hub refuses it, the worker refuses it again, and the off-box issuer refuses a worker. No setting turns this off; it comes back later, approved at your computer.
   - **A task never names keys.** A conductor that tries is refused, and the attempt is recorded.
   - Every hand-off and refusal is in the audit record by name, never by value.
+  - **The hub's daemon and how a worker joins.** `ozbox-hubd setup <box-id>` sets up the hub on `main` and `ozbox-hubd self-test` checks it. A worker joins only with a one-use invite, an attestation from a registrar your setup pinned and proof that it holds the attested key, and the hub plans the enrolment before it applies it. A Production box, `main` itself, an unknown box or a replayed attestation is refused. Messages are sealed to each worker's attested key and signed by keys only the secrets service holds. No worker can enrol on a real box until a registrar exists.
   - See [Orchestrating a fleet](/use-cases/orchestrating-a-fleet) section 11 and [ADR 0042](/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main).
 </Update>
 
