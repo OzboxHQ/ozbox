@@ -320,22 +320,6 @@ pub fn send_notice(
         .map_err(|e| redact(&e.to_string(), token))
 }
 
-/// A plain message, for the places that only need "did it go". The error never carries the token.
-// Only its own test uses it since every send goes through the notice model; kept for that test until the notice branch removes it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn send_text(
-    http: &dyn HttpClient,
-    token: &str,
-    chat_id: i64,
-    text: &str,
-) -> Result<(), String> {
-    let base = ApiBase::from_env(std::env::var("OZBOX_TELEGRAM_API_BASE").ok().as_deref());
-    Bot::new(http, token, &base)
-        .send(chat_id, text)
-        .map(|_| ())
-        .map_err(|e| redact(&e.to_string(), token))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -527,7 +511,11 @@ mod tests {
         assert!(!dbg.contains("FAKE-sentinel"), "{dbg}");
         // the one-call helpers refuse in words
         http.reply(401, "{}");
-        assert!(!send_text(&http, TOKEN, 5, "x").unwrap_err().contains(TOKEN));
+        assert!(
+            !send_notice(&http, TOKEN, 5, &crate::notice::Notice::reply("x"))
+                .unwrap_err()
+                .contains(TOKEN)
+        );
     }
 }
 

@@ -1206,8 +1206,10 @@ impl App {
         }
     }
 
-    /// A one-time link to the dashboard's chat page that names an agent's approval, for one person: the page redeems it once
-    /// and shows that request. With no public address, words that name the page (and no token is made).
+    /// A one-time link to the dashboard's chat page that names an agent's approval, for one person: the token is in the
+    /// address's fragment (`/chat#link=<token>`), so no server, tunnel, proxy or referrer ever sees it; the page takes it out
+    /// of the address bar and redeems it once over POST, and shows that request. With no public address, words that name
+    /// the page (and no token is made).
     pub(super) fn chat_link_action(
         &mut self,
         approval_id: &str,
@@ -1228,7 +1230,7 @@ impl App {
             .unwrap_or_default();
         crate::notice::Action::OneTime {
             host: crate::notice::host_of(&base),
-            url: format!("{base}/chat?link={token}"),
+            url: format!("{base}/chat#link={token}"),
         }
     }
 
@@ -1945,12 +1947,20 @@ impl App {
                             })
                         });
                         match a {
-                            Some((v, pending)) => Resp::json(
+                            Some((v, true)) => Resp::json(
                                 200,
-                                &json!({ "approval_id": aid, "pending": pending, "approval": v }),
+                                &json!({ "approval_id": aid, "pending": true, "approval": v }),
                             ),
+                            // decided (here, on another device, or it lapsed) before the link was opened: the link is used
+                            Some((_, false)) => {
+                                Resp::error(410, "link_used", &t("notice.link_used", &[]))
+                            }
                             None => Resp::error(404, "not_found", "that request is gone"),
                         }
+                    }
+                    // decided while the link was still in the chat: said only to the person the link was made for
+                    Some(Err(crate::chat::links::LinkError::Used)) => {
+                        Resp::error(410, "link_used", &t("notice.link_used", &[]))
                     }
                     _ => Resp::error(
                         404,
@@ -2438,15 +2448,21 @@ mod tests {
         let opens = r.opens();
         let url = opens
             .iter()
-            .find(|u| u.contains("/chat?link="))
+            .find(|u| u.contains("/chat#link="))
             .unwrap_or_else(|| panic!("no link button: {opens:?}"))
             .clone();
         assert!(
-            url.starts_with("https://ozbox.example.com/chat?link="),
+            url.starts_with("https://ozbox.example.com/chat#link="),
             "{url}"
         );
-        let token = url.split("link=").nth(1).unwrap().to_string();
+        let token = url.split("#link=").nth(1).unwrap().to_string();
         assert_eq!(token.len(), 48);
+        // the token is in the fragment only: a browser never sends it to a server, a tunnel or a referrer
+        let (sent_part, _) = url.split_once('#').unwrap();
+        assert!(
+            !sent_part.contains(&token) && !sent_part.contains('?'),
+            "{url}"
+        );
         fn pending(r: &Rig) -> Vec<String> {
             r.a.chat_book()
                 .unwrap()
@@ -2501,11 +2517,41 @@ mod tests {
             .0,
             404
         );
-        // the token is in no file this server wrote
+        // the token is in no file this server wrote, and in no activity or audit line
         for f in ["tasks.json", "state.json", "settings.json"] {
             let t = std::fs::read_to_string(r._dir.path().join(f)).unwrap_or_default();
             assert!(!t.contains(&token), "{f}");
         }
+        let (_, act) = r.get("/v1/activity");
+        assert!(!act.to_string().contains(&token));
+        let (_, said) = r.get("/v1/chat");
+        assert!(
+            !said.to_string().contains(&token),
+            "the dashboard's own copy names no token"
+        );
+        // a link whose request is decided before it is opened reads as used, to its own person
+        let url2 = r2
+            .opens()
+            .into_iter()
+            .find(|u| u.contains("/chat#link="))
+            .unwrap();
+        let token2 = url2.split("#link=").nth(1).unwrap().to_string();
+        let aid2 =
+            r2.a.chat_book()
+                .unwrap()
+                .approvals
+                .iter()
+                .find(|a| a.state == ApprovalState::Pending)
+                .map(|a| a.id.clone())
+                .unwrap();
+        let (st, v) = r2.call(
+            "POST",
+            &format!("/v1/approval-requests/{aid2}/deny"),
+            json!({}),
+        );
+        assert_eq!(st, 200, "{v}");
+        let (st, v) = r2.call("POST", "/v1/chat/links/redeem", json!({ "token": token2 }));
+        assert_eq!((st, v["code"].as_str()), (410, Some("link_used")), "{v}");
     }
 
     #[test]
@@ -3778,7 +3824,7 @@ mod tests {
         match r.a.chat_link_action("a1", "owner", r.now) {
             crate::notice::Action::OneTime { url, host } => {
                 assert!(
-                    url.starts_with("https://ozbox.example.com/chat?link="),
+                    url.starts_with("https://ozbox.example.com/chat#link="),
                     "{url}"
                 );
                 assert_eq!(host, "ozbox.example.com");

@@ -109,7 +109,14 @@ fn cases() -> Vec<(&'static str, Notice)> {
         ("approval", one_time(approval())),
         ("approval-shared", page(approval())),
         ("approval-no-address", words(approval())),
-        ("agent-asks", one_time(agent_asks())),
+        // an agent's question links to the Chat page with the token in the fragment, as the server makes it
+        ("agent-asks", {
+            let n = agent_asks();
+            n.with_action(Some(Action::OneTime {
+                url: format!("{BASE}/chat#link={TOKEN}"),
+                host: "dash.example.com".into(),
+            }))
+        }),
         ("disk", one_time(disk())),
         ("budget", page(budget())),
         (
@@ -174,7 +181,6 @@ fn every_kind_on_every_channel_matches_its_golden_file() {
 
 #[test]
 fn every_actionable_rendering_carries_the_link_or_says_where_to_go() {
-    let url = format!("{BASE}/go#{TOKEN}");
     for (case, n) in cases() {
         if n.kind == NoticeKind::Reply {
             continue;
@@ -182,7 +188,14 @@ fn every_actionable_rendering_carries_the_link_or_says_where_to_go() {
         let r = renderings(&n);
         let get = |c: &str| r.iter().find(|(ch, _)| *ch == c).unwrap().1.clone();
         match n.action.as_ref().unwrap() {
-            Action::OneTime { .. } => {
+            Action::OneTime { url, .. } => {
+                // the token travels only in the fragment, which a browser never sends to a server
+                let (sent, frag) = url.split_once('#').unwrap();
+                assert!(
+                    !sent.contains(TOKEN) && !sent.contains('?') && frag.ends_with(TOKEN),
+                    "{url}"
+                );
+                let url = url.clone();
                 for ch in [
                     "telegram", "slack", "discord", "teams", "whatsapp", "email", "sms", "text",
                 ] {
@@ -192,7 +205,10 @@ fn every_actionable_rendering_carries_the_link_or_says_where_to_go() {
                         get(ch)
                     );
                 }
-                assert!(get("push").ends_with(&format!("/go#{TOKEN}")), "{case}");
+                assert!(
+                    get("push").ends_with(TOKEN) && get("push").contains('#'),
+                    "{case}"
+                );
                 // a program gets no link made for a person
                 assert!(!get("webhook").contains(TOKEN), "{case}");
                 // and the message names the host, so a lookalike stands out

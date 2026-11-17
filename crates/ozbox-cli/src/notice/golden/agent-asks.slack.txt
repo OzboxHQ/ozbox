@@ -80,7 +80,7 @@
             "type": "plain_text"
           },
           "type": "button",
-          "url": "https://dash.example.com/go#0123456789abcdef0123456789abcdef0123456789abcdef"
+          "url": "https://dash.example.com/chat#link=0123456789abcdef0123456789abcdef0123456789abcdef"
         }
       ],
       "type": "actions"
