@@ -1203,22 +1203,50 @@ pub fn handle_from(
                 Err(e) => Resp::fail(e),
             }
         }
-        (Policy::Unsealed, "setup_code") => match gates
-            .require(store, "setup-code", "", "", &r.approval, now)
-            .and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string()))
-        {
-            Ok(code) => {
-                gates.audit_event(store, "secrets.setup-code.read", "", "via=ingress");
-                Resp {
-                    value: Some(code),
-                    ..Resp::ok()
+        // The dashboard says a person enrolled a passkey or an authenticator: the first-day window closes for good (a reserved
+        // name in the store, so a restart keeps it closed) and the held code is forgotten. The supervisor's socket only.
+        (Policy::Supervisor, "setup_code_close") => {
+            match store.set(crate::secrets_ingress::SETUP_WINDOW_CLOSED, "1") {
+                Ok(()) => {
+                    gates.setup_code.clear();
+                    gates.audit_event(store, "secrets.setup-code.window-closed", "", "via=dashboard");
+                    Resp::ok()
                 }
+                Err(e) => Resp::fail(&e.0),
             }
-            Err(e) if e == "none" => Resp::fail(
-                "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
-            ),
-            Err(e) => Resp::fail(&e),
-        },
+        }
+        // The first-day window (ADR 0041, Amendment of 2026-11-17): until the dashboard says a person enrolled a passkey or an
+        // authenticator, the code is read through this sealed route with no approval. Reaching the route takes the owner's
+        // ingress key (and, on AWS, the AWS sign-in that opens the session); no process of the box user can. Once closed, the
+        // code needs an approval, which a software laptop key never gives (review H1).
+        (Policy::Unsealed, "setup_code") => {
+            let first_day = crate::secrets_ingress::setup_window_open(store);
+            let gate = if first_day {
+                Ok(String::new())
+            } else if r.approval.is_empty() {
+                Err(crate::messages::t("ingress.setup_window_closed", &[]))
+            } else {
+                gates.require(store, "setup-code", "", "", &r.approval, now)
+            };
+            match gate.and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string())) {
+                Ok(code) => {
+                    let via = if first_day {
+                        "via=ingress-first-day"
+                    } else {
+                        "via=ingress"
+                    };
+                    gates.audit_event(store, "secrets.setup-code.read", "", via);
+                    Resp {
+                        value: Some(code),
+                        ..Resp::ok()
+                    }
+                }
+                Err(e) if e == "none" => Resp::fail(
+                    "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
+                ),
+                Err(e) => Resp::fail(&e),
+            }
+        }
         // A copy of the file-kept store key for the owner's keychain, so an upgrade that replaces the system disk can put it
         // back (ADR 0029 Amendment 6 section 9). Only a sealed request from the owner's computer; recorded; never logged.
         (Policy::Unsealed, "kek_export") => match (

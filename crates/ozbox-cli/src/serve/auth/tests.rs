@@ -2799,3 +2799,53 @@ fn a_box_change_is_decided_and_recorded_as_the_signed_in_person() {
     );
     assert_eq!(ok.0, 202, "{ok:?}");
 }
+
+/// The first-day window (ADR 0041, Amendment of 2026-11-17): every enrolment, by passkey or by authenticator, tells the box's
+/// secrets service to close it (the hook the dashboard sets; the service's side is idempotent and has its own test). Before
+/// anyone enrols, nothing is said.
+#[test]
+fn every_enrolment_by_passkey_or_authenticator_closes_the_first_day_window() {
+    let r = rig();
+    let n = Arc::new(AtomicU64::new(0));
+    let seen = n.clone();
+    r.auth.set_on_enrolled(Arc::new(move || {
+        seen.fetch_add(1, Ordering::SeqCst);
+    }));
+    assert_eq!(n.load(Ordering::SeqCst), 0);
+    // a passkey
+    let authn = Authenticator::new();
+    r.enrol(&authn, "owner");
+    assert_eq!(n.load(Ordering::SeqCst), 1, "a passkey enrolment closes it");
+    // an authenticator
+    let r = rig();
+    let n = Arc::new(AtomicU64::new(0));
+    let seen = n.clone();
+    r.auth.set_on_enrolled(Arc::new(move || {
+        seen.fetch_add(1, Ordering::SeqCst);
+    }));
+    let mut c = Client::new();
+    let flow = github_start(&r, &mut c).body["flow"].clone();
+    r.advance(5_100);
+    github_user_replies(&r, "owner-gh", 4242);
+    r.send(&mut c, "POST", "/auth/github/poll", json!({"flow": flow}));
+    assert_eq!(n.load(Ordering::SeqCst), 0, "signing in is not enrolling");
+    let secret = r.send(&mut c, "POST", "/auth/totp/setup", Value::Null).body["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        n.load(Ordering::SeqCst),
+        0,
+        "starting a setup is not enrolling"
+    );
+    let key = super::b64::decode_base32(&secret).unwrap();
+    let code = totp::hotp(&key, r.clock.load(Ordering::SeqCst) / 1000 / 30, 6);
+    let ok = r.send(&mut c, "POST", "/auth/totp/confirm", json!({"code": code}));
+    assert_eq!(ok.state(), "signed_in");
+    assert_eq!(
+        n.load(Ordering::SeqCst),
+        1,
+        "an authenticator enrolment closes it"
+    );
+    assert!(r.auth.has_second_factor());
+}
