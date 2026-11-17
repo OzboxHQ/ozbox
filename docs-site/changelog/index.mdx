@@ -8,6 +8,28 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI"]} description="First-run setup you can preview, script and trust">
+  ## `ozbox init` previews every step, stops before a quota bites, and cleans up after itself
+
+  Setting up an AWS account could stop half way: a network that needed an address the account had no room for failed in the middle, left
+  part of itself behind, and a dry run could not show anything after the state bucket. A script had to answer prompts to leave a step out.
+
+  - **`--dry-run` shows every step**, even before the state bucket exists. Nothing is made and nothing is written to your configuration.
+  - **The plan checks your quotas first.** If the account has no free Elastic IP address or NAT gateway for the network, the plan says
+    how many are allowed and in use, and gives the command that asks AWS for more. Nothing is made.
+  - **A step that fails part way removes what it made**, and says whether that worked. A step that changes something older is never
+    undone automatically.
+  - **Choose steps with flags:** `--only` and `--skip` (for example `--skip issuer`), so a script never answers prompts. The state bucket
+    cannot be skipped.
+  - **One operator policy file.** The adopt step's statements are merged into it for you, and setup lists what it added or replaced.
+  - **Clearer sign-in errors.** When AWS is down or throttling, setup says so instead of telling you to sign in again; an expired login and
+    a missing profile each name the command that fixes them.
+  - **Every step uses the same pinned AWS plugin.**
+
+  The setup permission set now also allows reading service quotas (`servicequotas:GetServiceQuota`); without it the plan says the quota
+  could not be checked. See the [CLI reference](/cli-reference).
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 
