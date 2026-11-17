@@ -121,16 +121,39 @@ older versions must stop being public before a new one can be. The image workflo
 4. **Retire** (optional, see below).
 
 **Private is not retired.** A private version is still in the account: its image and snapshots are kept, nothing is deleted,
-and the version can be made public again by hand. *Retired* means deleted: `scripts/image/retention.sh` deregisters the image and
-deletes its snapshots. It is a separate step with its own switch (`retire_old`, true on a tag push; a manual run can ask for the
-list only) and keeps the last three versions and the newest of each of the last three minors, whatever their visibility. The two
-cannot conflict: making room runs first, retirement runs after a release that already fits, and retirement does not look at
-visibility.
+and the version can be made public again by hand. *Retired* means deleted: the AMI is deregistered and its snapshots deleted,
+which cannot be undone, and a box (in any account) that still names that image cannot be rebuilt from it.
+
+After a release is public, `scripts/image/retention.sh` handles the versions outside the window (the last three versions and
+the newest of each of the last three minors, whatever their visibility). Its switch is `retire_old`:
+
+| `retire_old` | What happens to an old version | When |
+|---|---|---|
+| `private` (default) | made private if it is still public; the image and snapshots are kept | every tag push, and a manual run unless you choose otherwise |
+| `list` | nothing; the plan is printed | a manual run |
+| `delete` | retired: deregistered, snapshots deleted (cannot be undone) | a manual run only |
+
+Private is the default because it already takes a version out of every other account's choice (a client only picks public
+images) and can be undone; deleting saves only the snapshots' storage. By hand the script is a plan unless you pass `--apply`
+(and `--delete` to retire instead of making private):
+
+```sh
+scripts/image/retention.sh --released 0.3.0 --regions us-east-1,eu-west-1 --owner 123456789012           # the plan
+scripts/image/retention.sh --released 0.3.0 --regions us-east-1,eu-west-1 --owner 123456789012 --apply   # make private
+```
+
+Making room runs first, the old-version step after a release that already fits, so the two cannot conflict.
+
+**Where an image release runs from.** The image workflow runs from `main` (Actions, Image, Run workflow, branch `main`, the
+version as input) or from a pushed `image-vX.Y.Z` tag, and refuses any other ref, including the program's `vX.Y.Z` tag. That is
+deliberate: the signed manifest names the workflow at `main` or an `image-v*` tag, and every box checks exactly that, so a
+manifest signed from any other ref would be refused by every box. Accepting `v*` would widen what every box trusts to the tag
+the program release uses.
 
 **Publishing a half-public release again** (a run that failed part way before this was fixed, or by hand) is a manual run with
 `republish`: the quota step runs first, counts only the images still to be made public, and the already-public ones are skipped.
 
-The build role needs `servicequotas:ListServiceQuotas` to read the real limit; without it the scripts say so and assume 5.
+The build role needs `servicequotas:ListServiceQuotas` to read the real limit; without it the scripts say so and assume 5 (the owner grants it on the role; nothing in this repository can).
 It also needs `ec2:ModifyImageAttribute`, which it already has, to remove a launch permission.
 
 ## The benchmark gate (a release step, not CI)
