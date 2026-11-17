@@ -236,7 +236,7 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration (including `main` as a hub that workers dial out to, with keys delivered by name and sealed to the worker; [ADR 0042](docs/adr/0042-main-as-the-hub-workers-reached-over-a-sealed-channel-keys-sent-only-by-name-and-every-approval-comes-back-to-main.md)), schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 
