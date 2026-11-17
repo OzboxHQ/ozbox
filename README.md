@@ -41,8 +41,11 @@ cloud account, the dashboard runs on **your** computer or behind **your** domain
   ([ADR 0017](docs/adr/0017-credential-broker-per-run-tokens.md), [ADR 0018](docs/adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md)).
 - **A fleet, not a pet.** The system disk is rebuilt from a signed image; your work lives on a separate persistent `/work`
   disk that survives pausing, resizing and upgrading.
-- **Any engine, any cloud.** Bring the coding agent you prefer (Claude Code first; Codex, Gemini CLI, Aider and OpenCode use
-  the same interface) and the model provider you prefer, hosted or open-weight. AWS and Hetzner Cloud are supported by one
+- **Any engine, any cloud.** Bring the coding agent you prefer and the model provider you prefer, hosted or open-weight.
+  Oz Box starts Claude Code, Codex CLI and Gemini CLI as runs on a box (Preview), and agents on different engines work one
+  task through the same messages, each holding only its own provider's token
+  ([ADR 0056](docs/adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge.md));
+  Aider and OpenCode run in a terminal on the box (as runs: Planned). AWS and Hetzner Cloud are supported by one
   provider interface ([ADR 0003](docs/adr/0003-provider-interface.md)).
 
 ## Try it

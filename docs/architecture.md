@@ -11,7 +11,7 @@ This is a public, high-level sketch. It will grow as components are built.
  ozbox CLI / API ──▶ control plane ──▶ provider modules ──▶ cloud or VPS
 ```
 
-- **Rust** for the CLI and daemons; **TypeScript** for engine adapters and the dashboard.
+- **Rust** for the CLI, the daemons and the engine adapters; **TypeScript** for the dashboard.
 - **gRPC** between components; **REST and webhooks** for integrations.
 - **Immutable image, persistent disk:** upgrading a box means a new image on the same work disk.
 - **No inbound network:** every connection is a tunnel the box dials out to.
@@ -132,6 +132,14 @@ requests that show the exact action, reach people through the alert routing, exp
 need a fresh second factor for the risky kinds. Every decision is recorded in the audit trail. The task board, the approvals
 inbox and their settings in the dashboard, and `ozbox run` and `ozbox approvals` on the command line, all use the same
 `/v1` calls.
+
+An engine is an adapter (`ozbox_core::agent_engine::AgentEngine`): Claude Code (`claude_code`), and Codex CLI and Gemini CLI
+(`codex_cli`, `gemini_cli`, over `headless`, which starts one process per turn and resumes the program's own session for the
+next message). Each starts its program through the box daemon with the task on standard input and only its own vendor
+family's credentials in the environment. What any engine reports is translated once into the engine-neutral turn model
+(`ozbox_core::engine_turn`: task, ask, reply, tool use, usage, state, result), which is also what the hub carries in its own
+message kinds, so agents on different engines and providers work one task without either seeing the other's program, vendor
+or keys (ADR 0056).
 
 ## What an agent can do on a box
 
