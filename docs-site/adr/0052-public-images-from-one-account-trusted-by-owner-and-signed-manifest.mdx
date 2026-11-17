@@ -52,6 +52,17 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
   `0.2.0`) and is told "a newer release is available". The beta is retired only after the final release has shipped and 14 days
   have passed. A partial publish (some images public, then a failure) is recovered by running the workflow with `republish`,
   which publishes the existing release's manifest again after verifying it.
+- **Amendment: the public-image quota (owner's decision, 2026-11-16).** AWS allows only 5 public images per region by default.
+  The `0.2.0-beta.2` run made its amd64 image public (the fifth) and was refused for arm64, leaving the release half public,
+  because retirement ran after publishing and keeps three versions (six images), so it could never fit. Now, before publishing,
+  `scripts/image/make-room.sh` makes the **oldest** public Oz Box versions **private** (launch permission removed; the image and
+  snapshots stay) until the release fits, whole versions with every architecture together, never the version being published
+  or an image that is not ours, and the quota is read from Service Quotas (5 if it cannot be read). The preflight fails a release
+  that can never fit before anything is built, and `publish.sh` is all or nothing: it skips images that are already public, and
+  rolls back the ones it made public in its own run if any other is refused. **Private (for the quota) and retired (deleted) are
+  different:** old versions are made private by this process and never deleted by it; retirement stays a separate, explicit
+  step (`retire_old`). A client only ever picks a public image, so a version made private is no longer offered, and a box that
+  already runs it keeps running (as with retirement).
 - **Which release.** Among the verified candidates, the newest one **this program can use** (same major and minor version,
   ADR 0036) comes first, then the newest. The day after a minor release the newest image is the wrong one for the older program,
   and the three retained versions are what let it keep working until it is upgraded. At most six candidates are checked.
@@ -59,7 +70,14 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
   and signs the manifest (which records every image id per region and architecture, and refuses to be written if any region is
   missing), and only then makes the images public and retires the old ones. A failure before signing leaves nothing public that a
   client could mistake for a release. The client also walks the publisher's images newest first and takes the first the manifest
-  vouches for, so a build that was made public and then failed to sign cannot take `latest` down.
+  vouches for, so a build that was made public and then failed to sign cannot take `latest` down. The same walk applies to an
+  image in the caller's own account. An image is **passed over** when its release has no published, signed manifest (a 404:
+  the publish step never ran), when the signed manifest does not list the image for the region, or when the manifest says it is
+  a pre-release and this program is stable (a pre-release program may take one). Each one passed over is named in the upgrade
+  plan (and on `create`), one line each. A check that could not be made (a download or signature failure, a manifest for another
+  release) is **not** a reason to pass over: it says nothing about the image, so the lookup stops rather than fall back to an
+  older one on a bad day. At most six candidates are checked, within the lookup deadline. When none verifies, `ozbox upgrade`
+  refuses and names `--image` and `--allow-unverified-image`; `ozbox create` refuses and names `--image`.
 - **Unencrypted images, encrypted boxes.** An encrypted snapshot can never be public, so the public release is built with
   `aws_encrypt_boot = false`. Every box made from it has an encrypted root volume (the box module encrypts it at launch), and a
   fork that does not publish gets encrypted private images (the default).

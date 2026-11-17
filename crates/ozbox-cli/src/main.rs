@@ -11,6 +11,7 @@ mod approval_wait;
 mod attestation;
 mod audit_service;
 mod auth_cli;
+mod aws_native;
 mod awscli;
 mod backup_ops;
 mod backups;
@@ -34,6 +35,7 @@ mod config;
 mod cost_cli;
 mod cost_demo;
 mod dashboard_cli;
+mod dashboard_keep;
 mod egress;
 mod egress_guard;
 mod guard;
@@ -44,6 +46,7 @@ mod guard_scan;
 mod helper_refresh;
 mod host_guard_cli;
 mod host_tools;
+mod import_report;
 mod infra_cli;
 mod ingress_cli;
 mod ingress_client;
@@ -68,6 +71,7 @@ mod messages_cost;
 mod messages_hardening;
 mod messages_infra;
 mod messages_models;
+mod messages_old_disk;
 mod messages_orch;
 mod messages_perm;
 mod messages_quiesce;
@@ -140,8 +144,12 @@ mod tasks_cli;
 mod tasks_ops;
 mod tasks_service;
 mod telegram;
+mod telegram_store;
+mod telegram_transcript;
 mod telemetry;
 mod telemetry_cli;
+#[cfg(test)]
+mod test_support;
 mod this_box;
 mod timezone;
 mod tokenmac;
@@ -159,7 +167,10 @@ use clap::Parser;
 fn main() -> ExitCode {
     // clap prints usage errors and exits with 2 (and `--help` / `--version` with 0).
     let args = cli::Cli::parse();
-    let is_telemetry = matches!(args.command, cli::Command::Telemetry { .. });
+    let is_telemetry = matches!(
+        args.command,
+        cli::Command::Telemetry { .. } | cli::Command::BuildInfo
+    );
     match run::run(args) {
         Ok(()) => {
             telemetry_cli::after_command(is_telemetry);

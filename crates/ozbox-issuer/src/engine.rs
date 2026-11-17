@@ -1481,6 +1481,50 @@ mod tests {
     }
 
     #[test]
+    fn a_box_pinned_by_a_config_written_before_box_classes_is_never_released_production() {
+        // D2, end to end at the issuer, written only against what the issuer offered before box classes existed (a pin read from
+        // JSON with no class, the request, a present laptop key's approval, the release), so this test runs unchanged on the old
+        // code. There it fails: the request is filed, the laptop approves it and the value is read and released to the box, which
+        // may be a fleet worker. Here the request is refused, nothing is approved or read, and nothing is released.
+        let mut w = world();
+        let old = w.cfg.boxes["dev"].clone();
+        let pin: BoxPin = serde_json::from_value(serde_json::json!({
+            "store_id": old.store_id,
+            "service_key": old.service_key,
+            "caller": old.caller,
+            "allowed": old.allowed,
+        }))
+        .unwrap();
+        w.cfg.boxes.insert("dev".into(), pin);
+        let r = w.rand();
+        let i = w.issuer(&r);
+        let got = i.request(w.scope(), CALLER, NOW);
+        if let Ok(ch) = &got {
+            // what the old code allowed: a present laptop key approves, the box asks for the value
+            let _ = i.approve(
+                &ch.request_id,
+                "mac",
+                Proof::Signature(w.laptop.sign(&ch.message).as_ref()),
+                NOW + 1,
+            );
+            let _ = i.release(&ch.request_id, CALLER, NOW + 2);
+        }
+        assert!(
+            w.reader.calls.borrow().is_empty(),
+            "a Production value was read for a box that is not classified main"
+        );
+        assert!(
+            !w.log
+                .lines
+                .borrow()
+                .iter()
+                .any(|l| l.starts_with("release ")),
+            "a Production value was released to a box that is not classified main"
+        );
+        assert!(got.is_err(), "the request itself is refused");
+    }
+
+    #[test]
     fn a_pin_is_a_worker_unless_it_positively_says_main() {
         for (class, refused) in [
             (None, true),

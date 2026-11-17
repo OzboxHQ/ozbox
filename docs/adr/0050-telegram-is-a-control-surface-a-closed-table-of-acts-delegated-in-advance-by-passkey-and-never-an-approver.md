@@ -1,7 +1,8 @@
 # 0050 — Telegram is a control surface: a closed table of acts, delegated in advance by a passkey, and never an approver
 
-**Status.** Proposed (design only, revised 2026-11-14 after its security review). **Nothing here is built.** The review's findings are
-closed in this text; the build starts after the dashboard honesty work. It builds on ADR 0021 (chat with coding agents) and ADR 0041 (the
+**Status.** Accepted. **Phase P1 (the policy core and identity) is built and is Preview**: tested in CI against a fake Telegram and a
+software authenticator, never run for real on a box with a phone. Phases P2 to P6 are not built. Revised 2026-11-14 after its security
+review. It builds on ADR 0021 (chat with coding agents) and ADR 0041 (the
 approval model) **as amended on 2026-11-13**, in which a chat app is notify-only: no Approve, no Deny, no Stop and no `/budget`,
 refused by the server. Those amendments are written on the branch that built them and are not on every branch yet; this ADR cites them
 by number and does not restate or edit them. It also uses ADR 0022 (permission engine and audit chain), ADR 0023 and ADR 0026
@@ -473,10 +474,10 @@ calls; no measured path (create, resume timing, exec, disk, network, images) cha
   and it is why it needs a passkey delegation.
 - Telegram stays a notifier for every approval. Nothing in this ADR lets it decide.
 - Another cloud role, a chat profile on the box and a delegation record to build, test and review; more dashboard settings to explain.
-- **Not covered:** Production (never from chat, metadata only); worker boxes until the hub exists; creating, resizing, cloning,
-  snapshotting and destroying boxes; voice; groups and rooms (the mesh); chat apps other than Telegram beyond what they have (the
-  typing rule applies to all of them); any claim that Telegram is private. A provider without scoped power stays unsupported. Nothing
-  here is built, so no status mark may say "Works".
+- **Not covered:** Production (never from chat, metadata only); worker boxes until the hub exists; cloning,
+  snapshotting and destroying boxes (and, until box power is built, creating and resizing them); voice; groups and rooms (the mesh); chat apps other than Telegram beyond what they have (the
+  typing rule applies to all of them); any claim that Telegram is private. A provider without scoped power stays unsupported. Phase P1
+  is built and Preview; box power, `/run`, the chat profile and the redactor (P2 to P4) are not, and no status mark may say "Works".
 
 ## Open questions for the owner, each with a recommendation
 
@@ -492,3 +493,50 @@ Every recommendation changed on review is marked *delegated decision, owner to r
 8. **A mesh wake of a stopped host.** *Recommendation:* none; a box that hosts the bot is never paused from chat, and the laptop resumes it.
 9. **Other chat apps getting the same ceiling.** *Recommendation:* Telegram first; each other app later, on its own review. They already get the typing rule of §1b.
 10. **A second non-Telegram channel before converse too (it is required for tiers 2 and 3).** *Recommendation (delegated decision, owner to ratify):* not required for converse, which has the sealed transcript and the turn-id join; revisit after the first real use.
+
+## Build notes for phase P1 
+
+What was built, and the choices that the text above left open. Each is a decision a person can change by editing this record and the code
+that follows it.
+
+- **Where it lives.** `ozbox_core::chat_policy` is the pure core (the closed table of acts, the one parser, `decide`, the signed
+  records and their digests, admission and the replay set); `ozbox-cli` holds the bridge (`serve::telegram_bridge`), the dashboard
+  side (`serve::telegram_link`), the Bot API client (`telegram`), the durable store (`telegram_store`) and the sealed transcript
+  (`telegram_transcript`). The act table is exported to the dashboard as `chat-acts.ts`, generated from the Rust table and compared
+  by a test, as the approval rule table is.
+- **An `Allow` is a value only `decide` can make**, and the executor asks again with the facts of that moment (`Allowed::confirm`)
+  before it acts: a link revoked or locked, a role cut or a delegation lapsed between the record and the act refuses it.
+- **An act whose executor does not exist yet is never a bare `Allow`.** Box power, create and resize, and `/run` are in the table with
+  their tier and their delegation, and a person who holds the delegation gets a handoff in words ("this version cannot do it from a
+  chat yet"). In P1 a delegation can only be made for converse; asking for power or run is refused with `not_available`.
+- **The durable set and the links have their own file**, written with a sync and a rename, where a failed write is an error that stops
+  the bridge, and a file that exists and cannot be read does not load as empty. The `(bot id, update_id)` set is written **before** the
+  act it allows, and the offset moves only after.
+- **A link or a delegation is real only while its assertion verifies**, against a passkey the person still has, every time it is used.
+  A hand-written row, an edited row and a row whose passkey was removed are refused; the Account page says "not backed by a passkey".
+- **The bot id comes from `getMe`, never from the token.** `getMe` must show the three flags off, a webhook set by someone else is
+  named by its host only, and a 409 stops the bridge until an owner confirms; the stop survives a restart.
+- **Polling is on a thread of its own**, 30 seconds a poll, three updates at a time (the client keeps 64 KiB of an answer and a message
+  may be 4,096 characters), and one update at a time after an answer that did not parse. There is no callback query and no button.
+- **Chats linked before this release** (no passkey behind them) keep receiving alerts and may read (tier 0); anything beyond that
+  needs a new link with a passkey. The old "send the code the dashboard made to the bot" pairing is gone for Telegram (Slack and
+  WhatsApp keep it until their own review).
+- **A dashboard with no sign-in cannot link Telegram**: there is no person to bind and no passkey to sign with. It says so.
+- **A member's delegation needs an owner's co-signature** (an assertion over the delegation and the member's name, by someone who is
+  an owner now), including the converse delegation made in the same step as a member's link: it waits, shown as "waiting for an
+  owner's passkey".
+- **Production and the hub are marked by an owner** (Settings, Apps; a passkey shown a moment ago). The hub is also the box that hosts
+  the bot, which is never paused from chat.
+- **The audit actor is `person:<id>:chat:telegram`**, so the person joins to the record; the detail is `act`, `tier`, decision, rule,
+  `update_id`, the first 12 characters of the delegation digest and the first 16 of the message's HMAC, in at most 160 characters (the
+  chain cuts silently beyond that).
+- **Not in P1:** `ozbox chat lock` and `ozbox chat unlink` (the dashboard's lock-every-link button, `/lock` and `/unlink` are); the
+  handoff link's "consumed by the assertion" half (nothing needs one until a gated act can be prefilled); and the chat profile on the
+  box, the redactor, detail levels, box power and `/run` (P2 to P4).
+- **The Tier B "tunnel access log" check is weaker than this ADR's wording (§2).** The ADR asks that the tunnel's own access log never
+  contain a pointer-link token. The real-server harness cannot put a logging proxy in front of the dashboard (the passkey origin is the
+  server's own port), so the spec records what the **browser** sends (every request address and its referrer) and asserts the token is in
+  none of them, and that the address bar drops the fragment. That shows the page never puts the token in a request line or header; it
+  does not read a real tunnel's log. Closing it needs the harness to start a loopback reverse proxy whose address is the passkey origin,
+  with the server on another port, and to assert on that proxy's log; and, on a real box, the owner's tier C run reading the tunnel's
+  actual log.

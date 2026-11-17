@@ -42,6 +42,11 @@ pub struct ImageInfo {
     /// manifest could not be verified or the provider has none. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<crate::UpgradeRecord>,
+    /// Newer candidates that `latest` looked at and passed over, one line each (the image, its release and why: its
+    /// signed release could not be found, did not list the image, or is a pre-release this program does not use). Empty
+    /// when the newest candidate was the one chosen. Additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 fn signature_applies() -> bool {
@@ -73,6 +78,21 @@ pub struct SnapshotInfo {
     /// Whether `/work` is in it. False for a Hetzner snapshot, which can only capture the machine's root disk.
     pub includes_work: bool,
     pub labels: std::collections::BTreeMap<String, String>,
+}
+
+impl SnapshotInfo {
+    /// Whether this is the copy an upgrade kept of an OLD SYSTEM disk (it holds a store key, never `/work`).
+    pub fn is_old_system_disk_copy(&self) -> bool {
+        self.labels
+            .get(crate::engine::PURPOSE_LABEL)
+            .is_some_and(|p| p == crate::engine::PRE_UPGRADE_ROOT_PURPOSE)
+    }
+
+    /// Whether this is a backup of the box (anything but a copy of an old system disk). Not the same as `includes_work`: a
+    /// Hetzner snapshot is a backup of the box and does not include `/work`.
+    pub fn is_work_backup(&self) -> bool {
+        !self.is_old_system_disk_copy()
+    }
 }
 
 /// The `/work` disk a restore replaced and kept, until the person deletes it. Additive: new fields get a default.
@@ -123,7 +143,9 @@ pub trait Provider: Send + Sync {
 
     fn get(&self, name: &BoxName) -> Result<Option<BoxRecord>>;
 
-    /// The newest Oz image this account can see (read-only). `Unsupported` where the provider cannot tell.
+    /// The newest Oz image this account can see **whose signed release verifies** (read-only): newer candidates whose release
+    /// cannot be found or does not list them are passed over, and named in [`ImageInfo::skipped`]. When none verifies, the
+    /// newest is returned unverified, with every candidate's reason in `skipped`, for the caller to refuse. `Unsupported` where the provider cannot tell.
     fn latest_image(&self, _region: Option<&str>) -> Result<ImageInfo> {
         Err(Error::Unsupported {
             provider: self.id().to_string(),
@@ -168,6 +190,19 @@ pub trait Provider: Send + Sync {
     fn old_work_disks(&self, name: &BoxName) -> Result<Vec<OldWorkDisk>> {
         let _ = name;
         Ok(Vec::new())
+    }
+
+    /// Take the copy of the OLD system disk that an upgrade asked to keep (`Operation::Upgrade { keep_old_system_disk }`), now,
+    /// waiting as long as the provider allows for it to complete, and return its id. A caller that stops the box afterwards
+    /// takes it BEFORE it makes the box ready for the stop, so a slow copy cannot outlast the hold on new runs, and then plans
+    /// the upgrade again without the flag (the copy is done). A failure changes nothing. The default cannot keep one.
+    fn keep_old_system_disk(&self, name: &BoxName, image: &str) -> Result<String> {
+        let _ = image;
+        Err(Error::Unsupported {
+            provider: self.id().to_string(),
+            what: format!("keep a copy of the old system disk of {name}"),
+            why: "this provider cannot".into(),
+        })
     }
 
     /// Work out what `op` would change. Read-only.

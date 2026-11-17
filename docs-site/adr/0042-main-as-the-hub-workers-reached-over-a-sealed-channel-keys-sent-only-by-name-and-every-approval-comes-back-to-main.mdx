@@ -875,7 +875,11 @@ envelope work before H1 ends if H1's schema is frozen.
 assign and report logic and the worker's side over signing, sealing and transport traits (an in-memory transport in the tests); decision
 D2 as one function with no argument and no switch (`refuse_production`), called by the hub before it assigns, by the worker before it
 accepts, and by `ozbox-issuer` through a pin class that is not `main`; `task_start transport=hub` and the hub's reports in
-`task_status`; a conductor that names keys refused and recorded. **Not built:** everything networked or keyed (the list in the Status line).
+`task_status`; a conductor that names keys refused and recorded. The worker **screens every body before it is held for a gap or applied**: a
+key delivery, pins and the laptop relay (none built) and an assignment whose key declaration carries anything beside its environment
+and names are refused there, so their content is never written to the worker's state, and the worker still answers `unsupported` or
+`refused`. Sentinel tests hold this, and a box pinned at the issuer before box classes existed is shown never to be released
+Production by a test that runs unchanged on, and fails on, the issuer as it was. **Not built:** everything networked or keyed (the list in the Status line).
 
 **By hand on a real box** (nothing here needs a second box or a network channel, because none exists yet):
 1. On `main` running this build: `task_start` with `transport: hub` answers "this box has no worker channel yet" and adds no feature.

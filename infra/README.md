@@ -45,6 +45,8 @@ Everything that builds an Oz Box machine. Three pieces fit together:
    52 characters; `ozbox create` sets it) reaches the root setup step in the first-boot configuration, which writes
    `/etc/ozbox/approval-keys`. A malformed value fails the plan. Hetzner's first-boot configuration is sent without the
    template's comment lines, to stay under its 32 KB limit; both modules test their size with the longest values.
+   The Hetzner render has only about 1 to 2 KB of headroom under 32,768 bytes, so measure the next template addition against
+   the Hetzner render, not the AWS one.
 
 Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects `work_snapshot_id` and clone is not yet supported on Hetzner; `/work` backups there will use encrypted file backups to object storage.
 
@@ -55,7 +57,8 @@ Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects
   every resource is tagged `ozbox-managed=true`. Its `private_subnet_id` output is what the box module and `subnet_id` in the CLI
   config take. The NAT gateway bills by the hour while the network exists, so destroy the network when no box needs it.
 - **Operator policy** (`aws/operator-policy.json`): the least-privilege IAM policy for the person (or role) who runs `ozbox` against an
-  account. Replace `${account_id}` with the 12-digit account id before attaching it. In short: read-only describes, the Service Quotas
+  account. It is a template: `ozbox init` writes it filled in for your account, region and fleet (`operator-policy.json` in its working
+  folder, on every run) and `ozbox_provider_aws::operator_policy::render` is the only code that fills it. By hand, replace `${account_id}`, `${region}` and `${fleet}` (the fleet name in `[aws]`, `ozbox` by default). In short: read-only describes, the Service Quotas
   and Pricing reads, the two Cost Explorer reads (`ce:GetCostAndUsage` and `ce:GetTags`, for the real bill), and the public image
   parameters; EC2 resources can be created only when tagged `ozbox-managed=true` and changed or
   deleted only when they carry that tag; IAM only for roles and instance profiles named `ozbox-*` (only the Session Manager policy can
@@ -63,6 +66,11 @@ Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects
   documents; EC2 Instance Connect key pushes only to tagged instances and only for the `ozbox` user; S3 only for `ozbox-tfstate-*`
   buckets. An explicit Deny blocks creating users or keys, writing role or user policies, Organizations, Identity Center and Account
   actions, and opening an inbound security group rule. `crates/ozbox-provider-aws/tests/operator_policy.rs` pins these invariants.
+  Tagging follows from that: the role can put the `ozbox-managed` tag on a resource only as the resource is created, so a disk made
+  before the module tagged it (a `0.1.x` box's system disk) can be given its first tag only by an account administrator, never by
+  this role or the setup identity (IAM cannot tell "a disk of one of our machines" from any other volume). The module never asks
+  for it (the system disk is tagged at creation and its tags are ignored afterwards), and a plan that would is refused before
+  anything is applied, with the command to run: see ADR 0053, amendment 1.
 
 - **The real bill** (`ozbox cost bill`, the dashboard's Bill page): read from Cost Explorer, filtered to spend tagged
   `ozbox-managed=true` and grouped by the `ozbox-box` tag and the service. Two things are needed in the account, and neither can be
@@ -204,12 +212,60 @@ The AWS and Hetzner box modules need **OpenTofu 1.7 or newer** (they use `templa
 `tofu init` stops with an "Unsupported OpenTofu version" error that names the requirement, and `ozbox` shows that message,
 before anything is created. Keeping state in the encrypted bucket needs 1.10 or newer.
 
+## The setup identity: one permission set, `OzBoxSetup`
+
+`ozbox init` runs as a person signed in as **one** permission set, **`OzBoxSetup`**, defined by `infra/aws/setup-policy.json`. On IAM
+Identity Center a sign-in profile is exactly one permission set, so everything init applies has to be in it: a person given the key,
+adopt and box-policy sets separately could not run init end to end without full administrator rights. `OzBoxSetup` holds:
+
+- the reads init's checks make (`ec2:Describe*`, the signed-in role's own policy simulation) and the tagged-create checks it probes;
+- the state bucket `ozbox-state-<account>-<region>`: make it, version it, encrypt it, block public access, add the TLS-only policy and
+  tags, and read and write the state objects and the lock (only this account's `ozbox-state-*` buckets);
+- the network (`modules/aws-network`): the VPC, subnets, internet and NAT gateways, address and route tables, every one only when
+  tagged `ozbox-managed=true`, as the operator policy conditions them;
+- the statements of `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin`, with the same resource scoping (a test holds the
+  three files and this one in step);
+- the same explicit Denies as the operator policy: no users or access keys, nothing in Identity Center, Organizations or Account, no
+  open inbound rule, the reserved `obx` roles untouched, a Production key never changed, a document never run or shared. One is
+  narrower on purpose: the key files' "never use a key" Deny does not apply when S3 is the caller's proxy, because the state
+  bucket is encrypted with the account's S3 key and S3 uses it on every state read and write.
+
+It is **not** the security baseline (`ozbox harden`, which has `infra/aws/security-services-policy.json`) and not the off-box issuer
+(`--issuer-package`, whose first apply needs an account administrator, see below): both are opt-in and neither runs on a plain
+`ozbox init`. Keep those separate; the setup identity is deliberately not able to do them.
+
+The separate `OzBoxKeyAdmin`, `OzBoxAdoptAdmin` and `OzBoxPolicyAdmin` files remain for an administrator who wants to give one of
+them alone; `OzBoxSetup` is the one a person runs init with.
+
+### Give a person `OzBoxSetup` (IAM Identity Center)
+
+1. In the AWS console, sign in to the **management account** (or the delegated Identity Center administrator) and open
+   **IAM Identity Center**, then **Permission sets**, then **Create permission set**.
+2. Choose **Custom permission set**, name it `OzBoxSetup`, set a session duration of 1 to 4 hours, and under **Inline policy** paste
+   the contents of `infra/aws/setup-policy.json` with **every `${account_id}` replaced by the 12-digit id of the account the boxes live
+   in** (the file is under the 32,768-character inline-policy limit; a test holds that). Leave managed policies empty.
+3. **AWS accounts**, pick the account, **Assign users or groups**, choose the person (not a group everyone is in), and choose
+   `OzBoxSetup`. A person who also uses the daily operator role keeps that as a second assignment.
+4. On the person's computer add a profile for it and sign in:
+
+   ```
+   aws configure sso --profile ozbox-setup     # the permission set: OzBoxSetup
+   aws sso login --profile ozbox-setup
+   ```
+
+5. Run setup with it: `ozbox init --provider aws --profile ozbox-setup`. Day to day, use a different profile, the operator role.
+
+**Keep the daily operator role separate** (`infra/aws/operator-policy.json`). The setup identity can create keys and policies,
+make buckets and a network, and write the state of all of it; the operator role cannot, and has no right to the state bucket, so a
+stolen daily session cannot widen what a box's role may do, change the fleet key or rewrite the account's state. Nobody should sit
+in `OzBoxSetup` for ordinary work: assign it for the setup, and remove the assignment (or let the session expire) after.
+
 ## The fleet's secrets key and the two AWS identities
 
 `ozbox init` plans the fleet's secrets key (`modules/aws-secrets-key`: one KMS key, rotation on, `alias/ozbox-<fleet>-secrets`) after
 the network, with its state in the encrypted bucket, creates it only when you approve, and records `secrets_key_arn` and `fleet` in
-your config so new boxes keep their store's key in KMS. It runs as your **setup identity**, which needs the `OzBoxKeyAdmin`
-permission set (`infra/aws/key-admin-policy.json`); your **daily operator role**
+your config so new boxes keep their store's key in KMS. It runs as your **setup identity**, the `OzBoxSetup` permission set (it
+includes `OzBoxKeyAdmin`, `infra/aws/key-admin-policy.json`); your **daily operator role**
 (`infra/aws/operator-policy.json`) has no `kms:` action and is given no right to the key. If setup cannot
 create keys it says what to ask an administrator for and leaves boxes on a file key. On Hetzner there is no KMS: a box uses its
 TPM if it has one, otherwise a file key escrowed to OpenBao or your keychain (`ozbox secrets ingress escrow`).
@@ -218,12 +274,19 @@ TPM if it has one, otherwise a file key escrowed to OpenBao or your keychain (`o
 
 `ozbox adopt-fleet-key` reads a box's store facts as root through Systems Manager, with a document of the fleet's own
 (`ozbox-adopt-<fleet>`) that runs only fixed `ozbox` programs. `ozbox init` plans it after the key, as its own step with its own
-state, and applies it with the setup identity's **`OzBoxAdoptAdmin`** permission set (`infra/aws/adopt-admin-policy.json`: the
+state, and applies it with the setup identity (`OzBoxSetup`, which includes **`OzBoxAdoptAdmin`**, `infra/aws/adopt-admin-policy.json`: the
 document actions on `document/ozbox-adopt-*` only; it can neither send a command nor share a document). It is not part of the key
 module, whose `OzBoxKeyAdmin` set is KMS-only. Setup checks that permission before it plans, and a refusal never stops the key or
 the rest of setup. When it is applied, setup writes the policy for whoever runs `ozbox adopt-fleet-key` to
-`operator-adopt-policy.json` in the step's working folder and prints the path; an administrator attaches it to that sign-in and to
-nobody else. A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
+`operator-adopt-policy.json` in the step's working folder. Those three statements (`SendOnlyTheAdoptDocument`, `ToBoxesOzBoxManages`,
+`ReadACommandThatWasSent`) are also part of the daily operator policy, and **setup writes that whole policy on every run**, applied
+document step or not, to `operator-policy/<region>/operator-policy.json` in its working folder, and prints the path. Setup never applies it: it has
+no right over the operator's permissions, on purpose (an identity that could rewrite them could widen them). An account administrator
+replaces the daily role's policy with the file (Identity Center: Permission sets, the daily set, Inline policy). At about 8,500 characters it
+is longer than a managed policy may be (6,144), so it is an inline policy. If the config records the daily `profile`, setup also reads, as
+that profile, a Systems Manager command that does not exist: "not found" means the sign-in may ask, a refusal means its policy is from
+before the adopt statements, and setup prints those statements and the step. A test reads every AWS call out of the program's source and
+fails when the operator policy does not allow one (or it is not named as setup's). A test (`tests/init_module_identity_coverage.rs`) checks that every resource type in each module `init` applies is
 covered by the permission set that applies it.
 
 ## The box role's Session Manager policy, once per account (and what to run on an account that already has boxes)
@@ -234,16 +297,18 @@ or key), and, when a box uses them, `ozbox-box-parameters` (its own Parameter St
 `/ozbox`), `ozbox-box-fleet-key-<fleet>` (the fleet key, for this box's own secrets only), `ozbox-box-parameters-key` and
 `ozbox-box-session-logs`. `ozbox init` makes them (it needs the fleet key and, for session logs, `ozbox harden`, done first; run it
 again to add one), once, with
-the **setup identity** (it needs the `OzBoxPolicyAdmin` permission set, `infra/aws/box-policy-admin-policy.json`, with
-`${account_id}` replaced). Your **daily operator role** (`infra/aws/operator-policy.json`) may attach that one policy by ARN and
+the **setup identity** (`OzBoxSetup`, which includes `OzBoxPolicyAdmin`, `infra/aws/box-policy-admin-policy.json`). Your **daily operator role** (`infra/aws/operator-policy.json`) may attach that one policy by ARN and
 cannot create or change a policy, so it cannot widen what a box's role may do. A box cannot be created or upgraded before the
 policy exists; the plan says so.
 
 On an account that already has boxes (they carry AWS's `AmazonSSMManagedInstanceCore`):
 
-1. An administrator gives the setup identity `OzBoxPolicyAdmin` and re-applies `infra/aws/operator-policy.json` (it now allows
-   attaching only the new policy, reading it, and Instance Connect for the `ozbox-ingress` account).
-2. Run `ozbox init --profile <setup-profile>` and approve the "Session Manager policy" step.
+1. An administrator creates the `OzBoxSetup` permission set from `infra/aws/setup-policy.json` and assigns it to the person on the
+   account (the steps above), and re-applies `infra/aws/operator-policy.json` to the daily operator role (it now allows attaching
+   only the new policy, reading it, and Instance Connect for the `ozbox-ingress` account).
+2. Sign in as that profile and run `ozbox init --provider aws --profile <setup-profile>`; approve the state bucket (an older account has none, and it is the one step init needs) and the "Session Manager policy" step. When your configuration already names its subnet (`subnet_id` under `[aws]`),
+   init uses it: it checks the subnet is there, plans **no** network (a second one would bill a NAT gateway by the hour) and goes on. Answering no to any step other than the state bucket skips that step, says so and goes on to the next; the summary at the end lists what was applied, skipped and already in place. Init edits the config file `ozbox` reads
+   (`config.toml`, else `fleet.toml`), keeps its comments and every key, and never changes your daily `profile`: the profile you ran init with is recorded as `setup_profile`.
 3. For each box, either `ozbox upgrade <box>` (replaces the machine, swaps the attachment, pins your ingress key), or, without
    replacing the machine, swap the attachment (attach first, so Session Manager never drops):
 
@@ -279,7 +344,7 @@ On an account that already has boxes (they carry AWS's `AmazonSSMManagedInstance
 The issuer's two roles are `/obx/obx-<fleet>-issuer` and `/obx/obx-<fleet>-issuer-release`: the reserved role namespace (ADR 0040
 section 3.1), outside the `role/ozbox-*` rights of the daily operator role, which is also explicitly denied every IAM write on
 `role/obx/*` and `role/obx-*` (`infra/aws/operator-policy.json`). Re-apply that policy before the first `--issuer-package`. The setup
-identity's permission set (`infra/aws/key-admin-policy.json`) is denied changing a key tagged `ozbox-production` (its policy, grants
+identity's permission set (`infra/aws/setup-policy.json`, carrying the key statements of `infra/aws/key-admin-policy.json`) is denied changing a key tagged `ozbox-production` (its policy, grants
 and tags, deletion and disabling, and its alias `alias/ozbox-<fleet>-production`: no create, move or delete); only an account
 administrator can, and every such call is a CloudTrail event. **Changing the Production key later needs an administrator**: a
 label change, a change of its policy (for example adding `operator_role_arns`), `tofu destroy` of the issuer, and the alias

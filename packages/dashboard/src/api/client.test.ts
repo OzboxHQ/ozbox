@@ -166,3 +166,103 @@ describe('error bodies', () => {
     await expect(c.approvalRequests.deny('r1')).rejects.toMatchObject({ status: 403, code: 'not_allowed', message: 'only an owner decides this' });
   });
 });
+
+describe('the box list', () => {
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+
+  it('reads how old the list is and whether the server is reading it again', async () => {
+    const fetchImpl = (async () => json([{ spec: { name: 'dev' } }], 200, { 'X-Ozbox-Boxes-As-Of': '1800000000000', 'X-Ozbox-Boxes-Refreshing': '1' })) as unknown as typeof fetch;
+    const c = createApiClient({ token: 't', fetchImpl });
+    const v = await c.listBoxesView();
+    expect(v.boxes).toHaveLength(1);
+    expect(v).toMatchObject({ asOf: 1_800_000_000_000, refreshing: true, refreshFailed: false });
+    expect(await c.listBoxes()).toHaveLength(1);
+  });
+
+  it('reports a failed refresh, and no age when the server sent none', async () => {
+    const fetchImpl = (async () => json([], 200, { 'X-Ozbox-Boxes-Refresh-Failed': '1' })) as unknown as typeof fetch;
+    const v = await createApiClient({ token: 't', fetchImpl }).listBoxesView();
+    expect(v).toMatchObject({ asOf: null, refreshing: false, refreshFailed: true });
+  });
+
+  it('keeps waiting while the server reads the cloud for the first time, and shows no error meanwhile', async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return calls < 4 ? json({ code: 'warming', message: 'reading' }, 503) : json([{ spec: { name: 'dev' } }], 200, { 'X-Ozbox-Boxes-As-Of': '5' });
+    }) as unknown as typeof fetch;
+    const waits: number[] = [];
+    const c = createApiClient({ token: 't', fetchImpl, sleepImpl: async (ms) => { waits.push(ms); } });
+    const v = await c.listBoxesView();
+    expect(v.boxes).toHaveLength(1);
+    expect(calls).toBe(4);
+    expect(waits).toHaveLength(3);
+  });
+
+  it('gives up on a first read that never lands, with the server\'s own words', async () => {
+    const fetchImpl = (async () => json({ code: 'warming', message: 'reading' }, 503)) as unknown as typeof fetch;
+    let now = 0;
+    const c = createApiClient({ token: 't', fetchImpl, sleepImpl: async (ms) => { now += ms; }, nowImpl: () => now });
+    await expect(c.listBoxesView()).rejects.toMatchObject({ code: 'warming' });
+  });
+
+  it('does not retry a refusal that is not the warming answer', async () => {
+    let calls = 0;
+    const fetchImpl = (async () => { calls += 1; return json({ code: 'provider_error', message: 'no' }, 502); }) as unknown as typeof fetch;
+    const c = createApiClient({ token: 't', fetchImpl, sleepImpl: async () => {} });
+    await expect(c.listBoxesView()).rejects.toMatchObject({ code: 'provider_error' });
+    expect(calls).toBe(1);
+  });
+
+  it('stops waiting for the first read when the page is left', async () => {
+    const fetchImpl = (async () => json({ code: 'warming', message: 'reading' }, 503)) as unknown as typeof fetch;
+    const ctl = new AbortController();
+    const c = createApiClient({ token: 't', fetchImpl, sleepImpl: async () => { ctl.abort(); } });
+    await expect(c.listBoxesView(ctl.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('asking the boxes', () => {
+  it('asks only a few boxes at a time, so the calls that must not wait still get a connection', async () => {
+    let open = 0;
+    let peak = 0;
+    const gates: (() => void)[] = [];
+    const fetchImpl = (async () => {
+      open += 1;
+      peak = Math.max(peak, open);
+      await new Promise<void>((go) => gates.push(go));
+      open -= 1;
+      return new Response(JSON.stringify({ source: 'live', sample: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const c = createApiClient({ token: 't', fetchImpl });
+    const all = Promise.all(['a', 'b', 'c', 'd', 'e', 'f'].map((n) => c.metricsNow(n)));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(open).toBe(3);
+    while (gates.length > 0) {
+      gates.shift()?.();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await all;
+    expect(peak).toBe(3);
+  });
+
+  it('does not hold the info call behind them', async () => {
+    const gates: (() => void)[] = [];
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(url);
+      if (url.includes('/metrics/now')) await new Promise<void>((go) => gates.push(go));
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const c = createApiClient({ token: 't', fetchImpl });
+    const slow = ['a', 'b', 'c', 'd', 'e'].map((n) => c.metricsNow(n));
+    await c.info();
+    expect(urls).toContain('/v1/info');
+    for (let i = 0; i < 10; i += 1) {
+      gates.splice(0).forEach((g) => g());
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await Promise.all(slow);
+  });
+});

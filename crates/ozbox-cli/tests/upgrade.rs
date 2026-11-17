@@ -266,6 +266,15 @@ fn the_json_of_an_interrupted_upgrade_says_so_in_an_additive_field() -> TestResu
 }
 
 impl Env {
+    /// The sandbox's `latest` reports that it passed over these candidates.
+    fn mark_latest_skipped(&self, lines: &[&str]) -> TestResult {
+        let path = self.dir.path().join("state").join("state.json");
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        v["latest_skipped"] = serde_json::json!(lines);
+        std::fs::write(&path, serde_json::to_vec(&v)?)?;
+        Ok(())
+    }
+
     /// The sandbox's newest image reports that its release signature could not be verified.
     fn mark_images_unsigned(&self) -> TestResult {
         let path = self.dir.path().join("state").join("state.json");
@@ -307,6 +316,48 @@ fn an_image_that_could_not_be_verified_is_refused_unless_the_flag_names_it() -> 
     Ok(())
 }
 
+const SKIP_LINE: &str = "fake-image-9 (release 9.9.9): its release was never published";
+
+#[test]
+fn the_plan_names_each_candidate_latest_passed_over_and_an_explicit_image_has_none() -> TestResult {
+    let e = Env::new()?;
+    e.create("dev", &[]);
+    e.mark_latest_skipped(&[SKIP_LINE])?;
+    e.cmd()
+        .args(["upgrade", "dev", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Passed over while choosing the newest image: {SKIP_LINE}"
+        )));
+    // naming the image skips the lookup altogether: nothing is passed over
+    e.cmd()
+        .args(["upgrade", "dev", "--image", "fake-image-3", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Passed over").not());
+    Ok(())
+}
+
+#[test]
+fn when_no_image_verifies_the_refusal_names_what_was_passed_over_and_both_ways_forward(
+) -> TestResult {
+    let e = Env::new()?;
+    e.create("dev", &[]);
+    e.mark_images_unsigned()?;
+    e.mark_latest_skipped(&[SKIP_LINE])?;
+    e.cmd()
+        .args(["upgrade", "dev", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains(SKIP_LINE)
+                .and(predicate::str::contains("--image <id>"))
+                .and(predicate::str::contains("--allow-unverified-image")),
+        );
+    Ok(())
+}
+
 #[test]
 fn the_final_output_says_exactly_what_to_do_about_backup_credentials() -> TestResult {
     let e = Env::new()?;
@@ -316,9 +367,12 @@ fn the_final_output_says_exactly_what_to_do_about_backup_credentials() -> TestRe
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("Send credentials")
-                .and(predicate::str::contains("NOT restored"))
-                .and(predicate::str::contains("note: Backups:")),
+            // the plan says what an upgrade does to backups, and the command that puts credentials back if they stop
+            predicate::str::contains("note: Backups:")
+                .and(predicate::str::contains("ozbox backup credentials"))
+                .and(predicate::str::contains("STOP"))
+                // a box that reports no repository is not failed for it, and the report says there was nothing to verify
+                .and(predicate::str::contains("nothing to verify")),
         );
     let out = e
         .cmd()

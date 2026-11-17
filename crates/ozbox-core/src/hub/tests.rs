@@ -4,11 +4,14 @@ use std::collections::BTreeMap;
 
 use super::engine::{Assign, Hub, HubError, HubState, RosterEntry};
 use super::mem::{MemTransport, TestKey, TestRoster, TestSealer};
-use super::refusal::{refuse_production, KeyDeclaration, CODE_PRODUCTION};
+use super::refusal::{
+    refuse_production, KeyDeclaration, CODE_PRODUCTION, CODE_VALUE_IN_DECLARATION,
+};
 use super::wire::{Ext, Hop, Kind, Transport, ENVELOPE_TAG, PROFILE};
 use super::worker::{WorkerEnd, WorkerState};
 use crate::channel::wire::{
-    hex, seal_and_sign, Crypto, Envelope, Sealed, Signer, WireError as ChannelError, VERSION,
+    hex, seal_and_sign, Crypto, Envelope, Sealed, Sealer, Signer, WireError as ChannelError,
+    VERSION,
 };
 
 const HUB_FP: &str = "aa00000000000000000000000000000000000000000000000000000000000001";
@@ -718,6 +721,157 @@ fn key_delivery_is_not_supported_and_the_worker_says_so() {
         hs.peers["worker-1"].report.status["-"]["-"].state,
         "unsupported"
     );
+}
+
+// ---- sentinels: a value the channel could carry is never kept, reported or audited ---------------------------------
+
+/// A value no test or code path makes up by accident.
+const SENTINEL: &str = "SENTINEL-hub-value-7f3c9a0e51d2";
+
+/// Whether the state, as it is written to disk, holds the needle as text or as the hex a held body is kept in.
+fn state_holds(json: &str, needle: &str) -> bool {
+    json.contains(needle) || json.contains(&hex(needle.as_bytes()))
+}
+
+fn worker_keeps(ws: &WorkerState, needle: &str) -> bool {
+    state_holds(&serde_json::to_string(ws).unwrap(), needle)
+}
+
+fn hub_keeps(hs: &HubState, needle: &str) -> bool {
+    state_holds(&serde_json::to_string(hs).unwrap(), needle)
+}
+
+#[test]
+fn a_delivered_key_value_is_never_kept_reported_or_audited_by_the_worker_even_while_it_waits_for_a_gap(
+) {
+    // A taken-over hub sends a value. The worker builds no key delivery in this release, so it must keep nothing of it: not in
+    // its state while the message waits for an earlier one (state is a file on the worker's disk), not after, not in its audit
+    // and not in what it reports back.
+    let f = fx();
+    let (hub, w) = (f.hub(), f.worker());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    ws.take_audit();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "env": "staging",
+        "values": { "API_KEY": SENTINEL },
+    }))
+    .unwrap();
+    claim_seq(&mut hs);
+    claim_seq(&mut hs);
+    // number 2 first: it is held until number 1 arrives
+    let held = f.hub_message(&hs, &ws, "keys.deliver", 2, 1, 100, &body);
+    f.net.send("worker-1", held).unwrap();
+    w.poll(&mut ws, 2);
+    assert!(
+        !worker_keeps(&ws, SENTINEL),
+        "a key value waiting for a gap is in the worker's state"
+    );
+    let first = f.hub_message(&hs, &ws, "keys.deliver", 1, 1, 100, &body);
+    f.net.send("worker-1", first).unwrap();
+    w.poll(&mut ws, 3);
+    assert!(
+        !worker_keeps(&ws, SENTINEL),
+        "a key value is in the worker's state"
+    );
+    let audit = ws.take_audit();
+    assert!(audit.iter().any(|a| a.action == "worker.unsupported"));
+    assert!(audit.iter().all(|a| !a.detail.contains(SENTINEL)));
+    // what the worker said back never echoes it, on the wire or at the hub
+    hub.poll(&mut hs, 4);
+    assert!(
+        !hub_keeps(&hs, SENTINEL),
+        "a key value reached the hub's state"
+    );
+    assert!(hs.take_audit().iter().all(|a| !a.detail.contains(SENTINEL)));
+    for m in f
+        .net
+        .capture
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.envelope.from == "worker-1")
+    {
+        let plain = f
+            .hub_sealer
+            .open(&m.envelope.aad(&PROFILE), &m.envelope.body)
+            .unwrap_or_default();
+        assert!(!String::from_utf8_lossy(&plain).contains(SENTINEL));
+    }
+}
+
+#[test]
+fn an_assignment_that_smuggles_a_value_beside_the_key_names_is_refused_and_nothing_of_it_is_kept() {
+    // The declaration is names only. A body that puts a value next to them (a taken-over hub, or a later sender's mistake) is
+    // refused before it is held or applied, so the value is never on the worker's disk, and the hub hears it was refused.
+    let f = fx();
+    let (hub, w) = (f.hub(), f.worker());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    ws.take_audit();
+    let mut v = serde_json::to_value(assign("f7", decl("staging", &["API_KEY"]))).unwrap();
+    v["keys"]["values"] = serde_json::json!({ "API_KEY": SENTINEL });
+    let body = serde_json::to_vec(&v).unwrap();
+    claim_seq(&mut hs);
+    claim_seq(&mut hs);
+    let held = f.hub_message(&hs, &ws, "task.assign", 2, 1, 100, &body);
+    f.net.send("worker-1", held).unwrap();
+    w.poll(&mut ws, 2);
+    assert!(
+        !worker_keeps(&ws, SENTINEL),
+        "a smuggled value waiting for a gap is in the worker's state"
+    );
+    let first = f.hub_message(&hs, &ws, "task.assign", 1, 1, 100, &body);
+    f.net.send("worker-1", first).unwrap();
+    w.poll(&mut ws, 3);
+    assert!(
+        ws.tasks.is_empty(),
+        "an assignment carrying a value is not accepted"
+    );
+    assert!(!worker_keeps(&ws, SENTINEL));
+    let audit = ws.take_audit();
+    assert!(audit.iter().all(|a| !a.detail.contains(SENTINEL)));
+    assert!(audit
+        .iter()
+        .any(|a| a.detail.contains(CODE_VALUE_IN_DECLARATION)));
+    hub.poll(&mut hs, 4);
+    assert!(!hub_keeps(&hs, SENTINEL));
+}
+
+#[test]
+fn a_refused_production_declaration_leaves_its_key_names_nowhere_but_the_hubs_own_refusal() {
+    // the names in a refused declaration are not values, but they say what Production holds: neither end keeps them
+    let f = fx();
+    let (hub, w) = (f.hub(), f.worker());
+    let (mut hs, mut ws) = (f.hub_state(), f.worker_state());
+    connect(&f, &mut hs, &mut ws, 1);
+    let name = "SENTINEL_PROD_NAME_51D2";
+    assert!(hub
+        .assign(
+            &mut hs,
+            "worker-1",
+            &assign("f1", decl("production", &[name])),
+            5
+        )
+        .is_err());
+    assert!(!hub_keeps(&hs, name));
+    assert!(hs.take_audit().iter().all(|a| !a.detail.contains(name)));
+    // past the hub, by hand: the worker refuses it and keeps nothing of it
+    claim_seq(&mut hs);
+    let m = f.hub_message(
+        &hs,
+        &ws,
+        "task.assign",
+        1,
+        1,
+        100,
+        &serde_json::to_vec(&assign("f2", decl("production", &[name]))).unwrap(),
+    );
+    f.net.send("worker-1", m).unwrap();
+    w.poll(&mut ws, 6);
+    assert!(ws.tasks.is_empty());
+    assert!(!worker_keeps(&ws, name));
+    assert!(ws.take_audit().iter().all(|a| !a.detail.contains(name)));
 }
 
 // ---- incarnations, expiry and the session (ADR 0042) --------------------------------------------------------

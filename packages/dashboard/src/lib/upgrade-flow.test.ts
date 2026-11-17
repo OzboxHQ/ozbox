@@ -10,7 +10,7 @@ import type { ApplyResponse, PlanResponse, SelfTest } from '../api/types';
 import { en } from '../i18n/en';
 import { isMachineMissing, stateLabel } from './format';
 import { t } from './i18n';
-import { applyRequest, canConfirm, flowReducer, IMAGE_UNVERIFIED_CODE, idle, ops, SECRETS_STORE_LOST_CODE } from './plan-flow';
+import { applyRequest, canConfirm, flowReducer, IMAGE_UNVERIFIED_CODE, idle, ops, SECRETS_KEY_HELD_CODE, SECRETS_STORE_LOST_CODE } from './plan-flow';
 import { followUpgrade } from './upgrade-follow';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -224,6 +224,10 @@ describe('an upgrade that would start a new secrets store', () => {
     expect(bodies[0]).toEqual({ operation: { op: 'upgrade', name: 'main', image: 'ami-x' }, accept_new_secrets_store: true });
     expect(bodies[1]).toEqual({ operation: { op: 'upgrade', name: 'main', image: 'ami-x' }, allow_unverified_image: true, accept_new_secrets_store: true });
     expect(bodies[2]).toEqual({ operation: { op: 'upgrade', name: 'main', image: 'ami-x' } });
+  });
+
+  it('also offers the acceptance when a copy of the store key is held (the server code is secrets_key_held)', () => {
+    expect(SECRETS_KEY_HELD_CODE).toBe('secrets_key_held');
   });
 
   it('is asked again from the refusal, and the acceptance lives only in the planning it was given for', () => {

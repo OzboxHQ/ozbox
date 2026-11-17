@@ -25,6 +25,7 @@ pub struct ChatConfig {
     pub whatsapp: bool,
 }
 
+pub mod code;
 pub mod command;
 pub mod gateway;
 pub mod links;

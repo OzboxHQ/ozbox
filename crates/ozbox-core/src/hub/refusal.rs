@@ -59,6 +59,12 @@ impl std::fmt::Display for Refusal {
 
 pub const CODE_PRODUCTION: &str = "production-to-worker-refused";
 pub const CODE_INVALID: &str = "declaration-invalid";
+/// A declaration that carries anything beside its environment and names (a value, by the look of it). Refused by the worker's
+/// screen before the body is held or applied, so the content is never written to the worker's state.
+pub const CODE_VALUE_IN_DECLARATION: &str = "value-in-declaration";
+/// A kind this release builds no use for (key delivery, pins, the laptop relay). Refused by the worker's screen, so its body is
+/// never held, applied or kept.
+pub const CODE_UNSUPPORTED: &str = "unsupported-kind";
 
 /// Refuse Production. Takes the declaration and nothing else: there is no second argument that relaxes it.
 pub fn refuse_production(d: &KeyDeclaration) -> Result<(), Refusal> {

@@ -111,7 +111,7 @@ test('a delivery to a trigger starts a run whose own end is read, not only the d
   }
 });
 
-test('a chat app does not stop a run: /stop from Telegram is refused with a link and the run goes on', async ({ request }) => {
+test('a chat app does not stop a run: /stop from Telegram is refused and the run goes on', async ({ request }) => {
   expect((await call(request, 'PUT', '/v1/secrets/telegram-bot-token', { value: '123:R4_PLAYWRIGHT_SENTINEL' })).ok()).toBe(true);
   const getSettings = async () => (await json<{ settings: { apps: { telegram: { enabled: boolean } }; [k: string]: unknown } }>(await call(request, 'GET', '/v1/settings'))).settings;
   const s = await getSettings();
@@ -120,24 +120,27 @@ test('a chat app does not stop a run: /stop from Telegram is refused with a link
   const sent = async () => (await json<{ sent: { chat_id: number; text: string; buttons: string[] }[] }>(await call(request, 'GET', '/v1/demo/telegram/sent'))).sent.filter((m) => m.chat_id === CHAT);
   let taskId = '';
   try {
-    const { code } = await json<{ code: string }>(await call(request, 'POST', '/v1/apps/telegram/pairing', {}));
-    await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: code, name: 'R4 phone' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('Paired')), { timeout: 20_000 }).toBe(true);
-    await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: `/new ${BOX} r4stop` });
-    await expect.poll(async () => (await sent()).some((m) => /Started t\d+ on charlie/.test(m.text)), { timeout: 20_000 }).toBe(true);
-    taskId = /Started (t\d+) on charlie/.exec((await sent()).find((m) => /Started t\d+ on charlie/.test(m.text))?.text ?? '')?.[1] ?? '';
+    // a chat that is on the list (linked the old way: told things, reads), and a run started from the dashboard's own chat
+    await call(request, 'POST', '/v1/demo/telegram/legacy-chat', { chat_id: CHAT, name: 'R4 phone' });
+    // the dashboard chat answers later: the run it started is the one the chat now follows
+    await call(request, 'POST', '/v1/chat/messages', { text: `/new ${BOX} r4stop` });
+    await expect
+      .poll(async () => {
+        const o = await json<{ bound: { kind: string; id?: string } | null }>(await call(request, 'GET', '/v1/chat'));
+        taskId = o.bound?.kind === 'task' ? (o.bound.id ?? '') : '';
+        return taskId;
+      }, { timeout: 20_000 })
+      .toMatch(/^t\d+$/);
     expect(taskId).not.toBe('');
     await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: '/stop' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('is stopped in the dashboard, not from a chat app')), { timeout: 20_000 }).toBe(true);
+    await expect.poll(async () => (await sent()).some((m) => m.text.includes('run is stopped in the dashboard')), { timeout: 20_000 }).toBe(true);
     await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: '/budget +5' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('cap is raised in the dashboard')), { timeout: 20_000 }).toBe(true);
-    // no button anywhere, no word of /budget for a chat app, and no link that is only a path (this server has no public address)
+    await expect.poll(async () => (await sent()).some((m) => m.text.includes('spending limit is raised in the dashboard')), { timeout: 20_000 }).toBe(true);
+    // no button anywhere, and no link that is only a path (this server has no public address)
     await call(request, 'POST', '/v1/demo/telegram/message', { chat_id: CHAT, text: '/help' });
-    await expect.poll(async () => (await sent()).some((m) => m.text.includes('cannot approve, deny, stop')), { timeout: 20_000 }).toBe(true);
+    await expect.poll(async () => (await sent()).some((m) => m.text.includes('never approves, denies, stops a run')), { timeout: 20_000 }).toBe(true);
     expect((await sent()).every((m) => m.buttons.length === 0)).toBe(true);
-    expect((await sent()).every((m) => !m.text.includes('/budget'))).toBe(true);
     expect((await sent()).every((m) => !/Open it there: \//.test(m.text))).toBe(true);
-    expect((await sent()).some((m) => m.text.includes('Open the dashboard on the computer that runs it.'))).toBe(true);
     const t = (await json<{ items: TaskRow[] }>(await call(request, 'GET', '/v1/tasks'))).items.find((x) => x.id === taskId);
     expect(t?.state).not.toBe('cancelled');
   } finally {

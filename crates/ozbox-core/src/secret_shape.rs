@@ -145,7 +145,7 @@ mod tests {
             concat!("key s", "k-abcdefghijklmnopqrstuvwx"),
             concat!("gh", "p_abcdefghijklmnopqrstuvwxyz0123456789"),
             concat!("AK", "IAABCDEFGHIJKLMNOP"),
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc",
+            concat!("-----BEGIN OPENSSH PRIV", "ATE ", "KEY-----\nabc"),
             concat!("pass", "word = hunter2hunter2"),
             concat!("API_", "KEY: Zk3Jd9s0aLkq"),
             concat!("tok", "en=\"abcDEF123456\""),

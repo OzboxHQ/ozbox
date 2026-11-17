@@ -221,12 +221,18 @@ source "amazon-ebs" "ozbox" {
   security_group_id           = var.aws_security_group_id
   iam_instance_profile        = var.aws_instance_profile != "" ? var.aws_instance_profile : null
 
+  # With no existing profile, Packer makes a temporary one. Its policy document needs a Statement block (a bare
+  # Effect/Action/Resource does not parse). Least privilege: only what Session Manager needs (the intent of
+  # AmazonSSMManagedInstanceCore's Session Manager part) and the one S3 read the SSM agent makes; no other service.
   dynamic "temporary_iam_instance_profile_policy_document" {
     for_each = var.aws_instance_profile == "" ? [1] : []
     content {
-      Effect   = "Allow"
-      Action   = ["ssm:UpdateInstanceInformation", "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel", "s3:GetEncryptionConfiguration"]
-      Resource = ["*"]
+      Version = "2012-10-17"
+      Statement {
+        Effect   = "Allow"
+        Action   = ["ssm:UpdateInstanceInformation", "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel", "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel", "s3:GetEncryptionConfiguration"]
+        Resource = ["*"]
+      }
     }
   }
 

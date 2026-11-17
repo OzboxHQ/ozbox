@@ -122,10 +122,10 @@ write_files:
       # ozboxd's own state (metrics, file service, checkpoints, audit) lives here; ozboxd runs as the box user and cannot
       # create it under the root-owned /work.
       install -d -m 0750 -o ozbox -g ozbox /work/.ozbox
-      # Starter dotfiles only on first use of this disk.
+      # Starter dotfiles and Claude Code's second-layer setting, only on first use of this disk, and written AS THE BOX USER, never
+      # as root: no-clobber (set -C refuses an existing file and a dangling link), no link followed, `.claude` skipped if a link.
       if [ ! -e /work/home/ozbox/.profile ]; then
-        cp -n /etc/skel/.profile /etc/skel/.bashrc /etc/skel/.bash_logout /work/home/ozbox/ 2>/dev/null || true
-        chown -R ozbox:ozbox /work/home/ozbox
+        runuser -u ozbox -- sh -c 'set -C; umask 022; h=/work/home/ozbox; for f in .profile .bashrc .bash_logout; do [ -e $h/$f ] || [ -L $h/$f ] || cp /etc/skel/$f $h/$f; done; [ -L $h/.claude ] || { mkdir -p $h/.claude && s=$h/.claude/settings.json && { [ -e $s ] || [ -L $s ] || echo "{\"disableSkillShellExecution\": true}" > $s; }; }' || true
       fi
 
   # (comment lines are dropped from the helper scripts here: the user-data limit is 16 KB compressed)
@@ -212,6 +212,12 @@ write_files:
       d /run/ozbox-admin          0755 root root -
       d /run/ozbox-admin/requests 1770 root ozbox -
       d /run/ozbox-admin/results  0755 root root -
+
+  - path: /etc/claude-code/managed-settings.json
+    permissions: "0644"
+    owner: root:root
+    content: |
+      {"disableSkillShellExecution": true}
 
   - path: /etc/systemd/system/ozbox-admin.path
     permissions: "0644"
@@ -464,23 +470,33 @@ write_files:
       [Unit]
       Description=Hand the backup repository credentials the box daemon was given to the secrets service
       After=ozbox-secrets.service
+      RequiresMountsFor=/work
       StartLimitIntervalSec=0
       ConditionPathExists=/usr/local/bin/ozboxd
 
       # Takes no command or path from a request; hands checked settings to the secrets service (no credentials file).
+      # It also keeps the record in /work/ozbox-backup, the one place on /work its sandbox may write (made before the
+      # sandbox starts; the `-` only covers that folder not being there yet). RequiresMountsFor=/work holds it back until
+      # /work is mounted, where the record lives. At boot it waits up to 90 s for the secrets service: hence the limit.
       [Service]
       Type=oneshot
+      TimeoutStartSec=300
+      ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup
       ExecStart=/usr/local/bin/ozboxd backup-root
       User=root
       NoNewPrivileges=true
       PrivateTmp=true
       ProtectHome=true
       ProtectSystem=strict
-      ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets
+      ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets -/work/ozbox-backup
       ProtectKernelModules=true
       ProtectKernelLogs=true
       ProtectClock=true
       LockPersonality=true
+
+      # Also at every boot: brings the record up to date.
+      [Install]
+      WantedBy=multi-user.target
 
   - path: /etc/apt/apt.conf.d/20auto-upgrades
     permissions: "0644"
@@ -552,6 +568,7 @@ runcmd:
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, ozbox-tools.path]
   - [systemctl, enable, --now, ozbox-backup.path]
+  - [systemctl, enable, ozbox-backup.service]
   - [systemctl, enable, --now, ozbox-admin.path]
   - [bash, /usr/local/sbin/ozbox-secrets-setup.sh, "${box_name}", "${secrets_kms_key_id}", "${secrets_kms_region}", "${approval_key}"]
   # The task router (ADR 0044) gets a user of its own, so the channel's keys, state and audit chain are out of an agent's reach (a failure must not stop the boot).

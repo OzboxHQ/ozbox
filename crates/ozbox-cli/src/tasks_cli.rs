@@ -157,6 +157,8 @@ impl Transport for CommandTransport<'_> {
             cwd: None,
             env: Default::default(),
             stdin: Some(serde_json::to_vec(outbound).map_err(|e| e.to_string())?),
+            // `run_limited` below is what bounds this call, on every runner
+            timeout_secs: None,
         };
         let out = self
             .runner

@@ -72,15 +72,21 @@ pub fn call(
     }
 }
 
-/// Whether a secret of this name exists (never its value).
-pub fn exists(box_socket: &Path, name: &str) -> bool {
+/// Whether a secret of this name exists (never its value). `Err` when the service cannot be asked (it is not up yet, or
+/// does not answer): a missing secret and a service that is not ready are different things, and a caller must not report
+/// the second as the first.
+pub fn exists_checked(box_socket: &Path, name: &str) -> std::result::Result<bool, String> {
     call(
         box_socket,
         &json!({"op": "exists", "name": name}),
         Some(Duration::from_secs(10)),
     )
     .map(|v| v["flag"].as_bool() == Some(true))
-    .unwrap_or(false)
+}
+
+/// Whether a secret of this name exists (never its value); `false` also when the service cannot be asked.
+pub fn exists(box_socket: &Path, name: &str) -> bool {
+    exists_checked(box_socket, name).unwrap_or(false)
 }
 
 /// Runs a restic command through the service. The environment of `cmd` is ignored on purpose: the credentials are the
@@ -91,12 +97,16 @@ pub struct ServiceRunner {
 
 impl CommandRunner for ServiceRunner {
     fn run(&self, cmd: &CommandSpec) -> Result<Output> {
-        let v = call(
-            &self.socket,
-            &json!({"op": "restic", "args": cmd.args}),
-            None,
-        )
-        .map_err(Error::Provider)?;
+        // With a deadline the service kills restic at it; this side waits a little longer than that for the answer, so a
+        // service that is gone cannot hold the caller for ever either.
+        let (req, wait) = match cmd.timeout_secs {
+            Some(s) => (
+                json!({"op": "restic", "args": cmd.args, "timeout_secs": s}),
+                Some(Duration::from_secs(s + 15)),
+            ),
+            None => (json!({"op": "restic", "args": cmd.args}), None),
+        };
+        let v = call(&self.socket, &req, wait).map_err(Error::Provider)?;
         Ok(Output {
             status: v["status"].as_i64().and_then(|c| i32::try_from(c).ok()),
             stdout: v["stdout"].as_str().unwrap_or("").to_string(),

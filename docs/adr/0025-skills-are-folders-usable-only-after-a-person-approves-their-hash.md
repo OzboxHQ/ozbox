@@ -24,3 +24,7 @@ changed after they read it, is the supply-chain failure. Hashing the files makes
 **Cost.** Every edit to a skill needs a new review, which is the point and also friction for someone iterating; the library keeps
 the working copy apart from what is installed. Signing by a publisher (so a team can trust an author instead of reading every
 file) is not part of this decision.
+
+**Amended by [0051](0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again.md).**
+A person can also put an approved skill on a box's own disk, where its coding agents read it, and add skills of their own from the
+page. Points 1 to 5 still hold; the file rules now also refuse hidden and direction-changing characters.

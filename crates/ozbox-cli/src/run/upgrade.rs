@@ -61,6 +61,10 @@ pub struct Report {
     /// `/work` and come back by themselves, but a service that is not running after the upgrade is set up again from the
     /// passwords and the tunnel token kept in this computer's secret store. Additive.
     pub services: Step,
+    /// The hosted dashboard (`ozbox dashboard install`): its tunnel token and install settings are kept on this computer, and an
+    /// upgrade puts it back from them. `done` when it runs again, `failed` when it needs you (the step says the one command),
+    /// `skipped` when no dashboard is kept for this box. Additive.
+    pub dashboard: Step,
     /// The box memory guard (ADR 0045): swap in compressed RAM, protected scores for the box's own services and soft limits for
     /// terminals, put on the box live, with nothing restarted. Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +81,13 @@ pub struct Report {
     /// [`review_signers`]). Additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvers: Option<Step>,
+    /// The copy of the old system disk the upgrade kept because the store's key could not be shown to survive (see
+    /// [`OldDisk`]), or the statement that none was. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_system_disk: Option<Step>,
+    /// The id of that copy (an EBS snapshot on AWS). Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_system_disk_snapshot: Option<String>,
 }
 
 /// What an upgrade does to the box's secrets store. Its system disk is replaced and `/work` is kept, so the store's copy
@@ -106,6 +117,12 @@ pub enum StoreFate {
     /// machine configured for KMS over a store the file key still seals would never open it. Never accepted: finish or
     /// cancel the move first.
     MovingKey,
+    /// The store cannot be opened where it is, but a copy of its file key IS held (this computer's keychain or the box's vault),
+    /// so the old store is not lost: setting it aside (renamed, never deleted) leaves the key where it is, and the store can be
+    /// reopened later (see "Recovering an old secrets store" in the keeping-boxes-healthy use case). Refused without
+    /// `--accept-new-secrets-store`; with it the upgrade sets the old store aside and starts a new one on the fleet's key, which is the
+    /// only path that works from here (`adopt-fleet-key` refuses a box whose service is not ready). Additive.
+    KeyHeld,
 }
 
 /// The `Err` a root-facts reader gives when the box answered in a shape this program does not know.
@@ -119,7 +136,7 @@ pub struct StoreCheck {
 }
 
 /// What a person must enter again when a box starts a new secrets store.
-const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials and the web IDE's tunnel token when this computer holds them";
+const NEW_STORE_LOSES: &str = "the tunnel tokens, the backup repository credentials, project keys imported with `ozbox secrets import`, model and channel keys saved in the dashboard, laptop keys enrolled after the box was made, and the record that a passkey is enrolled (the dashboard asks for one again). Kept: /work, the box's own secrets in its vault, and the approval key pinned when the box was made. This upgrade puts back, from this computer, the backup credentials, the web IDE's tunnel token and the hosted dashboard (its install settings and tunnel token) when this computer holds them. If it does not hold the backup credentials, backups on the box STOP: the self-test fails and the report gives the command that sends them (`ozbox backup credentials <box>`). The dashboard's token can need your approval first, and the report then says the one command";
 
 /// What the box's ROOT says about its store, read through the cloud's root channel (AWS Systems Manager). `Err` is why it
 /// could not be read. Only an AWS box has one.
@@ -186,6 +203,93 @@ fn store_fate_from_root(
     }
 }
 
+/// Whether the box's root says its store is sealed by a file key that is gone, under a configuration for another kind of key:
+/// nothing on the box can open it (the service's `kind-mismatch` and `no-escrow` states, and the same facts when an older program
+/// recorded no state for them). Read from what root reports, so it holds whichever program wrote the state.
+fn store_cannot_open(f: &crate::secrets_adopt_facts::Facts) -> bool {
+    use crate::secrets_adopt_facts::Kek;
+    f.service_no_escrow
+        || (!f.service_ready
+            && f.store_kek == Kek::File
+            && !f.key_file
+            && (f.settings_key.is_some() || f.service_kek == Kek::Kms))
+}
+
+/// The store's fate for a box whose record carries the fleet's KMS key (`arn`): "kept" only when the box's root says the service is
+/// ready on that key and the store and its copy on `/work` are sealed by it. `facts` is `None` when there is no root channel
+/// (the label alone never decides) and `Some(Err)` when the box could not be asked.
+fn kms_labelled_store_check(
+    name: &str,
+    arn: &str,
+    facts: Option<std::result::Result<crate::secrets_adopt_facts::Facts, String>>,
+    laptop_escrow: bool,
+) -> StoreCheck {
+    use crate::secrets_adopt_facts::Kek;
+    let check = |fate, detail: String| StoreCheck { fate, detail };
+    let unknown =
+        |key: &str, why: &str| check(StoreFate::Unknown, t(key, &[("box", name), ("why", why)]));
+    let f = match facts {
+        None => return unknown("upgrade.store_kms_no_root", ""),
+        Some(Err(why)) if why == ROOT_OLDER => {
+            return check(
+                StoreFate::Unknown,
+                t("upgrade.store_root_older", &[("box", name)]),
+            )
+        }
+        Some(Err(why)) => return unknown("upgrade.store_kms_unasked", &why),
+        Some(Ok(f)) => f,
+    };
+    if store_cannot_open(&f) {
+        // "no copy held anywhere" is a claim about two places the facts name: this computer's keychain and the box's vault.
+        // Either holding the key means the store is NOT lost, so it is never called lost and never offered to be set aside.
+        let held = if laptop_escrow {
+            Some("in this computer's keychain")
+        } else if f.service_escrow == Some(true) {
+            Some("in the box's vault")
+        } else {
+            None
+        };
+        if let Some(held) = held {
+            return check(
+                StoreFate::KeyHeld,
+                t(
+                    "upgrade.store_kms_key_held",
+                    &[("box", name), ("held", held)],
+                ),
+            );
+        }
+        return check(
+            StoreFate::AlreadyLost,
+            t("upgrade.store_kms_unopenable", &[("box", name)]),
+        );
+    }
+    if !f.service_ready {
+        return unknown("upgrade.store_kms_not_ready", "");
+    }
+    if f.store_kek == Kek::File || f.persist_kek == Kek::File || f.service_kek == Kek::File {
+        return check(
+            StoreFate::Lost,
+            t(
+                "upgrade.store_kms_file_sealed",
+                &[("box", name), ("lost", NEW_STORE_LOSES)],
+            ),
+        );
+    }
+    let on_this_key = f.service_kek == Kek::Kms
+        && f.store_kek == Kek::Kms
+        && f.persist_kek == Kek::Kms
+        && f.settings_key.as_deref() == Some(arn)
+        && !f.busy
+        && !f.cancelled;
+    if on_this_key {
+        return check(
+            StoreFate::Kept,
+            t("upgrade.store_kms", &[("box", name), ("key", arn)]),
+        );
+    }
+    unknown("upgrade.store_kms_unconfirmed", "")
+}
+
 /// Ask the box, before anything is replaced, where its secrets store's key is (see `secrets_state`). On AWS (`root` is
 /// `Some`) the answer comes from the box's root through Systems Manager, and when that cannot answer the store is "unknown",
 /// never "kept"; elsewhere it is the box user's SSH answer, which is all there is. `laptop_escrow` is whether this computer's
@@ -213,13 +317,6 @@ pub fn store_check(
             t("upgrade.store_moving", &[("box", name)]),
         );
     }
-    // a box made with the fleet's KMS key carries it in its labels, and its upgrade keeps that key (the AWS adapter)
-    if let Some(arn) = rec.spec.labels.get(ozbox_provider_aws::SECRETS_KEY_LABEL) {
-        return check(
-            StoreFate::Kept,
-            t("upgrade.store_kms", &[("box", name), ("key", arn)]),
-        );
-    }
     if rec.state != BoxState::Running {
         return check(
             StoreFate::Unknown,
@@ -228,6 +325,13 @@ pub fn store_check(
                 &[("box", name), ("state", &rec.state.to_string())],
             ),
         );
+    }
+    // A box made with, or moved to, the fleet's KMS key carries it in its labels, and its upgrade gives the new machine that key.
+    // The label says which key the NEW machine gets; it does not say that the store opens under it. A store sealed by a file key
+    // that is gone, or a service that is not ready, behind a correct label is what a person was told was "kept" on 2026-11-16, so
+    // the verdict is read from the box's root, never from the label alone.
+    if let Some(arn) = rec.spec.labels.get(ozbox_provider_aws::SECRETS_KEY_LABEL) {
+        return kms_labelled_store_check(name, arn, root.map(|r| r(rec)), laptop_escrow);
     }
     if let Some(root) = root {
         return match root(rec) {
@@ -264,7 +368,7 @@ pub fn store_check(
             StoreFate::NotSaid,
             t("upgrade.store_not_said", &[("box", name)]),
         ),
-        Ok((Some(st), _)) if st.is_no_escrow() => check(
+        Ok((Some(st), _)) if st.is_unopenable() => check(
             StoreFate::AlreadyLost,
             t("upgrade.store_already_lost", &[("box", name)]),
         ),
@@ -308,6 +412,7 @@ pub fn store_check(
 pub fn store_refusal_code(fate: StoreFate) -> &'static str {
     match fate {
         StoreFate::MovingKey => "secrets_key_moving",
+        StoreFate::KeyHeld => "secrets_key_held",
         _ => "secrets_store_lost",
     }
 }
@@ -382,6 +487,195 @@ pub fn fleet_key_gate(
     }
 }
 
+/// What an upgrade does about a copy of the OLD system disk, which holds the store's key when that key is a file. The key
+/// is destroyed with the disk, so when the plan cannot show that the store's key survives, a copy is kept by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldDisk {
+    /// Keep a copy when the store's fate calls for it (this provider can, and the person did not opt out).
+    Keep,
+    /// The person turned it off (`--no-pre-upgrade-snapshot`).
+    OptedOut,
+    /// This provider cannot keep one.
+    NotOffered,
+    /// The store is known to be empty (`--use-fleet-key`): there is no key worth keeping.
+    StoreEmpty,
+}
+
+impl OldDisk {
+    /// The choice for one upgrade: only the AWS provider keeps a copy of a system disk.
+    pub fn choose(provider_id: &str, opted_out: bool, store_empty: bool) -> Self {
+        if store_empty {
+            Self::StoreEmpty
+        } else if opted_out {
+            Self::OptedOut
+        } else if provider_id == ozbox_provider_aws::PROVIDER_ID {
+            Self::Keep
+        } else {
+            Self::NotOffered
+        }
+    }
+}
+
+/// Whether the plan takes a copy of the old system disk: the store's key is a file on that disk, or ozbox cannot tell where
+/// it is. A store that is kept (by KMS, escrow or this computer's keychain), or already lost, needs none.
+pub fn old_disk_copy_wanted(fate: StoreFate, old_disk: OldDisk) -> bool {
+    old_disk == OldDisk::Keep && matches!(fate, StoreFate::Lost | StoreFate::Unknown)
+}
+
+/// The block printed BEFORE the confirmation (never only a plan note) when the upgrade cannot keep the store: what is lost,
+/// what is kept of the old disk and what to run afterwards. `None` when nothing is lost by this upgrade or the store is empty.
+pub fn store_loss_warning(check: &StoreCheck, box_name: &str, old_disk: OldDisk) -> Option<String> {
+    let head = match (check.fate, old_disk) {
+        (_, OldDisk::StoreEmpty) => return None,
+        (StoreFate::Lost, _) => "old_disk.head_lost",
+        (StoreFate::Unknown, _) => "old_disk.head_unknown",
+        _ => return None,
+    };
+    let args = [("box", box_name), ("lost", NEW_STORE_LOSES)];
+    let copy = match old_disk {
+        OldDisk::Keep => "old_disk.kept",
+        OldDisk::OptedOut => "old_disk.opted_out",
+        _ => "old_disk.unavailable",
+    };
+    Some(format!(
+        "{}\n{}\n{}",
+        t(head, &args),
+        t(copy, &args),
+        t("old_disk.afterwards", &args)
+    ))
+}
+
+/// The same plan with the copy of the old system disk added: planned again (a plan is read-only) from the operation with the
+/// choice set. The notes the caller added since the provider's own (`base_notes` of them) are kept. An `Err` is the provider's
+/// refusal, which names the opt-out.
+pub fn with_old_disk_copy(
+    p: &dyn Provider,
+    plan: Plan,
+    base_notes: usize,
+) -> ozbox_core::Result<Plan> {
+    let mut op = plan.operation.clone();
+    if let Operation::Upgrade {
+        keep_old_system_disk,
+        ..
+    } = &mut op
+    {
+        *keep_old_system_disk = true;
+    }
+    let mut fresh = p.plan(&op)?;
+    fresh.notes.extend(plan.notes.into_iter().skip(base_notes));
+    Ok(fresh)
+}
+
+/// The same plan with the copy of the old system disk taken already: the copy is made now, waiting as long as the provider allows,
+/// and the upgrade is planned again WITHOUT it, so the apply does not make a second. Done after the person confirmed and BEFORE the
+/// box is made ready for its stop: the hold on new runs lasts ten minutes from the start of that, and a slow copy must not eat it.
+/// An `Err` is the copy's failure; nothing has been changed.
+pub fn take_old_disk_copy_first(
+    p: &dyn Provider,
+    plan: &Plan,
+) -> ozbox_core::Result<(Plan, String)> {
+    let Operation::Upgrade { name, image, .. } = &plan.operation else {
+        return Err(ozbox_core::Error::Provider(
+            "only an upgrade keeps a copy of the old system disk".into(),
+        ));
+    };
+    let id = p.keep_old_system_disk(name, image)?;
+    let mut op = plan.operation.clone();
+    if let Operation::Upgrade {
+        keep_old_system_disk,
+        ..
+    } = &mut op
+    {
+        *keep_old_system_disk = false;
+    }
+    Ok((p.plan(&op)?, id))
+}
+
+/// Whether a plan takes the copy of the old system disk.
+pub fn plan_keeps_old_disk(plan: &Plan) -> bool {
+    plan.changes
+        .iter()
+        .any(|c| c.kind == "snapshot.old_system_disk")
+}
+
+/// The id of the copy this upgrade took of the old system disk, as the apply itself reported it (the record it returned carries
+/// the id of the snapshot it made). Never read back from a listing: a listing is unordered and holds the copies of earlier
+/// upgrades too, and the wrong id here would send a person to delete, or to recover from, the wrong disk.
+pub fn kept_copy_id(applied: Option<&BoxRecord>) -> std::result::Result<String, String> {
+    applied
+        .and_then(|r| r.spec.labels.get(ozbox_core::PRE_UPGRADE_COPY_LABEL))
+        .cloned()
+        .ok_or_else(|| "the apply did not say which snapshot it took".to_string())
+}
+
+/// What the report says about the copy of the old system disk: `None` when the plan had no reason to talk about one.
+pub fn old_disk_report(
+    taken_first: Option<&str>,
+    applied: Option<&BoxRecord>,
+    name: &BoxName,
+    kept: bool,
+    warned: bool,
+) -> (Option<Step>, Option<String>) {
+    let n = name.as_str();
+    if kept {
+        return match taken_first
+            .map(str::to_string)
+            .ok_or(())
+            .or_else(|()| kept_copy_id(applied))
+        {
+            Ok(id) => (
+                Some(Step::new(
+                    StepOutcome::Done,
+                    t("old_disk.taken", &[("box", n), ("id", &id)]),
+                )),
+                Some(id),
+            ),
+            Err(why) => (
+                Some(Step::new(
+                    StepOutcome::Failed,
+                    t("old_disk.not_found", &[("box", n), ("why", &why)]),
+                )),
+                None,
+            ),
+        };
+    }
+    (
+        warned.then(|| Step::new(StepOutcome::Skipped, t("old_disk.not_taken", &[("box", n)]))),
+        None,
+    )
+}
+
+/// What the plan says about the store when the upgrade also moves the box to the fleet's KMS key (`--use-fleet-key`, which
+/// is allowed only for a store that holds nothing). Whatever the old key was (a file with or without a copy, unsaid, or
+/// already lost), the new machine is configured for KMS and cannot open a file-sealed store, so the old store is set aside
+/// after the replace (renamed, never deleted) and a new one is started on the fleet's key: it is a "new store", accepted by
+/// the flag, and the plan says so. A store already on a key that is not a file, or a box that is moving its key, is left to
+/// its own text.
+pub fn fleet_key_store_check(check: StoreCheck, box_name: &str) -> StoreCheck {
+    match check.fate {
+        StoreFate::Lost
+        | StoreFate::Unknown
+        | StoreFate::AlreadyLost
+        | StoreFate::KeptByLaptop
+        | StoreFate::KeptByEscrow
+        | StoreFate::NotSaid => StoreCheck {
+            fate: StoreFate::Lost,
+            detail: t("upgrade.store_fleet_key_plan", &[("box", box_name)]),
+        },
+        _ => check,
+    }
+}
+
+/// Whether, after the machine is replaced, the upgrade sets the old store aside (`recover_store_step`): the person accepted a new
+/// store, and the store is one that would be lost, could not be asked about, cannot be opened, or is held by a key kept elsewhere.
+pub fn sets_store_aside(accept_new_store: bool, fate: StoreFate) -> bool {
+    accept_new_store
+        && matches!(
+            fate,
+            StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost | StoreFate::KeyHeld
+        )
+}
+
 /// Whether the upgrade may go ahead, given what happens to the store. `Ok` carries the plan's note (the store's fate is
 /// always in the plan); `Err` is the refusal: a store that would be lost, or a box that could not be asked, needs the
 /// person's explicit acceptance (`--accept-new-secrets-store`).
@@ -393,6 +687,20 @@ pub fn store_gate(
     match check.fate {
         // not even with --accept-new-secrets-store: a new machine on the KMS key over a file-sealed store never opens it
         StoreFate::MovingKey => Err(check.detail.clone()),
+        // the old store is set aside, never deleted, and its key stays where it is held: accepting loses nothing for good
+        StoreFate::KeyHeld if accept => Ok(format!(
+            "{} {}",
+            check.detail,
+            t(
+                "upgrade.store_accepted",
+                &[("box", box_name), ("lost", NEW_STORE_LOSES)]
+            )
+        )),
+        StoreFate::KeyHeld => Err(format!(
+            "{} {}",
+            check.detail,
+            t("upgrade.err_key_held", &[("box", box_name)])
+        )),
         StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost if accept => Ok(format!(
             "{} {}",
             check.detail,
@@ -518,7 +826,7 @@ pub(crate) fn recover_store_step(
         std::thread::sleep(waits.poll);
     };
     match state {
-        Ok((Some(s), _)) if s.is_no_escrow() => {
+        Ok((Some(s), _)) if s.is_unopenable() => {
             match super::admin::recover_secrets(agent, rec, keys) {
                 Ok(_) => Step::new(
                     StepOutcome::Done,
@@ -539,6 +847,12 @@ pub(crate) fn recover_store_step(
         Ok((Some(s), _)) if s.ready => Step::new(
             StepOutcome::Skipped,
             t("upgrade.recover_not_needed", &[("box", name)]),
+        ),
+        // a box whose program is older than the one that records this: its service loops on the mismatch and says nothing a
+        // program can act on, so the person is told what to run
+        Ok((Some(s), _)) if s.text.contains(crate::secrets_enc::KEK_KIND_MISMATCH) => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.recover_old_service", &[("box", name)]),
         ),
         Ok((Some(s), _)) => Step::new(
             StepOutcome::Failed,
@@ -776,6 +1090,10 @@ struct Outcome2<'a> {
     /// separate names on purpose: a reader must never take "called for live" as "done live".
     #[serde(skip_serializing_if = "Option::is_none")]
     upgrade_kind: Option<&'a KindReport>,
+    /// The words printed before the confirmation when the upgrade cannot keep the box's secrets store: what is lost, what is
+    /// kept of the old system disk and what to run afterwards. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secrets_store_warning: Option<&'a str>,
 }
 
 /// What every upgrade does today (ADR 0038): the box stops, its system disk is replaced and `/work` is kept.
@@ -906,6 +1224,45 @@ pub fn trust_gate(
     signature_notes(info, image, allow_unverified, notes)
 }
 
+/// One plan note for each candidate `latest` passed over, newest first: the image, its release and why (see
+/// [`ozbox_core::ImageInfo::skipped`]).
+pub fn latest_skipped_notes(info: Option<&ImageInfo>) -> Vec<String> {
+    info.map(|i| {
+        i.skipped
+            .iter()
+            .map(|line| t("upgrade.latest_skipped", &[("line", line)]))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// `latest` found no image whose signed release verifies: the refusal, naming every candidate passed over and the two ways
+/// forward. `None` when the chosen image verifies, the provider has no signed releases, or the person asked for
+/// unverified images.
+pub fn latest_unverified(info: Option<&ImageInfo>, allow_unverified: bool) -> Option<String> {
+    let info = info?;
+    if info.signature_verified || !info.signature_applicable || allow_unverified {
+        return None;
+    }
+    let detail = info
+        .signature_detail
+        .as_deref()
+        .unwrap_or("no reason was given");
+    let skipped: String = info
+        .skipped
+        .iter()
+        .map(|l| t("upgrade.latest_none_line", &[("line", l)]))
+        .collect();
+    Some(t(
+        "upgrade.err_latest_none",
+        &[
+            ("image", &info.id),
+            ("detail", detail),
+            ("skipped", &skipped),
+        ],
+    ))
+}
+
 /// The part of [`trust_gate`] about the image's signature, after its version has been looked at.
 fn signature_notes(
     info: &ImageInfo,
@@ -973,6 +1330,7 @@ pub(super) fn command(
     image: Option<String>,
     allow_unverified: bool,
     accept_new_store: bool,
+    no_old_disk_snapshot: bool,
     first_boot: FirstBootOpts,
     quiesce_mode: crate::quiesce::Mode,
     use_fleet_key: bool,
@@ -1009,13 +1367,41 @@ pub(super) fn command(
                         .ok()
                         .flatten()
                         .is_some();
-                store_check(ag, rec, simulated, escrowed, root)
+                let check = store_check(ag, rec, simulated, escrowed, root);
+                if use_fleet_key {
+                    fleet_key_store_check(check, rec.spec.name.as_str())
+                } else {
+                    check
+                }
             },
             accept_new_store,
+            old_disk: OldDisk::choose(p.id(), no_old_disk_snapshot, use_fleet_key),
             place_escrow: &|ag, rec| Some(place_escrow_step(ag, rec, keys.as_ref(), waits)),
             recover: &|ag, rec| Some(recover_store_step(ag, rec, keys.as_ref(), waits)),
             restore_backups: &restore_backup_credentials,
             restore_services: &restore_managed_services,
+            restore_dashboard: &|_, rec| {
+                if simulated {
+                    return None;
+                }
+                let secrets = crate::serve::secret_store();
+                let verifier = ozbox_core::ReleaseVerifier::new(
+                    std::sync::Arc::new(ozbox_core::SystemRunner),
+                    ozbox_core::DEFAULT_RELEASE_REPO,
+                );
+                restore_dashboard_with(
+                    rec,
+                    &crate::dashboard_cli::Stores {
+                        secrets: secrets.as_ref(),
+                        keys: keys.as_ref(),
+                    },
+                    &ozbox_core::SystemRunner,
+                    &verifier,
+                    &crate::dashboard_cli::VerifierAssets {
+                        verifier: &verifier,
+                    },
+                )
+            },
             memory_guard: &memory_guard_step,
             refresh_ssh: &|previous, after| refresh_ssh_entry(&for_ssh, previous, after),
             review_signers: &|rec| {
@@ -1046,12 +1432,16 @@ pub(super) struct Around<'a> {
     pub store_check: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> StoreCheck,
     /// The person accepted a new store (`--accept-new-secrets-store`).
     pub accept_new_store: bool,
+    /// Whether a copy of the old system disk is kept when the store's key cannot be shown to survive.
+    pub old_disk: OldDisk,
     /// After the reboot, for a store kept by this computer's keychain: put the key back through the ingress route.
     pub place_escrow: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     /// After the reboot, when a new store was accepted: set the old one aside.
     pub recover: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub restore_backups: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub restore_services: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
+    /// After the machine was replaced: put the hosted dashboard back from what this computer kept (`None`: none is kept).
+    pub restore_dashboard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     /// Put the memory guard on the running box, live (`None`: nothing to say, as on a box that cannot be asked).
     pub memory_guard: &'a dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     pub refresh_ssh: &'a dyn Fn(Option<&str>, &BoxRecord) -> Step,
@@ -1361,6 +1751,68 @@ pub(crate) fn restore_services_with(
     })
 }
 
+/// After the machine was replaced: the hosted dashboard, from what this computer kept when it was installed (the token in the
+/// keychain, the install settings beside it). `None` when none is kept for this box.
+///
+/// It goes through the very install the owner runs by hand, with the same checks, so the box's own gate decides: the web IDE's
+/// token is put back the same way (the box's root helper takes it, and asks for an approval once a second factor is enrolled).
+/// **Nothing here makes an approval.** A box that asks for one gets the outcome `failed` and the one command that makes it with
+/// the owner's pinned key at the owner's asking (`ozbox dashboard restore <box> --approve-with-laptop-key`).
+pub(crate) fn restore_dashboard_with(
+    rec: &BoxRecord,
+    stores: &crate::dashboard_cli::Stores<'_>,
+    runner: &dyn ozbox_core::CommandRunner,
+    verifier: &ozbox_core::ReleaseVerifier,
+    assets: &dyn crate::dashboard_cli::AssetSource,
+) -> Option<Step> {
+    use crate::dashboard_cli::restore_kept;
+    step_for_dashboard(
+        rec.spec.name.as_str(),
+        restore_kept(runner, verifier, assets, stores, &rec.spec.name),
+    )
+}
+
+/// The words for what putting the dashboard back came to; `None` when nothing is kept (there is nothing to say).
+pub(crate) fn step_for_dashboard(
+    me: &str,
+    outcome: crate::dashboard_cli::Restored,
+) -> Option<Step> {
+    use crate::dashboard_cli::Restored;
+    Some(match outcome {
+        Restored::NoneKept => return None,
+        Restored::Absent => Step::new(
+            StepOutcome::Skipped,
+            t("upgrade.dashboard_absent", &[("box", me)]),
+        ),
+        Restored::Running => Step::new(
+            StepOutcome::Done,
+            t("upgrade.dashboard_running", &[("box", me)]),
+        ),
+        Restored::Done { address, token } => {
+            let token = if token {
+                t("upgrade.dashboard_token_part", &[])
+            } else {
+                String::new()
+            };
+            Step::new(
+                StepOutcome::Done,
+                t(
+                    "upgrade.dashboard_restored",
+                    &[("box", me), ("address", &address), ("token", &token)],
+                ),
+            )
+        }
+        Restored::NeedsApproval => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.dashboard_needs_approval", &[("box", me)]),
+        ),
+        Restored::Failed(why) => Step::new(
+            StepOutcome::Failed,
+            t("upgrade.dashboard_failed", &[("box", me), ("why", &why)]),
+        ),
+    })
+}
+
 /// Put the box memory guard on a running box (ADR 0045), over the same root helper `ozbox admin` uses: swap in compressed RAM
 /// (never a disk), the box's own services protected from the OOM killer, and a soft limit for interactive terminals. It is the
 /// live path: nothing is restarted, so the tunnel, the web IDE and every terminal and run carry on, and a box that already has
@@ -1428,11 +1880,18 @@ pub(crate) fn restore_with(
     let target = settings.backups.restic.clone()?;
     let name = rec.spec.name.as_str();
     if settings.backups.overrides.get(name).and_then(|o| o.enabled) == Some(false) {
-        return None;
+        // the person turned this box's backups off on this computer: said as a choice, never as backups that stopped
+        return Some(Step::new(
+            StepOutcome::Skipped,
+            t("upgrade.backup_opted_out", &[("box", name)]),
+        ));
     }
+    // Never overwrite what the box already holds: a box whose secrets store came through the upgrade keeps its own
+    // credentials, which are the ones its backups were made with. Only a box without them is given them.
     Some(
-        match crate::backup_ops::ensure_credentials(agent, rec, &target, secrets, true) {
-            Ok(_) => Step::new(
+        match crate::backup_ops::ensure_credentials(agent, rec, &target, secrets, false) {
+            Ok(false) => return None,
+            Ok(true) => Step::new(
                 StepOutcome::Done,
                 t("upgrade.backup_restored", &[("box", name)]),
             ),
@@ -1495,6 +1954,7 @@ pub(crate) fn settle_after_replace(
     waits: Waits,
     recover: &dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
     restore_backups: &dyn Fn(&dyn BoxAgent, &BoxRecord) -> Option<Step>,
+    backups_before: bool,
 ) -> Settled {
     let (ready, mut selftest) = verify_after(p, agent, name, waits);
     // A new store the person accepted is started before anything is put back into it; the self-test then runs again, so
@@ -1513,22 +1973,184 @@ pub(crate) fn settle_after_replace(
             }
         }
     }
-    // The box is running again with a new system disk: put its repository credentials back, when it has a repository.
-    let restored = (ready.outcome != StepOutcome::Failed)
+    // The box is running again with a new system disk: put its repository credentials back when it lacks them, then check
+    // that backups that were set up work (never a silent stop).
+    let after = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(name).ok().flatten())
-        .flatten()
-        .and_then(|after| restore_backups(agent, &after));
-    let backup = restored.unwrap_or_else(|| {
-        Step::new(
-            StepOutcome::Skipped,
-            t("upgrade.backup_after", &[("box", name.as_str())]),
-        )
-    });
+        .flatten();
+    let restored = after.as_ref().and_then(|a| restore_backups(agent, a));
+    let put_back = restored
+        .as_ref()
+        .is_some_and(|s| s.outcome == StepOutcome::Done);
+    let backup = match &after {
+        Some(a) => verify_backups(agent, a, backups_before, restored),
+        // the box did not come back ready (or cannot be read), so nothing could be asked of it
+        None => restored.unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                if backups_before {
+                    t("upgrade.backup_unchecked", &[("box", name.as_str())])
+                } else {
+                    t("upgrade.backup_after", &[("box", name.as_str())])
+                },
+            )
+        }),
+    };
+    // credentials just put back change what the box's own self-test says about backups: it runs again, so the report
+    // describes the box as it is left
+    if put_back {
+        if let Some(a) = &after {
+            if let Ok(again) = agent.selftest(a, now_ms()) {
+                selftest = Some(again);
+            }
+        }
+    }
     Settled {
         ready,
         selftest,
         backup,
         recovery,
+    }
+}
+
+/// Whether the box says its repository credentials are on it, and whether backups were ever set up on it: `(configured,
+/// expected)`. `expected` is the box's own durable record (kept on `/work`, so it outlives the system disk) or what this
+/// program saw before the upgrade. `None` when the box cannot be asked, or answers in a shape that says nothing.
+fn backup_state(agent: &dyn BoxAgent, rec: &BoxRecord) -> Option<(bool, bool)> {
+    backup_state_ready(agent, rec).map(|(c, e, _)| (c, e))
+}
+
+/// As [`backup_state`], and whether the box's secrets service answered: `(configured, expected, ready)`. A box that has just
+/// started reports `ready = false`, and its `configured = false` then means "not known", not "none".
+fn backup_state_ready(agent: &dyn BoxAgent, rec: &BoxRecord) -> Option<(bool, bool, bool)> {
+    let (status, v) =
+        crate::backup_ops::call(agent, rec, "GET", "/status", &serde_json::Value::Null).ok()?;
+    let configured = v.get("configured").and_then(serde_json::Value::as_bool);
+    (status == 200 && configured.is_some()).then(|| {
+        (
+            configured == Some(true),
+            v.get("expected").and_then(serde_json::Value::as_bool) == Some(true),
+            !crate::backup_ops::status_not_ready(&v),
+        )
+    })
+}
+
+/// Before the upgrade: does the running box back up to a repository? (`false` when it cannot be asked: the box's own record
+/// still says so afterwards, for a box that has one.)
+pub(crate) fn backups_configured_now(agent: &dyn BoxAgent, rec: &BoxRecord) -> bool {
+    rec.state == BoxState::Running && backup_state(agent, rec).is_some_and(|(c, e)| c || e)
+}
+
+/// After the replace: backups that were set up must still be configured AND working. `restored` is what putting the
+/// credentials back from this computer said. A box that never had backups says nothing here (the old advice stays, as a
+/// skipped step); one that had them and has them no more is a FAILURE with the command, never a quiet skip.
+fn verify_backups(
+    agent: &dyn BoxAgent,
+    rec: &BoxRecord,
+    before: bool,
+    restored: Option<Step>,
+) -> Step {
+    let name = rec.spec.name.as_str();
+    let nothing = |restored: Option<Step>| {
+        restored.unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.backup_after", &[("box", name)]),
+            )
+        })
+    };
+    let Some((configured, recorded, ready)) = backup_state_ready(agent, rec) else {
+        // the box cannot say; a failure to put credentials back is still reported, and when it was set up before, say so
+        return match restored {
+            Some(s) => s,
+            None if before => Step::new(
+                StepOutcome::Failed,
+                t(
+                    "upgrade.backup_stopped",
+                    &[
+                        ("box", name),
+                        ("why", "The box could not be asked about its backups."),
+                    ],
+                ),
+            ),
+            None => nothing(None),
+        };
+    };
+    if !configured && !ready {
+        // the secrets service is not up yet: "no credentials" is "not known". Said as that, never as backups that stopped
+        // (the box's own self-test says the same), and nothing was sent to it.
+        return Step::new(
+            StepOutcome::Skipped,
+            t("upgrade.backup_not_ready", &[("box", name)]),
+        );
+    }
+    if !configured {
+        // turned off for this box on this computer: a choice, not a stop (the step says so)
+        if restored
+            .as_ref()
+            .is_some_and(|s| s.outcome == StepOutcome::Skipped)
+        {
+            return restored.unwrap_or_else(|| nothing(None));
+        }
+        if before || recorded || restored.is_some() {
+            let why = restored.map(|s| s.detail).unwrap_or_default();
+            return Step::new(
+                StepOutcome::Failed,
+                t("upgrade.backup_stopped", &[("box", name), ("why", &why)]),
+            );
+        }
+        return nothing(None);
+    }
+    // credentials are on the box: the repository must answer
+    let put_back = restored
+        .as_ref()
+        .is_some_and(|s| s.outcome == StepOutcome::Done);
+    let checked =
+        match crate::backup_ops::call(agent, rec, "GET", "/snapshots", &serde_json::Value::Null) {
+            Ok((200, v)) => {
+                let count = v["items"].as_array().map_or(0, Vec::len).to_string();
+                Step::new(
+                    StepOutcome::Done,
+                    t(
+                        if put_back {
+                            "upgrade.backup_working"
+                        } else {
+                            "upgrade.backup_kept"
+                        },
+                        &[("box", name), ("count", &count)],
+                    ),
+                )
+            }
+            // an operation holds the repository (a prune): it is working, and it was not listed
+            Ok((409, v)) if v.get("code").and_then(serde_json::Value::as_str) == Some("busy") => {
+                Step::new(
+                    StepOutcome::Skipped,
+                    t("upgrade.backup_busy", &[("box", name)]),
+                )
+            }
+            Ok((_, v)) => Step::new(
+                StepOutcome::Failed,
+                t(
+                    "upgrade.backup_unreachable",
+                    &[
+                        ("box", name),
+                        ("why", &crate::backup_ops::reason(&v, "no answer")),
+                    ],
+                ),
+            ),
+            Err(e) => Step::new(
+                StepOutcome::Failed,
+                t("upgrade.backup_unreachable", &[("box", name), ("why", &e)]),
+            ),
+        };
+    // Putting the credentials back failed, yet the box holds some (the helper stored them and then refused, say): that
+    // failure is part of the report, never dropped behind a repository that happens to answer.
+    match restored {
+        Some(r) if r.outcome == StepOutcome::Failed => Step::new(
+            StepOutcome::Failed,
+            format!("{} {}", r.detail, checked.detail),
+        ),
+        _ => checked,
     }
 }
 
@@ -1644,11 +2266,17 @@ pub(super) fn execute(
         name: name.clone(),
         image: target.clone(),
         reprovision,
+        keep_old_system_disk: false,
     };
     guard_rails(p, &op)?;
     crate::settings::enforce(&load_settings()?, p, &budget_view(&op, &rec))?;
     let mut plan = p.plan(&op)?;
+    // what the provider itself said; the replan that adds the copy of the old system disk keeps what is added after it
+    let base_notes = plan.notes.len();
     plan.notes.extend(first_boot_notes);
+    if requested == "latest" {
+        plan.notes.extend(latest_skipped_notes(info.as_ref()));
+    }
     plan.notes.extend(crate::infra_cli::plan_notes());
     // Which kind of upgrade the two signed releases call for, and why (ADR 0038, informational: this version of ozbox
     // carries out every upgrade as a replace). Only asked when there is something to do, and never an error: a manifest
@@ -1670,9 +2298,16 @@ pub(super) fn execute(
         Some(report)
     };
     let mut store = None;
+    let mut backups_before = false;
+    let mut loud: Option<String> = None;
     if !plan.is_noop() {
         // An image whose release signature could be checked and was not is refused before anything is confirmed,
         // unless the person asks for it by name; the plan then carries the warning.
+        if requested == "latest" {
+            if let Some(refusal) = latest_unverified(info.as_ref(), allow_unverified) {
+                return Err(CliError::Msg(refusal));
+            }
+        }
         match trust_gate(info.as_ref(), &target, allow_unverified) {
             Ok(notes) => plan.notes.extend(notes),
             Err(refusal) => return Err(CliError::Msg(refusal)),
@@ -1691,10 +2326,25 @@ pub(super) fn execute(
         // before anything is confirmed unless the person accepts it by name.
         let check = (around.store_check)(agent, &rec);
         match store_gate(&check, name.as_str(), around.accept_new_store) {
-            Ok(note) => plan.notes.push(note),
+            Ok(note) => {
+                // The key may be destroyed with the old system disk: the plan then keeps a copy of it first (planned again,
+                // so the step is in the plan and `apply` compares it), and the warning below says it in words.
+                if old_disk_copy_wanted(check.fate, around.old_disk) {
+                    plan = with_old_disk_copy(p, plan, base_notes)?;
+                }
+                plan.notes.push(note);
+                loud = store_loss_warning(&check, name.as_str(), around.old_disk);
+            }
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
         store = Some(check);
+        // does it back up to a repository? Read now (a running box answers), so the report afterwards can tell a box whose
+        // backups stopped from one that never had any, and the plan says what will be checked
+        backups_before = backups_configured_now(agent, &rec);
+        if backups_before {
+            plan.notes
+                .push(t("upgrade.backups_planned", &[("box", name.as_str())]));
+        }
     }
     // nothing to do asks nothing of the box
     let store = store.unwrap_or_else(|| StoreCheck {
@@ -1709,6 +2359,9 @@ pub(super) fn execute(
     }
     if !f.json {
         print!("{plan}");
+        if let Some(w) = &loud {
+            println!("\n{w}\n");
+        }
     }
     if plan.is_noop() {
         // Nothing to upgrade, but a box without the memory guard is put in order: live, nothing restarted, never on a dry run.
@@ -1729,6 +2382,7 @@ pub(super) fn execute(
                 interrupted: None,
                 memory_guard: memory.as_ref(),
                 upgrade_kind: kind.as_ref(),
+                secrets_store_warning: loud.as_deref(),
             },
         );
     }
@@ -1747,10 +2401,26 @@ pub(super) fn execute(
                 interrupted: None,
                 memory_guard: None,
                 upgrade_kind: kind.as_ref(),
+                secrets_store_warning: loud.as_deref(),
             },
         );
     }
     confirm(&plan, f)?;
+
+    // The copy of the old system disk is taken NOW, before the box is made ready for its stop: the hold the box puts on new runs
+    // lasts ten minutes from the start of that, and the provider may need longer than that for a first copy. A failure here has
+    // changed nothing. What is applied below is the same upgrade planned again without the step that is already done.
+    let mut copy_taken_first: Option<String> = None;
+    let apply_plan = if plan_keeps_old_disk(&plan) {
+        if !f.json {
+            println!("{}", t("old_disk.taking", &[("box", name.as_str())]));
+        }
+        let (again, id) = take_old_disk_copy_first(p, &plan)?;
+        copy_taken_first = Some(id);
+        again
+    } else {
+        plan.clone()
+    };
 
     // Quiesce replaces the plain checkpoint when the plan stops the machine (runs end cleanly, uncommitted work is
     // snapshotted without touching anything); otherwise the old step reports that there is nothing to save.
@@ -1791,7 +2461,7 @@ pub(super) fn execute(
         }
         c
     };
-    let result = match p.apply(&plan) {
+    let result = match p.apply(&apply_plan) {
         Ok(r) => r,
         Err(cause) => {
             let Some(stopped) = describe_failure(p, &name, &target, &cause) else {
@@ -1816,6 +2486,7 @@ pub(super) fn execute(
                     interrupted: Some(&stopped),
                     memory_guard: None,
                     upgrade_kind: kind.as_ref(),
+                    secrets_store_warning: loud.as_deref(),
                 },
             )?;
             return Err(CliError::Msg(message));
@@ -1856,11 +2527,7 @@ pub(super) fn execute(
         |after| refresh_ssh(rec.provider_id.as_deref(), after),
     );
     let kept_by_laptop = store.fate == StoreFate::KeptByLaptop;
-    let accepted = around.accept_new_store
-        && matches!(
-            store.fate,
-            StoreFate::Lost | StoreFate::Unknown | StoreFate::AlreadyLost
-        );
+    let accepted = sets_store_aside(around.accept_new_store, store.fate);
     let settled = settle_after_replace(
         p,
         agent,
@@ -1876,6 +2543,7 @@ pub(super) fn execute(
             }
         },
         around.restore_backups,
+        backups_before,
     );
     let (ready, selftest, backup_credentials, secrets_recovery) = (
         settled.ready,
@@ -1894,6 +2562,17 @@ pub(super) fn execute(
                 t("upgrade.services_none", &[("box", name.as_str())]),
             )
         });
+    // After the services, so the box's new secrets store and its SSH entry are in place before the dashboard's token goes in.
+    let dashboard = (ready.outcome != StepOutcome::Failed)
+        .then(|| p.get(&name).ok().flatten())
+        .flatten()
+        .and_then(|after| (around.restore_dashboard)(agent, &after))
+        .unwrap_or_else(|| {
+            Step::new(
+                StepOutcome::Skipped,
+                t("upgrade.dashboard_none", &[("box", name.as_str())]),
+            )
+        });
     let memory_guard = (ready.outcome != StepOutcome::Failed)
         .then(|| p.get(&name).ok().flatten())
         .flatten()
@@ -1902,6 +2581,13 @@ pub(super) fn execute(
         .then(|| p.get(&name).ok().flatten())
         .flatten()
         .and_then(|after| (around.review_signers)(&after));
+    let (old_system_disk, old_system_disk_snapshot) = old_disk_report(
+        copy_taken_first.as_deref(),
+        result.as_ref(),
+        &name,
+        plan_keeps_old_disk(&plan),
+        loud.is_some(),
+    );
     let report = Report {
         image: target,
         checkpoint,
@@ -1910,12 +2596,18 @@ pub(super) fn execute(
         ssh_entry,
         backup_credentials,
         services,
+        dashboard,
         memory_guard,
         secrets_store: store,
         secrets_recovery,
         approvers,
+        old_system_disk,
+        old_system_disk_snapshot,
     };
     if !f.json {
+        if let Some(c) = &report.old_system_disk {
+            println!("{}", c.detail);
+        }
         println!("{}", report.ready.detail);
         if let Some(r) = &report.secrets_recovery {
             println!("{}", r.detail);
@@ -1925,6 +2617,7 @@ pub(super) fn execute(
         }
         println!("{}", report.backup_credentials.detail);
         println!("{}", report.services.detail);
+        println!("{}", report.dashboard.detail);
         if let Some(m) = &report.memory_guard {
             println!("{}", m.detail);
         }
@@ -1946,6 +2639,7 @@ pub(super) fn execute(
             interrupted: None,
             memory_guard: None,
             upgrade_kind: kind.as_ref(),
+            secrets_store_warning: loud.as_deref(),
         },
     )?;
     // The change is made either way; a box that does not check out is a failure the person must not miss.
@@ -1961,8 +2655,20 @@ pub(super) fn execute(
             &[("box", name.as_str())],
         )));
     }
+    // backups that were set up and are not working are never a quiet success
+    if report.backup_credentials.outcome == StepOutcome::Failed {
+        return Err(CliError::Msg(t(
+            "upgrade.err_backups",
+            &[("box", name.as_str())],
+        )));
+    }
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[path = "upgrade_backups_tests.rs"]
+mod backups_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2080,9 +2786,11 @@ mod tests {
             &Around {
                 store_check: &store,
                 accept_new_store: false,
+                old_disk: OldDisk::NotOffered,
                 recover: &|_, _| None,
                 restore_backups: &|_, _| None,
                 restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
                 memory_guard: &|_, _| None,
                 refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
                 review_signers: &|_| None,
@@ -2123,8 +2831,440 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?)?;
         Ok((p, n))
+    }
+
+    /// A box on the sandbox's first image, planned and run through the command's own flow with the store's fate chosen: the
+    /// store check says `fate`, the person did (or did not) accept a new store, and `old_disk` is the copy policy.
+    fn run_keeping(
+        p: &dyn Provider,
+        name: &BoxName,
+        fate: StoreFate,
+        accept: bool,
+        old_disk: OldDisk,
+        dry_run: bool,
+    ) -> Result<()> {
+        run_keeping_asking(
+            &FirstBootBox {
+                record: Err("no route".into()),
+            },
+            p,
+            name,
+            fate,
+            accept,
+            old_disk,
+            dry_run,
+        )
+    }
+
+    fn run_keeping_asking(
+        agent: &dyn BoxAgent,
+        p: &dyn Provider,
+        name: &BoxName,
+        fate: StoreFate,
+        accept: bool,
+        old_disk: OldDisk,
+        dry_run: bool,
+    ) -> Result<()> {
+        execute(
+            p,
+            agent,
+            name.clone(),
+            Some("fake-image-2".into()),
+            false,
+            &Flags {
+                yes: true,
+                dry_run,
+                json: true,
+            },
+            Waits::default(),
+            &Around {
+                store_check: &|_, _| StoreCheck {
+                    fate,
+                    detail: "the store's key is in a file on the system disk".into(),
+                },
+                accept_new_store: accept,
+                old_disk,
+                recover: &|_, _| None,
+                restore_backups: &|_, _| None,
+                restore_services: &|_, _| None,
+                restore_dashboard: &|_, _| None,
+                memory_guard: &|_, _| None,
+                refresh_ssh: &|_, _| Step::new(StepOutcome::Skipped, String::new()),
+                review_signers: &|_| None,
+                place_escrow: &|_, _| None,
+                first_boot: FirstBootOpts::default(),
+                strict_checkpoint: false,
+                legacy_checkpoint: false,
+            },
+        )
+    }
+
+    fn fresh_box(
+        dir: &std::path::Path,
+    ) -> std::result::Result<
+        (
+            ozbox_core::Engine<ozbox_provider_fake::FakeBackend>,
+            BoxName,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let p = ozbox_provider_fake::open(dir);
+        let n = BoxName::new("main")?;
+        p.apply(&p.plan(&Operation::Create {
+            spec: BoxSpec::new(n.clone(), Size::S),
+        })?)?;
+        Ok((p, n))
+    }
+
+    fn old_disk_copies(
+        p: &dyn Provider,
+        n: &BoxName,
+    ) -> std::result::Result<Vec<ozbox_core::SnapshotInfo>, Box<dyn std::error::Error>> {
+        Ok(p.snapshots(n)?
+            .into_iter()
+            .filter(|s| s.labels.contains_key(ozbox_provider_aws::PURPOSE_TAG))
+            .collect())
+    }
+
+    /// The incident: a store whose key is a file on the system disk (or that cannot be told) was lost with the disk, and the
+    /// upgrade kept nothing. Now the copy is taken for exactly those fates, and only when the person did not opt out.
+    #[test]
+    fn a_copy_of_the_old_system_disk_is_wanted_exactly_when_the_stores_key_may_be_lost() {
+        use StoreFate::*;
+        for fate in [Lost, Unknown] {
+            assert!(old_disk_copy_wanted(fate, OldDisk::Keep), "{fate:?}");
+            for off in [OldDisk::OptedOut, OldDisk::NotOffered, OldDisk::StoreEmpty] {
+                assert!(!old_disk_copy_wanted(fate, off), "{fate:?} {off:?}");
+            }
+        }
+        for fate in [
+            Kept,
+            KeptByEscrow,
+            KeptByLaptop,
+            NotSaid,
+            AlreadyLost,
+            NotApplicable,
+            MovingKey,
+        ] {
+            assert!(!old_disk_copy_wanted(fate, OldDisk::Keep), "{fate:?}");
+        }
+        assert_eq!(OldDisk::choose("aws", false, false), OldDisk::Keep);
+        assert_eq!(OldDisk::choose("aws", true, false), OldDisk::OptedOut);
+        assert_eq!(OldDisk::choose("aws", false, true), OldDisk::StoreEmpty);
+        assert_eq!(OldDisk::choose("hcloud", false, false), OldDisk::NotOffered);
+    }
+
+    /// The plan carries the step (first) and keeps what the caller added after the provider's own notes.
+    #[test]
+    fn a_replanned_upgrade_lists_the_copy_first_and_keeps_the_notes_added_since() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let op = Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision: false,
+            keep_old_system_disk: false,
+        };
+        let mut plan = p.plan(&op)?;
+        let base = plan.notes.len();
+        plan.notes.push("added by the command".into());
+        let kinds = |pl: &Plan| {
+            pl.changes
+                .iter()
+                .map(|c| c.kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!plan_keeps_old_disk(&plan));
+        let fresh = with_old_disk_copy(&p, plan, base)?;
+        assert!(plan_keeps_old_disk(&fresh));
+        assert_eq!(
+            kinds(&fresh)[0],
+            "snapshot.old_system_disk",
+            "{:?}",
+            kinds(&fresh)
+        );
+        assert_eq!(
+            fresh.notes.last().map(String::as_str),
+            Some("added by the command")
+        );
+        Ok(())
+    }
+
+    /// An upgrade the plan cannot show keeps the store's key is applied only after the old system disk is copied, and the
+    /// report names the copy.
+    #[test]
+    fn an_accepted_upgrade_of_a_store_that_may_be_lost_keeps_a_copy_and_names_it() -> TestResult {
+        for fate in [StoreFate::Lost, StoreFate::Unknown] {
+            let dir = tempfile::tempdir()?;
+            let (p, n) = fresh_box(dir.path())?;
+            run_keeping(&p, &n, fate, true, OldDisk::Keep, false).map_err(|e| e.to_string())?;
+            let copies = old_disk_copies(&p, &n)?;
+            assert_eq!(copies.len(), 1, "{fate:?}: {copies:?}");
+            assert!(!copies[0].includes_work);
+            assert_eq!(
+                p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+                Some("fake-image-2"),
+                "the upgrade itself went ahead"
+            );
+            // and it is deletable like any snapshot
+            p.apply(&p.plan(&Operation::DeleteSnapshot {
+                name: n.clone(),
+                snapshot: copies[0].id.clone(),
+            })?)?;
+            assert!(old_disk_copies(&p, &n)?.is_empty());
+        }
+        Ok(())
+    }
+
+    /// A box that notes, when it is first asked to get ready for its stop, how many copies of old system disks the provider holds.
+    struct ReadyAsker {
+        inner: FirstBootBox,
+        dir: std::path::PathBuf,
+        copies_when_asked: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl BoxAgent for ReadyAsker {
+        fn metrics_now(
+            &self,
+            r: &BoxRecord,
+            t: u64,
+        ) -> std::result::Result<MetricsSample, AgentError> {
+            self.inner.metrics_now(r, t)
+        }
+        fn metrics_series(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+            c: u64,
+        ) -> std::result::Result<Vec<MetricsSample>, AgentError> {
+            self.inner.metrics_series(r, a, b, c)
+        }
+        fn selftest(&self, r: &BoxRecord, t: u64) -> std::result::Result<SelfTest, AgentError> {
+            self.inner.selftest(r, t)
+        }
+        fn incidents(
+            &self,
+            r: &BoxRecord,
+            a: u64,
+            b: u64,
+        ) -> std::result::Result<Vec<Incident>, AgentError> {
+            self.inner.incidents(r, a, b)
+        }
+        fn image_agent(
+            &self,
+            r: &BoxRecord,
+        ) -> std::result::Result<crate::serve::agent::ImageAgent, AgentError> {
+            self.inner.image_agent(r)
+        }
+        fn quiesce_call(
+            &self,
+            rec: &BoxRecord,
+            method: &str,
+            _: &[u8],
+        ) -> std::result::Result<(u16, serde_json::Value), AgentError> {
+            if method == "POST" {
+                // the provider as it is right now (the sandbox keeps its state in the folder)
+                let p = ozbox_provider_fake::open(&self.dir);
+                let n = p
+                    .snapshots(&rec.spec.name)
+                    .map(|l| l.iter().filter(|s| s.is_old_system_disk_copy()).count())
+                    .unwrap_or(usize::MAX);
+                if let Ok(mut g) = self.copies_when_asked.lock() {
+                    g.push(n);
+                }
+            }
+            Err(AgentError::Unsupported("none".into()))
+        }
+    }
+
+    /// The hold the box puts on new runs lasts ten minutes from the start of its preparation for the stop, and a first copy of a
+    /// disk can take longer: so the copy is complete BEFORE the box is asked to get ready, and the apply does not take a second.
+    #[test]
+    fn the_copy_is_taken_before_the_box_is_asked_to_get_ready_for_its_stop() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let agent = ReadyAsker {
+            inner: FirstBootBox {
+                record: Err("no route".into()),
+            },
+            dir: dir.path().to_path_buf(),
+            copies_when_asked: std::sync::Mutex::new(Vec::new()),
+        };
+        run_keeping_asking(&agent, &p, &n, StoreFate::Lost, true, OldDisk::Keep, false)
+            .map_err(|e| e.to_string())?;
+        let asked = agent
+            .copies_when_asked
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        assert_eq!(
+            asked,
+            vec![1],
+            "the copy existed when the box was asked to get ready"
+        );
+        assert_eq!(
+            old_disk_copies(&p, &n)?.len(),
+            1,
+            "and the apply took no second one"
+        );
+        assert_eq!(
+            p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+            Some("fake-image-2")
+        );
+        Ok(())
+    }
+
+    /// The report names the snapshot THIS apply took, said by the apply itself, even when the box already holds the copies of
+    /// earlier upgrades (a retried upgrade takes another copy): never one picked out of a listing.
+    #[test]
+    fn the_report_names_the_copy_this_apply_took_and_never_guesses() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let op = |reprovision: bool| Operation::Upgrade {
+            name: n.clone(),
+            image: "fake-image-2".into(),
+            reprovision,
+            keep_old_system_disk: true,
+        };
+        let mut said = Vec::new();
+        for reprovision in [false, true, true] {
+            let rec = p.apply(&p.plan(&op(reprovision))?)?.ok_or("no record")?;
+            let (step, id) = old_disk_report(None, Some(&rec), &n, true, true);
+            let step = step.ok_or("no step")?;
+            let id = id.ok_or("no id")?;
+            assert_eq!(step.outcome, StepOutcome::Done);
+            assert!(step.detail.contains(&id) && step.detail.contains("ozbox backup delete main"));
+            said.push(id);
+        }
+        // every apply took its own copy, each report named its own, and the listing holds all of them
+        let held: Vec<String> = old_disk_copies(&p, &n)?.into_iter().map(|c| c.id).collect();
+        assert_eq!(said.len(), 3);
+        let mut distinct = said.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3, "{said:?}");
+        for id in &said {
+            assert!(held.contains(id), "{id} not in {held:?}");
+        }
+        // an apply that did not say which snapshot it took is reported as a failure, not guessed from the listing
+        let (step, id) = old_disk_report(None, None, &n, true, true);
+        assert_eq!(step.ok_or("no step")?.outcome, StepOutcome::Failed);
+        assert!(id.is_none());
+        Ok(())
+    }
+
+    /// Opting out, a provider that cannot, a known-empty store, and a store that is kept: no copy, and nothing else changes.
+    #[test]
+    fn no_copy_is_kept_when_opted_out_unavailable_empty_or_the_store_is_kept() -> TestResult {
+        let cases = [
+            (StoreFate::Unknown, OldDisk::OptedOut),
+            (StoreFate::Lost, OldDisk::NotOffered),
+            (StoreFate::Lost, OldDisk::StoreEmpty),
+            (StoreFate::Kept, OldDisk::Keep),
+            (StoreFate::KeptByEscrow, OldDisk::Keep),
+            (StoreFate::KeptByLaptop, OldDisk::Keep),
+        ];
+        for (fate, old_disk) in cases {
+            let dir = tempfile::tempdir()?;
+            let (p, n) = fresh_box(dir.path())?;
+            let accept = matches!(fate, StoreFate::Lost | StoreFate::Unknown);
+            run_keeping(&p, &n, fate, accept, old_disk, false).map_err(|e| e.to_string())?;
+            assert!(old_disk_copies(&p, &n)?.is_empty(), "{fate:?} {old_disk:?}");
+            assert_eq!(
+                p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+                Some("fake-image-2")
+            );
+        }
+        Ok(())
+    }
+
+    /// A refused upgrade (no acceptance) changes nothing, takes no copy, and says what accepting does.
+    #[test]
+    fn a_refused_upgrade_takes_no_copy_and_says_what_accepting_would_keep() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        let e = run_keeping(&p, &n, StoreFate::Unknown, false, OldDisk::Keep, false)
+            .err()
+            .ok_or("expected a refusal")?
+            .to_string();
+        assert!(
+            e.contains("--accept-new-secrets-store") && e.contains("--no-pre-upgrade-snapshot"),
+            "{e}"
+        );
+        assert!(old_disk_copies(&p, &n)?.is_empty());
+        assert_ne!(
+            p.get(&n)?.ok_or("gone")?.spec.image.as_deref(),
+            Some("fake-image-2")
+        );
+        Ok(())
+    }
+
+    /// A dry run plans the copy (so the person sees it) and takes none.
+    #[test]
+    fn a_dry_run_plans_the_copy_and_takes_none() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let (p, n) = fresh_box(dir.path())?;
+        run_keeping(&p, &n, StoreFate::Unknown, true, OldDisk::Keep, true)
+            .map_err(|e| e.to_string())?;
+        assert!(old_disk_copies(&p, &n)?.is_empty());
+        Ok(())
+    }
+
+    /// The warning is its own block with what is lost, what is kept, and the exact commands afterwards (never only a note).
+    #[test]
+    fn the_warning_says_what_is_lost_what_is_kept_and_what_to_run_afterwards() {
+        let lost = StoreCheck {
+            fate: StoreFate::Lost,
+            detail: String::new(),
+        };
+        let w = store_loss_warning(&lost, "main", OldDisk::Keep).unwrap_or_default();
+        for want in [
+            "WILL BE LOST",
+            "file on its system disk",
+            "ozbox-purpose=pre-upgrade-root",
+            "ozbox backup delete main <snapshot id>",
+            "ozbox secrets import",
+            "--box",
+            "ozbox adopt-fleet-key main",
+            "imported with `ozbox secrets import`",
+        ] {
+            assert!(w.contains(want), "{want}: {w}");
+        }
+        let unknown = StoreCheck {
+            fate: StoreFate::Unknown,
+            detail: String::new(),
+        };
+        let w = store_loss_warning(&unknown, "main", OldDisk::Keep).unwrap_or_default();
+        assert!(
+            w.contains("MAY BE LOST") && w.contains("ozbox adopt-fleet-key main"),
+            "{w}"
+        );
+        let off = store_loss_warning(&unknown, "main", OldDisk::OptedOut).unwrap_or_default();
+        assert!(
+            off.contains("--no-pre-upgrade-snapshot") && off.contains("can never be opened"),
+            "{off}"
+        );
+        let none = store_loss_warning(&lost, "main", OldDisk::NotOffered).unwrap_or_default();
+        assert!(none.contains("kept on this provider"), "{none}");
+        for quiet in [
+            StoreFate::Kept,
+            StoreFate::KeptByEscrow,
+            StoreFate::AlreadyLost,
+        ] {
+            let c = StoreCheck {
+                fate: quiet,
+                detail: String::new(),
+            };
+            assert!(
+                store_loss_warning(&c, "main", OldDisk::Keep).is_none(),
+                "{quiet:?}"
+            );
+        }
+        assert!(store_loss_warning(&lost, "main", OldDisk::StoreEmpty).is_none());
     }
 
     fn replaced_with_the_store_gate(r: &Result<()>, asked: bool) -> bool {
@@ -2219,6 +3359,7 @@ mod tests {
             name: n.clone(),
             image: "fake-image-2".into(),
             reprovision: true,
+            keep_old_system_disk: false,
         })?;
         let kinds: Vec<_> = plan.changes.iter().map(|c| c.kind.as_str()).collect();
         assert_eq!(
@@ -2315,6 +3456,7 @@ mod tests {
             name: n.clone(),
             image: "img-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?)?;
         // stopped after the rebuild, before the mark was cleared: running on the image, still marked
         sim.mark_upgrade(&n, "img-2")?;
@@ -2322,6 +3464,7 @@ mod tests {
             name: n.clone(),
             image: "img-2".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         })?;
         assert!(
             plan.changes.iter().any(|c| c.kind == "upgrade.finish"),
@@ -2525,6 +3668,7 @@ mod tests {
             signature_applicable: applicable,
             first_boot_sha256: None,
             upgrade: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -2574,6 +3718,36 @@ mod tests {
                 "{r:?}: {notes:?}"
             );
         }
+    }
+
+    #[test]
+    fn latest_with_nothing_verified_is_refused_naming_what_was_passed_over_and_both_ways_forward() {
+        let mut none = info(false, true);
+        none.skipped = vec!["ami-0b (release 0.2.0-beta.1): not found".into()];
+        let refusal = latest_unverified(Some(&none), false).unwrap_or_default();
+        for want in [
+            "ami-1",
+            "ami-0b (release 0.2.0-beta.1)",
+            "--image",
+            "--allow-unverified-image",
+        ] {
+            assert!(refusal.contains(want), "{want}: {refusal}");
+        }
+        // verified, unsigned-by-design (sandbox), or asked for: not refused here
+        assert!(latest_unverified(Some(&info(true, true)), false).is_none());
+        assert!(latest_unverified(Some(&info(false, false)), false).is_none());
+        assert!(latest_unverified(Some(&none), true).is_none());
+        assert!(latest_unverified(None, false).is_none());
+    }
+
+    #[test]
+    fn what_latest_passed_over_is_a_plan_note_each() {
+        let mut i = info(true, true);
+        i.skipped = vec!["ami-1 (release 1): a".into(), "ami-2 (release 2): b".into()];
+        let notes = latest_skipped_notes(Some(&i));
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("ami-1") && notes[1].contains("ami-2"));
+        assert!(latest_skipped_notes(Some(&info(true, true))).is_empty());
     }
 
     #[test]
@@ -2830,6 +4004,7 @@ mod tests {
             name: rec.spec.name.clone(),
             image: "img".into(),
             reprovision: false,
+            keep_old_system_disk: false,
         };
         assert!(matches!(budget_view(&op, &rec), Operation::Snapshot { .. }));
         let mut stopped = rec;
@@ -2888,7 +4063,7 @@ mod tests {
             crate::backup_ops::call(&agent, &rec, "GET", "/status", &serde_json::Value::Null)?;
         assert_eq!((status, &v["configured"]), (200, &serde_json::json!(true)));
 
-        // a box switched off for backups is left alone
+        // a box switched off for backups is left alone, and the report says that is a choice (never "backups stopped")
         settings.backups.overrides.insert(
             "dev".into(),
             BoxOverride {
@@ -2896,7 +4071,9 @@ mod tests {
                 schedule: None,
             },
         );
-        assert!(restore_with(&settings, &agent, &rec, &secrets).is_none());
+        let off = restore_with(&settings, &agent, &rec, &secrets).ok_or("no step")?;
+        assert_eq!(off.outcome, StepOutcome::Skipped);
+        assert!(off.detail.contains("turned off"), "{}", off.detail);
         Ok(())
     }
 
@@ -3252,9 +4429,11 @@ mod tests {
                         detail: String::new(),
                     },
                     accept_new_store: false,
+                    old_disk: OldDisk::NotOffered,
                     recover: &|_, _| None,
                     restore_backups: &|_, _| None,
                     restore_services: &|_, _| None,
+                    restore_dashboard: &|_, _| None,
                     memory_guard: &|_, _| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         Some(Step::new(StepOutcome::Done, "in place"))
@@ -3293,6 +4472,55 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let (_p, rec) = running_box(dir.path(), "dev")?;
         Ok((dir, rec))
+    }
+
+    /// The report states the dashboard's outcome in one of three ways, and the step that needs the owner names the one command
+    /// and says nothing is approved for them.
+    #[test]
+    fn the_dashboard_line_says_put_back_needs_your_approval_or_not_installed() {
+        use crate::dashboard_cli::Restored;
+        assert!(step_for_dashboard("dev", Restored::NoneKept).is_none());
+        let done = step_for_dashboard(
+            "dev",
+            Restored::Done {
+                address: "https://ozbox.example.com".into(),
+                token: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(done.outcome, StepOutcome::Done);
+        assert!(
+            done.detail
+                .contains("put back on dev at https://ozbox.example.com")
+                && done.detail.contains("keychain"),
+            "{}",
+            done.detail
+        );
+        let needs = step_for_dashboard("dev", Restored::NeedsApproval).unwrap();
+        assert_eq!(needs.outcome, StepOutcome::Failed);
+        assert!(
+            needs
+                .detail
+                .contains("ozbox dashboard restore dev --approve-with-laptop-key")
+                && needs.detail.contains("nothing here makes that approval"),
+            "{}",
+            needs.detail
+        );
+        let absent = step_for_dashboard("dev", Restored::Absent).unwrap();
+        assert_eq!(absent.outcome, StepOutcome::Skipped);
+        assert!(absent.detail.contains("ozbox dashboard forget dev"));
+        assert_eq!(
+            step_for_dashboard("dev", Restored::Running)
+                .unwrap()
+                .outcome,
+            StepOutcome::Done
+        );
+        let failed =
+            step_for_dashboard("dev", Restored::Failed("it did not start".into())).unwrap();
+        assert!(
+            failed.detail.contains("ozbox dashboard restore dev")
+                && failed.detail.contains("it did not start")
+        );
     }
 
     #[test]
@@ -3721,6 +4949,241 @@ mod tests {
         Ok(())
     }
 
+    const FLEET_ARN: &str =
+        "arn:aws:kms:us-east-1:123456789012:key/0f0f0f0f-0000-4000-8000-000000000000";
+
+    /// A box whose record names the fleet's KMS key, asked through a root reader that answers `facts`.
+    fn kms_labelled_fate(
+        facts: std::result::Result<crate::secrets_adopt_facts::Facts, String>,
+    ) -> std::result::Result<StoreCheck, Box<dyn std::error::Error>> {
+        kms_labelled_fate_with(facts, false)
+    }
+
+    fn kms_labelled_fate_with(
+        facts: std::result::Result<crate::secrets_adopt_facts::Facts, String>,
+        laptop_escrow: bool,
+    ) -> std::result::Result<StoreCheck, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let (_, mut rec) = running_box(dir.path(), "main")?;
+        rec.spec.labels.insert(
+            ozbox_provider_aws::SECRETS_KEY_LABEL.into(),
+            FLEET_ARN.into(),
+        );
+        let root = move |_: &BoxRecord| facts.clone();
+        Ok(store_check(
+            &agent(),
+            &rec,
+            false,
+            laptop_escrow,
+            Some(&root),
+        ))
+    }
+
+    /// The 2026-11-16 finding: `ozbox upgrade main --dry-run` said "kept" from the box's label while its secrets service was
+    /// failing on a store sealed by a key kept in a file. Every verdict now comes from what the box's root says.
+    #[test]
+    fn a_kms_labelled_box_is_kept_only_when_its_root_shows_the_store_open_under_that_key(
+    ) -> TestResult {
+        use crate::secrets_adopt_facts::{tests::on_kms, Facts, Kek};
+        // the healthy box: kept, and the plan says root confirmed it
+        let kept = kms_labelled_fate(Ok(on_kms()))?;
+        assert_eq!(kept.fate, StoreFate::Kept);
+        assert!(kept.detail.contains("root confirms"), "{}", kept.detail);
+        assert!(store_gate(&kept, "main", false).is_ok());
+
+        // the incident: the service cannot start, the store is sealed by a key kept in a file that is gone, the box is configured
+        // for KMS (`kind-mismatch`). The label is correct and the plan must still not say kept
+        let incident = Facts {
+            service_ready: false,
+            service_kek: Kek::Kms,
+            store_kek: Kek::File,
+            persist_kek: Kek::File,
+            key_file: false,
+            backup: false,
+            ..on_kms()
+        };
+        let gone = kms_labelled_fate(Ok(incident.clone()))?;
+        assert_eq!(gone.fate, StoreFate::AlreadyLost);
+        let refusal = store_gate(&gone, "main", false).unwrap_err();
+        for words in [
+            "ALREADY UNOPENABLE",
+            "recover-secrets",
+            "--accept-new-secrets-store",
+            "Nothing was changed",
+        ] {
+            assert!(refusal.contains(words), "{words}: {refusal}");
+        }
+        assert!(!refusal.contains("kept."), "{refusal}");
+        // accepted, the upgrade sets the old store aside afterwards (the `recover` step)
+        assert!(store_gate(&gone, "main", true)?.contains("set aside"));
+        // an older program that recorded no state for it says the same facts, and is read the same way
+        let no_state = Facts {
+            service_kek: Kek::None,
+            ..incident.clone()
+        };
+        assert_eq!(
+            kms_labelled_fate(Ok(no_state))?.fate,
+            StoreFate::AlreadyLost
+        );
+        // the service's own "its key is lost and nothing holds a copy" state
+        let no_escrow = Facts {
+            service_no_escrow: true,
+            ..on_kms()
+        };
+        assert_eq!(
+            kms_labelled_fate(Ok(no_escrow))?.fate,
+            StoreFate::AlreadyLost
+        );
+
+        // a file-sealed store whose key is still on the disk and whose service is up: the new machine would not open it
+        let file_sealed = Facts {
+            store_kek: Kek::File,
+            persist_kek: Kek::File,
+            ..on_kms()
+        };
+        let lost = kms_labelled_fate(Ok(file_sealed))?;
+        assert_eq!(lost.fate, StoreFate::Lost);
+        assert!(store_gate(&lost, "main", false)
+            .unwrap_err()
+            .contains("adopt-fleet-key main"));
+
+        // a service that is not ready (restarting) is not "kept", and neither is a copy on /work that is not sealed by the key,
+        // another key, or a move under way
+        for f in [
+            Facts {
+                service_ready: false,
+                ..on_kms()
+            },
+            Facts {
+                persist_kek: Kek::None,
+                ..on_kms()
+            },
+            Facts {
+                settings_key: Some(
+                    "arn:aws:kms:us-east-1:123456789012:key/ffffffff-0000-4000-8000-000000000000"
+                        .into(),
+                ),
+                ..on_kms()
+            },
+            Facts {
+                busy: true,
+                ..on_kms()
+            },
+            Facts {
+                cancelled: true,
+                ..on_kms()
+            },
+        ] {
+            let c = kms_labelled_fate(Ok(f))?;
+            assert_eq!(c.fate, StoreFate::Unknown, "{}", c.detail);
+            assert!(store_gate(&c, "main", false).is_err());
+        }
+        Ok(())
+    }
+
+    /// A plan must never say "no copy held anywhere" while a copy is held: this computer's keychain, or the box's vault, holding
+    /// the file key means the store is not lost, so it is neither called already lost nor offered to be set aside.
+    #[test]
+    fn a_kms_labelled_box_whose_file_key_is_held_somewhere_is_never_called_lost() -> TestResult {
+        use crate::secrets_adopt_facts::{tests::on_kms, Facts, Kek};
+        let incident = Facts {
+            service_ready: false,
+            service_kek: Kek::Kms,
+            store_kek: Kek::File,
+            persist_kek: Kek::File,
+            key_file: false,
+            backup: false,
+            ..on_kms()
+        };
+        let cases = [
+            // this computer's keychain holds the key
+            (incident.clone(), true, "keychain"),
+            // the box's vault holds it
+            (
+                Facts {
+                    service_escrow: Some(true),
+                    ..incident.clone()
+                },
+                false,
+                "vault",
+            ),
+            // the service's own "lost" state, while the vault says it holds a copy
+            (
+                Facts {
+                    service_no_escrow: true,
+                    service_escrow: Some(true),
+                    ..on_kms()
+                },
+                false,
+                "vault",
+            ),
+        ];
+        for (f, laptop, place) in cases {
+            let c = kms_labelled_fate_with(Ok(f), laptop)?;
+            assert_eq!(c.fate, StoreFate::KeyHeld, "{}", c.detail);
+            assert!(c.detail.contains(place), "{}", c.detail);
+            assert!(!c.detail.contains("adopt-fleet-key"), "{}", c.detail);
+            assert!(
+                !c.detail.contains("ALREADY UNOPENABLE") && !c.detail.contains("no copy held"),
+                "{}",
+                c.detail
+            );
+            // refused without the person's acceptance, in words that name the way forward (the flag, and where the old store can be
+            // reopened from), and never with the advice that cannot work (`adopt-fleet-key` refuses a box whose service is not ready)
+            let refusal = store_gate(&c, "main", false).unwrap_err();
+            assert!(refusal.contains("IS held"), "{refusal}");
+            assert!(refusal.contains("--accept-new-secrets-store"), "{refusal}");
+            assert!(
+                refusal.contains("Recovering an old secrets store"),
+                "{refusal}"
+            );
+            assert!(refusal.contains("never deleted"), "{refusal}");
+            assert!(!refusal.contains("adopt-fleet-key"), "{refusal}");
+            assert!(!refusal.contains("Two ways forward"), "{refusal}");
+            // with it the upgrade goes ahead, sets the old store aside after the replace, and says so
+            let note = store_gate(&c, "main", true)?;
+            assert!(
+                note.contains("set aside") && note.contains("Accepted"),
+                "{note}"
+            );
+            assert!(!note.contains("adopt-fleet-key"), "{note}");
+            assert!(sets_store_aside(true, c.fate));
+            assert!(!sets_store_aside(false, c.fate));
+            assert_eq!(store_refusal_code(c.fate), "secrets_key_held");
+        }
+        // and with no copy anywhere it is still said to be lost
+        assert_eq!(
+            kms_labelled_fate_with(Ok(incident), false)?.fate,
+            StoreFate::AlreadyLost
+        );
+        Ok(())
+    }
+
+    /// Before the upgrade the plan's connection to the box failed, and it still said "kept". A box that could not be asked, or
+    /// that cannot be asked from here, is unknown, however its record is labelled.
+    #[test]
+    fn a_kms_labelled_box_that_could_not_be_asked_is_never_kept() -> TestResult {
+        for why in ["TargetNotConnected", "ssh: connection reset", ROOT_OLDER] {
+            let c = kms_labelled_fate(Err(why.to_string()))?;
+            assert_eq!(c.fate, StoreFate::Unknown, "{why}");
+            assert!(!c.detail.contains("kept."), "{}", c.detail);
+            let refusal = store_gate(&c, "main", false).unwrap_err();
+            assert!(refusal.contains("--accept-new-secrets-store"), "{refusal}");
+            assert!(store_gate(&c, "main", true).is_ok());
+        }
+        // no root channel at all (not AWS, or a caller that has none): the label alone still decides nothing
+        let dir = tempfile::tempdir()?;
+        let (_, mut rec) = running_box(dir.path(), "main")?;
+        rec.spec.labels.insert(
+            ozbox_provider_aws::SECRETS_KEY_LABEL.into(),
+            FLEET_ARN.into(),
+        );
+        let c = store_check(&agent(), &rec, false, false, None);
+        assert_eq!(c.fate, StoreFate::Unknown);
+        assert!(store_gate(&c, "main", false).is_err());
+        Ok(())
+    }
+
     #[test]
     fn the_stores_fate_is_in_every_plan_and_only_a_loss_or_a_box_that_cannot_be_asked_is_refused(
     ) -> TestResult {
@@ -3771,7 +5234,8 @@ mod tests {
         assert!(store_gate(&unknown, "dev", false)
             .unwrap_err()
             .contains("ozbox resume dev"));
-        // a stopped box cannot be asked, unless its labels say it has the fleet's KMS key
+        // a stopped box cannot be asked, and a label naming the fleet's KMS key does not change that: the label says which key the
+        // new machine gets, not that the store opens under it (2026-11-16)
         let mut paused = rec.clone();
         paused.state = BoxState::Paused;
         assert_eq!(fate(Ok((Some(lost()), true))).fate, StoreFate::Lost);
@@ -3783,10 +5247,9 @@ mod tests {
             ozbox_provider_aws::SECRETS_KEY_LABEL.into(),
             "arn:aws:kms:us-east-1:123456789012:key/x".into(),
         );
-        assert_eq!(
-            store_check(&agent(), &paused, false, false, None).fate,
-            StoreFate::Kept
-        );
+        let still = store_check(&agent(), &paused, false, false, None);
+        assert_eq!(still.fate, StoreFate::Unknown);
+        assert!(store_gate(&still, "dev", false).is_err());
         // a box moving its store to the fleet key: neither "kept" nor "lost" is true yet, so the upgrade is refused, and
         // --accept-new-secrets-store does not make it go ahead (a KMS-configured machine over a file-sealed store never opens)
         let mut moving = rec.clone();
@@ -3953,7 +5416,8 @@ mod tests {
         );
         assert!(store_gate(&unknown, "dev", false).is_err());
         assert!(store_gate(&unknown, "dev", true).is_ok());
-        // the cloud's own label still decides first, and a pending move still refuses
+        // the cloud's own label no longer decides alone (2026-11-16: it said "kept" about a store the box could not open), and a
+        // pending move still refuses
         let mut labelled = rec.clone();
         labelled.spec.labels.insert(
             ozbox_provider_aws::SECRETS_KEY_LABEL.into(),
@@ -3962,7 +5426,7 @@ mod tests {
         let down = |_: &BoxRecord| Err("down".to_string());
         assert_eq!(
             store_check(&agent(), &labelled, false, false, Some(&down)).fate,
-            StoreFate::Kept
+            StoreFate::Unknown
         );
         Ok(())
     }
@@ -4011,6 +5475,133 @@ mod tests {
         );
         assert!(fine.admin.lock().unwrap().is_empty());
         Ok(())
+    }
+
+    /// The 2026-11-16 upgrade of `main` (0.2.0-beta.0 to beta.1, `--accept-new-secrets-store --use-fleet-key`): the new machine
+    /// is configured for KMS over a store the old disk's file key sealed. The service now records that as unopenable, and the
+    /// step after the replace sets the old store aside, with the pinned key's approval, instead of reporting "nothing was set
+    /// aside" while the service loops.
+    #[test]
+    fn a_new_store_on_the_fleet_key_sets_the_old_file_sealed_store_aside_after_the_replace(
+    ) -> TestResult {
+        use crate::secrets::SecretStore;
+        use crate::secrets_state::{State, KIND_MISMATCH_CODE};
+        let dir = tempfile::tempdir()?;
+        let (p, name) = sandbox_box(dir.path(), None)?;
+        let (seed, pk) = crate::approval_key::generate()?;
+        let keys = crate::secrets::MemorySecrets::default();
+        keys.set("approval-key-laptop", &seed)?;
+        let mismatch = State::not_ready(
+            "sealed by a file key, configured for kms",
+            KIND_MISMATCH_CODE,
+            Some("kms"),
+            None,
+        )
+        .with_store_kek("file");
+        let a = state_agent(Ok((Some(mismatch), false)), &pk);
+        let settled = settle_after_replace(
+            &p,
+            &a,
+            &name,
+            quick(),
+            &|ag, rec| Some(recover_store_step(ag, rec, &keys, quick())),
+            &|_, _| None,
+            false,
+        );
+        let r = settled.recovery.expect("the old store was dealt with");
+        assert_eq!(r.outcome, StepOutcome::Done, "{}", r.detail);
+        assert!(
+            r.detail.contains("set aside") && r.detail.contains("new one started"),
+            "{}",
+            r.detail
+        );
+        let sent = a.admin.lock().unwrap().clone();
+        assert_eq!(sent[0], "recover-secrets challenge");
+        assert!(sent[1].starts_with("recover-secrets "), "{sent:?}");
+        Ok(())
+    }
+
+    /// A box whose own program predates the record (the real `main` on beta.1) still loops with the mismatch as a restart. The
+    /// upgrade must not say "for another reason than a lost key"; it says what to run, and sets nothing aside by guesswork.
+    #[test]
+    fn a_service_still_looping_on_the_mismatch_is_told_apart_and_the_person_is_told_what_to_run(
+    ) -> TestResult {
+        use crate::secrets_state::State;
+        let dir = tempfile::tempdir()?;
+        let (_, rec) = running_box(dir.path(), "dev")?;
+        let keys = crate::secrets::MemorySecrets::default();
+        let looping = State::not_ready(
+            &format!(
+                "{} (trying again in 2 s)",
+                crate::secrets_enc::KEK_KIND_MISMATCH
+            ),
+            "transient",
+            Some("kms"),
+            None,
+        );
+        let a = state_agent(Ok((Some(looping), true)), "");
+        let step = recover_store_step(&a, &rec, &keys, quick());
+        assert_eq!(step.outcome, StepOutcome::Failed);
+        assert!(
+            step.detail.contains("0.2.0-beta.2")
+                && step.detail.contains("--accept-new-secrets-store"),
+            "{}",
+            step.detail
+        );
+        assert!(!step.detail.contains("another reason"), "{}", step.detail);
+        assert!(a.admin.lock().unwrap().is_empty(), "nothing is guessed");
+        Ok(())
+    }
+
+    /// The plan for `--use-fleet-key` with `--accept-new-secrets-store`: whatever the file key's copies, the old store is set
+    /// aside and the new one starts on the fleet's KMS key, and the apply does it (the fate is the accepted new-store one).
+    #[test]
+    fn the_plan_for_the_fleet_key_with_a_new_store_says_the_old_store_is_set_aside_and_the_new_one_starts_on_kms(
+    ) {
+        for fate in [
+            StoreFate::Lost,
+            StoreFate::Unknown,
+            StoreFate::AlreadyLost,
+            StoreFate::KeptByLaptop,
+            StoreFate::KeptByEscrow,
+            StoreFate::NotSaid,
+        ] {
+            let c = fleet_key_store_check(
+                StoreCheck {
+                    fate,
+                    detail: "the old text".into(),
+                },
+                "main",
+            );
+            assert_eq!(c.fate, StoreFate::Lost, "{fate:?}");
+            for w in [
+                "--use-fleet-key",
+                "KMS",
+                "set aside",
+                "never deleted",
+                "new store",
+            ] {
+                assert!(c.detail.contains(w), "{fate:?} {w}: {}", c.detail);
+            }
+            // accepted, so the apply runs the recovery after the replace
+            let note = store_gate(&c, "main", true).unwrap();
+            assert!(note.contains("Accepted"), "{note}");
+        }
+        // a store already on a key that is not a file, and a box mid-move, keep their own text
+        for fate in [
+            StoreFate::Kept,
+            StoreFate::MovingKey,
+            StoreFate::NotApplicable,
+        ] {
+            let c = fleet_key_store_check(
+                StoreCheck {
+                    fate,
+                    detail: "own".into(),
+                },
+                "main",
+            );
+            assert_eq!(c.detail, "own");
+        }
     }
 
     #[test]

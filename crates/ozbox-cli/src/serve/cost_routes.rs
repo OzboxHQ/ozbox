@@ -190,7 +190,7 @@ impl App {
     }
 
     fn start_cost_read(&mut self, now_ms: u64, bill_too: bool, orphans_too: bool) -> bool {
-        let Ok(recs) = self.provider.list() else {
+        let Some(recs) = self.boxes_quietly() else {
             return false;
         };
         let bills = self.bill_source(&recs);
@@ -491,7 +491,7 @@ impl App {
             return Resp::error(409, "unknown_plan", "plan again");
         };
         let src = self.orphan_source();
-        let recs = self.provider.list().unwrap_or_default();
+        let recs = self.boxes_for_loop().unwrap_or_default();
         let regions = self.scan_regions(&recs);
         let book = self.prices.book.clone();
         let plan_id = b.plan_id.clone();

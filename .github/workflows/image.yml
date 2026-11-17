@@ -219,19 +219,39 @@ jobs:
           # makes crates/ozbox-cli/build.rs refuse to build without the dashboard (passed into cross by Cross.toml)
           OZBOX_RELEASE: "1"
         run: cross build --release --locked --target "$TARGET" -p ozboxd -p ozbox-cli
-      - name: The program serves the real dashboard, not the placeholder page
+      - name: The program serves the real dashboard, not the placeholder page (asked of the program itself, every architecture)
         env:
+          ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
           DASH: ${{ needs.dashboard.outputs.sha256 }}
         run: |
           set -euo pipefail
           f="target/$TARGET/release/ozbox"
-          if grep -aq "The dashboard is not built" "$f"; then
+          # the placeholder page is a literal that exists only in a build without a dashboard, so a search for it is sound
+          if LC_ALL=C grep -aqF "The dashboard is not built" "$f"; then
             echo "::error title=Placeholder dashboard::the ozbox program contains the placeholder page. The dashboard was not embedded."
             exit 1
           fi
-          # it records the hash of the dashboard it embedded, and it is the one that was built
-          grep -aq "$DASH" "$f"
+          # the program says which dashboard it embedded, and it is the one that was built. (A hash the compiler may split
+          # into pieces cannot be found by searching the file.)
+          case "$ARCH" in
+            amd64) sh scripts/release/check-embedded-dashboard.sh "$DASH" "./$f" ;;
+            arm64)
+              sudo apt-get update -qq
+              # Ubuntu 26.04 replaced qemu-user-static; install whichever this runner offers, then use the binary it ships.
+              sudo apt-get install -y -qq qemu-user-static >/dev/null 2>&1 || sudo apt-get install -y -qq qemu-user >/dev/null
+              q="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+              if [ -z "$q" ]; then
+                echo "::error title=No dashboard check::no qemu-aarch64 is available, so the arm64 program cannot be asked what it embedded"
+                exit 1
+              fi
+              sh scripts/release/check-embedded-dashboard.sh "$DASH" "$q" "./$f"
+              ;;
+            *)
+              echo "::error title=No dashboard check::there is no way to run the $ARCH program here"
+              exit 1
+              ;;
+          esac
       - name: The box daemon carries the marker the setup script looks for
         env:
           TARGET: ${{ matrix.target }}
@@ -239,8 +259,19 @@ jobs:
           set -euo pipefail
           # ozbox-supervisor-setup.sh decides whether to make the dashboard's socket by finding this text in the installed
           # daemon (a daemon that does not take its socket from systemd must never be handed one). Never reword it (G1 F8).
-          grep -aq 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
+          LC_ALL=C grep -aqF 'ozbox-listenfd-protocol-1' "target/$TARGET/release/ozboxd" \
             || { echo "::error title=Missing marker::the release ozboxd does not carry ozbox-listenfd-protocol-1, so no box would make its dashboard socket"; exit 1; }
+      - name: The release programs carry none of the debug-only test sockets
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Both hooks exist for the browser tests of a DEBUG build (a dashboard socket the daemon binds itself and admits any
+          # peer on, and the dashboard's switch to it). Neither may ever be in a program a box runs.
+          ! LC_ALL=C grep -aqF 'OZBOXD_TEST_DASHBOARD_SOCKET' "target/$TARGET/release/ozboxd" \
+            || { echo "::error title=Debug hook in a release::the release ozboxd carries OZBOXD_TEST_DASHBOARD_SOCKET"; exit 1; }
+          ! LC_ALL=C grep -aqF 'OZBOX_DAEMON_SUPERVISOR_SOCKET' "target/$TARGET/release/ozbox" \
+            || { echo "::error title=Debug hook in a release::the release ozbox carries OZBOX_DAEMON_SUPERVISOR_SOCKET"; exit 1; }
       - name: One self-contained file, and a start check where this runner can
         env:
           ARCH: ${{ matrix.arch }}
@@ -289,6 +320,24 @@ jobs:
           fi
           # the release job requires this file for every architecture it publishes
           printf '%s\n' "$got" >"out/ozbox-linux-$ARCH.first-boot"
+      - name: The program reaches its secrets key and its parameter store itself (the image has no aws command, so neither may need one)
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # The release program carries the native KMS and Parameter Store clients. The behaviour (a signed round trip against loopback fakes of the key service and the metadata service, whose
+          # signatures a separate verifier recomputes from the raw request) is tested in this same run's unit tests
+          # (aws_native / secrets_enc). It cannot be run from the SHIPPED program here without putting a test hook into it:
+          # the program's client only calls https://kms.<region>.amazonaws.com and the metadata address, and the release
+          # build refuses debug hooks (see "The release programs carry none of the debug-only test sockets"). So this checks
+          # that the program that is shipped is the one that has the native client and no longer builds the aws command line.
+          for needle in 'TrentService.Encrypt' 'TrentService.Decrypt' 'AmazonSSM.GetParametersByPath' 'x-amz-json-1.1' 'AWS4-HMAC-SHA256'; do
+            LC_ALL=C grep -aqF "$needle" "out/ozbox-linux-$ARCH" \
+              || { echo "::error title=No native AWS client::the $ARCH ozbox program does not carry $needle, so a box set up for KMS could not open its secrets store, or a box with secrets of its own could not load them"; exit 1; }
+          done
+          # the old way piped the key to `aws kms` as fileb:///dev/stdin: a program still carrying that argument is not the fix
+          ! LC_ALL=C grep -aqF 'fileb:///dev/stdin' "out/ozbox-linux-$ARCH" \
+            || { echo "::error title=aws command still used::the $ARCH ozbox program still builds an aws kms command line, which the image cannot run (no aws command)"; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ozboxd-${{ matrix.arch }}
@@ -384,11 +433,15 @@ jobs:
         run: |
           echo "::error title=AWS refused the OIDC sign-in::The build role's trust policy does not allow this run. It presented a subject like $SUBJECT: the role must trust the environment named image of this repository, in the form GitHub presents (the immutable-id form repo:ORG@ORG_ID/REPO@REPO_ID:environment:image when the organization uses it). Apply infra/aws/image-build-trust-policy.json to the role with those ids filled in (infra/README.md says how), and make sure this job runs in the environment image. Nothing was built."
           exit 1
-      - name: Public sharing is allowed in every region this release publishes to (before anything is built)
+      - name: Public sharing is allowed, and the public-image quota can hold this release, in every region (before anything is built)
         if: needs.plan.outputs.public == 'true'
         env:
           REGIONS: ${{ needs.plan.outputs.all_regions }}
-        run: bash scripts/image/preflight.sh --regions "$REGIONS"
+          ARCHS: ${{ needs.plan.outputs.archs }}
+        run: |
+          set -euo pipefail
+          owner="$(aws sts get-caller-identity --query Account --output text)"
+          bash scripts/image/preflight.sh --regions "$REGIONS" --owner "$owner" --need "$(jq length <<<"$ARCHS")"
       - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3
         with:
           version: 1.11.2
@@ -604,15 +657,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: |
           set -euo pipefail
           tag="image-v$VERSION"
-          gh release view "$tag" >/dev/null 2>&1 || \
-            gh release create "$tag" --title "Machine image $VERSION" --notes "Signed machine image manifest for $VERSION." --target "$GITHUB_SHA"
+          flags=(--title "Machine image $VERSION" --notes "Signed machine image manifest for $VERSION." --target "$GITHUB_SHA")
+          # a version with a pre-release field (0.2.0-beta.0) is a GitHub pre-release
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" "${flags[@]}"
           gh release upload "$tag" out/* --clobber
 
   publish:
-    name: Make public and retire old images
+    name: Make public and (optionally) retire old images
     # Only after the release's manifest is built, signed and uploaded: a client trusts the signed manifest, so no image is
     # public before its release is. Only when this repository publishes its images (OZBOX_IMAGE_PUBLIC); a pre-release only
     # through the plan job's exact beta opt-in (it sets `public`). A `republish` run has no build: it works from the release's own manifest.
@@ -664,14 +720,21 @@ jobs:
           role-to-assume: ${{ secrets.AWS_IMAGE_ROLE_ARN }}
           aws-region: us-east-1
           role-session-name: ozbox-publish-${{ github.run_id }}
-      - name: Make the release's images public (the images in the signed manifest, in every region)
+      - name: Make room under the public-image quota (older Oz Box versions become private, never deleted)
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
         run: |
           set -euo pipefail
+          owner="$(aws sts get-caller-identity --query Account --output text)"
           bash scripts/image/preflight.sh --regions "$REGIONS"
-          bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
+          # every region is planned first; one that cannot fit fails here, before any image changes
+          bash scripts/image/make-room.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --owner "$owner" --apply
+      - name: Make the release's images public (all or nothing; images already public are skipped)
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REGIONS: ${{ needs.plan.outputs.all_regions }}
+        run: bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
       - name: Retire images outside the retention window
         env:
           VERSION: ${{ needs.plan.outputs.version }}

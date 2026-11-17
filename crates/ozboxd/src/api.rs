@@ -181,6 +181,21 @@ impl AppState {
                     }),
                 ),
             },
+            p if crate::skills::handles(p) => match crate::skills::global() {
+                Some(svc) => {
+                    let (status, v) =
+                        svc.route(method, &p["/v1/skills".len()..], &req.body, req.dashboard);
+                    Response::json(status, &v)
+                }
+                None => Response::json(
+                    503,
+                    &serde_json::json!({
+                        "code": "skills_unavailable",
+                        "message": "skills on the box's disk are not available on this box",
+                        "error": "skills on the box's disk are not available on this box"
+                    }),
+                ),
+            },
             p if p == "/v1/local-ai" || p.starts_with("/v1/local-ai/") => {
                 match crate::local_ai::global() {
                     Some(svc) => {
@@ -791,6 +806,21 @@ mod unix {
             linger_close(&mut stream);
             return;
         }
+        // Putting a skill on the box's disk, or taking one away, is the dashboard's act, after a person approved the exact
+        // files: it is on the dashboard socket's route table only. Every process of the box user can open this socket, and a
+        // caller here could write whatever hash and files it likes, so this socket answers `GET` (what is on the disk) and
+        // nothing that writes.
+        if gate.is_none() && crate::skills::handles(&head.path) && head.method != "GET" {
+            let _ = http::write_response(
+                &mut stream,
+                &Response::json(
+                    403,
+                    &serde_json::json!({ "error": "a skill is put on this box through the dashboard's socket, not this one", "message": "a skill is put on this box through the dashboard's socket, not this one", "code": "skills_write_not_here" }),
+                ),
+            );
+            linger_close(&mut stream);
+            return;
+        }
         let path_for_audit = head.path.clone();
         let audit = |status: String, id: Option<String>| {
             if let (Some(g), Some(r)) = (gate, route) {
@@ -833,34 +863,36 @@ mod unix {
             }
             return;
         }
-        let resp = if head.content_length > http::MAX_BODY {
-            Response::error(413, "request body too large")
-        } else {
-            let mut body = head.early.clone();
-            let deadline = Instant::now() + REQUEST_DEADLINE;
-            let mut bad = None;
-            while body.len() < head.content_length {
-                let mut chunk = [0u8; 2048];
-                if Instant::now() >= deadline {
-                    bad = Some(Response::error(408, "request timed out"));
-                    break;
+        let resp =
+            if head.content_length > http::body_limit(&head.method, &head.path, gate.is_some()) {
+                Response::error(413, "request body too large")
+            } else {
+                let mut body = head.early.clone();
+                let deadline = Instant::now() + REQUEST_DEADLINE;
+                let mut bad = None;
+                while body.len() < head.content_length {
+                    let mut chunk = [0u8; 2048];
+                    if Instant::now() >= deadline {
+                        bad = Some(Response::error(408, "request timed out"));
+                        break;
+                    }
+                    match std::io::Read::read(&mut stream, &mut chunk) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => body.extend_from_slice(&chunk[..n]),
+                    }
                 }
-                match std::io::Read::read(&mut stream, &mut chunk) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => body.extend_from_slice(&chunk[..n]),
-                }
-            }
-            body.truncate(head.content_length);
-            bad.unwrap_or_else(|| {
-                state.route(&Request {
-                    method: head.method,
-                    path: head.path,
-                    query: head.query,
-                    body,
-                    capability: head.capability,
+                body.truncate(head.content_length);
+                bad.unwrap_or_else(|| {
+                    state.route(&Request {
+                        method: head.method,
+                        path: head.path,
+                        query: head.query,
+                        body,
+                        capability: head.capability,
+                        dashboard: gate.is_some(),
+                    })
                 })
-            })
-        };
+            };
         let id = route.and_then(|r| audit_id(r, &path_for_audit, &resp));
         audit(resp.status.to_string(), id);
         let _ = http::write_response(&mut stream, &resp);

@@ -80,9 +80,26 @@ pub(super) fn classify_named(method: &str, path: &str) -> Option<Need> {
         ["orchestrations", ..] => read_or(RunStart),
         ["approval-requests", ..] => read_or(ApprovalDecide),
         ["approval-policy"] => read_or(SettingsChange),
+        // Telegram links (ADR 0050): looking is for anyone signed in; making a link or a delegation is working, and the passkey is
+        // asked inside. What only makes Telegram less able (lock, unlink, revoke) is open to anyone for their own link, and the
+        // handler checks whose it is.
+        ["telegram"] if get => Need::Read,
+        ["telegram", "window" | "link", ..] => Need::Act(RunStart),
+        ["telegram", "links", _, "lock" | "unlock", ..] | ["telegram", "links", _] if !get => {
+            Need::Read
+        }
+        ["telegram", "links", _, "transcript"] => Need::Act(SettingsChange),
+        ["telegram", "links", _, "renew" | "delegations", ..] => Need::Act(RunStart),
+        ["telegram", "delegations", _] if !get => Need::Read,
+        ["telegram", "delegations", _, "cosign", ..] => Need::Act(SettingsChange),
+        ["telegram", "lock-all" | "resume" | "marks"] => Need::Act(SettingsChange),
+        // anything else under here that changes something is an owner's
+        ["telegram", ..] => read_or(SettingsChange),
         // memory is the agents' notes; a skill is code an agent may run, so reviewing one is the owner's
         ["memory", ..] => read_or(FileWrite),
         ["skills", ..] => read_or(SettingsChange),
+        // a skill put on a box's own disk is guidance its agents will follow: an owner's act, like approving one
+        ["boxes", _, "skills", ..] => read_or(SettingsChange),
         // permissions, secrets, costs, settings and people
         ["permissions", "check"] => Need::Read,
         ["permissions", "grants", ..] => read_or(GrantCreate),
@@ -465,6 +482,20 @@ mod tests {
             ("POST", "/v1/apps/webhooks", Need::Act(SettingsChange)),
             ("POST", "/v1/skills/x/approve", Need::Act(SettingsChange)),
             ("POST", "/v1/memory", Need::Act(FileWrite)),
+            ("POST", "/v1/skills", Need::Act(SettingsChange)),
+            ("DELETE", "/v1/skills/demo", Need::Act(SettingsChange)),
+            ("GET", "/v1/skills/holdings", Need::Read),
+            ("GET", "/v1/boxes/dev/skills", Need::Read),
+            (
+                "PUT",
+                "/v1/boxes/dev/skills/demo",
+                Need::Act(SettingsChange),
+            ),
+            (
+                "DELETE",
+                "/v1/boxes/dev/skills/demo",
+                Need::Act(SettingsChange),
+            ),
             // not in the table: reading is open to anyone signed in, a change is an owner's
             ("GET", "/v1/something-new", Need::Read),
             ("POST", "/v1/something-new", Need::Act(SettingsChange)),

@@ -1,0 +1,466 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadForPlansAndChecks",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:GetEbsEncryptionByDefault",
+        "ssm:DescribeInstanceInformation",
+        "sts:GetCallerIdentity",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadOwnSetupRoleForPermissionChecks",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:SimulatePrincipalPolicy"
+      ],
+      "Resource": "arn:aws:iam::${account_id}:role/aws-reserved/sso.amazonaws.com/*"
+    },
+    {
+      "Sid": "CreateTaggedResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateInternetGateway",
+        "ec2:AllocateAddress",
+        "ec2:CreateVolume",
+        "ec2:CreateSubnet",
+        "ec2:CreateRouteTable",
+        "ec2:CreateNatGateway",
+        "ec2:CreateSnapshot"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:vpc/*",
+        "arn:aws:ec2:*:${account_id}:internet-gateway/*",
+        "arn:aws:ec2:*:${account_id}:elastic-ip/*",
+        "arn:aws:ec2:*:${account_id}:volume/*",
+        "arn:aws:ec2:*:${account_id}:subnet/*",
+        "arn:aws:ec2:*:${account_id}:route-table/*",
+        "arn:aws:ec2:*:${account_id}:natgateway/*",
+        "arn:aws:ec2:*::snapshot/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "RunTaggedInstances",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:${account_id}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesBaseResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:*::image/*",
+        "arn:aws:ec2:*:${account_id}:network-interface/*",
+        "arn:aws:ec2:*:${account_id}:volume/*"
+      ]
+    },
+    {
+      "Sid": "RunInstancesInOzboxNetworks",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:subnet/*",
+        "arn:aws:ec2:*:${account_id}:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:*:${account_id}:*/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateVolume",
+            "CreateVpc",
+            "CreateInternetGateway",
+            "AllocateAddress",
+            "CreateSubnet",
+            "CreateRouteTable",
+            "CreateNatGateway",
+            "CreateSnapshot"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnCreateSnapshot",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:*::snapshot/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": "CreateSnapshot"
+        }
+      }
+    },
+    {
+      "Sid": "ChangeOnlyTaggedNetworkResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:ModifyVpcAttribute",
+        "ec2:DeleteVpc",
+        "ec2:CreateSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:DeleteSubnet",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:CreateRoute",
+        "ec2:ReplaceRoute",
+        "ec2:DeleteRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateNatGateway",
+        "ec2:DeleteNatGateway",
+        "ec2:ReleaseAddress"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "ListKeysAndAliases",
+      "Effect": "Allow",
+      "Action": [
+        "kms:ListKeys",
+        "kms:ListAliases"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateOnlyOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": "kms:CreateKey",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ozbox-managed": "true"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "ozbox-*",
+            "purpose",
+            "team"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TagOnlyKeysThatAreAlreadyOzBoxKeys",
+      "Effect": "Allow",
+      "Action": "kms:TagResource",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true",
+          "aws:RequestTag/ozbox-managed": "true"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "ozbox-*",
+            "purpose",
+            "team"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AdministerOnlyOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListResourceTags",
+        "kms:EnableKeyRotation",
+        "kms:PutKeyPolicy",
+        "kms:UpdateKeyDescription",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "arn:aws:kms:*:${account_id}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "AliasesOnlyUnderTheOzBoxPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:*:${account_id}:alias/ozbox-*"
+    },
+    {
+      "Sid": "AliasesPointOnlyAtOzBoxTaggedKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:*:${account_id}:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "MakeAndMaintainOnlyTheAdoptDocuments",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:CreateDocument",
+        "ssm:UpdateDocument",
+        "ssm:UpdateDocumentDefaultVersion",
+        "ssm:DeleteDocument",
+        "ssm:DescribeDocument",
+        "ssm:GetDocument",
+        "ssm:DescribeDocumentPermission",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:*:${account_id}:document/ozbox-adopt-*"
+    },
+    {
+      "Sid": "CreateAndMaintainOnlyTheBoxManagedPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:TagPolicy",
+        "iam:UntagPolicy",
+        "iam:ListPolicyTags"
+      ],
+      "Resource": "arn:aws:iam::${account_id}:policy/ozbox-box-*"
+    },
+    {
+      "Sid": "OzboxStateBucketsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:GetEncryptionConfiguration",
+        "s3:PutEncryptionConfiguration",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:GetBucketTagging",
+        "s3:PutBucketTagging"
+      ],
+      "Resource": "arn:aws:s3:::ozbox-state-${account_id}-*"
+    },
+    {
+      "Sid": "OzboxStateObjectsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::ozbox-state-${account_id}-*/*"
+    },
+    {
+      "Sid": "NeverTouchTheReservedObxRoles",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/obx/*",
+        "arn:aws:iam::*:role/obx-*",
+        "arn:aws:iam::*:role/*/obx-*"
+      ]
+    },
+    {
+      "Sid": "NeverGrantAccessOrOpenInbound",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:PutRolePolicy",
+        "iam:PutUserPolicy",
+        "iam:PutGroupPolicy",
+        "iam:AttachUserPolicy",
+        "iam:AttachGroupPolicy",
+        "organizations:*",
+        "sso:*",
+        "account:*",
+        "ec2:AuthorizeSecurityGroupIngress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverAttachOrGrantAnything",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:AttachUserPolicy",
+        "iam:AttachGroupPolicy",
+        "iam:PutRolePolicy",
+        "iam:PutUserPolicy",
+        "iam:PutGroupPolicy",
+        "iam:CreateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:CreateUser",
+        "iam:CreateAccessKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverRunACommandOrShareADocument",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:StartSession",
+        "ssm:ModifyDocumentPermission"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverUseAKeyExceptThroughTheStateBucket",
+      "Effect": "Deny",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:CreateGrant",
+        "kms:RetireGrant",
+        "kms:RevokeGrant",
+        "kms:ImportKeyMaterial",
+        "kms:ReplicateKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "kms:ViaService": "s3.*.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "NeverChangeTheProductionKey",
+      "Effect": "Deny",
+      "Action": [
+        "kms:PutKeyPolicy",
+        "kms:CreateGrant",
+        "kms:TagResource",
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-production": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverAliasTheProductionKey",
+      "Effect": "Deny",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ozbox-production": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NeverUseTheProductionAliasName",
+      "Effect": "Deny",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:*:${account_id}:alias/ozbox-*-production"
+    },
+    {
+      "Sid": "NeverRemoveTheOzBoxTag",
+      "Effect": "Deny",
+      "Action": "kms:UntagResource",
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverLockOutTheKeyPolicy",
+      "Effect": "Deny",
+      "Action": [
+        "kms:CreateKey",
+        "kms:PutKeyPolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "kms:BypassPolicyLockoutSafetyCheck": "true"
+        }
+      }
+    }
+  ]
+}

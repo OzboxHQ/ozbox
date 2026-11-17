@@ -637,6 +637,9 @@ Confirmed in the IAM policy simulator, or on a canary where stated, or from prov
    protection that matters on this socket points the other way: the box user and its agents cannot reach the dashboard's
    process, its secrets or its socket, and the box user's own socket is not open to the dashboard.
 
+   Also on it: skills on the box's own disk (`/v1/skills`, ADR 0051): a push writes only into the agents' skills folders, only
+   the files the dashboard sends, re-checked and re-hashed by the daemon (the approval is the dashboard's check, made before it sends).
+
    Not on it: backups, the tool installer, local models, writing agent events (the coding agent's own hook), download links
    (`/v1/files/tokens`), emptying the trash, and **answering an agent's permission request** (`POST
    /v1/agent-events/permission/{id}`). No socket of the daemon takes that answer: a process on the box that could post it could

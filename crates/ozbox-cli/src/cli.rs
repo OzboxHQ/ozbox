@@ -141,7 +141,8 @@ pub enum Command {
     Upgrade {
         #[arg(value_parser = parse_name)]
         name: BoxName,
-        /// An image id, or `latest` (the default): the newest Oz image this account can see.
+        /// An image id, or `latest` (the default): the newest Oz image whose signed release verifies (newer ones whose release
+        /// cannot be found or does not list them are passed over, and the plan says which).
         #[arg(long)]
         image: Option<String>,
         /// Use an image whose release signature could not be verified. The plan prints a warning. Without this, such an
@@ -154,6 +155,13 @@ pub enum Command {
         /// this, such an upgrade is refused.
         #[arg(long)]
         accept_new_secrets_store: bool,
+        /// AWS: do not keep a copy of the old system disk. By default, when the plan cannot show that the secrets store's key
+        /// survives (it is a file on the system disk, or ozbox cannot tell), the upgrade first takes an encrypted snapshot of
+        /// that disk, so the old store's key is not destroyed with it and the old store can be reopened (docs: Recovering an
+        /// old secrets store). The snapshot is billed like any other and nothing deletes it for you. With this flag the key
+        /// is destroyed with the disk and the old store can never be opened.
+        #[arg(long)]
+        no_pre_upgrade_snapshot: bool,
         /// Replace the box's machine from the image it already runs, so it boots with this program's first-boot
         /// configuration (/work is kept). Without this, a box on the target image is replaced only when it says its first
         /// boot differs from this program's, or has no record of it.
@@ -401,9 +409,17 @@ pub enum Command {
         /// Do not keep a final snapshot of /work.
         #[arg(long)]
         no_final_snapshot: bool,
+        /// Keep the copies of old system disks that upgrades took (each holds the box's old secrets-store key). By default they
+        /// are deleted with the box, because ozbox cannot list them once it is gone.
+        #[arg(long)]
+        keep_old_system_disks: bool,
     },
     /// The box modules and first-boot configuration this program renders: its version, their hashes, and the folder in use.
     Infra,
+    /// What this program was built with: its version and the dashboard it embeds (the content hash, or `none`, and whether
+    /// the placeholder page is compiled in). The release build runs this to check what it built. Reads no configuration.
+    #[command(hide = true)]
+    BuildInfo,
     /// The size catalogue and the machine type each provider maps it to.
     Sizes,
     /// The providers and what each can do.
@@ -852,7 +868,7 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live.
+    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -863,6 +879,11 @@ pub enum SecretsCommand {
         /// A production-looking key to store anyway (it stays flagged, and no agent's command receives it). Repeatable.
         #[arg(long = "allow-live", value_name = "NAME")]
         allow_live: Vec<String>,
+        /// Store EVERY production-looking key in the file, as if each were named with --allow-live. The same typed confirmation
+        /// (a person at a terminal; refused from a script) comes first, after the names are listed. They stay flagged and no agent's
+        /// command receives them. Use either this or --allow-live NAME, not both.
+        #[arg(long = "allow-live-all", conflicts_with = "allow_live")]
+        allow_live_all: bool,
         /// Mark a value PUBLIC: a public URL or an anonymous key that a declared command may be given as plain environment
         /// (`"public": ["NAME"]` in its declaration). Your explicit word, never guessed from a value. Refused for a name that
         /// says it is secret, a production-looking value, a kind of key that is only ever secret, and a service-role key.
@@ -1348,6 +1369,7 @@ pub enum TunnelCommand {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum DashboardCommand {
     /// Install the dashboard as a service on a box, with its tunnel, running as a user of its own (never the box user). Shows
     /// the plan first.
@@ -1411,6 +1433,33 @@ pub enum DashboardCommand {
         /// this computer's command line or shell history.
         #[arg(long, requires = "token_stdin")]
         approval_stdin: bool,
+        /// Use the tunnel token this computer kept in its keychain when the dashboard was installed with --token-stdin, instead
+        /// of reading one. It is never shown. Without this flag a tokenless install leaves the box's token as it is.
+        #[arg(long, conflicts_with = "token_stdin")]
+        token_from_keychain: bool,
+        /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
+        /// token, as `ozbox secrets approve --scope tunnel-token --token-stdin` would, and send it. Needs a token
+        /// (--token-stdin or --token-from-keychain).
+        #[arg(long, conflicts_with_all = ["approval", "approval_stdin"])]
+        approve_with_laptop_key: bool,
+    },
+    /// Put a dashboard back on a box from what this computer kept when it was installed: the address, the people, the tunnel
+    /// and its token (in the keychain, never in a file). One command after an upgrade that started a new secrets store.
+    Restore {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
+        /// The release to take the program from (as for install). Default: the image release the box is from.
+        #[arg(long)]
+        release: Option<String>,
+        /// When the box asks for an approval of the token change: make it now with this computer's pinned key, for exactly this
+        /// token (the same step as `ozbox secrets approve --scope tunnel-token --token-stdin`), and send it.
+        #[arg(long)]
+        approve_with_laptop_key: bool,
+    },
+    /// Forget what this computer kept for a box's dashboard (its token and install settings). Nothing on the box changes.
+    Forget {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
     },
 }
 
@@ -1732,6 +1781,19 @@ pub enum BackupCommand {
         /// Replace /work of this box. High risk: the box name is typed, and the current state is kept first.
         #[arg(long)]
         in_place: bool,
+    },
+    /// Send the repository's password and keys to a box from this computer's secret store (what a box needs after its
+    /// secrets store started again without them). Nothing is printed or stored on the box's /work.
+    Credentials {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
+    },
+    /// Turn off backups on a box: its schedule stops (provider snapshots and repository), and its repository credentials
+    /// are removed from the box. Backups already made stay where they are. Turn them on again with `ozbox backup schedule
+    /// --box <box> --every daily` and `ozbox backup credentials <box>`.
+    Off {
+        #[arg(value_parser = parse_name)]
+        name: BoxName,
     },
     /// Delete one backup. It cannot be brought back.
     Delete {
@@ -2429,8 +2491,15 @@ pub enum SkillsCommand {
         #[arg(long, default_value = "fleet")]
         scope: String,
     },
-    /// Approve the skill's current files (shown first; the hash is what you approve).
-    Approve { name: String },
+    /// Approve the skill's current files (shown first; the hash is what you approve). A skill that runs commands or widens
+    /// what an agent may do (hooks, allowed-tools, shell, agent, a `!` command in its text) needs each one acknowledged: you
+    /// are asked, or pass `--ack <what>` for each one (`--yes` alone never acknowledges them).
+    Approve {
+        name: String,
+        /// Acknowledge one of the things the skill asks for (`hooks`, `allowed-tools`, `shell`, `agent`, `shell-injection`).
+        #[arg(long = "ack")]
+        ack: Vec<String>,
+    },
     /// Withdraw every approval of a skill.
     Revoke { name: String },
 }
