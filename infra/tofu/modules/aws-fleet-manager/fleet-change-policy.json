@@ -1,0 +1,264 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheFleet",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVolumesModifications",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeImages",
+        "ec2:DescribeTags",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeAvailabilityZones",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchOnlyTaggedSizedLockedDownInstances",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:${account_id}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:RequestTag/ozbox-managed": "true",
+          "ec2:MetadataHttpTokens": "required",
+          "ec2:InstanceType": "${sizes}"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "ozbox-managed",
+            "ozbox-box",
+            "ozbox-region",
+            "ozbox-role",
+            "ozbox-created-by",
+            "ozbox-first-boot",
+            "ozbox-orchestration",
+            "Name"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LaunchOnlyOzboxImages",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*::image/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "ec2:ImageID": "${image_ids}"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyEncryptedBoundedTaggedVolumes",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume"
+      ],
+      "Resource": "arn:aws:ec2:*:${account_id}:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:RequestTag/ozbox-managed": "true",
+          "ec2:VolumeType": "gp3"
+        },
+        "Bool": {
+          "ec2:Encrypted": "true"
+        },
+        "NumericLessThanEquals": {
+          "ec2:VolumeSize": "${max_volume_gb}",
+          "ec2:VolumeIops": "${max_iops}",
+          "ec2:VolumeThroughput": "${max_throughput}"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchOnlyInOzboxNetworks",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:subnet/*",
+        "arn:aws:ec2:*:${account_id}:security-group/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "TheLaunchsInterfaceIsInAnOzboxSubnet",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:${account_id}:network-interface/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}"
+        },
+        "ArnLike": {
+          "ec2:Subnet": "${subnet_arns}"
+        }
+      }
+    },
+    {
+      "Sid": "CloneOnlyFromOzboxSnapshots",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:CreateVolume"
+      ],
+      "Resource": "arn:aws:ec2:*::snapshot/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "TagOnlyWhileCreating",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:*/*",
+        "arn:aws:ec2:*::snapshot/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateVolume",
+            "CreateSnapshot"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SnapshotOnlyOzboxVolumes",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSnapshot",
+      "Resource": "arn:aws:ec2:*:${account_id}:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "SnapshotsAreTaggedAtBirth",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSnapshot",
+      "Resource": "arn:aws:ec2:*::snapshot/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:RequestTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "PauseResumeDestroyOnlyOzboxResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:DeleteVolume"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:${account_id}:instance/*",
+        "arn:aws:ec2:*:${account_id}:volume/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "GrowOnlyOzboxVolumesWithinLimits",
+      "Effect": "Allow",
+      "Action": "ec2:ModifyVolume",
+      "Resource": "arn:aws:ec2:*:${account_id}:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true",
+          "ec2:VolumeType": "gp3"
+        },
+        "NumericLessThanEquals": {
+          "ec2:VolumeSize": "${max_volume_gb}",
+          "ec2:VolumeIops": "${max_iops}",
+          "ec2:VolumeThroughput": "${max_throughput}"
+        }
+      }
+    },
+    {
+      "Sid": "ResizeChangesTheInstanceTypeOnly",
+      "Effect": "Allow",
+      "Action": "ec2:ModifyInstanceAttribute",
+      "Resource": "arn:aws:ec2:*:${account_id}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "${regions}",
+          "aws:ResourceTag/ozbox-managed": "true",
+          "ec2:Attribute/InstanceType": "${sizes}"
+        }
+      }
+    },
+    {
+      "Sid": "PassOnlyAPoolRoleReservedForThisSession",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${account_id}:role/obx/obx-pool-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com",
+          "iam:ResourceTag/ozbox-reserved-for": "${aws:userid}"
+        }
+      }
+    },
+    {
+      "Sid": "ManagedStateObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::ozbox-tfstate-managed-${account_id}/ozbox/boxes/*"
+    },
+    {
+      "Sid": "ListManagedState",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::ozbox-tfstate-managed-${account_id}",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "ozbox/boxes/*"
+        }
+      }
+    }
+  ]
+}

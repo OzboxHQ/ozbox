@@ -50,6 +50,7 @@ mod code_routes;
 mod cost_routes;
 mod demo_telegram;
 mod files;
+mod fleet_routes;
 mod lane;
 #[cfg(test)]
 mod lane_tests;
@@ -206,6 +207,9 @@ pub(crate) enum FleetMode {
     ThisBox,
     /// The simulated provider: nothing here is real.
     Demo,
+    /// A box's dashboard that manages the fleet through its own scoped roles (ADR 0040): every change needs a change window
+    /// opened from the owner's computer and the owner's passkey over that exact plan.
+    Managed,
 }
 
 impl FleetMode {
@@ -223,6 +227,12 @@ impl FleetMode {
                 "docs": DOCS_THIS_BOX,
             }),
             FleetMode::Demo => json!({ "mode": "demo", "connected": true, "demo": true }),
+            FleetMode::Managed => json!({
+                "mode": "managed",
+                "connected": true,
+                "demo": false,
+                "changes_need": ["change_window", "owner_passkey"],
+            }),
         }
     }
 }
@@ -363,6 +373,9 @@ pub struct App {
     chat: chat_routes::ChatRt,
     /// Sign-in for a dashboard on a shared machine; `None` = the local access token.
     auth: Option<Arc<auth::Auth>>,
+    /// A box's dashboard that manages the fleet (ADR 0040): the gate every change passes. `None` everywhere today but in
+    /// tests: the credential holder it needs is not built, so a box's dashboard still says the fleet is not connected.
+    fleet_gate: Option<crate::fleet_gate::FleetGate>,
     /// This server runs on a box (its secrets service is there): without a sign-in, its access token is not proof of the
     /// person there (see `roles::step_up_gate`).
     on_a_box: bool,
@@ -403,6 +416,9 @@ struct ApplyRequest {
     /// Optional echo of the plan being confirmed; it must equal the plan this server issued.
     plan: Option<Plan>,
     confirm_name: Option<String>,
+    /// The passkey assertion over this plan's fleet challenge (ADR 0040 §2), when the dashboard manages the fleet.
+    #[serde(default)]
+    fleet_assertion: Option<Value>,
 }
 
 /// Parse `--bind`. Only loopback addresses (and `localhost`) are accepted: nothing here may listen publicly.
@@ -513,6 +529,7 @@ impl App {
             test_runs: Arc::default(),
             demo_telegram: None,
             auth: None,
+            fleet_gate: None,
             extra_headers: Vec::new(),
             notified_requests: std::collections::BTreeSet::new(),
             access: access::AccessCtx::default(),
@@ -739,6 +756,14 @@ impl App {
     }
 
     /// Turn on sign-in (the `--public-behind-tunnel` mode): the local token no longer opens anything.
+    /// Manage the fleet from this dashboard through `gate` (ADR 0040). Every change then also needs a window for its plan and
+    /// the owner's passkey over that plan; nothing else about plan and apply changes.
+    #[cfg(test)]
+    pub(crate) fn with_fleet_gate(mut self, gate: crate::fleet_gate::FleetGate) -> Self {
+        self.fleet_gate = Some(gate);
+        self
+    }
+
     pub fn with_auth(mut self, auth: Arc<auth::Auth>) -> Self {
         self.auth = Some(auth);
         self.sync_second_factor();
@@ -853,6 +878,7 @@ impl App {
                 FleetMode::Connected => "connected",
                 FleetMode::ThisBox => "this_box",
                 FleetMode::Demo => "demo",
+                FleetMode::Managed => "managed",
             },
         };
         let query = req.query.clone();
@@ -1038,9 +1064,10 @@ impl App {
             ["jobs", id] if get => self.apply_job(id),
             ["plans", id] if get => self.get_plan(id),
             ["plans"] if post => self.issue_plan(&req.body),
+            ["fleet", "plans", id, "challenge"] if post => self.fleet_challenge(req, id),
             ["apply"] if post => {
                 let step_up = self.step_up_state(req);
-                self.apply(&req.body, step_up)
+                self.apply_from(Some(req), &req.body, step_up)
             }
             ["info"]
             | ["boxes"]
@@ -1085,6 +1112,9 @@ impl App {
 
     /// What the boxes this dashboard lists are: a fleet it can manage, this box alone, or made-up demo boxes.
     fn fleet_mode(&self) -> FleetMode {
+        if self.fleet_gate.is_some() {
+            return FleetMode::Managed;
+        }
         match self.provider_id.as_str() {
             crate::this_box::PROVIDER_ID => FleetMode::ThisBox,
             ozbox_provider_fake::PROVIDER_ID => FleetMode::Demo,
@@ -1408,6 +1438,12 @@ impl App {
     }
 
     fn apply(&mut self, body: &[u8], step_up: roles::StepUp) -> Resp {
+        self.apply_from(None, body, step_up)
+    }
+
+    /// `apply` for a person's own request (`req`), or for the server's own follow-up (`None`: an orchestration's step). A
+    /// fleet-managing dashboard refuses the second kind: only a person's passkey over the plan lets a fleet change through.
+    fn apply_from(&mut self, req: Option<&Req>, body: &[u8], step_up: roles::StepUp) -> Resp {
         let request: ApplyRequest = match serde_json::from_slice(body) {
             Ok(r) => r,
             Err(e) => return Resp::error(400, "bad_request", &format!("invalid request: {e}")),
@@ -1484,6 +1520,18 @@ impl App {
                 200,
                 &json!({ "plan": plan, "applied": false, "result": Value::Null }),
             );
+        }
+        // A box's dashboard that manages the fleet: a window for this plan and the owner's passkey over it, checked last,
+        // just before the plan is used up (ADR 0040 §2). A later ask while the box is made ready was already let through.
+        if !quiescing {
+            if let Some(refusal) = self.fleet_gate_refusal(
+                req,
+                &request.plan_id,
+                &plan,
+                request.fleet_assertion.as_ref(),
+            ) {
+                return refusal;
+            }
         }
         // A change that stops the machine (a resize, an upgrade) gets the box ready first: runs end cleanly and uncommitted
         // work is snapshotted, bounded in time, on a thread of its own (see `quiesce_jobs`). An upgrade that does not stop

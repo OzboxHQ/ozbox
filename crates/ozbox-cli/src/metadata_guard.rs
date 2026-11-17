@@ -193,6 +193,28 @@ mod tests {
     use super::*;
     use ozbox_core::{Output, RecordingRunner};
 
+    /// ADR 0040 §1: the fleet's credentials come from the instance's role, so who reaches the metadata service decides who
+    /// could hold them. The box user, its runs, the dashboard (an HTTP server an agent can reach) and the fleet's own
+    /// credential holder are not on the list: the credential holder joins it only after main runs the narrow box policies
+    /// (the ADR's order), in a change of its own.
+    #[test]
+    fn neither_the_box_user_nor_its_runs_nor_the_dashboard_reach_the_metadata_service() {
+        for who in [
+            "ozbox",
+            "ozbox-supervisor",
+            "ozbox-run",
+            "ozbox-runner",
+            "ozbox-fleetcred",
+            "ozbox-fleetapply",
+        ] {
+            assert!(
+                !ALLOWED.contains(&who),
+                "{who} must not reach the instance's credentials"
+            );
+        }
+        assert!(ALLOWED.iter().all(|u| !u.starts_with("ozbox-run")));
+    }
+
     fn out(stdout: &str) -> Output {
         Output {
             status: Some(0),

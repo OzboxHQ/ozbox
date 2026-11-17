@@ -1,0 +1,55 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheFleet",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVolumesModifications",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeImages",
+        "ec2:DescribeTags",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeRegions"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "${regions}" } }
+    },
+    {
+      "Sid": "ReadPrices",
+      "Effect": "Allow",
+      "Action": ["pricing:GetProducts", "pricing:DescribeServices", "pricing:GetAttributeValues"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": ["us-east-1", "eu-central-1", "ap-south-1"] } }
+    },
+    {
+      "Sid": "ReadQuotasAndWhoAmI",
+      "Effect": "Allow",
+      "Action": ["servicequotas:GetServiceQuota", "sts:GetCallerIdentity"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "${regions}" } }
+    },
+    {
+      "Sid": "NeverUserDataConsolesOrDiskBlocks",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:DescribeInstanceAttribute",
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ec2:GetLaunchTemplateData",
+        "ebs:*",
+        "s3:*",
+        "ssm:GetParameter*",
+        "secretsmanager:*",
+        "kms:*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

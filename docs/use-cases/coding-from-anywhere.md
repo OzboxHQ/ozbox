@@ -196,7 +196,12 @@ them with `ozbox` on your computer. (Made-up demo boxes appear only when you ask
 browser or a stand-in server on the box itself: it says "This is demo data, and a box has no demo terminal" rather than hand
 you a shell on the box that is not the box user's.) Every page says plainly what is not connected, not built or not
 permitted in the same way, and none shows demo data on a box. A dashboard that manages the fleet from a box is
-designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md) and is not built.
+designed in [ADR 0040](../adr/0040-a-boxs-dashboard-manages-the-fleet-through-a-scoped-role-of-its-own.md). Its first part is
+built and tested with stand-ins, never on a real account (**Preview**): the cloud roles it would use (it may change only Oz Box's
+own boxes, never itself, and never who may do what), and the step where each change is planned, shown, and applied only inside
+a change window opened from your own computer and after you confirm that exact plan with your passkey. Nothing turns it on
+yet, because the part on the box that would hold the fleet's credentials is not built, so a box's dashboard still says the
+fleet is not connected.
 
 **The terminal, Files and Tools say what they are.** The terminal names its box before it connects ("Connecting to main…"),
 and once the shell is up it says "Connected to main, as the box user". That shell is started by the box's own agent, never by

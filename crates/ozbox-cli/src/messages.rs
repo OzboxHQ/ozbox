@@ -377,6 +377,7 @@ pub fn t(key: &str, args: &[(&str, &str)]) -> String {
         .chain(crate::messages_infra::EN.iter())
         .chain(crate::messages_adopt_key::EN.iter())
         .chain(crate::messages_quiesce::EN.iter())
+        .chain(crate::messages_fleet::EN.iter())
         .find(|(k, _)| *k == key)
         .map(|(_, v)| (*v).to_string())
         .unwrap_or_else(|| key.to_string());
