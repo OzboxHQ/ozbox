@@ -1,5 +1,6 @@
 import type { AlertOutcome, OutcomeStatus } from './alert-types';
 import type { ChannelsStatus, EmailProvider, RoutingConfig, SmsConfig, SmtpConfig, WhatsappConfig } from './channel-types';
+import type { AssertionJson, RequestJson } from '../lib/webauthn';
 // These types mirror the JSON that `ozbox --json` and `ozbox serve` produce (crates/ozbox-core).
 
 export type GpuKind = 'Small' | 'Large';
@@ -85,10 +86,18 @@ export interface PlanResponse {
   needs_passkey?: boolean;
 }
 
+/** The passkey request for one fleet plan: the options to hand the browser, and the challenge (hex) the server bound to it. */
+export interface FleetChallenge {
+  options: RequestJson;
+  challenge: string;
+}
+
 export interface ApplyRequest {
   plan_id: string;
   plan?: Plan;
   confirm_name?: string;
+  /** On a box's dashboard that manages the fleet: the owner's passkey over this plan's challenge (ADR 0040). */
+  fleet_assertion?: AssertionJson;
 }
 
 /** One thing an upgrade did around the provider's change. */
@@ -212,9 +221,12 @@ export interface SizeInfo {
   quote?: { machine_type: string | null; monthly: number | null; currency: string | null };
 }
 
-/** Where the boxes the dashboard lists come from: a fleet it manages, this box alone, or made-up demo boxes. */
+/** Where the boxes the dashboard lists come from: a fleet it manages, this box alone, made-up demo boxes, or (`managed`) a
+ * fleet this box's dashboard manages through roles of its own, where every change needs a change window and a passkey. */
 export interface FleetInfo {
-  mode: 'connected' | 'this_box' | 'demo';
+  mode: 'connected' | 'this_box' | 'demo' | 'managed';
+  /** `managed` only: what every change needs beyond the plan (`change_window`, `owner_passkey`). */
+  changes_need?: string[];
   connected: boolean;
   demo: boolean;
   /** Only when the fleet is not connected: the error code the fleet endpoints answer, the sentence, and the guide. */
