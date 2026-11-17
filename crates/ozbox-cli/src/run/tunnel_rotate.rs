@@ -1,6 +1,6 @@
 //! `ozbox admin <box> -- replace-tunnel-token <cloudflare|ngrok|ide> (--token-stdin | --token-from-store NAME)
 //! [--approve-with-laptop-key]`: put a new tunnel token on a box, keep the old one until the new tunnel is healthy, and put the
-//! old one back if it is not (ADR 0029 Amendment 18).
+//! old one back if it is not (ADR 0029 Amendment 19).
 //!
 //! The token is a secret all the way: it is read from standard input or from this computer's secret store (never an argument),
 //! handed to the box the way `ozbox dashboard install` hands it (inside the script on the SSH connection's standard input,

@@ -1,5 +1,5 @@
 //! Commits made while the box's secrets service was down, recorded on the box and added to the audit chain once it is back
-//! (ADR 0029 Amendment 17).
+//! (ADR 0029 Amendment 18).
 //!
 //! While the service is down a clean commit goes through with a note (Amendment 15): stored values could not be compared. The
 //! service is also what writes the audit chain, so nothing could record that commit there at the time. `post-commit` therefore

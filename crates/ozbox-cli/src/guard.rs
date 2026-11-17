@@ -2243,7 +2243,7 @@ mod tests {
         );
     }
 
-    /// ADR 0029 Amendment 17: a commit that stands while the service is down gets a line in the outage journal; one the shapes
+    /// ADR 0029 Amendment 18: a commit that stands while the service is down gets a line in the outage journal; one the shapes
     /// took back gets none (there is no commit to record), and the line names the commit that is HEAD.
     #[test]
     fn v6b_an_outage_commit_that_stands_is_journalled_and_one_taken_back_is_not() {

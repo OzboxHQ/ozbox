@@ -325,7 +325,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          # A real round trip through the SHIPPED program (ADR 0029 Amendment 17): `ozbox secrets native-check` runs the same
+          # A real round trip through the SHIPPED program (ADR 0029 Amendment 18): `ozbox secrets native-check` runs the same
           # key-service and parameter-store clients the store and the loader use against loopback stand-ins it starts itself,
           # each request signed with SigV4 and each signature recomputed by the stand-in from the bytes that arrived. It runs
           # with an empty PATH and environment, so a program that started the `aws` command (or any command) fails. Nothing

@@ -2070,7 +2070,7 @@ every box that declared secrets of its own failed to load them, and the only tra
 - **Push** (`pre-push`) stays closed for the whole outage. A push is what leaves the box and stored values cannot be compared, so it is stopped with the same plain words; the shapes it found are listed too. Nothing is lost: the commits are on the box.
 - **No box-user override.** A command the box user could run to wave a change through would be a way for an agent to do the same, and an approval is recorded by the service that is down. The way forward is to restore the service, which the message says how to do.
 
-**What this accepts.** While the service is down a stored value can enter a local commit unseen. It cannot leave through a push that runs the hooks: `pre-push` reads every commit the remote lacks once the service is back, and a commit with such a value then has to be rewritten before it can be pushed. The hooks are a barrier against accident, not a wall (ADR 0041 lists their limits: a push with `--no-verify`, or with `core.hooksPath` moved, runs none of them). What actually stops an unscanned value leaving the box is the egress allow-list and the host's push protection; the hooks add to them and are not what they rest on. This is the same exposure `post-commit` already accepted for a service that was missing. A box user who can make the service unreachable can commit unscanned, which the hook, a barrier against accident, never claimed to stop (ADR 0023); the closed network and the push check stand behind it. **For the owner to decide:** whether the unscanned commits should also be listed in the audit chain when the service returns (the service cannot record them while it is down), and whether a push should ever be allowed during an outage by a laptop-signed approval (it would need a path that does not go through the service). (Decided in Amendment 17: yes to the first, no to the second.)
+**What this accepts.** While the service is down a stored value can enter a local commit unseen. It cannot leave through a push that runs the hooks: `pre-push` reads every commit the remote lacks once the service is back, and a commit with such a value then has to be rewritten before it can be pushed. The hooks are a barrier against accident, not a wall (ADR 0041 lists their limits: a push with `--no-verify`, or with `core.hooksPath` moved, runs none of them). What actually stops an unscanned value leaving the box is the egress allow-list and the host's push protection; the hooks add to them and are not what they rest on. This is the same exposure `post-commit` already accepted for a service that was missing. A box user who can make the service unreachable can commit unscanned, which the hook, a barrier against accident, never claimed to stop (ADR 0023); the closed network and the push check stand behind it. **For the owner to decide:** whether the unscanned commits should also be listed in the audit chain when the service returns (the service cannot record them while it is down), and whether a push should ever be allowed during an outage by a laptop-signed approval (it would need a path that does not go through the service). (Decided in Amendment 18: yes to the first, no to the second.)
 
 ## Amendment 16 (2026-11-16): a hosted dashboard's tunnel token is kept on this computer, and an upgrade puts it back without making an approval
 
@@ -2117,7 +2117,7 @@ way round it. A box whose pinned key was applied when the new store's service st
 **What this does not close.** The put-back runs over the box user's SSH shell like the install it is (Amendment 3 of ADR 0028 names
 that route's limits). The pinned key is a software key; a hardware-backed key is not built. Not yet run against a real box.
 
-## Amendment 17 (2026-11-17): outage-window commits reach the audit chain, no approval opens a push during an outage, a downgrade cannot strand a KMS store, and the self-test reads typed state
+## Amendment 18 (2026-11-17): outage-window commits reach the audit chain, no approval opens a push during an outage, a downgrade cannot strand a KMS store, and the self-test reads typed state
 
 Amendment 15 left two questions for the owner, and the reviews of beta.3 left three smaller gaps. The owner decided the first two;
 the rest are fixes.
@@ -2182,7 +2182,7 @@ whose old system disk is already gone.
 **Not covered.** No real KMS or Parameter Store call is made in CI (no cloud there). The outage journal and its replay have run
 only in tests, never on a real box with its service stopped.
 
-## Amendment 18 (2026-11-17): a tunnel token is rotated from this computer, kept until the new tunnel is healthy, and put back if it is not
+## Amendment 19 (2026-11-17): a tunnel token is rotated from this computer, kept until the new tunnel is healthy, and put back if it is not
 
 A hosted dashboard's tunnel token (and the web IDE's) is write-only on the box, and the only way to change it was to install
 again. That replaced the token with nothing to fall back on: a wrong token took the dashboard down. `ozbox admin <box> --

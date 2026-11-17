@@ -196,7 +196,7 @@ pub(crate) fn post_commit_unscanned(repo: &Path, why: &str) -> String {
 }
 
 /// [`post_commit_unscanned`], and, when `journal` is given and the commit stands, the commit's line in the outage journal (ADR
-/// 0029 Amendment 17): the audit chain is written by the service that is down, so the line waits on the box until it is back.
+/// 0029 Amendment 18): the audit chain is written by the service that is down, so the line waits on the box until it is back.
 /// Returns what to print and whether a line was written.
 pub(crate) fn post_commit_unscanned_journalled(
     repo: &Path,
@@ -232,7 +232,7 @@ pub(crate) fn post_commit_unscanned_journalled(
 }
 
 /// Before a hook does anything else, while the service answers: hand the commits made during an outage to the audit chain
-/// (ADR 0029 Amendment 17). Never stops the hook: a failure is said, and the journal is kept for the next time.
+/// (ADR 0029 Amendment 18). Never stops the hook: a failure is said, and the journal is kept for the next time.
 #[cfg(unix)]
 fn replay_outage_journal() {
     let Some(path) = crate::guard_outage::journal_path() else {

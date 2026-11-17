@@ -2412,7 +2412,7 @@ pub(super) fn execute(
             Err(refusal) => return Err(CliError::Msg(refusal)),
         }
         // A store on the fleet's KMS key opens only under an image whose secrets service can reach the key by itself: a
-        // downgrade onto an older one is refused here, before anything is confirmed (ADR 0029 Amendment 17).
+        // downgrade onto an older one is refused here, before anything is confirmed (ADR 0029 Amendment 18).
         let uses_fleet_key = around.fleet_key
             || rec
                 .spec
@@ -3791,7 +3791,7 @@ mod tests {
         }
     }
 
-    /// A signed manifest as the image workflow writes it, with or without the `secrets_keys` it learnt in ADR 0029 Amendment 17.
+    /// A signed manifest as the image workflow writes it, with or without the `secrets_keys` it learnt in ADR 0029 Amendment 18.
     fn fixture_manifest(keys: Option<&str>) -> String {
         let gen = "a".repeat(64);
         let keys = keys

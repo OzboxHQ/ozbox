@@ -23,7 +23,7 @@ from what is done: `upgrade_kind` is `{"called_for": "live" | "replace" | "in_pl
 `carried_out`, never on `called_for`: a plan that says "called for live" must never read as a live update having happened.
 `upgrade-policy.json` supplies exactly `work_format`, `work_format_reads` and (since 2026-11-17) `secrets_keys` to the signed
 record, and nothing else from that file is read. `secrets_keys` lists the store keys the release's secrets service opens by itself;
-the upgrade plan refuses a box on the fleet's KMS key an image that does not list `kms` (ADR 0029 Amendment 17).
+the upgrade plan refuses a box on the fleet's KMS key an image that does not list `kms` (ADR 0029 Amendment 18).
 
 **Build status.** Part 2 of the build plan (section 9), *runs out of the daemon*, is built and **Preview**: CI covers it with a
 fake of the box user's manager (the real shim, its socket, log and status file, and real programs; no systemd). Not yet run

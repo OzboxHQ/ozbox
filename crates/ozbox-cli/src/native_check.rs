@@ -1,5 +1,5 @@
 //! `ozbox secrets native-check`: a real round trip through the SHIPPED program's own key-service and parameter-store clients,
-//! against loopback stand-ins it starts and stops itself (ADR 0029 Amendment 17).
+//! against loopback stand-ins it starts and stops itself (ADR 0029 Amendment 18).
 //!
 //! The image has no `aws` command, so a box's secrets store on the fleet's KMS key and a box's own secrets in Parameter Store
 //! are reached only by this program's native client (Amendments 13 and 14). The image workflow used to show the shipped program

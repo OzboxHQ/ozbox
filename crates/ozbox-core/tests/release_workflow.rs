@@ -763,7 +763,7 @@ fn nothing_writes_live_from_until_the_adr_rules_hold() {
         serde_json::from_str(&repo_file("infra/packer/ozbox-image/upgrade-policy.json")).unwrap();
     let mut keys: Vec<_> = policy.as_object().unwrap().keys().cloned().collect();
     keys.sort();
-    // the `/work` format, and the store keys the release's secrets service opens (ADR 0029 Amendment 17); never live_from
+    // the `/work` format, and the store keys the release's secrets service opens (ADR 0029 Amendment 18); never live_from
     assert_eq!(keys, ["secrets_keys", "work_format", "work_format_reads"]);
     // the rules are written down where the next person looks
     let adr =

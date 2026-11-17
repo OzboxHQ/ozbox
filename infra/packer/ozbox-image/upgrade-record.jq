@@ -5,7 +5,7 @@
 # $parts (the per-architecture part files, slurped).
 #
 # The record is the computed generation and parts plus EXACTLY the two `/work` format keys of the policy file and the
-# `secrets_keys` it declares (the store keys this release's secrets service opens by itself; ADR 0029 Amendment 17). The policy
+# `secrets_keys` it declares (the store keys this release's secrets service opens by itself; ADR 0029 Amendment 18). The policy
 # is never merged whole: a `disk_generation`, a `disk_parts` or a `live_from` in that file must change nothing, because
 # `live_from` is what turns live updates on, and it is written by the release that ships the live updater (ADR 0038,
 # "Rules that hold before any release turns live updates on").

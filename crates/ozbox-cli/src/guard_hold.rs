@@ -1062,7 +1062,7 @@ mod tests {
         assert!(!m.contains(&key), "{m}");
     }
 
-    /// ADR 0029 Amendment 17: no approval of any kind gets a push past an outage. Not a code signed on the owner's laptop (the
+    /// ADR 0029 Amendment 18: no approval of any kind gets a push past an outage. Not a code signed on the owner's laptop (the
     /// service that would check and spend it is the one that is down), and not a request decided elsewhere: the request side is
     /// never even asked, so an answer from anywhere (a socket that says "approved") cannot matter.
     #[test]

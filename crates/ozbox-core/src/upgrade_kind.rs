@@ -44,7 +44,7 @@ pub struct UpgradeBlock {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_format_reads: Vec<u64>,
     /// The kinds of key this release's secrets service opens a store with by itself (`file`, `kms`, ...), when the manifest
-    /// says (ADR 0029 Amendment 17). Empty for a release that does not say: the upgrade plan then goes by its version.
+    /// says (ADR 0029 Amendment 18). Empty for a release that does not say: the upgrade plan then goes by its version.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets_keys: Vec<String>,
 }
@@ -512,7 +512,7 @@ mod tests {
         )
     }
 
-    /// ADR 0029 Amendment 17: the manifest may say which store keys the release's secrets service opens by itself.
+    /// ADR 0029 Amendment 18: the manifest may say which store keys the release's secrets service opens by itself.
     #[test]
     fn the_record_reads_the_secrets_key_kinds_and_refuses_anything_else() {
         let gen = h('a');
