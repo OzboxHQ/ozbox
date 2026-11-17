@@ -75,25 +75,142 @@ impl Policy {
     }
 }
 
-/// Names the box user's side may read back over the box socket for now, because the dashboard sends with them. A secret
-/// of any other kind is never answered there. This list shrinks as the credential broker takes each over.
-const BOX_GET_PREFIXES: &[&str] = &[
-    "email-api-key",
-    "telegram-bot-token",
-    "slack-webhook-url",
-    "discord-webhook-url",
-    "teams-webhook-url",
-    "smtp-password",
-    "sms-",
-    "whatsapp-token",
-    "google-client-secret",
-    "vapid-private-key",
-    "push-",
-    "webhook-url-",
-    "webhook-secret-",
-    "trigger-secret-",
-    "totp-",
+/// What the box user, and every agent (which runs as it), may do with one secret name on its own socket. A row of
+/// [`BOX_REACH`] says which; [`box_reach`] is the one place the box socket asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxReach {
+    /// Nothing: not read, written, deleted, asked about or listed. The refusal is the same words whether the name is set or
+    /// not, so the answer does not say which names exist.
+    None,
+    /// Asked whether it is set, and listed; written only through the root helper's admin action (see `box_may_write`).
+    Ask,
+    /// Written and deleted on the box socket of a service with no supervisor socket, asked about and listed; never read
+    /// back. A locked box socket writes nothing.
+    Write,
+    /// What `Write` allows, and read back, on the box socket of a service with no supervisor socket only (the dashboard then
+    /// runs as the box user and sends with it). A locked box socket never reads anything back.
+    Read,
+}
+
+/// How a row of [`BOX_REACH`] matches a name.
+#[derive(Debug, Clone, Copy)]
+pub enum NameRule {
+    Exact(&'static str),
+    Prefix(&'static str),
+}
+
+impl NameRule {
+    fn matches(self, name: &str) -> bool {
+        match self {
+            NameRule::Exact(n) => name == n,
+            NameRule::Prefix(p) => name.starts_with(p),
+        }
+    }
+}
+
+/// One row: the names, what the box user may do with them, and whether the supervisor (the dashboard's own user) may read
+/// them back on its socket. Each row in the table says why in a comment.
+pub struct ReachRow {
+    pub rule: NameRule,
+    pub box_user: BoxReach,
+    pub supervisor_get: bool,
+}
+
+const fn row(rule: NameRule, box_user: BoxReach, supervisor_get: bool) -> ReachRow {
+    ReachRow {
+        rule,
+        box_user,
+        supervisor_get,
+    }
+}
+
+use NameRule::{Exact, Prefix};
+
+/// The whole access rule for the box user's socket, first match wins. The names the store keeps for its own approval keys,
+/// audit keys, ingress key and markers are checked before the table (see [`box_reach`]); a name no row matches is
+/// [`BoxReach::None`]. Both reading back and writing are allow-lists: only the `Read` rows are read back, and only the
+/// `Read` and `Write` rows are written, which are the names a box user's command or a dashboard running as the box user
+/// writes (a valid name of `secrets::valid_name`, or one a command makes).
+///
+/// Reading back is the shorter list: only the `Read` rows. A person's sign-in and second factors and the dashboard's own keys
+/// are `None`: the dashboard reads and writes them as its own user (`ozbox-supervisor`), never the box user. A security
+/// review (2026-11-17) found `totp-<user>` on the read list, so on a service with no supervisor socket any agent could read
+/// the owner's authenticator secret and make valid codes, and write one of its own.
+pub const BOX_REACH: &[ReachRow] = &[
+    // a person's sign-in and second factors, and the keys the dashboard signs and sends with as itself
+    row(Prefix("totp-"), BoxReach::None, true), // an authenticator-app secret: whoever reads it can make valid codes
+    row(Exact("google-client-secret"), BoxReach::None, true), // the sign-in client secret
+    row(Exact("vapid-private-key"), BoxReach::None, true), // the key notifications to a person's devices are signed with
+    row(Prefix("push-"), BoxReach::None, true), // a person's device subscriptions: whoever holds them can send to that device
+    row(Prefix("subscription-"), BoxReach::None, true), // a subscription sign-in and its opt-in (ADR 0055): the dashboard's own user only
+    // the hub's own records (ADR 0042): root and the service only, never the box user; the supervisor does not read them back
+    row(Prefix("hub-key-"), BoxReach::None, false),
+    row(Prefix("hub-release-"), BoxReach::None, false),
+    row(Prefix("hub-delivered-"), BoxReach::None, false),
+    // a task channel's two private keys on a laptop (`ozbox tasks`); on a box they are the task router's own, never this store's
+    row(Prefix("tasks-sign-"), BoxReach::None, false),
+    row(Prefix("tasks-seal-"), BoxReach::None, false),
+    // the store's own keys
+    row(Exact("store-kek"), BoxReach::None, false), // the store's key-encryption key
+    row(Exact(crate::tokenmac::KEYS_SECRET), BoxReach::None, false), // the keys sessions, setup codes and tokens are tagged with
+    // a project's secrets and declaration (ADR 0029): the runner and the root launcher only
+    row(Prefix("workload"), BoxReach::None, false), // a workload secret or a project's declaration
+    // decides where the dashboard is reached from: the root helper writes it, behind a fresh approval
+    row(Prefix("tunnel-token-"), BoxReach::Ask, false), // a tunnel token
+    // written by a box user's command, never read back
+    row(Exact("restic-password"), BoxReach::Write, false), // backups (`ozbox backup`, a restore)
+    row(Exact("restic-env"), BoxReach::Write, false),      // backups
+    row(Exact("restic-access-key"), BoxReach::Write, false), // backups
+    row(Exact("restic-secret-key"), BoxReach::Write, false), // backups
+    row(Prefix("model-key-"), BoxReach::Write, false), // a model provider's key (`ozbox models`, the dashboard)
+    row(Prefix("ide-password-"), BoxReach::Write, false), // a box's web IDE password
+    row(Prefix("desktop-password-"), BoxReach::Write, false), // a box's desktop password
+    row(Prefix("ide-tunnel-token-"), BoxReach::Write, false), // another box's IDE connector token (`ozbox code`)
+    row(Prefix("dashboard-tunnel-token-"), BoxReach::Write, false), // what `ozbox dashboard install` keeps for a box
+    row(Prefix("dashboard-install-"), BoxReach::Write, false),      // the same install's settings
+    row(Prefix("mesh-authkey-"), BoxReach::Write, false), // a box's mesh join key (`ozbox mesh`)
+    // the dashboard sends with these; this list shrinks as the credential broker takes each over
+    row(Exact("email-api-key"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("telegram-bot-token"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("slack-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("discord-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("teams-webhook-url"), BoxReach::Read, true), // a notification channel's send key
+    row(Exact("smtp-password"), BoxReach::Read, true), // a notification channel's send key
+    row(Prefix("sms-"), BoxReach::Read, true),         // a notification channel's send key
+    row(Exact("whatsapp-token"), BoxReach::Read, true), // a notification channel's send key
+    row(Prefix("webhook-url-"), BoxReach::Read, true), // an outgoing webhook's address
+    row(Prefix("webhook-secret-"), BoxReach::Read, true), // an outgoing webhook's signing secret
+    row(Prefix("trigger-secret-"), BoxReach::Read, true), // an incoming trigger's secret (it starts a run as the box user)
 ];
+
+/// What the box user may do with `name` on its socket (see [`BOX_REACH`]).
+pub fn box_reach(name: &str) -> BoxReach {
+    if is_reserved_record(name) {
+        return BoxReach::None;
+    }
+    BOX_REACH
+        .iter()
+        .find(|r| r.rule.matches(name))
+        .map_or(BoxReach::None, |r| r.box_user)
+}
+
+/// The store's own records that a module of this service keeps (approval keys and markers, audit keys, the ingress key, the
+/// second-factor marker): not the box user's to read, write, ask about or list.
+fn is_reserved_record(name: &str) -> bool {
+    name == crate::secrets_approval::ENROLLED_MARKER
+        || crate::audit_service::is_audit_secret(name)
+        || crate::approval_key::is_reserved(name)
+        || crate::secrets_ingress::is_reserved(name)
+}
+
+/// Whether the supervisor's socket answers `get` for `name`: the dashboard's send keys and the sign-in factors it owns.
+pub fn supervisor_may_get(name: &str) -> bool {
+    !is_reserved_record(name)
+        && BOX_REACH
+            .iter()
+            .find(|r| r.rule.matches(name))
+            .is_some_and(|r| r.supervisor_get)
+}
 
 /// Names whose writes are not the box user's to make over the box socket: a tunnel token decides where the dashboard is
 /// reached from. The write goes through the root helper's admin action instead, which is recorded, and which the
@@ -123,8 +240,9 @@ pub fn user_name_count(store: &EncryptedSecrets) -> Option<u32> {
     u32::try_from(names.iter().filter(|n| !is_system_name(n)).count()).ok()
 }
 
+/// Whether the box socket of a service with no supervisor socket answers `get` for `name`.
 pub fn box_may_get(name: &str) -> bool {
-    BOX_GET_PREFIXES.iter().any(|p| name.starts_with(p))
+    box_reach(name) == BoxReach::Read
 }
 
 #[derive(Deserialize, Default)]
@@ -166,6 +284,10 @@ struct Req {
     request_id: String,
     #[serde(default)]
     salt: String,
+    /// At the root helper's gate, for a tunnel token: the token's full digest (`tunnel_token_sha256`), which an approved
+    /// `tunnel-token` request is bound to. Sent by the gate itself (root), never by the box user.
+    #[serde(default)]
+    token_sha256: String,
     #[serde(default)]
     scope: String,
     #[serde(default)]
@@ -491,6 +613,9 @@ impl Gates {
     /// if the write fails ([`crate::secrets_approval::ApprovalGate::consume_then`]), the lock not held across the write. Check everything that does not depend on the approval BEFORE
     /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
     /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
+    ///
+    /// `declared` says what the caller knows of the change: it touches Production (a declaration with a Production command), so a
+    /// code a software key made is refused for it (ADR 0041 §3). It can only make the gate stricter.
     #[allow(clippy::too_many_arguments)]
     pub fn require_then<T>(
         &self,
@@ -499,6 +624,7 @@ impl Gates {
         project: &str,
         env: &str,
         approval: &str,
+        declared: bool,
         now_ms: u64,
         effect: impl FnOnce(&str) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -522,22 +648,32 @@ impl Gates {
             line("refused", "none why=codes-off");
             return Err(CODES_REFUSED.to_string());
         }
-        match self
-            .approvals
-            .consume_then(approval, scope, project, env, now_ms, |via| {
+        match self.approvals.consume_then_tiered(
+            approval,
+            scope,
+            project,
+            env,
+            declared,
+            now_ms,
+            |via| {
                 let out = effect(via)?;
                 line("allowed", via);
                 Ok(out)
-            }) {
+            },
+        ) {
             Ok(out) => Ok(out),
             Err(ConsumeThen::Effect(e)) => {
                 line("kept", "none");
                 Err(e)
             }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
+                Err(e)
+            }
             Err(ConsumeThen::Approval(e)) => {
                 line("refused", "none");
                 Err(if approval.is_empty() {
-                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                    NEEDS_APPROVAL.to_string()
                 } else {
                     e
                 })
@@ -573,6 +709,40 @@ impl Gates {
         approval: &str,
         now_ms: u64,
     ) -> Result<String, Refusal> {
+        self.require_typed_tiered(store, scope, project, env, approval, false, now_ms)
+    }
+
+    /// [`Gates::require`] for an act the spender knows more about: `declared` says the thing being approved touches Production
+    /// (an import whose names or values say so), which only ever makes the signer rule stricter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn require_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, String> {
+        self.require_typed_tiered(store, scope, project, env, approval, declared, now_ms)
+            .map_err(|r| match r {
+                Refusal::NoApprover(m) | Refusal::Approval(m) => m,
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn require_typed_tiered(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        declared: bool,
+        now_ms: u64,
+    ) -> Result<String, Refusal> {
+        use crate::secrets_approval::ConsumeThen;
         let line =
             |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
         if !store
@@ -595,16 +765,21 @@ impl Gates {
         }
         match self
             .approvals
-            .consume(approval, scope, project, env, now_ms)
+            .consume_tiered(approval, scope, project, env, declared, now_ms)
         {
             Ok(via) => {
                 line("allowed", &via);
                 Ok(via)
             }
+            Err(ConsumeThen::Signer(e)) => {
+                line("refused", "none why=software-key-production");
+                Err(Refusal::Approval(e))
+            }
             Err(e) => {
+                let e = e.into_message();
                 line("refused", "none");
                 Err(Refusal::Approval(if approval.is_empty() {
-                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                    NEEDS_APPROVAL.to_string()
                 } else {
                     e
                 }))
@@ -612,6 +787,11 @@ impl Gates {
         }
     }
 }
+
+/// What the gate says when a change needs an approval and none was sent: what approves it and where (B4-27). A computer's
+/// command recognises its first words (`approval_flow::needs_approval`) and files a request by itself; the root helper shows
+/// the person at most 300 characters of it.
+pub const NEEDS_APPROVAL: &str = "this change needs a fresh approval: run it from your computer without --approval and approve the request it files in the dashboard (Approvals) with your passkey or authenticator code, or pass --approval CODE from the dashboard (Settings, Secrets)";
 
 /// Spend an approved `import` request for exactly these rows (ADR 0041 §4). The subject is recomputed here from
 /// the rows as they stand: every name, its classification, the digest of its value under the laptop's salt, the environment
@@ -673,6 +853,113 @@ fn spend_import_request(
             .as_ref()
             .map_or("approved", |d| d.factor_label.as_str())
     ))
+}
+
+/// Spend an approved request named at the root helper's gate (`req-<id>`, ADR 0041 amendment of 2026-11-17 for B4-27): a
+/// `tunnel-token` or `box-secrets` change filed from a computer and approved on the dashboard. The subject is recomputed from
+/// what the gate sees ([`ozbox_core::approval_subject::gate_subject`]), so a request approved for another token or another
+/// declaration is refused and kept. The gate is the whole check, as it is for a code: the helper makes the change next, so the
+/// request is finished here. Returns how it was approved, for the helper's message.
+#[allow(clippy::too_many_arguments)]
+fn spend_gate_request(
+    store: &EncryptedSecrets,
+    gates: &Gates,
+    scope: &str,
+    project: &str,
+    env: &str,
+    token_sha256: &str,
+    id: &str,
+    now: u64,
+) -> Result<String, String> {
+    let svc = gates
+        .requests
+        .get()
+        .ok_or("this service does not keep approval requests: send an approval code")?;
+    let subject = ozbox_core::approval_subject::gate_subject(scope, project, env, token_sha256)
+        .map_err(|e| e.0)?;
+    let r = svc.spend(
+        store,
+        gates,
+        ozbox_core::approval::SpendVia::Socket {
+            class: ozbox_core::approval::SocketClass::Admin,
+            uid: None,
+        },
+        id,
+        &subject,
+        now,
+    )?;
+    let _ = svc.finish_inside(id, now);
+    Ok(format!(
+        "request:{}",
+        r.decision
+            .as_ref()
+            .map_or("approved", |d| d.factor_label.as_str())
+    ))
+}
+
+/// Spend an approved `policy` request and write the declaration (§2: spending, effect, spent). A write that fails after the
+/// spend leaves the request spending, as an import's does; the person files a new one.
+fn spend_declaration_request(
+    store: &EncryptedSecrets,
+    gates: &Gates,
+    project: &str,
+    p: &crate::workload_policy::Policy,
+    request_id: &str,
+    now: u64,
+) -> Result<String, String> {
+    let svc = gates
+        .requests
+        .get()
+        .ok_or("this service does not keep approval requests: send an approval code")?;
+    let subject = declaration_subject(store, project, p)?;
+    let r = svc.spend(
+        store,
+        gates,
+        ozbox_core::approval::SpendVia::Inside,
+        request_id,
+        &subject,
+        now,
+    )?;
+    crate::workload_policy::save(store, project, p).map_err(|e| e.0)?;
+    let _ = svc.finish_inside(request_id, now);
+    Ok(format!(
+        "request:{}",
+        r.decision
+            .as_ref()
+            .map_or("approved", |d| d.factor_label.as_str())
+    ))
+}
+
+/// The subject of a declaration change, worked out by the service from the declaration it was sent and the one it holds
+/// (ADR 0041 §3.1, B4-27): the digest of each, as the service serialises them, and the sensitivity. A workload declaration
+/// names no `host-guard` or `tunnel-token` entry, so it never widens a guarded scope: its sensitivity is `ordinary`, read from
+/// the two parsed declarations, never a filer's label. One function, used where the request is filed and where it is spent.
+pub fn declaration_subject(
+    store: &EncryptedSecrets,
+    project: &str,
+    new: &crate::workload_policy::Policy,
+) -> Result<ozbox_core::approval_subject::Subject, String> {
+    use ozbox_core::approval_subject::{
+        policy_sensitivity, sha256_hex, GuardedSettings, PolicyChange, Subject,
+    };
+    let digest = |p: &crate::workload_policy::Policy| {
+        serde_json::to_string(p)
+            .map(|s| sha256_hex(&s))
+            .map_err(|_| "the declaration could not be read".to_string())
+    };
+    let current = crate::workload_policy::load(store, project).map_err(|e| e.0)?;
+    let predecessor = match &current {
+        Some(c) => digest(c)?,
+        None => sha256_hex(""),
+    };
+    let none = GuardedSettings::default();
+    Ok(Subject::Policy(PolicyChange {
+        // bound: an approval for one project's declaration is never spent on another's (review M2)
+        project: project.to_string(),
+        policy_sha256: digest(new)?,
+        predecessor_sha256: predecessor,
+        sensitivity: policy_sensitivity(&none, &none),
+    }))
 }
 
 /// Answer one request under a policy, with a fresh gate state (tests that need none of it).
@@ -776,10 +1063,18 @@ pub fn handle_from(
     let denied = || Resp::fail("that is not allowed on this socket");
     // a workload secret and a project's declaration are never the box socket's to read, write or list
     let boxy = |name: &str| !name.starts_with("workload");
+    // the box user's reach is the table's (`BOX_REACH`); the supervisor's is its own names and the box user's
+    let may_write = |name: &str| match policy {
+        Policy::Admin => true,
+        Policy::Box => {
+            matches!(box_reach(name), BoxReach::Write | BoxReach::Read) && box_may_write(name)
+        }
+        Policy::Supervisor => boxy(name) && box_may_write(name),
+        _ => false,
+    };
+    let box_user = matches!(policy, Policy::Box | Policy::BoxLocked);
     let resp = match (policy, r.op.as_str()) {
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "set")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
-        {
+        (Policy::Box | Policy::Supervisor | Policy::Admin, "set") if may_write(&r.name) => {
             let stored = if r.value_b64.is_empty() {
                 store.set(&r.name, &r.value)
             } else if policy != Policy::Admin || !r.value.is_empty() {
@@ -810,7 +1105,9 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists") => {
+        (Policy::Box | Policy::BoxLocked | Policy::Supervisor | Policy::Admin, "exists")
+            if !box_user || box_reach(&r.name) != BoxReach::None =>
+        {
             match store.exists(&r.name) {
                 Ok(b) => Resp {
                     flag: Some(b),
@@ -819,9 +1116,7 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "delete")
-            if (boxy(&r.name) && box_may_write(&r.name)) || policy == Policy::Admin =>
-        {
+        (Policy::Box | Policy::Supervisor | Policy::Admin, "delete") if may_write(&r.name) => {
             match store.delete(&r.name) {
                 Ok(()) => {
                     gates.audit_event(
@@ -852,7 +1147,9 @@ pub fn handle_from(
                         n.into_iter()
                             .filter(|n| {
                                 policy == Policy::Admin
-                                    || (boxy(n)
+                                    || (box_user && box_reach(n) != BoxReach::None)
+                                    || (policy == Policy::Supervisor
+                                        && boxy(n)
                                         && n != crate::secrets_approval::ENROLLED_MARKER
                                         && !crate::audit_service::is_audit_secret(n)
                                         && !crate::approval_key::is_reserved(n))
@@ -864,14 +1161,19 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
-        (Policy::Box | Policy::Supervisor | Policy::Admin, "mac") => match decode_std(&r.msg) {
+        // The tag of a token under the internal keys: the dashboard's own (sessions, setup codes, tickets). Never the box user's,
+        // not even with no supervisor socket: there the dashboard runs as the box user and keeps process-local keys instead.
+        (Policy::Supervisor | Policy::Admin, "mac") => match decode_std(&r.msg) {
             Some(m) => Resp {
                 tags: Some(mac.tags_hex(&m, crate::tokenmac::now_ms())),
                 ..Resp::ok()
             },
             None => Resp::fail("that request is not valid"),
         },
-        (Policy::Box | Policy::Supervisor, "get") if box_may_get(&r.name) => {
+        (Policy::Box, "get") | (Policy::Supervisor, "get")
+            if (policy == Policy::Box && box_may_get(&r.name))
+                || (policy == Policy::Supervisor && supervisor_may_get(&r.name)) =>
+        {
             match store.get(&r.name) {
                 Ok(v) => Resp {
                     value: v,
@@ -990,7 +1292,12 @@ pub fn handle_from(
                 Resp::fail(&format!("{n} is already stored for this project and environment, and this box has no second factor enrolled, so it cannot be replaced from the box. Enrol a passkey in the dashboard (or make the box with `ozbox create` from a computer with a keychain), then import it with an approval"))
             } else {
                 let gate = if r.request_id.is_empty() {
-                    gates.require(store, "import", &r.project, &r.env, &r.approval, now)
+                    // a legacy code is judged by what the import carries as well as by its environment's name, with the
+                    // request path's own helpers: a key named live, or a live-mode value, makes it Production for a software key
+                    let declared = crate::secrets_signer::import_says_production(
+                        lines.iter().map(|l| (l.name.as_str(), l.value.as_str())),
+                    );
+                    gates.require_tiered(store, "import", &r.project, &r.env, &r.approval, declared, now)
                 } else {
                     spend_import_request(store, gates, &r.project, &r.env, &lines, &r.request_id, &r.salt, now)
                 };
@@ -1057,12 +1364,38 @@ pub fn handle_from(
                 .and_then(|p| policy_bootstrap_gate(store, &r.project, &p).map(|()| p))
             {
                 Err(e) => Resp::fail(&e),
+                // an approved `policy` request (B4-27): the subject is worked out again from this declaration and the one held
+                // now, so a declaration changed after the approval, or one the box's own changed under, is refused and kept
+                Ok(p) if !r.request_id.is_empty() => {
+                    match spend_declaration_request(store, gates, &r.project, &p, &r.request_id, now)
+                    {
+                        Err(e) => Resp::fail(&e),
+                        Ok(via) => {
+                            crate::workload::audit(
+                                store.path(),
+                                &format!("policy project={} via={via}", r.project),
+                            );
+                            gates.audit_event(
+                                store,
+                                "secrets.policy.write",
+                                &r.project,
+                                &format!("via={via}"),
+                            );
+                            Resp::ok()
+                        }
+                    }
+                }
                 Ok(p) => match gates.require_then(
                     store,
                     "policy",
                     &r.project,
                     "",
                     &r.approval,
+                    // a declaration that touches Production is never approved by a key kept on a computer (ADR 0041 §3); one
+                    // whose current declaration cannot be read is treated as touching it, the stricter reading
+                    crate::workload_policy::load(store, &r.project).map_or(true, |cur| {
+                        crate::secrets_signer::declaration_touches_production(&p, cur.as_ref())
+                    }),
                     now,
                     |via| {
                         crate::workload_policy::save(store, &r.project, &p).map_err(|e| e.0)?;
@@ -1140,22 +1473,51 @@ pub fn handle_from(
                 Err(e) => Resp::fail(e),
             }
         }
-        (Policy::Unsealed, "setup_code") => match gates
-            .require(store, "setup-code", "", "", &r.approval, now)
-            .and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string()))
-        {
-            Ok(code) => {
-                gates.audit_event(store, "secrets.setup-code.read", "", "via=ingress");
-                Resp {
-                    value: Some(code),
-                    ..Resp::ok()
+        // The dashboard says a person enrolled a passkey or an authenticator: the first-day window closes for good (a reserved
+        // name in the store, so a restart keeps it closed) and the held code is forgotten. The supervisor's socket only.
+        (Policy::Supervisor, "setup_code_close") => {
+            match store.set(crate::secrets_ingress::SETUP_WINDOW_CLOSED, "1") {
+                Ok(()) => {
+                    gates.setup_code.clear();
+                    gates.audit_event(store, "secrets.setup-code.window-closed", "", "via=dashboard");
+                    Resp::ok()
                 }
+                Err(e) => Resp::fail(&e.0),
             }
-            Err(e) if e == "none" => Resp::fail(
-                "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
-            ),
-            Err(e) => Resp::fail(&e),
-        },
+        }
+        // The first-day window (ADR 0041, Amendment of 2026-11-17): until the dashboard says a person enrolled a passkey or an
+        // authenticator, the code is read through this sealed route with no approval. Reaching the route takes the owner's
+        // ingress key (and, on AWS, the AWS sign-in that opens the session); no process of the box user can. Once closed, the
+        // code needs an approval, which a software laptop key never gives (review H1).
+        (Policy::Unsealed, "setup_code") => {
+            let refusal = crate::secrets_ingress::setup_window_refusal(store, now);
+            let first_day = refusal.is_none();
+            let gate = if first_day {
+                Ok(String::new())
+            } else if r.approval.is_empty() {
+                Err(crate::messages::t(refusal.unwrap_or("ingress.setup_window_closed"), &[]))
+            } else {
+                gates.require(store, "setup-code", "", "", &r.approval, now)
+            };
+            match gate.and_then(|_| gates.setup_code.get(now).ok_or_else(|| "none".to_string())) {
+                Ok(code) => {
+                    let via = if first_day {
+                        "via=ingress-first-day"
+                    } else {
+                        "via=ingress"
+                    };
+                    gates.audit_event(store, "secrets.setup-code.read", "", via);
+                    Resp {
+                        value: Some(code),
+                        ..Resp::ok()
+                    }
+                }
+                Err(e) if e == "none" => Resp::fail(
+                    "there is no first-time code waiting: the dashboard makes one only while nobody has enrolled a passkey, and it lasts 30 minutes (restart the dashboard to get another)",
+                ),
+                Err(e) => Resp::fail(&e),
+            }
+        }
         // A copy of the file-kept store key for the owner's keychain, so an upgrade that replaces the system disk can put it
         // back (ADR 0029 Amendment 6 section 9). Only a sealed request from the owner's computer; recorded; never logged.
         (Policy::Unsealed, "kek_export") => match (
@@ -1193,7 +1555,7 @@ pub fn handle_from(
                 &r.scope,
                 &r.project,
                 &r.env,
-                "dashboard-stepup",
+                &crate::secrets_signer::Signer::Dashboard,
                 now,
                 crate::secrets_approval::DEFAULT_TTL_MS,
             ) {
@@ -1252,6 +1614,20 @@ pub fn handle_from(
                 Err(e) => Resp::fail(&e.0),
             }
         }
+        // Root alone can start the first-day window's day again (never after the first enrolment closed it): the box user,
+        // the dashboard and the owner's sealed route cannot.
+        (Policy::Admin, "setup_window_extend") => {
+            match store.exists(crate::secrets_ingress::SETUP_WINDOW_CLOSED) {
+                Ok(false) => match store.set(crate::secrets_ingress::SETUP_WINDOW_STARTED, &now.to_string()) {
+                    Ok(()) => {
+                        gates.audit_event(store, "secrets.setup-code.window-extended", "", "via=admin");
+                        Resp::ok()
+                    }
+                    Err(e) => Resp::fail(&e.0),
+                },
+                _ => Resp::fail("the first-day window was closed by an enrolment and never reopens"),
+            }
+        }
         (Policy::Admin, "unenroll") => match store.delete(crate::secrets_approval::ENROLLED_MARKER)
         {
             Ok(()) => Resp::ok(),
@@ -1303,7 +1679,21 @@ pub fn handle_from(
         },
         // The root helper asks this before it stores a tunnel token (it cannot judge a code itself).
         (Policy::Admin, "gate") => {
-            match gates.require(store, &r.scope, &r.project, &r.env, &r.approval, now) {
+            // an approved request (`req-<id>`, B4-27) or a code; the request is recomputed from what the gate sees
+            let allowed = match ozbox_core::approval_subject::request_word_id(&r.approval) {
+                Some(id) => spend_gate_request(
+                    store,
+                    gates,
+                    &r.scope,
+                    &r.project,
+                    &r.env,
+                    &r.token_sha256,
+                    id,
+                    now,
+                ),
+                None => gates.require(store, &r.scope, &r.project, &r.env, &r.approval, now),
+            };
+            match allowed {
                 Ok(via) => Resp {
                     value: Some(via),
                     ..Resp::ok()
@@ -1627,6 +2017,8 @@ pub fn serve_gates(
     broker: Option<Arc<Broker>>,
     gates: Arc<Gates>,
 ) {
+    // the first-day window's clock starts with the box's first service start and survives every restart
+    crate::secrets_ingress::start_setup_window(store.as_ref(), crate::tokenmac::now_ms());
     let mac = Arc::new(TokenMac::new(store.clone() as Arc<dyn SecretStore>));
     let gate = Arc::new(IssuerGate::default());
     let mut handles = Vec::new();
@@ -2611,8 +3003,17 @@ mod tests {
         let r = ask(
             &s,
             &m,
-            Policy::Box,
+            Policy::Supervisor,
             json!({"op":"mac","msg": encode_std(b"token")}),
+        );
+        assert_eq!(
+            ask(
+                &s,
+                &m,
+                Policy::Box,
+                json!({"op":"mac","msg": encode_std(b"token")})
+            )["ok"],
+            false
         );
         assert_eq!(r["tags"].as_array().unwrap().len(), 1);
         let keys = s.get(crate::tokenmac::KEYS_SECRET).unwrap().unwrap();
@@ -2676,7 +3077,8 @@ mod tests {
         );
         c.set("restic-password", "pw-12345678").unwrap();
         assert!(c.get("restic-password").is_err());
-        assert_eq!(c.mac_tags(b"x").unwrap().unwrap().len(), 1);
+        // the tag of a token is the dashboard's own, never the box user's
+        assert!(c.mac_tags(b"x").is_err());
         c.delete("telegram-bot-token").unwrap();
         assert!(SocketSecrets::new(d.path().join("none.sock"))
             .get("a")

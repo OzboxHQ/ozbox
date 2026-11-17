@@ -89,7 +89,7 @@ fn get(runner: &dyn CommandRunner, on_box: &BoxName, id: &str) -> Result<Value, 
 /// challenge is recomputed from them, so the laptop signs what it worked out and not an opaque value the box handed it.
 /// A box whose ids changed (its store was replaced, or it is another box) is refused until the pin is
 /// replaced on purpose.
-fn pinned_ids(
+pub(crate) fn pinned_ids(
     runner: &dyn CommandRunner,
     on_box: &BoxName,
 ) -> Result<ozbox_core::approval_subject::Ids, CliError> {

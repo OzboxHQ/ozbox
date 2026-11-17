@@ -85,6 +85,9 @@ pub struct Auth {
     pub(crate) http: Arc<dyn HttpClient>,
     pub(crate) clock: Box<dyn Fn() -> u64 + Send + Sync>,
     pub(crate) state_path: Option<PathBuf>,
+    /// Called each time a person enrols a passkey or an authenticator (the box's dashboard closes the secrets service's first-day
+    /// window with it: `secrets_ingress::close_setup_window`). Idempotent on the other side.
+    pub(crate) on_enrolled: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
@@ -173,6 +176,24 @@ impl Auth {
             http,
             clock,
             state_path,
+            on_enrolled: Mutex::new(None),
+        }
+    }
+
+    /// What to do each time a person enrols a passkey or an authenticator (see the field).
+    pub fn set_on_enrolled(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_enrolled.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// A person enrolled a passkey or an authenticator: say so to whoever asked ([`Auth::set_on_enrolled`]).
+    pub(crate) fn note_enrolled(&self) {
+        let f = self
+            .on_enrolled
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(f) = f {
+            f();
         }
     }
 

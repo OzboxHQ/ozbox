@@ -236,8 +236,9 @@ pub enum Command {
         /// Hetzner: the OpenBao KV mount (default secret).
         #[arg(long)]
         mount: Option<String>,
-        /// Hetzner: a fresh approval code, for a box whose dashboard has a second factor (from the dashboard, or
-        /// `ozbox secrets approve --scope box-secrets --project declaration`).
+        /// Hetzner, the fallback: a fresh approval code from the dashboard (Settings, Secrets). Without it, a box whose
+        /// dashboard has a second factor is sent an approval request for exactly this declaration, and the command waits
+        /// (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or authenticator code.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
     },
@@ -863,7 +864,8 @@ pub enum SecretsCommand {
         passphrase_stdin: bool,
     },
     /// Import the keys of a `.env` file for one project and environment. Shows names and fingerprints, never values;
-    /// nothing is stored without --yes. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
+    /// nothing is stored without --yes. With --box, a box that needs an approval gets a request and this command waits
+    /// for you to approve it in the dashboard. A key that looks like production is held back unless named in --allow-live (or every one allowed with --allow-live-all). The result accounts for every entry of the file: stored, held back, skipped, duplicate or unchanged.
     Import {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -889,10 +891,18 @@ pub enum SecretsCommand {
         /// this computer; the values travel on the SSH connection only, never in a file on the box or an argument.
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code the dashboard gave you after your passkey or authenticator code (Settings, Secrets). A box
-        /// whose dashboard has a second factor refuses the keys without one.
+        /// The fallback: an approval code the dashboard gave you (Settings, Secrets). Without it, a box whose dashboard has
+        /// a second factor is sent an approval request for exactly these keys, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy. For a non-Production
+        /// import it also offers to approve with this computer's key. A code this computer's key made (`ozbox secrets
+        /// approve`) never approves Production.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// stored and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// The box end of `ozbox secrets import --box` and `ozbox env policy set --box`: reads one request line on standard
     /// input and hands it to the import socket. A person never runs it.
@@ -948,7 +958,10 @@ pub enum SecretsCommand {
         #[command(subcommand)]
         command: IngressCommand,
     },
-    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes).
+    /// Ask a box for an approval code signed by this computer's key (single-use, for one scope, expires in minutes). This
+    /// computer's key never approves Production: an import into a Production environment (anything but dev, development,
+    /// staging, test or e2e), a declaration with a command that takes Production secrets, and a guard override that is not for
+    /// one change are refused by the box. Approve those on the dashboard with your passkey or authenticator.
     Approve {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
@@ -1230,12 +1243,15 @@ pub enum IngressCommand {
     /// Keep a copy of a box's file-kept store key in this computer's keychain, so `ozbox upgrade` can put it back through
     /// the ingress route when the system disk is replaced. The key is never printed. WARNING: that copy opens every value on the
     /// box (every project key, the box's own tokens and credentials), and any program running as you on this computer can read
-    /// your keychain. Once the box has a second factor the copy needs an approval from your approval key; the box records it.
+    /// your keychain. Once the box has a second factor the copy needs an approval that is not this computer's software key (a
+    /// software key never approves it): a laptop key that proves a touch, or root on the box. The box records it.
     Escrow {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
     },
-    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read.
+    /// The dashboard's first-time setup code, delivered here and never to a log the box user can read. It is handed out with no
+    /// approval only until someone enrols a passkey or an authenticator in the dashboard; after that it is refused for good, and
+    /// you sign in with what you enrolled.
     SetupCode {
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: BoxName,
@@ -1419,9 +1435,12 @@ pub enum DashboardCommand {
         /// Caddy: the loopback port on your server that Caddy forwards to.
         #[arg(long, default_value_t = 7878)]
         remote_port: u16,
-        /// On a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's token, from
-        /// `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this computer
-        /// (the same token piped in; a box from an older image takes a code made without --token-stdin).
+        /// The fallback, on a box whose dashboard has a second factor: a single-use approval code for changing the tunnel's
+        /// token, from `ozbox secrets approve --box <box> --scope tunnel-token --project <provider> --token-stdin` on this
+        /// computer (the same token piped in; a box from an older image takes a code made without --token-stdin). Without it
+        /// (and without --approve-with-laptop-key), the box is sent an approval request for exactly this token and the
+        /// command waits (up to 30 minutes) while you approve it in the dashboard (Approvals) with your passkey or
+        /// authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
         /// Read the approval code from the line after the token on standard input (needs --token-stdin), so it is not in
@@ -2054,7 +2073,8 @@ pub enum GuardCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
-    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route.
+    /// Save a project's declaration. With --box it goes to that box's secrets service over its SSH route; a box that needs an
+    /// approval gets a request for exactly this declaration, and this command waits for you to approve it in the dashboard.
     Set {
         #[arg(value_name = "FILE")]
         file: std::path::PathBuf,
@@ -2062,9 +2082,16 @@ pub enum PolicyCommand {
         project: String,
         #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
         on_box: Option<BoxName>,
-        /// The approval code from the dashboard (see `ozbox secrets import --approval`).
+        /// The fallback: an approval code from the dashboard (Settings, Secrets). Without it, a box whose dashboard has a
+        /// second factor is sent an approval request for exactly this declaration, and the command waits while you approve it
+        /// in the dashboard (Approvals) with your passkey or authenticator code; nothing to copy.
         #[arg(long, value_name = "CODE")]
         approval: Option<String>,
+        /// How long to wait for the approval request, in minutes (1 to 30). Ctrl-C stops waiting; either way nothing is
+        /// saved and the request expires by itself.
+        #[arg(long, value_name = "MINUTES", default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..=30))]
+        wait: u64,
     },
     /// Print what to pin, to paste into a declaration. Run it on YOUR computer, against your own checkout at the commit the box
     /// has (`--commit`): a digest computed on the box only freezes what an agent may already have changed. It reads files and

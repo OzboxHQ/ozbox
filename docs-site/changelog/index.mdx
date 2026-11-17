@@ -8,6 +8,50 @@ What changes for someone using Oz Box, newest first. Each entry says what you ca
 
 Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**.
 
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="Approve imports and other changes in the dashboard, with nothing to copy">
+  ## Approve an import, a declaration or a tunnel token in your dashboard while the command waits, with no code to copy
+
+  Importing keys into a box with a second factor used to mean asking the dashboard for a code, copying it into `--approval` and running the import again before it expired. Now the import asks for its own approval and waits.
+
+  - **Run the import, then approve it.** `ozbox secrets import <file> --project <p> --env <e> --box <box> --yes` prints `Waiting for approval in your dashboard`. Open **Approvals**, check the names, and approve with your passkey. The command goes on by itself and stores exactly what you approved.
+  - **No passkey? Use your authenticator.** The approval sheet has **Use an authenticator code** for an account that has an authenticator app and no passkey. It approves any request, Production included. A passkey is still offered first, and an account with a passkey approves with it. A code is not tied to the request the way a passkey is, so type it only into your own dashboard.
+  - **Production is approved in the dashboard only.** For a non-Production environment the command also offers to approve with your computer's approval key (`Approve it now? [y/N]`); for Production it never does, and says so.
+  - **Waiting is safe to stop.** `--wait MINUTES` (up to 30) limits the wait. Ctrl-C or a timeout stores nothing, and the request expires by itself.
+  - **The same for a declaration, a tunnel token and the box's own secrets.** `ozbox env policy set --box`, `ozbox dashboard install --token-stdin` (a new tunnel token) and `ozbox box-secrets` on Hetzner wait for your approval the same way, with no code. These are approved in the dashboard only.
+  - **An approval is for one project.** A declaration you approve for one project cannot be used for another, and the card in **Approvals** names the **Project**.
+  - **An approval is for one project.** A declaration you approve for one project cannot be used for another, and the card in **Approvals** names the **Project**.
+  - **Every refusal says what approves it and where**: the dashboard's **Approvals**, or a code as the fallback.
+  - **`--approval CODE` still works**, as the fallback and for a box from before this release. Setting a tunnel token from the box itself, removing one, placing a vault token and a host guard change still take a code for now; importing a `.env` file from the dashboard itself is planned.
+
+  This is Preview until it has run on a real box. **How to get it.** `ozbox upgrade <box>` to the release that carries this, and update `ozbox` on your computer. See [Secure agent workspace](/use-cases/secure-agent-workspace).
+</Update>
+
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Production approvals come from the dashboard">
+  ## A key kept on your computer can no longer approve Production
+
+  A code made with your computer's own approval key (`ozbox secrets approve`) could approve an import into a Production environment, although Production is meant to be approved only by a person with their passkey or authenticator. The box now refuses it.
+
+  - **Production imports take the dashboard's code.** For an import into any environment other than `dev`, `development`, `staging`, `test` or `e2e`, ask for an approval on the box's dashboard with your passkey or authenticator and run the import with `--approval` and that code. A code from your computer's key is refused, and the message says where to go instead.
+  - **A staging import that carries a live key is Production too.** A key named like `STRIPE_LIVE_KEY` or `PROD_…`, or a value such as `sk_live_…` or a production address, makes the import a Production one whatever its environment, so it takes the dashboard's code.
+  - **The first-time dashboard code needs no approval on day one.** `ozbox secrets ingress setup-code --box <box>` reads it with no approval only while the box has no approver (no passkey, authenticator or pinned laptop key) and only for its first 24 hours; after either it needs an approval, and once someone enrols it is refused without one, and you sign in with what you enrolled. No program on the box can read it this way.
+  - **Your computer's key no longer approves declarations or the box's own settings.** That covers `ozbox secrets ingress escrow`, a tunnel token and who may approve: a program running as you on your computer could otherwise take the box's store key or enrol its own passkey. Approve these with a laptop key that needs a touch, or as root on the box, or on the dashboard where it offers the change.
+  - **Everything else is unchanged.** Your computer's key still approves ordinary imports into non-Production environments and guard overrides for one change, and the dashboard's codes work as before.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this. See [Secure agent workspace](/use-cases/secure-agent-workspace).
+</Update>
+
+<Update label="[Release date]" tags={["Dashboard", "Security"]} description="Agents on a box cannot reach your authenticator">
+  ## Agents on a box can no longer read or replace your authenticator
+
+  On a box made before the dashboard had a user of its own, and not upgraded since, an agent on the box could read the secret behind your authenticator app and make valid sign-in codes, or replace it. It could also read the dashboard's Google sign-in secret and the keys that send notifications to your devices.
+
+  - **Your sign-in factors are now the dashboard's alone.** Agents on a box cannot read, replace, remove or even see the names of your authenticator secret, the Google sign-in secret or your devices' notification keys, on any box.
+  - **What agents may do with each kind of secret is now one fixed list.** On an older box they can still save the secrets Oz Box's own commands save (backup, model and IDE keys, and what `ozbox dashboard install`, `ozbox code` and `ozbox mesh` keep), and read back only the dashboard's sending keys; any other name is refused. On a current box they cannot save or read any.
+  - **On a box that has not been upgraded**, the authenticator, Google sign-in and device notifications stop working until you upgrade it, and restarting its dashboard signs everyone out. Passkeys keep working.
+
+  **What to do after upgrading.** Treat an authenticator set up before this release as possibly seen: on the dashboard's **Account** page, under **Authenticator app**, choose **Remove**, then **Set up an authenticator app** again (if the authenticator is your only second factor, add a passkey first). If that box used Google sign-in, make a new client secret for your OAuth app and save it again. Upgrade with `ozbox upgrade <box>`.
+</Update>
+
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
   ## Oz Box 0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades
 

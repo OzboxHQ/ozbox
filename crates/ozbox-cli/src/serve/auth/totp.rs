@@ -6,6 +6,12 @@ use super::b64::{decode_base32, encode_base32};
 
 pub const STEP_S: u64 = 30;
 
+/// The store name of a person's authenticator secret. One function, read by the dashboard's sign-in and by the secrets
+/// service when it checks a code that approves a request (ADR 0041), so the two cannot drift apart.
+pub fn secret_name(user: &str) -> String {
+    format!("totp-{user}")
+}
+
 pub fn new_secret() -> Result<String, String> {
     let mut b = [0u8; 20];
     getrandom::getrandom(&mut b).map_err(|_| "no randomness".to_string())?;

@@ -138,6 +138,7 @@ fn wait(id: &str, json: bool) -> Result<(), CliError> {
             Ok(())
         }
         Waited::Refused(m) | Waited::GaveUp(m) => Err(CliError::Msg(m)),
+        Waited::TimedOut => Err(CliError::Msg("the wait ran out: ask again".into())),
         Waited::Stopped => Err(CliError::Msg(
             "stopped waiting; the request stays for 30 minutes".into(),
         )),
