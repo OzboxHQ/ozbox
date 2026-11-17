@@ -61,6 +61,7 @@ pub fn ses_request(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> HttpRequest {
     let mut v = json!({
         "FromEmailAddress": from,
@@ -70,6 +71,9 @@ pub fn ses_request(
             "Body": { "Text": { "Data": text, "Charset": "UTF-8" } }
         } },
     });
+    if let Some(h) = html {
+        v["Content"]["Simple"]["Body"]["Html"] = json!({ "Data": h, "Charset": "UTF-8" });
+    }
     if !reply_to.is_empty() {
         v["ReplyToAddresses"] = json!([reply_to]);
     }
@@ -108,11 +112,12 @@ pub fn ses(
     to: &[String],
     subject: &str,
     text: &str,
+    html: Option<&str>,
 ) -> Result<Native, String> {
     let region = region(ctx, region_setting)?;
     Ok(send_signed(
         ctx,
-        ses_request(&region, from, reply_to, to, subject, text),
+        ses_request(&region, from, reply_to, to, subject, text, html),
         &region,
         "ses",
         ses_answer,
@@ -236,6 +241,7 @@ mod tests {
             &to,
             "S",
             "--profile evil",
+            None,
         )
         .unwrap();
         assert!(matches!(r, Native::Sent(Ok(ref s)) if s == "sent"));
@@ -313,12 +319,19 @@ mod tests {
     fn the_region_comes_from_the_setting_else_this_machine_and_a_bad_one_sends_nothing() {
         let f = Fake::start();
         let g = rig_with_aws(&f.imds);
-        assert!(
-            ses(&g.ctx, Some("EU WEST"), "a@example.com", "", &[], "s", "t")
-                .err()
-                .unwrap()
-                .contains("region")
-        );
+        assert!(ses(
+            &g.ctx,
+            Some("EU WEST"),
+            "a@example.com",
+            "",
+            &[],
+            "s",
+            "t",
+            None
+        )
+        .err()
+        .unwrap()
+        .contains("region"));
         assert!(g.http.requests().is_empty());
         if std::env::var("AWS_REGION").is_err() && std::env::var("AWS_DEFAULT_REGION").is_err() {
             sns(&g.ctx, None, "", "+15005550009", "x").unwrap();
