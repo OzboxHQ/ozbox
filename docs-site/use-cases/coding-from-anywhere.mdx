@@ -181,7 +181,9 @@ reports success only once the dashboard runs that way; it never runs as the box 
 old way (the one the box's image carries when its hash is in the image release's signed manifest, otherwise the release's
 signed program) is kept only as a fallback. Read the first-time setup code on your own computer with `ozbox secrets ingress setup-code --box ops`
 (it is handed to the box's secrets service and sent back through the sealed route, so it is not in a log the box user can read; on a
-box made before the ingress account, `ozbox upgrade` it first) and sign in at once. A box made before this release does not know the helper's new check
+box made before the ingress account, `ozbox upgrade` it first) and sign in at once. Once the box has a second factor, this
+computer's software key cannot fetch the code (a program on your computer could otherwise enrol its own passkey): a laptop key that
+needs a touch, or root on the box, approves it. A box made before this release does not know the helper's new check
 and the install stops there, with the dashboard staged but not running: upgrade the box first (an upgrade on Hetzner now replaces the
 server, so it brings the current helper too). Upgrading or pausing that box takes the dashboard down, so do that from another computer; an upgrade then puts it back from what this computer kept (below).
 **Status:** Preview.

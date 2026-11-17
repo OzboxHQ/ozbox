@@ -688,11 +688,12 @@ added to the catalog first (ADR 0042 §13). Nothing is cached for the benchmark,
 - Agent approvals, tool requests and Production use keep their own stores; only the envelope, table, inbox and audit words are
   shared. A fourth kind of gate must choose its store with the gate that spends.
 - The `secret-use` (Production) row is a pointer to ADR 0029, which keeps its own issuer; the no-software-key rule is repeated in its Amendment 9 §4.
-- **Legacy codes and owner-only scopes.** While scope-only codes are on (§10, until phase 3), a software laptop key still makes
-  codes for the box's own settings (`tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets`, `host-guard`) and
-  for a declaration that touches no Production environment, although the request table (§3.1) says a software key decides none of
-  them. Only Production is closed on the code path (Amendment of 2026-11-17). `kek-export` is the sharpest of these: the escrowed
-  key opens every value on the box, Production ones included. Phase 3 (codes off) closes the rest.
+- **Legacy codes and the box's own acts.** Closed by the review fix of 2026-11-17 (Amendment of 2026-11-17, "Review fix"): on the
+  code path a software laptop key now makes no code for `policy`, `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`,
+  `box-secrets` or `host-guard`, exactly as the request table says. What is still not covered: a box whose **only** approver is a
+  software laptop key (a box made by `ozbox create`, before a passkey or a touch key is enrolled) has no route on the code path to
+  its dashboard's first-time code, its store key's escrow, its tunnel token or a declaration; those now go through a request
+  decided by a laptop key that proves a touch, or by root. Making that first-day path smooth is open work.
 - **The issuer's laptop presence is still declared.** The issuer refuses a laptop key whose record says it does not ask the
   person, and no setting changes that any more, but whether a key asks the person is still what its pinned record says, not a
   verified attestation (pending phase 2, as above).
@@ -1306,13 +1307,14 @@ process with the ingress route can ask the box directly.
    with no row is Production, the fail-safe reading):
    - `import`: Production when its environment is not a listed non-Production one (`dev`, `development`, `staging`, `test`, `e2e`),
      the rule of §3 (`is_production_environment`).
-   - `policy`: the code carries no environment, so the declaration decides. It is Production when a command in it, or in the
+   - `policy` (for the dashboard's codes; a software key approves no declaration since the review fix below): the code carries no
+     environment, so the declaration decides. It is Production when a command in it, or in the
      declaration it replaces, takes secrets from a Production environment, or when the project's Production identifiers change (a
      declaration that cannot be read is treated as Production).
    - `guard-override`: a code names one change by digest. A code for anything that is not a change digest is refused for a software
      key.
-   - `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets`, `host-guard`: the box's own settings, not a project's
-     environment, so not Production by this rule (see "what is not covered").
+   - `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets`, `host-guard`: first written here as the box's own
+     settings, not Production. **Superseded by the review fix below**: they, and `policy`, are Production-tier for a software key.
 3. **A software key's code is refused for every Production act, on every path**: when the laptop asks for a challenge (before it
    signs anything), when the code would be made, and when a code is spent. The spend is the boundary: a code an older program made is
    refused there too, and the refusal does not spend it. A refused challenge writes a bounded `secrets.signer.refused` line
@@ -1324,14 +1326,15 @@ process with the ingress route can ask the box directly.
    ask the person never approves a Production use, and no setting changes that.
 6. **Nothing else changes.** The dashboard's codes approve what they approved before, Production included. A software key's code
    for a non-Production import, a declaration that touches no Production environment, a guard override for a change digest and the
-   box's own settings is made and spent as before.
+   box's own settings is made and spent as before. (Narrowed by the review fix below: a software key no longer approves a
+   declaration or the box's own settings.)
 
 **Tests.** The proof test (a software key's code for an exact Production import, refused for `production`, `prod`, `live` and
 `qa`, nothing stored); the gate refusing a software key's Production code that already exists, naming the dashboard, with no code
 and no value in the refusal, and the code left unspent; the dashboard still importing into Production; a software key still
 importing into each non-Production environment; a declaration with a Production command, and one that removes it, refused for a
 software key and accepted from the dashboard; a guard override for `production` refused and one for a digest made; the box's own
-scopes still taking a software key's code; a scope-by-scope table of what a software key may approve, and the parity of the
+scopes still taking a software key's code (reversed by the review fix below); a scope-by-scope table of what a software key may approve, and the parity of the
 Production table with `SCOPES`; on the request path, every row's software cell classified and a software key refused for each
 Production import (four environments, a live key name, the filer's flag); the issuer refusing a software key with the old opt-in
 set.
@@ -1340,3 +1343,34 @@ set.
 
 **Not proven on a real box.** Planned: a laptop's `ozbox secrets approve --scope import --env production` against a real box,
 refused with the sentence above, and a dashboard code for the same import accepted.
+
+### Review fix (2026-11-17): one software-key table for both paths, and an import judged by what it carries
+
+An independent review of this amendment found two gaps, both fixed in the same change.
+
+- **High: the code path's own table let a software key approve the box's own acts.** Its rows called `tunnel-token`,
+  `signer-enroll`, `setup-code`, `kek-export`, `box-secrets` and `host-guard` "not Production", so a software laptop key's code was
+  made and spent for them, while the request table (§3.1, `software: never`) refuses all of them, and `policy` too. The attack is a
+  program on the owner's computer that can use the keychain key: it mints a `kek-export` code and takes the file-kept store key (which
+  opens every Production value), or a `setup-code` code and enrols its own passkey, which then approves anything as the dashboard.
+  **Decision:** the code path no longer keeps a table of its own. Its tier is read from the request table's `software` column, the
+  column the request path's software cell reads too (`member-level` is one change by digest, `new-non-production-names` is judged by
+  the environment and what the import carries, `never` is refused always). So a software key makes and spends no code for `policy`,
+  `tunnel-token`, `signer-enroll`, `setup-code`, `kek-export`, `box-secrets` or `host-guard` on either path, and the two cannot
+  drift. The refusal for these says a software key never approves them and names a laptop key that proves a touch, root, or the
+  dashboard where it offers the change (`approval.software_key_never`).
+- **Medium: a legacy import was judged by its environment's name alone.** A software key's code for `staging` carrying
+  `STRIPE_LIVE_KEY`, or a value starting `sk_live_`, was accepted, while the request path treats the same import as Production (a name
+  that says production or live; a live-mode or production-looking value). **Decision:** at the legacy import's spend the box reads the
+  rows with the request path's own helpers (`name_says_production`, `value_says_production`), and an import whose names or values say
+  Production is Production for a software key, whatever its environment. The refusal does not spend the code.
+
+**Consequence.** On a box whose only approver is this computer's software key, `ozbox secrets ingress setup-code` and `ozbox secrets
+ingress escrow`, a tunnel token set with this computer's key, and a declaration approved by it are refused; they go through a request
+decided by a laptop key that proves a touch, or by root (see "what is not covered").
+
+**Tests.** Each fails on the code before the fix: a software key gets no code for any of the six box scopes and a code that somehow
+exists for `kek-export` or `setup-code` is refused at the gate, unspent; a software key gets no `policy` code and one that exists is
+refused for a staging-only declaration as for a Production one; a software key's `staging` code is refused for an import with a key
+named live or production, a `sk_live_` value or a production address, nothing stored and the code left good for an ordinary import;
+the set of scopes a software key never decides is the same on both paths, read from `RULES`.
