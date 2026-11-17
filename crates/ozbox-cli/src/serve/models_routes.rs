@@ -586,7 +586,9 @@ mod tests {
         // additive (ADR 0054): every subscription row is shown with its honest status, and none is "available" yet
         let subs = v["subscriptions"].as_array().unwrap();
         assert!(!subs.is_empty());
-        assert!(subs.iter().all(|s| s["kind"] == "subscription" && s["status"] != "available"));
+        assert!(subs
+            .iter()
+            .all(|s| s["kind"] == "subscription" && s["status"] != "available"));
     }
 
     #[test]
