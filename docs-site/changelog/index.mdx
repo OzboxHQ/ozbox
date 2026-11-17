@@ -104,6 +104,16 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **Rotate a tunnel token safely.** `ozbox admin <box> -- replace-tunnel-token cloudflare --token-stdin` puts the new token on the box, waits for the tunnel to stay up, and puts the old token back if it does not. The token is never typed on the command line.
   - **Commits made while a box's secrets service is down are recorded.** Once the service is back they are added to the box's audit trail, marked as made in the outage. A push stays stopped for the whole outage, and no approval opens it.
   - **An upgrade will not strand a store on your fleet's key.** Upgrading such a box to an image older than 0.2.0-beta.3 is refused in the plan, before anything changes.
+<Update label="[Release date]" tags={["CLI", "Dashboard", "Security"]} description="OpenBao, SES and SNS without extra programs on a box; arm images; old images kept private">
+  ## Boxes on OpenBao load their secrets, and SES and SNS alerts send from a box
+
+  - **A box whose secrets are in OpenBao loads them**, and escrows its store's key there, without the `bao` program the box image does not carry. The vault must have a certificate from a public authority. See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+  - **Amazon SES email and Amazon SNS texts send without the `aws` command**, so the dashboard on a box can deliver them with the box's role. A computer that names an AWS profile keeps using the `aws` command. See [Alerts, costs and guardrails](/use-cases/alerts-costs-guardrails).
+  - **Let a box send them, for one sender and one topic only.** Off by default. Name the SES identity and the SNS topic under `[aws]` (`notify_ses_identity_arn`, `notify_sns_topic_arn`), run `ozbox init`, then set `notify_send_grants = true` and create or `ozbox upgrade` the box. The box may send from that identity and publish to that topic and nothing else, and the plan refuses a wildcard or a missing ARN.
+  - **A box on an arm (Graviton) machine is offered arm images** by `ozbox upgrade` and the dashboard, instead of an x86 image it could not use.
+  - **For image publishers:** older image versions are now made private and kept by default, and deleted only when you ask (`retire_old: delete`); the image workflow runs only from `main` or an `image-v*` tag. See [Releasing](/releasing).
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
 </Update>
 
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">

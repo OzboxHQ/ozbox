@@ -96,6 +96,7 @@ mod native_check;
 mod netguard;
 mod notify;
 mod notify_config;
+mod openbao;
 mod orch_cli;
 mod orch_tools;
 mod orphans;

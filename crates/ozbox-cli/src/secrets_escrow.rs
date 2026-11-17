@@ -12,20 +12,24 @@
 //! * With what: the box-secrets credential (`BAO_ADDR`, `BAO_TOKEN`), which systemd gives the secrets user's units from
 //!   root-only files. The box user never holds it. The vault policy for the token must allow `create`, `update` and `read`
 //!   on that one path.
-//! * How: the `bao` command, with the value on standard input (`kek=-`), never in an argument, a log or an error.
+//! * How: natively, over https (see `openbao`: no `bao` command, which the box image does not carry). The key travels only
+//!   in the body of the one request that writes it, and the token only as a header read at the moment of the request; never
+//!   in an argument, a URL, a log or an error.
 //!
 //! Not built: escrow in the laptop keychain, put back by `ozbox upgrade`. Without the ingress account of ADR 0029
 //! Amendment 6 §3 every route from the laptop into the box passes through a process of the box user, which could keep the
 //! key; so a box without a vault has no escrow, and a replaced system disk starts a new store (`ozbox admin <box> -- recover-secrets`, approved by the key pinned when the box was made).
 
-use ozbox_core::{CommandRunner, CommandSpec};
 use zeroize::Zeroizing;
 
-/// Where the escrowed key lives, and that there is a credential to reach it.
+use crate::openbao::Bao;
+
+/// Where the escrowed key lives, and the vault that holds it (an address; the token is read at each request).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Escrow {
     pub mount: String,
     pub path: String,
+    pub vault: Bao,
 }
 
 fn plain(s: &str) -> bool {
@@ -43,7 +47,7 @@ impl Escrow {
         if get("OZBOX_BOX_SECRETS_BACKEND").as_deref() != Some("openbao") {
             return None;
         }
-        get("BAO_ADDR").filter(|a| a.starts_with("https://"))?;
+        let vault = Bao::new(&get("BAO_ADDR")?)?;
         get("BAO_TOKEN").filter(|t| !t.is_empty())?;
         let prefix = get("OZBOX_BOX_SECRETS_PATH").unwrap_or_default();
         let prefix = prefix.trim_matches('/');
@@ -53,7 +57,7 @@ impl Escrow {
         } else {
             format!("{prefix}/_escrow/{scope}")
         };
-        (plain(&mount) && plain(&path) && plain(scope)).then_some(Escrow { mount, path })
+        (plain(&mount) && plain(&path) && plain(scope)).then_some(Escrow { mount, path, vault })
     }
 
     /// Whether the box declares an escrow at all (box secrets on OpenBao at an https address), whether or not its token is
@@ -65,47 +69,30 @@ impl Escrow {
     }
 
     /// The escrowed key, or why it could not be had. The vault's own words are not repeated (they can name a path).
-    pub fn fetch(&self, runner: &dyn CommandRunner) -> Result<Zeroizing<String>, String> {
-        let out = runner
-            .run(&CommandSpec::new("bao").args([
-                "kv".to_string(),
-                "get".into(),
-                format!("-mount={}", self.mount),
-                "-field=kek".into(),
-                self.path.clone(),
-            ]))
-            .map_err(|_| "the bao command could not be started".to_string())?;
-        let value = Zeroizing::new(out.stdout.trim().to_string());
-        if out.status != Some(0) || value.is_empty() {
-            return Err("the vault did not return this box's escrowed store key (there may be none, or the vault cannot be reached with the box's token)".into());
-        }
-        Ok(value)
+    pub fn fetch(&self) -> Result<Zeroizing<String>, String> {
+        let fields = self
+            .vault
+            .read(&self.mount, &self.path)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let value = fields
+            .into_iter()
+            .find(|(k, _)| k == "kek")
+            .map(|(_, v)| Zeroizing::new(v.trim().to_string()))
+            .filter(|v| !v.is_empty());
+        value.ok_or_else(|| "the vault did not return this box's escrowed store key (there may be none, or the vault cannot be reached with the box's token)".into())
     }
 
-    /// Put `kek_text` in escrow, unless the vault already holds exactly that. The value goes on standard input only.
-    pub fn place(&self, runner: &dyn CommandRunner, kek_text: &str) -> Result<bool, String> {
-        if self
-            .fetch(runner)
-            .is_ok_and(|have| have.as_str() == kek_text.trim())
-        {
+    /// Put `kek_text` in escrow, unless the vault already holds exactly that. The value goes in the request body only.
+    pub fn place(&self, kek_text: &str) -> Result<bool, String> {
+        let kek = Zeroizing::new(kek_text.trim().to_string());
+        if self.fetch().is_ok_and(|have| have.as_str() == kek.as_str()) {
             return Ok(false);
         }
-        let out = runner
-            .run(
-                &CommandSpec::new("bao")
-                    .args([
-                        "kv".to_string(),
-                        "put".into(),
-                        format!("-mount={}", self.mount),
-                        self.path.clone(),
-                        "kek=-".into(),
-                    ])
-                    .stdin(kek_text.trim().as_bytes().to_vec()),
-            )
-            .map_err(|_| "the bao command could not be started".to_string())?;
-        if out.status != Some(0) {
-            return Err("the store key could not be escrowed in the vault (the box's token needs create, update and read on its escrow path)".into());
-        }
+        self.vault
+            .write(&self.mount, &self.path, &[("kek", kek.as_str())])
+            .map_err(|_| "the store key could not be escrowed in the vault (the box's token needs create, update and read on its escrow path)".to_string())?;
         Ok(true)
     }
 }
@@ -128,12 +115,7 @@ pub const TOKEN_MISSING: &str = "the store's key is not on this disk and this bo
 
 /// Bring back a missing key file from escrow. `key_file` is where the file-kept key belongs.
 #[cfg(unix)]
-pub fn recover_key(
-    escrow: Option<&Escrow>,
-    declared: bool,
-    runner: &dyn CommandRunner,
-    key_file: &std::path::Path,
-) -> Missing {
+pub fn recover_key(escrow: Option<&Escrow>, declared: bool, key_file: &std::path::Path) -> Missing {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let Some(e) = escrow else {
@@ -143,7 +125,7 @@ pub fn recover_key(
         }
         return Missing::NoEscrow(NO_ESCROW.into());
     };
-    let kek = match e.fetch(runner) {
+    let kek = match e.fetch() {
         Ok(k) => k,
         Err(why) => {
             return Missing::Unavailable(format!(
@@ -174,7 +156,15 @@ pub fn recover_key(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use ozbox_core::{Output, RecordingRunner};
+    use crate::openbao::fakes::{Vault, TOKEN};
+
+    /// The escrow of `FULL` for box dev-1, against a loopback vault.
+    fn against(v: &Vault) -> Escrow {
+        Escrow {
+            vault: v.client(),
+            ..Escrow::from_env(&env(FULL), "dev-1").unwrap()
+        }
+    }
 
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |k| {
@@ -197,7 +187,6 @@ mod tests {
     fn a_declared_vault_with_no_token_yet_is_waited_for_not_read_as_no_escrow() {
         let d = tempfile::tempdir().unwrap();
         let key = d.path().join("kek.key");
-        let r = RecordingRunner::new();
         let declared_no_token = env(&[
             ("OZBOX_BOX_SECRETS_BACKEND", "openbao"),
             ("BAO_ADDR", "https://vault.example.com"),
@@ -205,10 +194,10 @@ mod tests {
         assert!(Escrow::declared(&declared_no_token));
         assert!(Escrow::from_env(&declared_no_token, "dev-1").is_none());
         assert!(
-            matches!(recover_key(None, true, &r, &key), Missing::Unavailable(m) if m.contains("place-bao-token"))
+            matches!(recover_key(None, true, &key), Missing::Unavailable(m) if m.contains("place-bao-token"))
         );
         assert!(matches!(
-            recover_key(None, false, &r, &key),
+            recover_key(None, false, &key),
             Missing::NoEscrow(_)
         ));
         assert!(!Escrow::declared(&env(&[(
@@ -241,35 +230,77 @@ mod tests {
     }
 
     #[test]
-    fn the_key_goes_to_the_vault_on_standard_input_only() {
-        let e = Escrow::from_env(&env(FULL), "dev-1").unwrap();
-        let r = RecordingRunner::new();
-        // no escrow yet, then the put succeeds
-        r.reply(Output {
-            status: Some(2),
-            stdout: String::new(),
-            stderr: "No value found at secret/data/ozbox/dev/_escrow/dev-1".into(),
-        });
-        r.reply(Output {
-            status: Some(0),
-            stdout: String::new(),
-            stderr: String::new(),
-        });
-        assert!(e.place(&r, "SENTINEL-KEK-TEXT").unwrap());
-        let calls = r.calls();
-        let put = &calls[1];
-        assert!(put.args.iter().any(|a| a == "kek=-"));
-        assert!(!format!("{:?}", put.args).contains("SENTINEL-KEK-TEXT"));
-        assert_eq!(put.stdin.as_deref(), Some(b"SENTINEL-KEK-TEXT".as_slice()));
+    fn the_key_goes_to_the_vault_in_the_request_body_only_and_is_not_written_twice() {
+        let v = Vault::start();
+        let e = against(&v);
+        // no escrow yet, then the write succeeds
+        assert!(e.place("SENTINEL-KEK-TEXT\n").unwrap());
+        {
+            let seen = v.seen.lock().unwrap();
+            let methods: Vec<String> = seen
+                .iter()
+                .map(|s| format!("{} {}", s.method, s.url))
+                .collect();
+            assert_eq!(
+                methods,
+                [
+                    "GET /v1/secret/data/ozbox/dev/_escrow/dev-1",
+                    "POST /v1/secret/data/ozbox/dev/_escrow/dev-1",
+                ]
+            );
+            let put = &seen[1];
+            let body: serde_json::Value = serde_json::from_str(&put.body).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"data": {"kek": "SENTINEL-KEK-TEXT"}})
+            );
+            for s in seen.iter() {
+                assert!(!s.url.contains("SENTINEL") && !s.url.contains(TOKEN));
+                assert!(s.headers.iter().all(
+                    |(k, v)| k.eq_ignore_ascii_case("x-vault-token") || !v.contains("SENTINEL")
+                ));
+            }
+        }
+        assert_eq!(e.fetch().unwrap().as_str(), "SENTINEL-KEK-TEXT");
         // the same key already there: nothing is written
-        let r = RecordingRunner::new();
-        r.reply(Output {
-            status: Some(0),
-            stdout: "SENTINEL-KEK-TEXT\n".into(),
-            stderr: String::new(),
-        });
-        assert!(!e.place(&r, "SENTINEL-KEK-TEXT").unwrap());
-        assert_eq!(r.calls().len(), 1);
+        let before = v.seen.lock().unwrap().len();
+        assert!(!e.place("SENTINEL-KEK-TEXT").unwrap());
+        assert_eq!(v.seen.lock().unwrap().len(), before + 1);
+        // a refused write is one plain sentence with nothing of the key or the token in it
+        *v.force.lock().unwrap() = Some((403, "permission denied SENTINEL".into()));
+        let err = e.place("ANOTHER-SENTINEL").unwrap_err();
+        assert!(err.contains("create, update and read"), "{err}");
+        assert!(!err.contains("SENTINEL") && !err.contains(TOKEN));
+    }
+
+    #[test]
+    fn escrow_works_with_no_bao_command_anywhere() {
+        // the defect this replaces: the image has no `bao`. A child process with an empty PATH places and fetches the key.
+        if std::env::var("OZBOX_ESCROW_NO_PROGRAM_CHILD").is_ok() {
+            let v = Vault::start();
+            let e = against(&v);
+            assert!(e.place("SENTINEL-KEK-TEXT").unwrap());
+            assert_eq!(e.fetch().unwrap().as_str(), "SENTINEL-KEK-TEXT");
+            return;
+        }
+        let empty = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "secrets_escrow::tests::escrow_works_with_no_bao_command_anywhere",
+                "--nocapture",
+            ])
+            .env("OZBOX_ESCROW_NO_PROGRAM_CHILD", "1")
+            .env("PATH", empty.path())
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
     }
 
     #[cfg(unix)]
@@ -277,30 +308,23 @@ mod tests {
     fn a_missing_key_comes_back_from_escrow_or_says_which_kind_of_missing_it_is() {
         let d = tempfile::tempdir().unwrap();
         let file = d.path().join("kek.key");
-        let r = RecordingRunner::new();
         // no escrow configured: nothing can bring it back
         assert!(matches!(
-            recover_key(None, false, &r, &file),
+            recover_key(None, false, &file),
             Missing::NoEscrow(_)
         ));
-        let e = Escrow::from_env(&env(FULL), "dev-1").unwrap();
+        let v = Vault::start();
+        let e = against(&v);
         // the vault does not answer: worth retrying, and the error names no value
-        r.reply(Output {
-            status: Some(1),
-            stdout: String::new(),
-            stderr: "permission denied".into(),
-        });
-        match recover_key(Some(&e), true, &r, &file) {
+        *v.force.lock().unwrap() = Some((503, "sealed".into()));
+        match recover_key(Some(&e), true, &file) {
             Missing::Unavailable(why) => assert!(why.contains("place-bao-token"), "{why}"),
             m => panic!("{m:?}"),
         }
         assert!(!file.exists());
-        r.reply(Output {
-            status: Some(0),
-            stdout: "KEKTEXT\n".into(),
-            stderr: String::new(),
-        });
-        assert_eq!(recover_key(Some(&e), true, &r, &file), Missing::Recovered);
+        *v.force.lock().unwrap() = None;
+        v.put("secret/ozbox/dev/_escrow/dev-1", &[("kek", "KEKTEXT\n")]);
+        assert_eq!(recover_key(Some(&e), true, &file), Missing::Recovered);
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "KEKTEXT\n");
         assert_eq!(

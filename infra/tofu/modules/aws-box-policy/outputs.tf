@@ -11,5 +11,6 @@ output "policy_arns" {
     parameters_key = one(aws_iam_policy.parameters_key[*].arn)
     fleet_key      = one(aws_iam_policy.fleet_key[*].arn)
     session_logs   = one(aws_iam_policy.session_logs[*].arn)
+    notify         = one(aws_iam_policy.notify[*].arn)
   }
 }

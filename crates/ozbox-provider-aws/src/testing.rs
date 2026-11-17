@@ -807,8 +807,9 @@ impl FakeAws {
                             || i.state == "available"
                     })
                     .filter(|i| {
-                        !args.iter().any(|x| x == "Name=architecture,Values=x86_64")
-                            || i.arch == "x86_64"
+                        args.iter()
+                            .find_map(|x| x.strip_prefix("Name=architecture,Values="))
+                            .is_none_or(|a| i.arch == a)
                     })
                     .filter(|i| {
                         !args.iter().any(|x| x == "Name=name,Values=ozbox-*")
@@ -817,7 +818,9 @@ impl FakeAws {
                     .filter(|i| {
                         !latest_query
                             || (i.state == "available"
-                                && i.arch == "x86_64"
+                                && args.iter().any(|x| {
+                                    x == &format!("Name=architecture,Values={}", i.arch)
+                                })
                                 && i.tags.contains_key("ozbox-image")
                                 && i.tags.get("ozbox-managed").map(String::as_str) == Some("true"))
                     })

@@ -148,7 +148,9 @@ then mark any disk in the account as its own.
 **A box with secrets of its own** (kept in AWS Parameter Store) loads them with the box's role too: no `aws` command is needed on
 the box. If it could not (the role may not read its path, or Parameter Store is not reachable), the box's self-test fails
 `box_secrets_loaded`, and `ozbox admin <box> -- collect-logs` shows the loader's reason (never a value). The box tries again every
-fifteen minutes. A box whose secrets are in OpenBao still needs the `bao` program on it.
+fifteen minutes. A box whose secrets are in OpenBao reads them, and escrows its store's key there, the same way: straight from the
+vault with the token you placed, no `bao` program needed (Preview: tested against a simulated vault). The vault must be reachable
+at its `https://` address with a certificate from a public authority; a vault behind a private certificate authority is not reached yet.
 
 **A box set up for the fleet's KMS key** keeps its store's key in KMS and reaches it with the box's own role: no `aws` command is
 needed on the box. If the role cannot use the key, the secrets service stays down and the box's self-test fails `secrets_key_usable`

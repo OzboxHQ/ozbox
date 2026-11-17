@@ -52,10 +52,11 @@ on:
         required: false
         default: ""
       retire_old:
-        description: After publishing, retire images older than the last 3 versions (false = only list them)
+        description: "After publishing, what happens to versions older than the window (the last 3, plus the newest of the last 3 minors): private = make them private and keep them (the default); list = only list them; delete = deregister them and delete their snapshots (cannot be undone)"
         required: false
-        type: boolean
-        default: true
+        type: choice
+        default: private
+        options: [private, list, delete]
       arch:
         description: Architectures to build
         required: false
@@ -107,7 +108,17 @@ jobs:
           # release carries that number (tag image-v<version>); the build date is only recorded in the manifest.
           product="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           version="$IN_VERSION"
-          if [ "$REF_TYPE" = "tag" ]; then version="${REF_NAME#image-v}"; fi
+          # The signed manifest's identity names this workflow at `main` or at an `image-v*` tag, and nothing else: a box refuses
+          # any other. So a run from a program tag (`v*`) or another branch would sign a manifest no box trusts; refuse it here.
+          if [ "$REF_TYPE" = "tag" ]; then
+            case "$REF_NAME" in
+              image-v*) version="${REF_NAME#image-v}" ;;
+              *) echo "this workflow runs from an image-v<version> tag, or by hand from main (Run workflow, branch main, the version as input); $REF_NAME is not one of them, and a manifest signed from it would be refused by every box" >&2; exit 1 ;;
+            esac
+          elif [ "$REF_NAME" != "main" ]; then
+            echo "run this workflow from main (or push an image-v<version> tag): a manifest signed from the branch $REF_NAME would be refused by every box" >&2
+            exit 1
+          fi
           if [ -z "$version" ]; then version="$product"; fi
           if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$'; then
             echo "the version must look like 0.3.0 or 0.3.0-rc.1" >&2
@@ -749,7 +760,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
         run: bash scripts/image/publish.sh --manifest signed/ozbox-image-manifest.json --version "$VERSION" --regions "$REGIONS" --apply
-      - name: Retire images outside the retention window
+      - name: Old versions outside the retention window (private by default; deleted only when asked)
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           REGIONS: ${{ needs.plan.outputs.all_regions }}
@@ -757,7 +768,11 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(aws sts get-caller-identity --query Account --output text)"
-          apply=--apply
-          # a tag push or a manual run retires; a manual run may ask for the list only
-          if [ "$RETIRE" = "false" ]; then apply=; fi
-          bash scripts/image/retention.sh --released "$VERSION" --regions "$REGIONS" --owner "$owner" --keep 3 $apply
+          # A tag push (no input) makes old versions private and keeps them; a manual run may ask for the list only, or to delete.
+          case "${RETIRE:-private}" in
+            private) mode=(--apply) ;;
+            list) mode=() ;;
+            delete) mode=(--delete --apply) ;;
+            *) echo "retire_old must be private, list or delete" >&2; exit 1 ;;
+          esac
+          bash scripts/image/retention.sh --released "$VERSION" --regions "$REGIONS" --owner "$owner" --keep 3 "${mode[@]}"

@@ -79,6 +79,11 @@ pub struct ProviderSection {
     /// (`ozbox init security`). Boxes created or rebuilt afterwards join them.
     pub session_log_bucket: Option<String>,
     pub patch_group: Option<String>,
+    /// AWS only, off by default: let boxes created or rebuilt afterwards send alert email from one SES identity and publish
+    /// alert texts to one SNS topic (both ARNs below, and `ozbox init` run with them so the account's policy names them).
+    pub notify_send_grants: Option<bool>,
+    pub notify_ses_identity_arn: Option<String>,
+    pub notify_sns_topic_arn: Option<String>,
     /// `local` (the default) or `s3`: where each box's OpenTofu state lives (ADR 0033). Set to `s3` only after
     /// `ozbox state migrate` has copied the boxes there.
     pub state_backend: Option<String>,

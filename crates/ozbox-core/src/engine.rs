@@ -145,6 +145,16 @@ pub trait Backend: Send + Sync {
         Err(self.upgrade_unsupported("find the latest image"))
     }
 
+    /// The newest Oz image for a machine of `machine_type` (its CPU architecture). The default ignores the type.
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        let _ = machine_type;
+        self.latest_image(region)
+    }
+
     /// What is known about one image, for `upgrade --image <id>`. Read-only.
     fn image_info(&self, _image: &str, _region: Option<&str>) -> Result<ImageInfo> {
         Err(self.upgrade_unsupported("inspect an image"))
@@ -1276,6 +1286,14 @@ impl<B: Backend> Provider for Engine<B> {
 
     fn latest_image(&self, region: Option<&str>) -> Result<ImageInfo> {
         self.backend.latest_image(region)
+    }
+
+    fn latest_image_for(
+        &self,
+        region: Option<&str>,
+        machine_type: Option<&str>,
+    ) -> Result<ImageInfo> {
+        self.backend.latest_image_for(region, machine_type)
     }
 
     fn check_reprovision(&self, rec: &BoxRecord) -> Result<Vec<String>> {

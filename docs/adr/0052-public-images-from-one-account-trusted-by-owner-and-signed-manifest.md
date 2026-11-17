@@ -33,7 +33,7 @@ box from it with a bare `ozbox create`, and `ozbox upgrade` takes the next one.
 - **The window.** Retention keeps the last **three released versions** and the newest version of each of the **last three
   minors**, so a patch-heavy minor cannot push every older minor out. A pre-release never counts toward the window and is
   retired only after its own release has shipped AND 14 days have passed (a person on a beta is given time to move). There is
-  no scheduled run: a tag push or a manual run retires, and a manual run can ask for the list only. A box whose image was retired keeps running; `clone`, a create from a stale configuration and a
+  no scheduled run: a tag push or a manual run takes old versions out of use, and a manual run can ask for the list only (since the 2026-11-17 amendment, out of use means private by default, and deleting is a manual run's explicit choice). A box whose image was retired keeps running; `clone`, a create from a stale configuration and a
   rebuild from the same image are refused up front with `ozbox upgrade` as the way forward.
 - **When a check fails, the lookup stops.** A public image that the manifest FOR THAT RELEASE does not list for the region is
   skipped for the next candidate. A manifest that is for another release (an old, validly signed manifest swapped in), that
@@ -106,10 +106,12 @@ image needs `curl` and `cosign` on the person's computer, as `upgrade` already d
 own account and set `image_publisher` and `release_repo` to trust them.
 
 **What is not covered.**
-- The public path picks the x86-64 image; there is no arm64 size to create (the catalogue has no Graviton machine).
+- There is no arm64 size to create (the catalogue has no Graviton machine), so `create` picks the x86-64 image. A box already on a
+  Graviton type is matched to the arm64 image (the 2026-11-17 amendment).
 - A box created from an image that is later retired keeps running; `ozbox upgrade` moves it to a current image.
-- AMI deprecation is not used: a deprecated image is hidden from other accounts' searches, and retiring deletes the image
-  anyway, so a date before deletion buys nothing, and deprecating a still-retained version would hide it from older programs.
+- AMI deprecation is not used: a deprecated image is hidden from other accounts' searches, and making a version private (the
+  default, the 2026-11-17 amendment) already hides it, so a date buys nothing, and deprecating a still-retained version would hide it from
+  older programs.
 - The build role's permissions are the owner's to tighten: publishing needs the image attribute change but not the snapshot
   attribute change (`ec2:ModifySnapshotAttribute` is not used), and the preflight needs `ec2:GetImageBlockPublicAccessState`, which the role's read-only `ec2:Get*` already covers.
 - The build instance's SSM registration and Packer's temporary key are cleared by a transient unit when the build instance stops
@@ -120,3 +122,27 @@ own account and set `image_publisher` and `release_repo` to trust them.
 - Public sharing of images is blocked by default in a new AWS account, per region: it has to be switched off in each of the
   three before the first release can publish.
 - Nothing here has been proven against a real account.
+
+## Amendment (2026-11-17): old versions are made private by default, the workflow runs only from a ref a box trusts, and the image matches the machine's architecture
+
+**Old versions are made private, not deleted, unless a person asks.** Retirement deleted images by default (a tag push retired).
+Deleting cannot be undone, costs the next person who rebuilds a box from that image its rebuild (`clone`, a stale configuration,
+another account's record), and buys only the storage of a few snapshots. Making a version private already takes it out of every
+other account's choice (a client picks only public images) while it stays restorable by hand. So `retention.sh` now makes each
+version outside the window that is still public **private** and keeps its image and snapshots; `--delete` retires as before.
+Both print a plan and change nothing without `--apply`. The workflow's `retire_old` is `private` (the default, and what every tag
+push does), `list`, or `delete` (a manual run only).
+
+**The workflow runs only from `main` or an `image-v*` tag.** The signed manifest's identity names `image.yml` at `refs/heads/main`
+or `refs/tags/image-v*`, and a box refuses any other. A run from the program's `v*` tag (or another branch) would sign a manifest
+no box trusts; it is now refused in the first job, naming the two ways that work. Accepting `v*` was rejected: it would widen the
+identity every box checks to the tag the program release uses, so whoever may push a program tag could sign an image release.
+
+**The image matches the machine.** Image lookup asked for x86-64 only, so a box on a Graviton type was offered an x86 image that
+its upgrade check refused, and never found an arm64 one. The lookup now asks for the architecture of the box's own instance type
+(`latest_image_for`); a create, whose sizes all map to x86 types, is unchanged.
+
+**What is not covered.** The window still counts versions, not who still runs them. The build role needs
+`servicequotas:ListServiceQuotas` to read the real public-image quota; it is the owner's to grant, and without it the scripts
+assume 5 and say so. None of this has been run against a real account.
+

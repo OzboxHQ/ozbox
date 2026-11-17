@@ -628,6 +628,7 @@ impl Channels {
             http: Arc::clone(&self.http),
             runner: Arc::clone(&self.runner),
             aws_profile: self.aws_profile.clone(),
+            aws: crate::aws_native::shared(),
         }
     }
 

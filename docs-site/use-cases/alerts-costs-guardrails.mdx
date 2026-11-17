@@ -20,6 +20,14 @@ See [how to read the status](/use-cases#how-to-read-the-status).
 test**, which shows each channel's result as it arrives. SMS works through Twilio, Vonage, Amazon SNS, Africa's Talking
 or Telnyx; email through Resend, Postmark, SendGrid, Amazon SES or your own SMTP server.
 
+Amazon SES and SNS send with the AWS credentials of the computer the dashboard runs on, with no `aws` command needed: on a box,
+the box's own role; elsewhere `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. A computer that names a profile under `[aws]`, or
+has no such keys, still uses the `aws` command, which reads profiles. **On a box:** its role allows neither `ses:SendEmail` nor
+`sns:Publish` unless you turn it on, for one sender identity and one topic only: put `notify_ses_identity_arn` and
+`notify_sns_topic_arn` under `[aws]`, run `ozbox init`, add `notify_send_grants = true`, then create or `ozbox upgrade` the box
+([ADR 0035](/adr/0035-security-services-session-logs-and-patching-are-opt-in-and-never-restart-a-box-in-use), Amendment 2).
+Any process on the box, an agent included, can then send from that identity, so leave it off when another provider will do.
+
 **Status:** Preview (no real message has been sent in testing).
 
 ## 2. Urgent at 2 am, everything else in the morning
