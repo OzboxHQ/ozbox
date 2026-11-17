@@ -134,7 +134,7 @@ pub struct ClaudeCodeEngine<T: RunTransport> {
 
 /// The fixed wrapper: the box user's own program folder is searched first (a service's `PATH` does not include it), then
 /// the program runs with its arguments as they are. No variable data is in the script itself.
-const WRAPPER: &str = r#"PATH="$HOME/.local/bin:$PATH"; export PATH; exec "$@""#;
+pub const WRAPPER: &str = r#"PATH="$HOME/.local/bin:$PATH"; export PATH; exec "$@""#;
 
 fn tool_pattern(cmd: &str) -> String {
     format!("Bash({}:*)", cmd.trim())
@@ -291,8 +291,13 @@ pub fn parse_line(line: &str, st: &mut StreamState) -> Vec<EngineEvent> {
                     }
                     Some("tool_use") => {
                         // only the tool's name: its input may hold anything
-                        let name = block["name"].as_str().unwrap_or("tool");
-                        out.push(EngineEvent::Log(format!("using {name}")));
+                        let name: String = block["name"]
+                            .as_str()
+                            .unwrap_or("tool")
+                            .chars()
+                            .take(100)
+                            .collect();
+                        out.push(EngineEvent::ToolUse { name });
                     }
                     _ => {}
                 }
@@ -430,7 +435,8 @@ impl<T: RunTransport> AgentEngine for ClaudeCodeEngine<T> {
                 req.ask_for_edits,
             ),
             cwd: req.repo.as_ref().map(|r| format!("/work/repos/{r}")),
-            env: req.secret_env.clone(),
+            // another vendor family's credentials never reach this run (ADR 0056)
+            env: crate::engine_turn::strip_foreign("claude-code", &req.secret_env),
             labels,
             max_runtime_s: req.max_runtime_s,
             memory_request_bytes: 2 * 1024 * 1024 * 1024,
@@ -706,7 +712,9 @@ mod tests {
         e.transport.log = log.as_bytes()[..cut].to_vec();
         let first = e.poll(&h).unwrap();
         assert!(first.contains(&EngineEvent::Log("Reading the parser".into())));
-        assert!(first.contains(&EngineEvent::Log("using Read".into())));
+        assert!(first.contains(&EngineEvent::ToolUse {
+            name: "Read".into()
+        }));
         let usage = EngineEvent::TokenUsage {
             input_tokens: 100,
             output_tokens: 20,

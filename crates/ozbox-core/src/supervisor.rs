@@ -651,6 +651,11 @@ fn poll_active(
                         t.push_log(&redact_line(&l, &secrets));
                     }
                 }
+                EngineEvent::ToolUse { name } => {
+                    if let Some(t) = book.task_mut(&id) {
+                        t.push_log(&redact_line(&format!("using {name}"), &secrets));
+                    }
+                }
                 EngineEvent::Usage { cents, tokens } => {
                     // a broker's count is the one to trust, so the engine's own figures are left out
                     if !via_broker {
