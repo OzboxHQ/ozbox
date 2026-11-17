@@ -292,6 +292,10 @@ pub fn route_props(route: &Route) -> Vec<String> {
     for k in ["NO_PROXY", "no_proxy"] {
         v.push(format!("Environment={k}=localhost,127.0.0.1,::1"));
     }
+    // Node's fetch ignores HTTPS_PROXY without its opt-in (`egress::PROXY_OPT_INS`)
+    for (k, val) in crate::egress::PROXY_OPT_INS {
+        v.push(format!("Environment={k}={val}"));
+    }
     for (d, port) in &route.tunnels {
         for (k, val) in crate::egress::tunnel_env(d, *port) {
             v.push(format!("Environment={k}={val}"));
@@ -556,6 +560,7 @@ mod tests {
             "Environment=HTTPS_PROXY=http://127.0.0.1:40123",
             "Environment=https_proxy=http://127.0.0.1:40123",
             "Environment=NO_PROXY=localhost,127.0.0.1,::1",
+            "Environment=NODE_USE_ENV_PROXY=1",
             "Environment=DATABASE_HOST=127.0.0.1",
             "Environment=DATABASE_PORT=40124",
             "Environment=DATABASE_REMOTE_HOST=db.example.com",
@@ -623,5 +628,150 @@ mod tests {
     fn raw_tcp_destinations_are_held_back_from_services_until_the_squat_check_passes() {
         // the switch the refusal reads; flipping it is the whole change, after the real-box check
         assert!(!std::hint::black_box(SERVICE_TCP_TUNNELS));
+    }
+
+    /// The `node` on this machine and its version, or why the Node test cannot run here.
+    fn node_with_env_proxy() -> Result<(), String> {
+        let out = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map_err(|_| "no node on PATH".to_string())?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let n: Vec<u32> = v
+            .trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        let ok = match n.as_slice() {
+            [22, m, ..] => *m >= 21,
+            [24, m, ..] => *m >= 5,
+            [maj, ..] => *maj >= 25,
+            _ => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "node {v} has no NODE_USE_ENV_PROXY (22.21+, 24.5+)"
+            ))
+        }
+    }
+
+    /// Run Node's built-in `fetch` to an `.invalid` https host with `env` only, behind a listener that plays the proxy:
+    /// the request head it received, if Node came to it.
+    fn node_fetch_through(
+        env: &[(String, String)],
+        port_holder: std::net::TcpListener,
+    ) -> Option<String> {
+        use std::io::{Read, Write};
+        port_holder.set_nonblocking(true).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done2 = done.clone();
+        let seen = std::thread::spawn(move || {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while std::time::Instant::now() < end {
+                // node has exited: one last look for a connection it made, then stop
+                let last = done2.load(std::sync::atomic::Ordering::SeqCst);
+                match port_holder.accept() {
+                    Ok((mut c, _)) => {
+                        c.set_nonblocking(false).unwrap();
+                        c.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            .unwrap();
+                        let mut head = Vec::new();
+                        let mut b = [0u8; 1024];
+                        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match c.read(&mut b) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => head.extend_from_slice(&b[..n]),
+                            }
+                        }
+                        let _ = c.write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
+                        return Some(String::from_utf8_lossy(&head).to_string());
+                    }
+                    Err(_) if last => return None,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+            None
+        });
+        let script = "setTimeout(()=>process.exit(4),15000).unref();\
+                      fetch('https://ozbox-test.invalid/').then(()=>process.exit(0),()=>process.exit(0))";
+        let st = std::process::Command::new("node")
+            .args(["-e", script])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_ne!(st.code(), Some(4), "node's fetch hung");
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let head = seen.join().unwrap();
+        head.filter(|h| !h.is_empty())
+    }
+
+    /// B4-30: the variables the launcher gives a service (and a one-shot command, whose proxy address carries a password)
+    /// make Node's built-in `fetch` use the proxy. Without the opt-in it goes direct, which is the bug this pins.
+    #[test]
+    fn node_fetch_uses_the_proxy_with_the_variables_the_runner_sets() {
+        if let Err(why) = node_with_env_proxy() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        // the service: exactly the Environment= lines of its unit
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut r = route();
+        r.port = l.local_addr().unwrap().port();
+        r.tunnels.clear();
+        let env: Vec<(String, String)> = route_props(&r)
+            .iter()
+            .filter_map(|p| p.strip_prefix("Environment="))
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let Some(head) = node_fetch_through(&env, l) else {
+            panic!("node's fetch did not use the proxy");
+        };
+        assert!(
+            head.starts_with("CONNECT ozbox-test.invalid:443 "),
+            "{head}"
+        );
+
+        // a one-shot command: the proxy address carries the run's password, and Node presents it
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://run:pw0123@127.0.0.1:{}",
+            l.local_addr().unwrap().port()
+        );
+        let mut env = vec![
+            ("HTTPS_PROXY".to_string(), url.clone()),
+            ("https_proxy".to_string(), url),
+            (
+                "NO_PROXY".to_string(),
+                "localhost,127.0.0.1,::1".to_string(),
+            ),
+        ];
+        for (k, v) in crate::egress::PROXY_OPT_INS {
+            env.push((k.to_string(), v.to_string()));
+        }
+        let Some(head) = node_fetch_through(&env, l) else {
+            panic!("node's fetch did not use the proxy");
+        };
+        assert!(
+            head.starts_with("CONNECT ozbox-test.invalid:443 "),
+            "{head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("proxy-authorization: basic "),
+            "{head}"
+        );
+
+        // the control: the same address without the opt-in, and Node never comes to the proxy (it goes direct)
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let env = vec![("HTTPS_PROXY".to_string(), url)];
+        assert_eq!(node_fetch_through(&env, l), None);
     }
 }

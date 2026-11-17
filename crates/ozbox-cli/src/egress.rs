@@ -422,6 +422,15 @@ pub fn start_tunnel_on(
     Ok(TcpTunnel { port: local, stop })
 }
 
+/// The variables that make a runtime use the proxy address, set wherever `HTTPS_PROXY` is set and reserved like it.
+///
+/// Node's built-in `fetch` (undici, and so supabase-js and most SDKs) ignores `HTTPS_PROXY` unless `NODE_USE_ENV_PROXY=1`
+/// (Node 22.21 and 24.5 onward; an older Node ignores the flag and goes direct, so it is refused by the closed network rather
+/// than quietly using the proxy). Without it every https call from a Node command went direct and failed, while the raw `tcp`
+/// tunnels worked. Python (`requests`, `httpx`, `urllib`), Go `net/http`, Deno, Bun, curl and Rust `reqwest` read
+/// `HTTPS_PROXY` by themselves.
+pub const PROXY_OPT_INS: [(&str, &str); 1] = [("NODE_USE_ENV_PROXY", "1")];
+
 /// The environment lines that tell a command where its tunnels are.
 pub fn tunnel_env(dest: &TcpDest, port: u16) -> Vec<(String, String)> {
     vec![

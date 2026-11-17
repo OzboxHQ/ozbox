@@ -61,6 +61,16 @@ Tags: **CLI** (the `ozbox` command) · **Dashboard** · **Docs** · **Security**
   - **The self-test names a first-boot step that did not finish** (`first_boot_steps`) and the command that runs it again.
 
   See [Keeping boxes healthy](/use-cases/keeping-boxes-healthy).
+<Update label="[Release date]" tags={["CLI", "Security"]} description="Node commands and the egress route">
+  ## Node commands can reach the hosts their project declares
+
+  A Node command or server run with `ozbox env run` in a project that declares `egress` could not reach those hosts over https: Node's built-in `fetch`, and the SDKs built on it, ignored the proxy address Oz Box gives the command and went direct, where the closed network refused them. Raw `tcp` destinations worked, which made the failure confusing.
+
+  - **Node 22.21 and 24.5 onward now use the route** with no change to your project: Oz Box also sets `NODE_USE_ENV_PROXY=1`, and a declaration cannot override it.
+  - **Which runtimes use the route** (Node, curl, Python, Go, Deno, Bun, Rust, Java) is listed in [A secure workspace for AI agents](/use-cases/secure-agent-workspace).
+  - **Known limit.** An older Node, Python `aiohttp` without `trust_env=True`, and Java do not read the proxy variables, so their https calls still fail.
+
+  **How to get it.** `ozbox upgrade <box>` to the release that carries this.
 </Update>
 
 <Update label="November 16, 2026" tags={["CLI", "Dashboard", "Security"]} description="0.2.0-beta.3: AWS boxes keep their secrets, backups and dashboard through upgrades">
