@@ -78,11 +78,20 @@ out=\"$d/oz.code-workspace\"
 
 /// Lines every box's `~/.tmux.conf` should have; each is appended only when it is not there yet, so running setup again
 /// changes nothing and a person's own file is never rewritten.
-pub const TMUX_LINES: [&str; 4] = [
+///
+/// Copying out of tmux: `set-clipboard on` makes tmux send what it copies (a mouse drag, or copy mode's Enter) to the
+/// terminal around it as an OSC 52 sequence, which the browser IDE's terminal and the dashboard's terminal turn into a
+/// write to the person's clipboard. tmux already does that for `xterm*` outer terminals; the `terminal-features` line adds
+/// the same for an outer tmux or screen (tmux on a laptop, then `ssh` to the box, then tmux here). A program inside tmux that
+/// asks to READ the clipboard (`OSC 52 ;?`) gets tmux's own copy buffer back, never the person's clipboard: tmux answers that
+/// itself. `allow-passthrough` is deliberately not set: OSC 52 does not need it, and it would let any program inside reach
+/// the outer terminal unfiltered.
+pub const TMUX_LINES: [&str; 5] = [
     "set -g mouse on",
     "set -g history-limit 100000",
     "set -g default-terminal \"tmux-256color\"",
     "set -g set-clipboard on",
+    "set -as terminal-features \",screen*:clipboard,tmux*:clipboard\"",
 ];
 
 /// Editor settings that make terminals survive: the default profile is the tmux one, with a plain one beside it, and the
@@ -94,23 +103,51 @@ pub fn editor_settings(home: &str) -> String {
     )
 }
 
-/// Firefox refuses a page's own clipboard read, so the editor's terminal paste command fails there ("Unable to read from
-/// the browser's clipboard"). These remove that command's default bindings while a terminal has focus, so the browser's own
-/// paste event reaches the terminal instead. (A leading `-` on a command removes a default binding.)
+/// One keymap per operating system for the browser IDE's terminal (the editor's own keys are the browser's and need
+/// nothing). The editor picks the binding for the computer the browser runs on, so one file serves every visitor:
+///
+/// | | macOS | Windows | Linux |
+/// |---|---|---|---|
+/// | copy | Cmd+C (editor default) | Ctrl+C with a selection, Ctrl+Shift+C (editor default) | Ctrl+C with a selection (added here), Ctrl+Shift+C |
+/// | interrupt | Ctrl+C | Ctrl+C with nothing selected | Ctrl+C with nothing selected |
+/// | paste | Cmd+V (the browser's own paste) | Ctrl+V (editor), Ctrl+Shift+V and Shift+Insert (browser's own) | Ctrl+V (added here), Ctrl+Shift+V and Shift+Insert (browser's own) |
+///
+/// Why the paste keys differ: the editor's paste command reads the clipboard from code, which Chromium allows once the person
+/// says yes, and Firefox and Safari allow only after a click on a small Paste button. The browser's own paste (a `paste` event)
+/// needs no permission in any browser, so wherever the terminal lets the key through (Cmd+V, Ctrl+Shift+V, Shift+Insert) the
+/// editor's command is removed and the browser pastes. Ctrl+V cannot be let through: the terminal turns a plain Ctrl+V into the
+/// shell's literal-next key whenever the browser can read the clipboard from code, so Ctrl+V stays on the editor's command.
+/// (A leading `-` on a command removes a default binding; `isLinux` and `isMac` are the visitor's computer.)
 pub const KEYBINDINGS: &str = r#"[
-  { "key": "ctrl+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" },
   { "key": "cmd+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" },
   { "key": "ctrl+shift+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" },
-  { "key": "shift+insert", "command": "-workbench.action.terminal.pasteSelection", "when": "terminalFocus" }
+  { "key": "shift+insert", "command": "-workbench.action.terminal.pasteSelection", "when": "terminalFocus" },
+  { "key": "ctrl+v", "command": "workbench.action.terminal.paste", "when": "isLinux && terminalFocus" },
+  { "key": "ctrl+c", "command": "workbench.action.terminal.copyAndClearSelection", "when": "isLinux && terminalFocus && terminalTextSelected" }
+]
+"#;
+
+/// Entries an earlier Oz Box wrote that turned out wrong; setup takes them out of a person's file again. Removing the
+/// editor's Ctrl+V paste made Ctrl+V type the shell's literal-next key (`^V`) on Windows and Linux in every browser that can
+/// read the clipboard from code, so Ctrl+V pasted nothing. Only an exact copy of what Oz Box wrote is removed.
+pub const RETIRED_KEYBINDINGS: &str = r#"[
+  { "key": "ctrl+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" }
 ]
 "#;
 
 /// Merges defaults into a person's JSON file on the box: a key they have is never changed or removed (for a list, their
 /// entries stay and only missing ones are added), a file that is absent is created, and a file that is not plain JSON
-/// (comments, damage) is left exactly as it is. Writes nothing when nothing is missing, so it is safe to run again.
+/// (damage, or comments anywhere but a header) is left exactly as it is. Writes nothing when nothing is missing, so it is safe
+/// to run again. A header of whole-line `//` comments (the editor writes one at the top of a new keybindings file) is kept
+/// as it is. An optional third file lists entries an earlier Oz Box wrote and now takes back (see [`RETIRED_KEYBINDINGS`]):
+/// only exact copies are removed from a list.
 pub const OZ_MERGE_JSON: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 dest, defaults = sys.argv[1], sys.argv[2]
+retired = []
+if len(sys.argv) > 3:
+    with open(sys.argv[3]) as f:
+        retired = json.load(f)
 with open(defaults) as f:
     want = json.load(f)
 if not os.path.exists(dest):
@@ -120,19 +157,26 @@ if not os.path.exists(dest):
     sys.exit(0)
 try:
     with open(dest) as f:
-        have = json.load(f)
+        text = f.read()
+    lines = text.split("\n")
+    n = 0
+    while n < len(lines) and (lines[n].strip() == "" or lines[n].lstrip().startswith("//")):
+        n += 1
+    header = "\n".join(lines[:n])
+    have = json.loads("\n".join(lines[n:]))
 except Exception:
     sys.exit(0)
 if isinstance(want, dict) and isinstance(have, dict):
     new = {**want, **have}
 elif isinstance(want, list) and isinstance(have, list):
-    new = list(have) + [e for e in want if e not in have]
+    kept = [e for e in have if e not in retired]
+    new = kept + [e for e in want if e not in kept]
 else:
     sys.exit(0)
 if new != have:
     tmp = dest + ".oz-tmp"
     with open(tmp, "w") as f:
-        f.write(json.dumps(new, indent=2) + "\n")
+        f.write((header + "\n" if header else "") + json.dumps(new, indent=2) + "\n")
     os.replace(tmp, dest)
 "#;
 
@@ -153,10 +197,11 @@ pub fn terminal_fragment() -> String {
          {tmux}\
          cat > \"$HOME/.config/ozbox/defaults/settings.json\" <<__OZBOX_EOF__\n{settings}__OZBOX_EOF__\n\
          cat > \"$HOME/.config/ozbox/defaults/keybindings.json\" <<'__OZBOX_EOF__'\n{KEYBINDINGS}__OZBOX_EOF__\n\
-         merge() {{ if command -v python3 >/dev/null 2>&1; then python3 \"$HOME/.local/bin/oz-merge-json\" \"$1\" \"$2\" || true; else [ -e \"$1\" ] || cp \"$2\" \"$1\"; fi; }}\n\
+         cat > \"$HOME/.config/ozbox/defaults/keybindings-retired.json\" <<'__OZBOX_EOF__'\n{RETIRED_KEYBINDINGS}__OZBOX_EOF__\n\
+         merge() {{ if command -v python3 >/dev/null 2>&1; then python3 \"$HOME/.local/bin/oz-merge-json\" \"$@\" || true; else [ -e \"$1\" ] || cp \"$2\" \"$1\"; fi; }}\n\
          merge \"$HOME/.local/share/code-server/User/settings.json\" \"$HOME/.config/ozbox/defaults/settings.json\"\n\
          merge \"$HOME/.vscode-server/data/Machine/settings.json\" \"$HOME/.config/ozbox/defaults/settings.json\"\n\
-         merge \"$HOME/.local/share/code-server/User/keybindings.json\" \"$HOME/.config/ozbox/defaults/keybindings.json\"\n\
+         merge \"$HOME/.local/share/code-server/User/keybindings.json\" \"$HOME/.config/ozbox/defaults/keybindings.json\" \"$HOME/.config/ozbox/defaults/keybindings-retired.json\"\n\
          \"$HOME/.local/bin/oz-workspace\" || true\n",
         settings = editor_settings("$HOME")
     )
@@ -218,7 +263,9 @@ impl Service {
 //   (https://github.com/kasmtech/KasmVNC/blob/master/unix/vncserver); `vncpasswd -u USER [-r read] [-w write]` reads the
 //   password and its confirmation from standard input when it is not a terminal
 //   (https://github.com/kasmtech/KasmVNC/blob/master/unix/kasmvncpasswd/kasmvncpasswd.c); the settings file is
-//   `~/.vnc/kasmvnc.yaml` with `network.interface`, `network.websocket_port` and `network.ssl.require_ssl`
+//   `~/.vnc/kasmvnc.yaml` with `network.interface`, `network.websocket_port`, `network.ssl.require_ssl` and
+//   `data_loss_prevention.clipboard.{server_to_client,client_to_server}.{enabled,size}` (size: `unlimited` or a byte
+//   count; checked with `vncserver -dry-run`, which turns them into `-DLP_ClipSendMax` / `-DLP_ClipAcceptMax`)
 //   (https://docs.kasmvnc.com/docs/latest/configuration/).
 // * VS Code keybindings are read by the editor on the person's own computer, never from the box: over SSH a desktop editor
 //   gets only the terminal side (tmux and its settings) from here; the Code panel says so.
@@ -323,17 +370,33 @@ pub fn token_ok(t: &str) -> bool {
         })
 }
 
-/// KasmVNC's settings: plain HTTP on loopback (the SSH forward is the encryption), its own sign-in required.
+/// Most text the desktop's clipboard carries in one copy, each way (KasmVNC cuts anything longer at this size).
+pub const DESKTOP_CLIPBOARD_BYTES: u32 = 1_048_576;
+
+/// KasmVNC's settings: plain HTTP on loopback (the SSH forward is the encryption), its own sign-in required. The clipboard
+/// goes both ways (the person's computer to the desktop and back), capped at [`DESKTOP_CLIPBOARD_BYTES`] per copy instead of
+/// KasmVNC's unlimited default; the X "primary" selection (select-to-copy) is not sent out, so merely selecting text on the
+/// desktop never changes the person's clipboard.
 pub fn kasmvnc_yaml() -> String {
     format!(
         "\
 network:
   interface: 127.0.0.1
-  websocket_port: {}
+  websocket_port: {port}
   ssl:
     require_ssl: false
+data_loss_prevention:
+  clipboard:
+    server_to_client:
+      enabled: true
+      size: {cap}
+      primary_clipboard_enabled: false
+    client_to_server:
+      enabled: true
+      size: {cap}
 ",
-        Service::Desktop.box_port()
+        port = Service::Desktop.box_port(),
+        cap = DESKTOP_CLIPBOARD_BYTES,
     )
 }
 
@@ -396,8 +459,14 @@ pub fn status_script() -> String {
         "uid=$(id -u); export XDG_RUNTIME_DIR=/run/user/$uid\n\
          echo linger=$(loginctl show-user \"$(id -un)\" -p Linger --value 2>/dev/null || echo no)\n\
          if command -v tmux >/dev/null 2>&1; then echo tmux=yes; else echo tmux=no; fi\n\
-         if [ -x \"$HOME/.local/bin/oz-term\" ]; then echo terminals=yes; else echo terminals=no; fi\n",
+         k=\"$HOME/.config/ozbox/defaults/keybindings.json\"\n",
     );
+    // "yes" only when the helpers are there AND the key bindings set up are this version's, so a box set up by an older
+    // Oz Box (whose Ctrl+V binding did not paste) is brought up to date the next time its IDE is opened.
+    s.push_str(&format!(
+        "if [ -x \"$HOME/.local/bin/oz-term\" ] && [ -f \"$k\" ] && [ \"$(sha256sum \"$k\" | cut -d' ' -f1)\" = {want} ]; then echo terminals=yes; else echo terminals=no; fi\n",
+        want = sha256_hex(KEYBINDINGS.as_bytes()),
+    ));
     for svc in ALL {
         let id = svc.id();
         let want = sha256_hex(unit_text(svc).as_bytes());
@@ -662,6 +731,10 @@ mod tests {
         let yaml = kasmvnc_yaml();
         assert!(yaml.contains("interface: 127.0.0.1") && yaml.contains("websocket_port: 8444"));
         assert!(!yaml.contains("0.0.0.0"));
+        // the clipboard goes both ways, capped, and selecting text on the desktop alone never reaches the person's clipboard
+        assert_eq!(yaml.matches("enabled: true").count(), 2, "{yaml}");
+        assert_eq!(yaml.matches("size: 1048576").count(), 2, "{yaml}");
+        assert!(yaml.contains("primary_clipboard_enabled: false") && !yaml.contains("unlimited"));
     }
 
     #[test]
@@ -895,14 +968,15 @@ esac
         let kb: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(user.join("keybindings.json")).unwrap())
                 .unwrap();
-        assert_eq!(kb.as_array().unwrap().len(), 4);
+        assert_eq!(kb.as_array().unwrap().len(), 5);
         // a person's own files: their keys and entries stay, ours are added, and a second run changes nothing
         std::fs::write(
             user.join("settings.json"),
             r#"{ "editor.fontSize": 18, "files.hotExit": "off", "terminal.integrated.rightClickBehavior": "default" }"#,
         )
         .unwrap();
-        let mine_kb = r#"[ { "key": "ctrl+k", "command": "mine.command" }, { "key": "ctrl+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" } ]"#;
+        // theirs: one of their own, one that is the same as ours, and the Ctrl+V removal an earlier Oz Box wrote
+        let mine_kb = r#"[ { "key": "ctrl+k", "command": "mine.command" }, { "key": "cmd+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" }, { "key": "ctrl+v", "command": "-workbench.action.terminal.paste", "when": "terminalFocus" } ]"#;
         std::fs::write(user.join("keybindings.json"), mine_kb).unwrap();
         sh(&terminal_fragment(), d.path(), &[]);
         let s: serde_json::Value =
@@ -920,10 +994,15 @@ esac
                 .unwrap();
         let k = k.as_array().unwrap();
         assert!(k.iter().any(|e| e["command"] == "mine.command"));
+        assert!(
+            !k.iter().any(|e| e["key"] == "ctrl+v"
+                && e["command"] == "-workbench.action.terminal.paste"),
+            "the retired Ctrl+V removal is taken back"
+        );
         assert_eq!(
             k.len(),
-            5,
-            "their two plus the three of ours they did not have, none twice"
+            6,
+            "their own one, plus all five of ours (one of which they had), none twice"
         );
         let before = (
             std::fs::read(user.join("settings.json")).unwrap(),
@@ -947,21 +1026,181 @@ esac
         );
     }
 
+    /// The keymap the IDE's terminal ends up with on each computer, worked out the way the editor does: its own defaults
+    /// (as shipped in the editor this was checked against), then ours on top. `os` is "mac", "windows" or "linux".
+    fn terminal_keymap(os: &str) -> Vec<(String, String, String)> {
+        // (key, command, when) for the defaults that matter here
+        let mut map: Vec<(String, String, String)> = match os {
+            "mac" => vec![
+                (
+                    "cmd+c",
+                    "workbench.action.terminal.copySelection",
+                    "terminalTextSelected",
+                ),
+                ("cmd+v", "workbench.action.terminal.paste", "terminalFocus"),
+            ],
+            "windows" => vec![
+                (
+                    "ctrl+c",
+                    "workbench.action.terminal.copyAndClearSelection",
+                    "terminalTextSelected",
+                ),
+                (
+                    "ctrl+shift+c",
+                    "workbench.action.terminal.copySelection",
+                    "terminalTextSelected",
+                ),
+                ("ctrl+v", "workbench.action.terminal.paste", "terminalFocus"),
+                (
+                    "ctrl+shift+v",
+                    "workbench.action.terminal.paste",
+                    "terminalFocus",
+                ),
+            ],
+            _ => vec![
+                (
+                    "ctrl+shift+c",
+                    "workbench.action.terminal.copySelection",
+                    "terminalTextSelected",
+                ),
+                (
+                    "ctrl+shift+v",
+                    "workbench.action.terminal.paste",
+                    "terminalFocus",
+                ),
+                (
+                    "shift+insert",
+                    "workbench.action.terminal.pasteSelection",
+                    "terminalFocus",
+                ),
+            ],
+        }
+        .into_iter()
+        .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+        .collect();
+        let ours: serde_json::Value = serde_json::from_str(KEYBINDINGS).unwrap();
+        for e in ours.as_array().unwrap() {
+            let key = e["key"].as_str().unwrap().to_string();
+            let cmd = e["command"].as_str().unwrap();
+            let when = e["when"].as_str().unwrap_or("");
+            // the platform guard is the visitor's computer
+            let applies = (!when.contains("isLinux") || os == "linux")
+                && (!when.contains("isMac") || os == "mac");
+            if !applies {
+                continue;
+            }
+            if let Some(gone) = cmd.strip_prefix('-') {
+                map.retain(|(k, c, _)| !(k == &key && c == gone));
+            } else {
+                map.push((key, cmd.to_string(), when.to_string()));
+            }
+        }
+        map
+    }
+
+    fn bound(map: &[(String, String, String)], key: &str) -> Option<String> {
+        map.iter()
+            .find(|(k, _, _)| k == key)
+            .map(|(_, c, _)| c.clone())
+    }
+
     #[test]
-    fn keybindings_free_the_browsers_own_paste_in_a_terminal() {
-        let k: serde_json::Value = serde_json::from_str(KEYBINDINGS).unwrap();
-        let k = k.as_array().unwrap();
-        for key in ["ctrl+v", "cmd+v", "ctrl+shift+v"] {
-            assert!(
-                k.iter().any(|e| e["key"] == key
-                    && e["command"] == "-workbench.action.terminal.paste"
-                    && e["when"] == "terminalFocus"),
-                "{key}"
+    fn one_keymap_per_computer_copies_pastes_and_still_interrupts() {
+        // macOS: Cmd copies and pastes (the paste is the browser's own, no permission), Ctrl+C is always the interrupt
+        let mac = terminal_keymap("mac");
+        assert_eq!(
+            bound(&mac, "cmd+c").as_deref(),
+            Some("workbench.action.terminal.copySelection")
+        );
+        assert_eq!(bound(&mac, "cmd+v"), None, "the browser's own paste");
+        assert_eq!(bound(&mac, "ctrl+c"), None, "always reaches the shell");
+        assert_eq!(bound(&mac, "ctrl+v"), None);
+        for os in ["windows", "linux"] {
+            let m = terminal_keymap(os);
+            // Ctrl+C copies only while text is selected; otherwise it reaches the shell as the interrupt
+            let (_, cmd, when) = m.iter().find(|(k, _, _)| k == "ctrl+c").unwrap();
+            assert_eq!(
+                cmd, "workbench.action.terminal.copyAndClearSelection",
+                "{os}"
+            );
+            assert!(when.contains("terminalTextSelected"), "{os}: {when}");
+            // Ctrl+V must stay on the editor's paste: let through, the terminal would send ^V (the regression this fixes)
+            assert_eq!(
+                bound(&m, "ctrl+v").as_deref(),
+                Some("workbench.action.terminal.paste"),
+                "{os}"
+            );
+            assert_eq!(
+                bound(&m, "ctrl+shift+v"),
+                None,
+                "{os}: the browser's own paste"
+            );
+            assert_eq!(
+                bound(&m, "ctrl+shift+c").as_deref(),
+                Some("workbench.action.terminal.copySelection"),
+                "{os}"
             );
         }
-        assert!(k.iter().any(|e| e["key"] == "shift+insert"
-            && e["command"] == "-workbench.action.terminal.pasteSelection"
-            && e["when"] == "terminalFocus"));
+        assert_eq!(bound(&terminal_keymap("linux"), "shift+insert"), None);
+        // what was taken back is not shipped again
+        let retired: serde_json::Value = serde_json::from_str(RETIRED_KEYBINDINGS).unwrap();
+        let ours: serde_json::Value = serde_json::from_str(KEYBINDINGS).unwrap();
+        for r in retired.as_array().unwrap() {
+            assert!(!ours.as_array().unwrap().contains(r), "{r}");
+        }
+    }
+
+    #[test]
+    fn the_terminals_are_current_only_with_this_versions_key_bindings() {
+        let d = tempfile::tempdir().unwrap();
+        let said = |d: &std::path::Path| {
+            let (_, out) = sh(&status_script(), d, &[]);
+            out.lines()
+                .find(|l| l.starts_with("terminals="))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(said(d.path()), "terminals=no");
+        let (code, out) = sh(&terminal_fragment(), d.path(), &[]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(said(d.path()), "terminals=yes");
+        // what an older Oz Box left: the helpers, with the earlier key bindings
+        std::fs::write(
+            d.path().join(".config/ozbox/defaults/keybindings.json"),
+            RETIRED_KEYBINDINGS,
+        )
+        .unwrap();
+        assert_eq!(said(d.path()), "terminals=no");
+    }
+
+    #[test]
+    fn a_comment_header_is_kept_and_comments_anywhere_else_leave_the_file_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let user = d.path().join(".local/share/code-server/User");
+        std::fs::create_dir_all(&user).unwrap();
+        // what the editor writes at the top of a new keybindings file, plus the line an earlier Oz Box added
+        let headed = "// Place your key bindings in this file to override the defaults\n[\n  { \"key\": \"ctrl+v\", \"command\": \"-workbench.action.terminal.paste\", \"when\": \"terminalFocus\" },\n  { \"key\": \"f5\", \"command\": \"mine\" }\n]\n";
+        std::fs::write(user.join("keybindings.json"), headed).unwrap();
+        let (code, out) = sh(&terminal_fragment(), d.path(), &[]);
+        assert_eq!(code, 0, "{out}");
+        let got = std::fs::read_to_string(user.join("keybindings.json")).unwrap();
+        assert!(got.starts_with("// Place your key bindings"), "{got}");
+        let body: serde_json::Value =
+            serde_json::from_str(got.split_once('\n').unwrap().1).unwrap();
+        let body = body.as_array().unwrap();
+        assert!(body.iter().any(|e| e["command"] == "mine"));
+        assert!(!body
+            .iter()
+            .any(|e| e["key"] == "ctrl+v" && e["command"] == "-workbench.action.terminal.paste"));
+        assert_eq!(body.len(), 6);
+        // a comment inside the list cannot be kept by a rewrite, so the file is left exactly as it is
+        let inner = "[\n  // mine\n  { \"key\": \"f5\", \"command\": \"mine\" }\n]\n";
+        std::fs::write(user.join("keybindings.json"), inner).unwrap();
+        sh(&terminal_fragment(), d.path(), &[]);
+        assert_eq!(
+            std::fs::read_to_string(user.join("keybindings.json")).unwrap(),
+            inner
+        );
     }
 
     #[test]
@@ -986,6 +1225,9 @@ esac
                 && once.contains("set -g set-clipboard on")
                 && once.contains("history-limit 100000")
         );
+        // copies leave through OSC 52 (also through an outer tmux), and nothing inside may talk to the outer terminal unfiltered
+        assert!(once.contains("set -as terminal-features \",screen*:clipboard,tmux*:clipboard\""));
+        assert!(!once.contains("allow-passthrough") && !once.contains("set-clipboard off"));
         sh(&terminal_fragment(), d.path(), &[]);
         assert_eq!(
             std::fs::read_to_string(d.path().join(".tmux.conf")).unwrap(),
