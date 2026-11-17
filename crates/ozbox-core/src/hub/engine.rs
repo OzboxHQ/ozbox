@@ -510,20 +510,58 @@ pub struct HubService {
     pub verifier: std::sync::Arc<dyn Verifier>,
     pub sealer: std::sync::Arc<dyn Sealer>,
     pub net: std::sync::Arc<dyn Transport>,
+    /// Workers that enrolled after this service started, beside `roster`: enrolment adds here ([`HubService::enrol`]), so nobody
+    /// copies a worker into a directory by hand. Read on every call.
+    pub enrolled: std::sync::RwLock<BTreeMap<String, RosterEntry>>,
     pub state: std::sync::Mutex<HubState>,
     /// Where the state persists. `None` keeps it in memory only (the fake fleet, tests).
     pub store: Option<Store<HubState>>,
 }
 
 impl HubService {
+    /// Every worker this hub may hand work to: the roster it started with and those that enrolled since.
+    pub fn roster_now(&self) -> BTreeMap<String, RosterEntry> {
+        let mut all = self.roster.clone();
+        if let Ok(e) = self.enrolled.read() {
+            all.extend(e.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        all
+    }
+
+    /// Whether `worker` is on the roster now.
+    pub fn knows(&self, worker: &str) -> bool {
+        self.roster.contains_key(worker)
+            || self.enrolled.read().is_ok_and(|e| e.contains_key(worker))
+    }
+
+    /// A worker enrolled (or was given a new attested key): it is on the roster from the next call. Returns false when the roster
+    /// cannot be written.
+    pub fn enrol(&self, worker: &str, entry: RosterEntry) -> bool {
+        match self.enrolled.write() {
+            Ok(mut e) => {
+                e.insert(worker.to_string(), entry);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A worker was removed: it is off the roster from the next call.
+    pub fn unenrol(&self, worker: &str) {
+        if let Ok(mut e) = self.enrolled.write() {
+            e.remove(worker);
+        }
+    }
+
     /// Run `f` with the hub and its state, at time `now`. The state is written **first**, then whatever the channel owes the workers is
     /// pushed, so a crash never leaves a worker holding a message this hub has forgotten it sent. Returns `None` when the state cannot
     /// be used (the lock is poisoned or the store cannot be written); in that case nothing is pushed.
     pub fn with<T>(&self, now: u64, f: impl FnOnce(&Hub<'_>, &mut HubState) -> T) -> Option<T> {
+        let roster = self.roster_now();
         let hub = Hub {
             me: &self.me,
             my_fp: &self.my_fp,
-            roster: &self.roster,
+            roster: &roster,
             signer: self.signer.as_ref(),
             verifier: self.verifier.as_ref(),
             sealer: self.sealer.as_ref(),

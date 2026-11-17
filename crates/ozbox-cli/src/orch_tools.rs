@@ -773,7 +773,7 @@ impl Tools {
         let dry = flag(a, "dry_run");
         // over the hub by default when this box has one and the named box is one of its workers; the laptop route otherwise
         let default_transport = match (&self.hub, self::s(a, "box")) {
-            (Some(h), Some(b)) if h.roster.contains_key(b) => "hub",
+            (Some(h), Some(b)) if h.knows(b) => "hub",
             _ => "ssh",
         };
         let transport = self::s(a, "transport").unwrap_or(default_transport);

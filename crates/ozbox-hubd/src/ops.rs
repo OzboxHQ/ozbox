@@ -39,6 +39,9 @@ pub trait KeyOps: Send + Sync {
     fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpsError>;
     /// The tag of an enrolment token.
     fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, OpsError>;
+    /// Any other operation the service answers on this socket (`hub_release`, `hub_store_delivery`, ...): the request as one JSON
+    /// value, the answer's `result`. A service that does not know the operation says so; no value is in an error.
+    fn call(&self, req: Value) -> Result<Value, OpsError>;
 }
 
 fn call_result(out: Result<Value, String>) -> Result<Value, OpsError> {
@@ -87,6 +90,50 @@ impl KeyOps for LocalKeyOps {
     fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, OpsError> {
         let v = self.ask(json!({"op": "hub_mac", "data": hex(bytes)}))?;
         field(&v, "tag")
+    }
+    fn call(&self, req: Value) -> Result<Value, OpsError> {
+        self.ask(req)
+    }
+}
+
+/// [`LocalKeyOps`] with the store behind it, so the operations that read or keep values answer too (`handle_with_store`): the
+/// way tests, and one process playing both a service and its caller, hold a whole end.
+pub struct LocalServiceOps {
+    pub keys: Arc<HubKeys>,
+    pub store: Arc<dyn crate::keys::KeyStore + Send + Sync>,
+    pub caller: Caller,
+}
+
+impl LocalServiceOps {
+    fn ask(&self, req: Value) -> Result<Value, OpsError> {
+        call_result(crate::keys::handle_with_store(
+            &self.keys,
+            self.store.as_ref(),
+            self.caller,
+            &req,
+        ))
+    }
+}
+
+impl KeyOps for LocalServiceOps {
+    fn identity(&self) -> Result<Identity, OpsError> {
+        identity_from(&self.ask(json!({"op": "hub_identity"}))?)
+    }
+    fn sign(&self, purpose: SignPurpose, bytes: &[u8]) -> Result<Vec<u8>, OpsError> {
+        let v =
+            self.ask(json!({"op": "hub_sign", "purpose": purpose.word(), "data": hex(bytes)}))?;
+        field(&v, "sig")
+    }
+    fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, OpsError> {
+        let v = self.ask(json!({"op": "hub_open", "aad": hex(aad), "sealed": hex(sealed)}))?;
+        field(&v, "plain").map(Zeroizing::new)
+    }
+    fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, OpsError> {
+        let v = self.ask(json!({"op": "hub_mac", "data": hex(bytes)}))?;
+        field(&v, "tag")
+    }
+    fn call(&self, req: Value) -> Result<Value, OpsError> {
+        self.ask(req)
     }
 }
 
@@ -155,5 +202,8 @@ impl KeyOps for SocketKeyOps {
     fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, OpsError> {
         let v = self.ask(json!({"op": "hub_mac", "data": hex(bytes)}))?;
         field(&v, "tag")
+    }
+    fn call(&self, req: Value) -> Result<Value, OpsError> {
+        self.ask(req)
     }
 }

@@ -324,21 +324,33 @@ impl Hubd {
         if sealed_bytes(msg) > TRANSPORT_CAP {
             return Err(Rejected("too-big"));
         }
-        e.check(&PROFILE).map_err(|_| Rejected("shape"))?;
-        if e.to != self.cfg.name {
+        // the conversation fabric rides the same spool under `<box>.fabric` endpoints, with its own profile (ADR 0057)
+        let fabric = e.to == format!("{}.fabric", self.cfg.name);
+        let profile = if fabric {
+            &ozbox_core::fabric::wire::PROFILE
+        } else {
+            &PROFILE
+        };
+        e.check(profile).map_err(|_| Rejected("shape"))?;
+        if !fabric && e.to != self.cfg.name {
             return Err(Rejected("not-for-this-hub"));
         }
         if e.receiver_fp != self.identity.channel_fp() {
             return Err(Rejected("sealed-for-another-key"));
         }
+        let worker = if fabric {
+            e.from.strip_suffix(".fabric").unwrap_or_default()
+        } else {
+            e.from.as_str()
+        };
         let st = self.state().map_err(|_| Rejected("state"))?;
-        let Some(rec) = st.enrol.roster.get(&e.from) else {
+        let Some(rec) = st.enrol.roster.get(worker) else {
             return Err(Rejected("not-enrolled"));
         };
         let v = DirectoryVerifier {
             dir: self.dir.clone(),
         };
-        if !v.verify(&rec.channel_fp, &e.canonical(&PROFILE), &msg.signature) {
+        if !v.verify(&rec.channel_fp, &e.canonical(profile), &msg.signature) {
             return Err(Rejected("bad-signature"));
         }
         Ok(())
@@ -369,14 +381,16 @@ impl Hubd {
         let Some(rec) = st.enrol.roster.get(to) else {
             return Err(Rejected("not-enrolled"));
         };
+        let fabric_to = format!("{to}.fabric");
+        let fabric_from = format!("{}.fabric", self.cfg.name);
         for m in &msgs {
             let e = &m.envelope;
-            if e.check(&PROFILE).is_err()
-                || e.from != self.cfg.name
-                || e.to != to
-                || e.receiver_fp != rec.channel_fp
-                || sealed_bytes(m) > TRANSPORT_CAP
-            {
+            let shaped = if e.to == fabric_to {
+                e.from == fabric_from && e.check(&ozbox_core::fabric::wire::PROFILE).is_ok()
+            } else {
+                e.from == self.cfg.name && e.to == to && e.check(&PROFILE).is_ok()
+            };
+            if !shaped || e.receiver_fp != rec.channel_fp || sealed_bytes(m) > TRANSPORT_CAP {
                 let _ = self.update(|st| refused(st, now, "outbound-misaddressed"));
                 return Err(Rejected("outbound-misaddressed"));
             }
@@ -478,7 +492,10 @@ impl Hubd {
             let gone = st.enrol.remove(worker, now);
             if gone {
                 st.outbound.remove(worker);
-                st.inbound.retain(|m| m.envelope.from != worker);
+                st.inbound.retain(|m| {
+                    m.envelope.from != worker
+                        && m.envelope.from.strip_suffix(".fabric") != Some(worker)
+                });
                 note(st, now, "hub.worker.removed", Some(worker), String::new());
             }
             (gone, fp)
@@ -794,7 +811,7 @@ impl ozbox_core::hub::wire::Transport for SpoolTransport {
     fn send(&self, to: &str, msg: Sealed) -> Result<(), ozbox_core::hub::wire::WireError> {
         let v = ask(
             &self.socket,
-            &json!({"op": "spool_put", "to": to, "messages": [msg]}),
+            &json!({"op": "spool_put", "to": to.strip_suffix(".fabric").unwrap_or(to), "messages": [msg]}),
         )
         .map_err(|_| ozbox_core::hub::wire::WireError::SendFailed)?;
         if v["ok"].as_bool() == Some(true) {
@@ -804,13 +821,15 @@ impl ozbox_core::hub::wire::Transport for SpoolTransport {
         }
     }
 
-    fn recv(&self, _who: &str) -> Option<Sealed> {
+    fn recv(&self, who: &str) -> Option<Sealed> {
+        // the worker channel's endpoint and the fabric's (`<hub>.fabric`) share one spool; each takes only what is addressed to it
         let mut b = self.buf.lock().ok()?;
-        if b.is_empty() {
+        if !b.iter().any(|m| m.envelope.to == who) {
             let v = ask(&self.socket, &json!({"op": "spool_take"})).ok()?;
             let msgs: Vec<Sealed> = serde_json::from_value(v["result"]["messages"].clone()).ok()?;
             b.extend(msgs);
         }
-        b.pop_front()
+        let at = b.iter().position(|m| m.envelope.to == who)?;
+        b.remove(at)
     }
 }

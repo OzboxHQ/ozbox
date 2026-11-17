@@ -605,6 +605,7 @@ fn the_fleet_inbox_shows_a_workers_request_and_relays_the_persons_passkey_decisi
     let mut hs = HubState::new("main", HUB_FP, 1);
     hs.pin_service("worker-1", svc.pin());
     let hub = Arc::new(HubService {
+        enrolled: Default::default(),
         me: "main".into(),
         my_fp: HUB_FP.into(),
         roster,

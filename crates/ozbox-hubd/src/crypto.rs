@@ -57,7 +57,7 @@ impl Directory {
     }
 }
 
-/// Signs worker-channel envelopes through the secrets service.
+/// Signs worker-channel envelopes, and conversation-fabric envelopes (their own profile, ADR 0057), through the secrets service.
 pub struct ServiceSigner {
     pub ops: Arc<dyn KeyOps>,
 }
@@ -65,12 +65,49 @@ pub struct ServiceSigner {
 impl Signer for ServiceSigner {
     fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, WireError> {
         // the service refuses anything else too; refusing here first keeps a wrong call from reaching it at all
-        if !SignPurpose::Envelope.admits(canonical) {
+        let purpose = if SignPurpose::Envelope.admits(canonical) {
+            SignPurpose::Envelope
+        } else if SignPurpose::Fabric.admits(canonical) {
+            SignPurpose::Fabric
+        } else {
+            return Err(WireError::SignFailed);
+        };
+        self.ops
+            .sign(purpose, canonical)
+            .map_err(|_| WireError::SignFailed)
+    }
+}
+
+/// Signs the network handshake through the secrets service's **hub** socket (`ozbox-hubd`'s one private operation): the handshake
+/// key, under the handshake tag, and nothing else.
+pub struct HandshakeSigner {
+    pub ops: Arc<dyn KeyOps>,
+}
+
+impl Signer for HandshakeSigner {
+    fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, WireError> {
+        if !SignPurpose::Handshake.admits(canonical) {
             return Err(WireError::SignFailed);
         }
         self.ops
-            .sign(SignPurpose::Envelope, canonical)
+            .sign(SignPurpose::Handshake, canonical)
             .map_err(|_| WireError::SignFailed)
+    }
+}
+
+/// Checks a handshake signature against the **handshake** key attested for a channel fingerprint (the roster's, or the hub's pin).
+pub struct HandshakeVerifier {
+    pub dir: Directory,
+}
+
+impl Verifier for HandshakeVerifier {
+    fn verify(&self, sender_fp: &str, canonical: &[u8], signature: &[u8]) -> bool {
+        if !SignPurpose::Handshake.admits(canonical) {
+            return false;
+        }
+        self.dir
+            .get(sender_fp)
+            .is_some_and(|id| verify_ed25519(&id.handshake_public, canonical, signature))
     }
 }
 

@@ -963,6 +963,7 @@ mod hub_handoff {
             },
         );
         let svc = HubService {
+            enrolled: Default::default(),
             me: "main".into(),
             my_fp: HUB_FP.into(),
             roster,

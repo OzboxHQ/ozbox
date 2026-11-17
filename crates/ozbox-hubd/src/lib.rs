@@ -10,16 +10,20 @@
 //! * [`selftest`]: what must hold before it is trusted.
 //! * [`setup`]: the units and folders, written by the script this program carries.
 //!
-//! What is **not** here: the network transport (a worker dials out to the hub; built behind `ozbox_core::hub::wire::Transport`
-//! separately), sealed key delivery, the approval path and the merge queue over the channel.
+//! * [`nethost`]: the network end, inside the daemon: workers dial out, the daemon checks and spools, the roster follows enrolment.
+//! * [`fleet`]: the three seams of sealed key delivery, backed by enrolment's attestations and the secrets service.
+//!
+//! What is **not** here: the registrars that vouch for a worker's keys on a real box (a separate crate module).
 
 #![cfg(unix)]
 
 pub mod crypto;
 pub mod daemon;
 pub mod enrol;
+pub mod fleet;
 pub mod identity;
 pub mod keys;
+pub mod nethost;
 pub mod ops;
 pub mod seams;
 pub mod selftest;

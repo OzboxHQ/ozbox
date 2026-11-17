@@ -45,18 +45,33 @@ pub const NAMES: [&str; 5] = [
     NAME_TOKEN_MAC,
 ];
 
-/// Whether a store name belongs to the hub's keys.
+/// The values the owner staged for release to workers (development and staging only), one per environment and name:
+/// `hub-release-<env>-<name>`. Reserved like the keys: the box socket can neither read nor write one.
+pub const RELEASE_PREFIX: &str = "hub-release-";
+/// What a worker's service holds of a delivery (one record per task, and an index of them), under the same reservation.
+pub const DELIVERED_PREFIX: &str = "hub-delivered-";
+const DELIVERED_INDEX: &str = "hub-delivered-index";
+
+/// Whether a store name belongs to the hub's keys, the values staged for release, or what a worker's service holds of a delivery.
 pub fn is_reserved(name: &str) -> bool {
     name.starts_with(KEY_PREFIX)
+        || name.starts_with(RELEASE_PREFIX)
+        || name.starts_with(DELIVERED_PREFIX)
 }
 
 /// The envelope tag of the worker channel: the only envelopes this key signs.
 pub const HUB_ENVELOPE_TAG: &str = ozbox_core::hub::wire::ENVELOPE_TAG;
+/// The envelope tag of the conversation fabric (ADR 0057): the other envelope this key signs.
+pub const FABRIC_ENVELOPE_TAG: &str = ozbox_core::fabric::wire::ENVELOPE_TAG;
 
 /// Where the private halves are kept. The secrets service adapts its encrypted store to this.
 pub trait KeyStore {
     fn get(&self, name: &str) -> Result<Option<Zeroizing<String>>, String>;
     fn set(&self, name: &str, value: &str) -> Result<(), String>;
+    /// Remove a name (a delivery that ended). A store that cannot says so, and the delivery operations refuse.
+    fn delete(&self, _name: &str) -> Result<(), String> {
+        Err("this store cannot delete".into())
+    }
 }
 
 /// What a signature is for. Each purpose fixes the key and the domain tag the bytes must begin with.
@@ -68,6 +83,9 @@ pub enum SignPurpose {
     EnrolProof,
     /// The handshake (`ozbox-hub-handshake-v1`), with the handshake key.
     Handshake,
+    /// A conversation-fabric envelope (`ozbox-fabric-envelope-v1`), with the channel key: the fabric is its own profile of the
+    /// same channel (ADR 0057), so it has its own domain tag and the same key.
+    Fabric,
 }
 
 impl SignPurpose {
@@ -76,6 +94,7 @@ impl SignPurpose {
             SignPurpose::Envelope => "envelope",
             SignPurpose::EnrolProof => "enrol-proof",
             SignPurpose::Handshake => "handshake",
+            SignPurpose::Fabric => "fabric",
         }
     }
 
@@ -84,6 +103,7 @@ impl SignPurpose {
             SignPurpose::Envelope,
             SignPurpose::EnrolProof,
             SignPurpose::Handshake,
+            SignPurpose::Fabric,
         ]
         .into_iter()
         .find(|p| p.word() == s)
@@ -94,6 +114,7 @@ impl SignPurpose {
             SignPurpose::Envelope => HUB_ENVELOPE_TAG,
             SignPurpose::EnrolProof => ENROL_PROOF_TAG,
             SignPurpose::Handshake => HANDSHAKE_TAG,
+            SignPurpose::Fabric => FABRIC_ENVELOPE_TAG,
         }
     }
 
@@ -227,7 +248,9 @@ impl HubKeys {
             return Err("those bytes are not a message this key signs");
         }
         let pair = match purpose {
-            SignPurpose::Envelope | SignPurpose::EnrolProof => &self.channel_sign,
+            SignPurpose::Envelope | SignPurpose::EnrolProof | SignPurpose::Fabric => {
+                &self.channel_sign
+            }
             SignPurpose::Handshake => &self.handshake,
         };
         Ok(pair.sign(bytes).as_ref().to_vec())
@@ -259,6 +282,22 @@ impl HubKeys {
     /// The fingerprint of the delivery key (for a test that a delivery ciphertext does not open as a body).
     pub fn delivery_public(&self) -> [u8; ozbox_seal::KEY_LEN] {
         self.delivery.public()
+    }
+
+    /// Open values sealed to this end's **delivery** key (the worker's service only). A channel body does not open here and a
+    /// delivery does not open as a channel body: the keys and the `info` both differ.
+    pub fn open_delivery(
+        &self,
+        aad: &[u8],
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, &'static str> {
+        const NO: &str = "that delivery could not be opened";
+        if sealed.len() < ozbox_seal::KEY_LEN {
+            return Err(NO);
+        }
+        let (enc, ct) = sealed.split_at(ozbox_seal::KEY_LEN);
+        let info = delivery_info(&self.identity.delivery_fp());
+        self.delivery.open(&info, aad, enc, ct).map_err(|_| NO)
     }
 }
 
@@ -302,7 +341,9 @@ pub fn handle(keys: &HubKeys, caller: Caller, req: &Value) -> Result<Value, Stri
             let purpose = SignPurpose::parse(req["purpose"].as_str().unwrap_or_default())
                 .ok_or_else(|| "that request is not valid".to_string())?;
             let allowed = match purpose {
-                SignPurpose::Envelope | SignPurpose::EnrolProof => caller == Caller::Supervisor,
+                SignPurpose::Envelope | SignPurpose::EnrolProof | SignPurpose::Fabric => {
+                    caller == Caller::Supervisor
+                }
                 SignPurpose::Handshake => caller == Caller::Hub,
             };
             if !allowed {
@@ -333,4 +374,216 @@ pub fn handle(keys: &HubKeys, caller: Caller, req: &Value) -> Result<Value, Stri
         ("hub_identity" | "hub_sign" | "hub_open" | "hub_mac", _) => Err(NOT_HERE.into()),
         _ => Err("that operation is not known".into()),
     }
+}
+
+// ---- the operations that read or keep values: release (main's service) and delivery (a worker's service) -------------------
+
+fn name_ok(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 40
+        && n.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The store name a value staged for release lives under. `None` for an environment or name that is not valid.
+pub fn release_name(env: &str, name: &str) -> Option<String> {
+    (name_ok(env) && name_ok(name)).then(|| format!("{RELEASE_PREFIX}{env}-{name}"))
+}
+
+fn str_list(v: &Value, max: usize) -> Result<Vec<String>, String> {
+    let a = v.as_array().ok_or("that request is not valid")?;
+    if a.is_empty() || a.len() > max {
+        return Err("that request is not valid".into());
+    }
+    a.iter()
+        .map(|x| {
+            x.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "that request is not valid".to_string())
+        })
+        .collect()
+}
+
+fn task_slug(orchestration: &str, feature: &str) -> String {
+    let b = ozbox_core::hub::keys::task_key(orchestration, feature);
+    ozbox_core::channel::wire::fingerprint(b.as_bytes())
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn refuse_prod(env: &str, names: &[String]) -> Result<(), String> {
+    ozbox_core::hub::refusal::refuse_production(&ozbox_core::hub::refusal::KeyDeclaration {
+        env: env.to_string(),
+        names: names.to_vec(),
+    })
+    .map_err(|r| r.message)
+}
+
+/// Like [`handle`], and also the operations that need the store:
+///
+/// | Operation | Admin socket | Supervisor socket |
+/// |---|---|---|
+/// | `hub_release_set` (stage a development or staging value for release) | yes | no |
+/// | `hub_release` (read the named values, seal them to a worker's attested key) | no | yes, never Production |
+/// | `hub_store_delivery` (a worker's service opens and keeps a delivery) | no | yes, never Production |
+/// | `hub_delivery_delete` (a task's keys, or all of them) | no | yes |
+///
+/// Production is refused here too, in front of any read: the third place beside the hub and the worker (decision D2). No value is
+/// ever put in an answer or an error: a release answers only sealed bytes, and a stored delivery answers only that it was stored.
+pub fn handle_with_store(
+    keys: &HubKeys,
+    store: &dyn KeyStore,
+    caller: Caller,
+    req: &Value,
+) -> Result<Value, String> {
+    let op = req["op"].as_str().unwrap_or_default();
+    match (op, caller) {
+        ("hub_release_set", Caller::Admin) => {
+            let env = req["env"].as_str().unwrap_or_default();
+            let name = req["name"].as_str().unwrap_or_default();
+            refuse_prod(env, &[name.to_string()])?;
+            let store_name = release_name(env, name).ok_or("that is not a valid name")?;
+            let value = req["value"].as_str().unwrap_or_default();
+            if value.is_empty() || value.len() > 8 * 1024 {
+                return Err("that value is not valid".into());
+            }
+            store.set(&store_name, value)?;
+            Ok(json!({ "staged": true }))
+        }
+        ("hub_release", Caller::Supervisor) => {
+            let env = req["env"].as_str().unwrap_or_default().to_string();
+            let names = str_list(&req["names"], ozbox_core::hub::refusal::MAX_NAMES)?;
+            let to = ozbox_core::hub::keys::AttestedKey {
+                public: req["to_public"].as_str().unwrap_or_default().to_string(),
+                fp: req["to_fp"].as_str().unwrap_or_default().to_string(),
+            };
+            let (request_id, worker, orchestration, feature) = (
+                req["request_id"].as_str().unwrap_or_default(),
+                req["worker"].as_str().unwrap_or_default(),
+                req["orchestration"].as_str().unwrap_or_default(),
+                req["feature"].as_str().unwrap_or_default(),
+            );
+            // D2 at the issuer, before anything is read
+            ozbox_core::hub::keys::issuer_guard(&ozbox_core::hub::keys::ReleaseRequest {
+                request_id,
+                worker,
+                orchestration,
+                feature,
+                env: &env,
+                names: &names,
+                to: &to,
+            })
+            .map_err(|r| r.message)?;
+            let pk =
+                ozbox_seal::public_from_hex(&to.public).map_err(|_| "that key is not valid")?;
+            if ozbox_core::channel::wire::fingerprint(&pk) != to.fp {
+                return Err("that key does not match its fingerprint".into());
+            }
+            let mut values = serde_json::Map::new();
+            for n in &names {
+                let store_name = release_name(&env, n).ok_or("that is not a valid name")?;
+                let v = store.get(&store_name)?.ok_or_else(|| {
+                    // names only: which one is not held, never a value
+                    format!("no value is staged for {n} in {env}")
+                })?;
+                values.insert(n.clone(), Value::String(v.to_string()));
+            }
+            let plain = Zeroizing::new(
+                serde_json::to_vec(&json!({ "values": values }))
+                    .map_err(|_| "the release could not be made")?,
+            );
+            let aad = ozbox_core::hub::keys::delivery_aad(
+                request_id,
+                worker,
+                orchestration,
+                feature,
+                &env,
+                &names,
+            );
+            let (enc, ct) = ozbox_seal::seal(&pk, &delivery_info(&to.fp), &aad, &plain)
+                .map_err(|_| "the release could not be sealed")?;
+            let mut sealed = enc;
+            sealed.extend_from_slice(&ct);
+            Ok(json!({ "env": env, "names": names, "sealed": hex(&sealed) }))
+        }
+        ("hub_store_delivery", Caller::Supervisor) => {
+            let env = req["env"].as_str().unwrap_or_default().to_string();
+            let names = str_list(&req["names"], ozbox_core::hub::refusal::MAX_NAMES)?;
+            // D2 in the worker's own service, whatever the hub agent checked before
+            refuse_prod(&env, &names)?;
+            if req["key_fp"].as_str() != Some(keys.identity().delivery_fp().as_str()) {
+                return Err("that delivery is sealed to another key".into());
+            }
+            let (request_id, worker, orchestration, feature) = (
+                req["request_id"].as_str().unwrap_or_default(),
+                req["worker"].as_str().unwrap_or_default(),
+                req["orchestration"].as_str().unwrap_or_default(),
+                req["feature"].as_str().unwrap_or_default(),
+            );
+            let aad = ozbox_core::hub::keys::delivery_aad(
+                request_id,
+                worker,
+                orchestration,
+                feature,
+                &env,
+                &names,
+            );
+            let sealed = hex_arg(req, "sealed", MAX_OP_BYTES)?;
+            let plain = keys.open_delivery(&aad, &sealed).map_err(str::to_string)?;
+            let v: Value =
+                serde_json::from_slice(&plain).map_err(|_| "that delivery is not valid")?;
+            let got: std::collections::BTreeSet<&str> = v["values"]
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            let want: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+            if got != want {
+                return Err("that delivery does not hold the names it declared".into());
+            }
+            let slug = task_slug(orchestration, feature);
+            store.set(
+                &format!("{DELIVERED_PREFIX}{slug}"),
+                &String::from_utf8_lossy(&plain),
+            )?;
+            let mut index = delivered_index(store)?;
+            if !index.contains(&slug) {
+                index.push(slug);
+                store.set(DELIVERED_INDEX, &json!(index).to_string())?;
+            }
+            Ok(json!({ "stored": true, "names": names }))
+        }
+        ("hub_delivery_delete", Caller::Supervisor) => {
+            let mut index = delivered_index(store)?;
+            if req["all"].as_bool() == Some(true) {
+                for slug in index.drain(..) {
+                    store.delete(&format!("{DELIVERED_PREFIX}{slug}"))?;
+                }
+            } else {
+                let slug = task_slug(
+                    req["orchestration"].as_str().unwrap_or_default(),
+                    req["feature"].as_str().unwrap_or_default(),
+                );
+                if let Some(at) = index.iter().position(|x| *x == slug) {
+                    index.remove(at);
+                    store.delete(&format!("{DELIVERED_PREFIX}{slug}"))?;
+                }
+            }
+            store.set(DELIVERED_INDEX, &json!(index).to_string())?;
+            Ok(json!({ "remaining": index.len() }))
+        }
+        ("hub_release_set" | "hub_release" | "hub_store_delivery" | "hub_delivery_delete", _) => {
+            Err(NOT_HERE.into())
+        }
+        _ => handle(keys, caller, req),
+    }
+}
+
+fn delivered_index(store: &dyn KeyStore) -> Result<Vec<String>, String> {
+    Ok(match store.get(DELIVERED_INDEX)? {
+        Some(v) => {
+            serde_json::from_str(&v).map_err(|_| "the delivery index is damaged".to_string())?
+        }
+        None => Vec::new(),
+    })
 }

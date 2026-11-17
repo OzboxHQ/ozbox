@@ -30,6 +30,9 @@ impl KeyStore for Adapter<'_> {
     fn set(&self, name: &str, value: &str) -> Result<(), String> {
         self.0.set(name, value).map_err(|e| e.0)
     }
+    fn delete(&self, name: &str) -> Result<(), String> {
+        self.0.delete(name).map_err(|e| e.0)
+    }
 }
 
 /// Which of the hub's callers a socket is.
@@ -82,7 +85,7 @@ pub fn answer(
         return Err("that is not allowed on this socket".into());
     }
     let k = keys(store, gates)?;
-    ozbox_hubd::keys::handle(&k, who, req)
+    ozbox_hubd::keys::handle_with_store(&k, &Adapter(store), who, req)
 }
 
 #[cfg(test)]

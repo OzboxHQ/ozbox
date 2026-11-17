@@ -311,11 +311,20 @@ impl LinkState {
     /// replay are checked again by the channel, which is the guarantee.
     fn admit(&mut self, msg: Sealed, now: u64, inbox: &mut VecDeque<Sealed>) {
         let e = &msg.envelope;
-        if e.from != self.peer || e.to != self.me {
+        // the conversation fabric rides this connection under `<box>.fabric` endpoints (its own profile and kinds); everything
+        // else is the worker channel's
+        let fabric =
+            e.from == format!("{}.fabric", self.peer) && e.to == format!("{}.fabric", self.me);
+        if !fabric && (e.from != self.peer || e.to != self.me) {
             self.stats.misaddressed += 1;
             return;
         }
-        if e.check(&PROFILE).is_err() {
+        let shaped = if fabric {
+            e.check(&crate::fabric::wire::PROFILE)
+        } else {
+            e.check(&PROFILE)
+        };
+        if shaped.is_err() {
             self.stats.malformed += 1;
             return;
         }

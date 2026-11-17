@@ -231,6 +231,8 @@ struct Shared {
     inner: Mutex<Inner>,
     /// Wakes a connection's writer: something was queued, an acknowledgement is owed, or the end is stopping.
     cv: Condvar,
+    /// The workers this hub end admits and the keys their enrolment attested (empty on a worker). It grows as workers enrol.
+    roster: std::sync::RwLock<BTreeMap<String, RosterEntry>>,
     stop: AtomicBool,
 }
 
@@ -245,6 +247,7 @@ impl Shared {
                 open: 0,
             }),
             cv: Condvar::new(),
+            roster: std::sync::RwLock::new(BTreeMap::new()),
             stop: AtomicBool::new(false),
         })
     }
@@ -255,7 +258,9 @@ impl Shared {
 
     fn send(&self, to: &str, msg: Sealed) -> Result<(), WireError> {
         let mut g = self.inner.lock().map_err(|_| WireError::SendFailed)?;
-        let link = g.links.get_mut(to).ok_or(WireError::SendFailed)?;
+        // a fabric endpoint (`<box>.fabric`) is carried on the connection of the box it names
+        let peer = to.strip_suffix(".fabric").unwrap_or(to);
+        let link = g.links.get_mut(peer).ok_or(WireError::SendFailed)?;
         link.queue(&msg, now_ms())
             .map_err(|_| WireError::SendFailed)?;
         drop(g);
@@ -265,10 +270,12 @@ impl Shared {
 
     fn recv(&self, who: &str) -> Option<Sealed> {
         let mut g = self.inner.lock().ok()?;
-        if g.me != who {
+        // the worker channel's endpoint is this end's name, the fabric's is `<name>.fabric`; each takes only its own
+        if g.me != who && who.strip_suffix(".fabric") != Some(g.me.as_str()) {
             return None;
         }
-        g.inbox.pop_front()
+        let at = g.inbox.iter().position(|m| m.envelope.to == who)?;
+        g.inbox.remove(at)
     }
 
     fn reach(&self, peer: &str) -> Option<Reach> {
@@ -509,6 +516,9 @@ impl NetHub {
                     .insert(w.clone(), LinkState::new(&cfg.me, w, random_u64()));
             }
         }
+        if let Ok(mut r) = shared.roster.write() {
+            *r = cfg.roster.clone();
+        }
         let cfg = Arc::new(cfg);
         let sh = shared.clone();
         let accept = std::thread::spawn(move || accept_loop(listener, sh, cfg));
@@ -517,6 +527,48 @@ impl NetHub {
             addr,
             accept: Mutex::new(Some(accept)),
         })
+    }
+
+    /// Admit a worker that has just enrolled, or take a new key for one: no restart, and the links of the others are untouched.
+    /// Refused for a name that is not a box name.
+    pub fn enrol(&self, worker: &str, entry: RosterEntry) -> Result<(), NetError> {
+        if !word_ok(worker) {
+            return Err(NetError::BadName);
+        }
+        let me = self
+            .shared
+            .inner
+            .lock()
+            .map_err(|_| NetError::Bind)?
+            .me
+            .clone();
+        let replaced = self
+            .shared
+            .roster
+            .write()
+            .map_err(|_| NetError::Bind)?
+            .insert(worker.to_string(), entry.clone())
+            .is_some_and(|old| old != entry);
+        let mut g = self.shared.inner.lock().map_err(|_| NetError::Bind)?;
+        if replaced || !g.links.contains_key(worker) {
+            // a new key is a new session: the old connection's link is dropped and the worker is proved afresh
+            g.links.insert(
+                worker.to_string(),
+                LinkState::new(&me, worker, random_u64()),
+            );
+        }
+        Ok(())
+    }
+
+    /// Stop admitting a worker (it was removed from the roster): its link is dropped and its connection closes.
+    pub fn remove(&self, worker: &str) {
+        if let Ok(mut r) = self.shared.roster.write() {
+            r.remove(worker);
+        }
+        if let Ok(mut g) = self.shared.inner.lock() {
+            g.links.remove(worker);
+        }
+        self.shared.cv.notify_all();
     }
 
     /// The address actually listened on (the port, when 0 was asked).
@@ -645,7 +697,12 @@ fn hub_handshake(
 ) -> Result<(String, u64), Option<String>> {
     let deadline = now_ms() + HANDSHAKE_MS;
     let hello: Hello = read_handshake(s, rd, T_HELLO, deadline).map_err(|_| None)?;
-    let Some(entry) = cfg.roster.get(&hello.worker) else {
+    let Some(entry) = sh
+        .roster
+        .read()
+        .ok()
+        .and_then(|r| r.get(&hello.worker).cloned())
+    else {
         return Err(None);
     };
     let claimed = Some(hello.worker.clone());
