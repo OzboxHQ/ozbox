@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use ozbox_core::orch_merge::{MergeOutcome, Merger, RebaseOutcome, TestOutcome};
+use ozbox_core::orch_merge::{HeadRead, MergeOutcome, Merger, RebaseOutcome, TestOutcome};
 use ozbox_core::BoxRecord;
 use serde_json::json;
 
@@ -284,6 +284,56 @@ impl Merger for DaemonMerger {
                     Some((_, out)) => TestOutcome::Fail(tail(out)),
                     None => TestOutcome::Fail(s("the tests did not run")),
                 })
+            }
+        }
+    }
+
+    /// The commit the branch points at on the **remote**, read now: a fetch, then the remote-tracking ref. The merge queue over the
+    /// hub compares it with the commit its lane tested, so a branch a worker pushed again after the lane passed is never merged on
+    /// the old verdict, whatever the worker reported. A branch the remote does not have is an error, never "unknown".
+    fn head_step(&mut self, repo: Option<&str>, branch: &str) -> Result<HeadRead, String> {
+        let repo = repo.ok_or(
+            "name the repository: the merge queue needs to know which one under /work/repos",
+        )?;
+        let r = format!("/work/repos/{repo}");
+        let key = format!("head:{branch}");
+        let steps = || {
+            vec![
+                Step {
+                    argv: argv(&["git", "-C", &r, "fetch", "--prune", "origin"]),
+                    cwd: r.clone(),
+                    allow_fail: false,
+                },
+                Step {
+                    argv: argv(&[
+                        "git",
+                        "-C",
+                        &r,
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/origin/{branch}"),
+                    ]),
+                    cwd: r.clone(),
+                    allow_fail: true,
+                },
+            ]
+        };
+        match self.drive(&key, Some(steps())).inspect_err(|_| {
+            self.flights.remove(&key);
+        })? {
+            Drive::Pending => Ok(HeadRead::Pending),
+            Drive::Done(res) => {
+                self.flights.remove(&key);
+                let sha = res
+                    .get(1)
+                    .filter(|(c, _)| *c == 0)
+                    .map(|(_, t)| t.trim().to_string())
+                    .filter(|t| ozbox_core::hub::merge::commit_ok(t))
+                    .ok_or_else(|| {
+                        s("the branch is not on the remote, so there is no commit to check the merge against")
+                    })?;
+                Ok(HeadRead::Known(Some(sha)))
             }
         }
     }

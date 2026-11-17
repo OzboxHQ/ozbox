@@ -68,6 +68,21 @@ pub trait Merger {
     fn head(&mut self, _repo: Option<&str>, _branch: &str) -> Result<Option<String>, String> {
         Ok(None)
     }
+
+    /// [`Merger::head`] for a merger whose reads take time (the conductor's box reads the remote through its daemon, a step at a
+    /// time): `Pending` until it can say. The default answers at once with [`Merger::head`].
+    fn head_step(&mut self, repo: Option<&str>, branch: &str) -> Result<HeadRead, String> {
+        Ok(HeadRead::Known(self.head(repo, branch)?))
+    }
+}
+
+/// What a read of a branch's head came back with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadRead {
+    /// Still being read: ask again on the next tick.
+    Pending,
+    /// The commit the branch points at on the conductor's side, or `None` when this merger cannot say.
+    Known(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

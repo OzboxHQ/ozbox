@@ -14,7 +14,7 @@ use super::engine::{Hub, HubError, HubState};
 use super::lane::{Spec, Split, Verdict};
 use super::wire::{Ext, Kind, PROFILE};
 use crate::orch::{FeatureState, MergeState, Transport};
-use crate::orch_merge::{MergeOutcome, MergeStep, Merger, RebaseOutcome, TestOutcome};
+use crate::orch_merge::{HeadRead, MergeOutcome, MergeStep, Merger, RebaseOutcome, TestOutcome};
 use crate::run::Book;
 
 /// What the hub tells a worker about one of its features (the body of `answer`).
@@ -328,7 +328,11 @@ impl Merger for HubMerger<'_, '_> {
             // a worker that reported a newer commit since the lane passed, or a branch the conductor's side sees elsewhere, was not
             // what the lane tested: it goes back through the lane, never merged on the old verdict
             let reported = self.commits.get(branch);
-            let head = self.inner.head(repo, branch)?;
+            let head = match self.inner.head_step(repo, branch)? {
+                // the conductor's side is still reading the remote: nothing is merged on a guess, and the step is asked again
+                HeadRead::Pending => return Ok(MergeOutcome::Pending),
+                HeadRead::Known(h) => h,
+            };
             if reported.is_some_and(|c| *c != tested) || head.is_some_and(|h| h != tested) {
                 self.st.tested.remove(branch);
                 return Err(format!(
