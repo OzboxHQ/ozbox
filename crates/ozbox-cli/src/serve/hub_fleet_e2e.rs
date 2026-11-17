@@ -1599,3 +1599,309 @@ fn first_contact_is_refused_without_a_valid_token_attestation_and_proof() {
     };
     let _ = (f.socket(), &f.hub_tools, &f.workers);
 }
+
+/// What `main`'s merge queue needs of its own box, played by a fake that records its calls and can say where a branch points.
+struct GitOnMain {
+    log: Vec<String>,
+    /// Where the conductor's side sees every branch right now (`None`: it cannot say).
+    head: Option<String>,
+}
+
+impl ozbox_core::orch_merge::Merger for GitOnMain {
+    fn rebase(
+        &mut self,
+        _: Option<&str>,
+        branch: &str,
+        _: &str,
+    ) -> Result<ozbox_core::orch_merge::RebaseOutcome, String> {
+        self.log.push(format!("rebase {branch}"));
+        Ok(ozbox_core::orch_merge::RebaseOutcome::Clean)
+    }
+    fn test(
+        &mut self,
+        _: Option<&str>,
+        _: &str,
+        _: &[String],
+        _: Option<&str>,
+    ) -> Result<ozbox_core::orch_merge::TestOutcome, String> {
+        Err("the lane, not main, runs the tests here".into())
+    }
+    fn merge(
+        &mut self,
+        _: Option<&str>,
+        branch: &str,
+        _: &str,
+    ) -> Result<ozbox_core::orch_merge::MergeOutcome, String> {
+        self.log.push(format!("merge {branch}"));
+        Ok(ozbox_core::orch_merge::MergeOutcome::Done)
+    }
+    fn head(&mut self, _: Option<&str>, _: &str) -> Result<Option<String>, String> {
+        Ok(self.head.clone())
+    }
+}
+
+/// Each worker takes the lane shards it was handed and reports every spec passed (running a shard is the box's own runner's).
+fn run_shards(f: &mut Fleet) -> usize {
+    let mut n = 0;
+    for w in &mut f.workers {
+        for sh in w.agent.take_shards() {
+            n += 1;
+            w.agent.shard_result(
+                now_ms(),
+                &ozbox_core::hub::lane::ShardResult {
+                    run: sh.run.clone(),
+                    shard: sh.shard,
+                    passed: sh.specs.clone(),
+                    failed: vec![],
+                    flaky: vec![],
+                    finished: true,
+                },
+            );
+        }
+    }
+    n
+}
+
+/// Both workers' results go through `main`'s merge queue with the lane split across the two workers on each exact commit, the person
+/// approves, a branch that moved after its lane passed is not merged on the old verdict, and the worker hears what happened.
+#[test]
+fn both_results_go_through_the_merge_queue_and_lanes_and_a_moved_branch_is_not_merged_on_an_old_verdict(
+) {
+    use ozbox_core::hub::lane::{Spec, Split};
+    use ozbox_core::hub::merge::{
+        admit_results, reported_commits, return_to_worker, HubMerger, LaneDecl,
+    };
+    use ozbox_core::hub::refusal::KeyDeclaration;
+    use ozbox_core::orch::{FeatureReq, FeatureState, MergeState, Transport};
+    use ozbox_core::orch_merge::merge_step;
+    use ozbox_core::orch_rules::MergeApproval;
+    use ozbox_core::run::{ApprovalState, Book};
+
+    let mut f = pair();
+    let mut book = Book::default();
+    let id = book
+        .start_orchestration("ship it", "ada", "main", &[], 1000)
+        .unwrap();
+    {
+        let o = book.orchestration_mut(&id).unwrap();
+        o.policy.test_command = vec!["npx".into(), "playwright".into(), "test".into()];
+        o.policy.test_lane_box = Some("hub:browser".into());
+        o.policy.merge_approval = MergeApproval::Person;
+    }
+    let mut feats = Vec::new();
+    for (worker, engine, title) in [
+        ("box-a", "claude-code", "parser"),
+        ("box-b", "codex", "tests"),
+    ] {
+        let o = book.orchestration_mut(&id).unwrap();
+        let fid = o
+            .add_feature(
+                &FeatureReq {
+                    title: title.into(),
+                    brief: format!("build {title}"),
+                    box_name: Some(worker.into()),
+                    ..Default::default()
+                },
+                1001,
+            )
+            .unwrap();
+        let fm = o.feature_mut(&fid).unwrap();
+        fm.transport = Transport::Hub;
+        fm.state = FeatureState::Starting;
+        let branch = fm.branch.clone();
+        let mut a = ozbox_core::engine_turn::assign_of(
+            &ozbox_core::engine_turn::Task {
+                id: format!("{id}/{fid}"),
+                title: title.into(),
+                instruction: format!("TASK-MARKER {title}"),
+                repo: Some("billing".into()),
+                branch: Some(branch),
+            },
+            KeyDeclaration {
+                env: "staging".into(),
+                names: Vec::new(),
+            },
+            now_ms() + 3_600_000,
+        );
+        a.engine = Some(engine.into());
+        let t = now_ms();
+        f.att
+            .svc
+            .with(t, |hub, st| hub.assign(st, worker, &a, t))
+            .unwrap()
+            .unwrap();
+        feats.push((worker, fid));
+    }
+    // both workers run their programs and report the exact commit they finished
+    f.until("both results are at the hub", |f| {
+        let st = f.hub_state();
+        feats.iter().all(|(w, fid)| {
+            st.peers.get(*w).is_some_and(|p| {
+                p.report
+                    .results
+                    .get(&id)
+                    .is_some_and(|m| m.contains_key(fid))
+            })
+        })
+    });
+    let queued = admit_results(&mut book, &f.hub_state(), now_ms());
+    assert_eq!(queued.len(), 2);
+    let commits = reported_commits(&book, &id);
+    assert_eq!(commits.len(), 2);
+    let suite = vec![
+        Spec {
+            file: "a.spec.ts".into(),
+            resource: None,
+            weight_ms: Some(9_000),
+        },
+        Spec {
+            file: "b.spec.ts".into(),
+            resource: Some("sandbox-1".into()),
+            weight_ms: Some(2_000),
+        },
+        Spec {
+            file: "c.spec.ts".into(),
+            resource: Some("sandbox-1".into()),
+            weight_ms: Some(2_000),
+        },
+        Spec {
+            file: "d.spec.ts".into(),
+            resource: None,
+            weight_ms: Some(3_000),
+        },
+    ];
+    let lanes: BTreeMap<String, LaneDecl> = [(
+        "browser".to_string(),
+        LaneDecl {
+            name: "browser".into(),
+            command: "browser-shard".into(),
+            split: Split::Weight,
+            specs: suite,
+            workers: vec!["box-a".into(), "box-b".into()],
+            known_keys: vec!["sandbox-1".into()],
+        },
+    )]
+    .into_iter()
+    .collect();
+    let mut git = GitOnMain {
+        log: Vec::new(),
+        head: None,
+    };
+    let step = |f: &mut Fleet, book: &mut Book, git: &mut GitOnMain| {
+        let now = now_ms();
+        let commits = reported_commits(book, &id);
+        f.att
+            .svc
+            .with(now, |hub, st| {
+                let mut m = HubMerger {
+                    inner: git,
+                    hub,
+                    st,
+                    lanes: &lanes,
+                    commits,
+                    now,
+                };
+                let s = merge_step(book, &id, &mut m, now);
+                if let Some(s) = &s {
+                    let _ = return_to_worker(hub, st, book, &id, s, now);
+                }
+                s
+            })
+            .unwrap()
+    };
+    // the first feature: rebase, a lane on its exact commit split across both workers, never green until every spec passed
+    let first = book.orchestration(&id).unwrap().merge_queue[0]
+        .feature_id
+        .clone();
+    let mut state = None;
+    for _ in 0..400 {
+        f.round();
+        run_shards(&mut f);
+        if let Some(s) = step(&mut f, &mut book, &mut git) {
+            state = Some(s.state);
+            if s.state == MergeState::AwaitingApproval {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(state, Some(MergeState::AwaitingApproval), "{}", f.diag());
+    assert!(
+        f.hub_state().lanes.values().all(|l| l.shards.len() == 2),
+        "the lane was split across both workers"
+    );
+    // the person decides the merge; the lane's green is a test result, not the gate
+    let aid = book.orchestration(&id).unwrap().merge_queue[0]
+        .approval_id
+        .clone()
+        .unwrap();
+    assert!(book.approval(&aid).unwrap().needs_step_up);
+    // ... but the branch moved after the lane passed: it is not merged on the old verdict
+    book.approvals
+        .iter_mut()
+        .find(|a| a.id == aid)
+        .unwrap()
+        .state = ApprovalState::Approved;
+    git.head = Some("c".repeat(40));
+    let mut last = None;
+    for _ in 0..10 {
+        f.round();
+        if let Some(s) = step(&mut f, &mut book, &mut git) {
+            last = Some(s);
+            if last.as_ref().is_some_and(|s| s.state == MergeState::Failed) {
+                break;
+            }
+        }
+    }
+    let last = last.unwrap();
+    assert_eq!(last.state, MergeState::Failed);
+    assert!(
+        last.detail
+            .contains("no longer points at the commit the lane tested"),
+        "{}",
+        last.detail
+    );
+    assert!(
+        !git.log.iter().any(|l| l.starts_with("merge ")),
+        "{:?}",
+        git.log
+    );
+    assert!(f.hub_state().tested.is_empty());
+    // the branch is where the lane tested it again: queued again, the lane's verdict for that very commit stands, and it merges
+    git.head = None;
+    book.orchestration_mut(&id)
+        .unwrap()
+        .enqueue_merge(&first, now_ms())
+        .unwrap();
+    let mut merged = false;
+    for _ in 0..400 {
+        f.round();
+        run_shards(&mut f);
+        if let Some(s) = step(&mut f, &mut book, &mut git) {
+            if s.state == MergeState::AwaitingApproval {
+                // the person approves whatever is pending
+                for a in book
+                    .approvals
+                    .iter_mut()
+                    .filter(|a| a.state == ApprovalState::Pending)
+                {
+                    a.state = ApprovalState::Approved;
+                }
+            }
+            if s.state == MergeState::Merged && s.feature_id == first {
+                merged = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(merged, "{}\n{:?}", f.diag(), git.log);
+    // the worker that owns the feature hears it, as said by the queue
+    let owner = feats.iter().find(|(_, fid)| *fid == first).unwrap().0;
+    let i = f.workers.iter().position(|w| w.name == owner).unwrap();
+    f.until("the worker heard the queue's answers", |f| {
+        let h = &f.workers[i].agent.heard;
+        h.iter().any(|x| x == &format!("{first}:merged"))
+            && h.iter().any(|x| x == &format!("{first}:not-approved"))
+    });
+}
