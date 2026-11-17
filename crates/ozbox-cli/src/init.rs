@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ozbox_core::{Change, CommandRunner, CommandSpec, Output, Risk, Size};
+use ozbox_provider_aws::operator_policy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+mod adopt;
 
 use crate::messages::t;
 use crate::netguard::{Guard, HttpClient, HttpRequest};
@@ -237,6 +240,10 @@ pub fn classify_probe(dry: bool, out: &Output) -> (ProbeState, Option<String>) {
     if err.contains("DryRunOperation") {
         return (ProbeState::Allowed, None);
     }
+    // a named-bucket probe: the bucket not being there is not a refusal (a 403 or AccessDenied still is one, never a 404)
+    if err.contains("NoSuchBucket") || err.contains("(404)") {
+        return (ProbeState::Allowed, None);
+    }
     if err.contains("UnauthorizedOperation")
         || err.contains("AccessDenied")
         || err.contains("not authorized")
@@ -265,77 +272,215 @@ pub fn classify_probe(dry: bool, out: &Output) -> (ProbeState, Option<String>) {
     )
 }
 
-fn probe_defs(region: &str) -> Vec<(&'static str, &'static str, bool, Vec<String>)> {
+/// Whether the daily operator sign-in already holds the statements the adopt commands need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorCheck {
+    /// Systems Manager answered "not found" to a read of a command that does not exist: the sign-in may ask.
+    Allowed,
+    /// The sign-in was refused: it was set up before the adopt statements existed.
+    Denied,
+    /// The answer was neither (not signed in, a network error).
+    Unknown,
+    /// No daily profile is recorded in the config, so there is no sign-in to ask.
+    NotChecked,
+}
+
+/// What `ozbox init` leaves for the administrator who applies the operator policy.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OperatorPolicyReport {
+    /// The complete policy, ready to apply (one file; replaces the daily permission set's policy).
+    pub file: String,
+    pub region: String,
+    pub fleet: String,
+    /// The statements an operator policy from before 0.2.0 does not have.
+    pub added_statements: Vec<String>,
+    /// Those statements as rendered for this account, region and fleet.
+    pub adopt_statements: Vec<Value>,
+    pub operator_check: OperatorCheck,
+}
+
+/// The meaning of the one read the operator check makes.
+pub fn classify_operator_check(out: &Output) -> OperatorCheck {
+    let err = out.stderr.as_str();
+    if err.contains("AccessDenied") || err.contains("not authorized") {
+        return OperatorCheck::Denied;
+    }
+    if out.status == Some(0)
+        || err.contains("InvocationDoesNotExist")
+        || err.contains("InvalidCommandId")
+        || err.contains("InvalidInstanceId")
+    {
+        return OperatorCheck::Allowed;
+    }
+    OperatorCheck::Unknown
+}
+
+/// Who grants a probe's permission. The operator policy (`infra/aws/operator-policy.json`) is the daily role; the state
+/// bucket belongs to the setup identity, which no operator statement reaches (README, "AWS: the network and the operator's
+/// permissions"). Only an operator probe can stop setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Grant {
+    /// `infra/aws/operator-policy.json`, by the named statement.
+    Operator(&'static str),
+    /// The setup identity (or an administrator), not the operator policy.
+    SetupIdentity,
+}
+
+/// One permission probe: the call it makes, and the IAM action and tag it stands for, so a test can hold it to the policy.
+pub(crate) struct ProbeDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub dry: bool,
+    pub args: Vec<String>,
+    /// The IAM action the call needs.
+    pub action: &'static str,
+    /// The EC2 resource type the call tags on creation (`ozbox-managed=true`, as the OpenTofu modules do), if it creates one.
+    pub tag_resource: Option<&'static str>,
+    pub grant: Grant,
+}
+
+/// The tag every Oz Box resource carries, and the only shape of create the operator policy allows.
+pub(crate) const MANAGED_TAG: &str = "ozbox-managed";
+
+fn tag_spec(resource: &str) -> String {
+    format!("ResourceType={resource},Tags=[{{Key={MANAGED_TAG},Value=true}}]")
+}
+
+pub(crate) fn probe_defs(region: &str, account: Option<&str>) -> Vec<ProbeDef> {
     let az = format!("{region}a");
     let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-    vec![
-        (
-            "ec2_run_instances",
-            "init.probe_run_instances",
-            true,
-            v(&[
-                "ec2",
-                "run-instances",
-                "--dry-run",
-                "--image-id",
-                "ami-0123456789abcdef0",
-                "--instance-type",
-                "t3.nano",
-                "--count",
-                "1",
+    let mut defs = vec![
+        ProbeDef {
+            id: "ec2_run_instances",
+            label: "init.probe_run_instances",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "run-instances",
+                    "--dry-run",
+                    "--image-id",
+                    "ami-0123456789abcdef0",
+                    "--instance-type",
+                    "t3.nano",
+                    "--count",
+                    "1",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("instance"));
+                a
+            },
+            action: "ec2:RunInstances",
+            tag_resource: Some("instance"),
+            grant: Grant::Operator("RunTaggedInstances"),
+        },
+        ProbeDef {
+            id: "ec2_create_volume",
+            label: "init.probe_create_volume",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-volume",
+                    "--dry-run",
+                    "--availability-zone",
+                    &az,
+                    "--size",
+                    "1",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("volume"));
+                a
+            },
+            action: "ec2:CreateVolume",
+            tag_resource: Some("volume"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ec2_create_snapshot",
+            label: "init.probe_create_snapshot",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-snapshot",
+                    "--dry-run",
+                    "--volume-id",
+                    "vol-0123456789abcdef0",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("snapshot"));
+                a
+            },
+            action: "ec2:CreateSnapshot",
+            tag_resource: Some("snapshot"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ec2_create_vpc",
+            label: "init.probe_create_vpc",
+            dry: true,
+            args: {
+                let mut a = v(&[
+                    "ec2",
+                    "create-vpc",
+                    "--dry-run",
+                    "--cidr-block",
+                    "10.255.0.0/16",
+                    "--tag-specifications",
+                ]);
+                a.push(tag_spec("vpc"));
+                a
+            },
+            action: "ec2:CreateVpc",
+            tag_resource: Some("vpc"),
+            grant: Grant::Operator("CreateTaggedResources"),
+        },
+        ProbeDef {
+            id: "ssm_describe",
+            label: "init.probe_ssm",
+            dry: false,
+            args: v(&["ssm", "describe-instance-information", "--max-results", "5"]),
+            action: "ssm:DescribeInstanceInformation",
+            tag_resource: None,
+            grant: Grant::Operator("ReadOnly"),
+        },
+    ];
+    // The state bucket init keeps its plans in, by name: never a listing of every bucket in the account. "Not found" means
+    // the permission is there and the bucket is still to be made. It is the setup identity's bucket, so it never stops setup.
+    if let Some(account) = account {
+        defs.push(ProbeDef {
+            id: "s3_state_bucket",
+            label: "init.probe_s3",
+            dry: false,
+            args: v(&[
+                "s3api",
+                "head-bucket",
+                "--bucket",
+                &Init::bucket_name(account, region),
             ]),
+            action: "s3:ListBucket",
+            tag_resource: None,
+            grant: Grant::SetupIdentity,
+        });
+    }
+    defs
+}
+
+/// Which grant to name when a probe is refused, so the person knows who to ask and for what.
+fn grant_hint(def: &ProbeDef) -> String {
+    match def.grant {
+        Grant::Operator(sid) => t(
+            if def.tag_resource.is_some() {
+                "init.grant_operator_tagged"
+            } else {
+                "init.grant_operator"
+            },
+            &[("action", def.action), ("sid", sid), ("tag", MANAGED_TAG)],
         ),
-        (
-            "ec2_create_volume",
-            "init.probe_create_volume",
-            true,
-            v(&[
-                "ec2",
-                "create-volume",
-                "--dry-run",
-                "--availability-zone",
-                &az,
-                "--size",
-                "1",
-            ]),
-        ),
-        (
-            "ec2_create_snapshot",
-            "init.probe_create_snapshot",
-            true,
-            v(&[
-                "ec2",
-                "create-snapshot",
-                "--dry-run",
-                "--volume-id",
-                "vol-0123456789abcdef0",
-            ]),
-        ),
-        (
-            "ec2_create_vpc",
-            "init.probe_create_vpc",
-            true,
-            v(&[
-                "ec2",
-                "create-vpc",
-                "--dry-run",
-                "--cidr-block",
-                "10.255.0.0/16",
-            ]),
-        ),
-        (
-            "ssm_describe",
-            "init.probe_ssm",
-            false,
-            v(&["ssm", "describe-instance-information", "--max-results", "5"]),
-        ),
-        (
-            "s3_list",
-            "init.probe_s3",
-            false,
-            v(&["s3api", "list-buckets"]),
-        ),
-    ]
+        Grant::SetupIdentity => t("init.grant_setup_identity", &[("action", def.action)]),
+    }
 }
 
 // ---------- regions ----------
@@ -457,6 +602,15 @@ pub struct Prepared {
     run: Vec<CommandSpec>,
     #[serde(skip)]
     after: After,
+}
+
+/// What a look at the configured subnet found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubnetState {
+    Found,
+    Missing,
+    /// The answer could not be read (often a missing `ec2:DescribeSubnets` permission); the reason is short.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -641,7 +795,8 @@ impl InitPaths {
 
     /// The directory next to the configuration file (`OZBOX_CONFIG`, else `~/.config/ozbox`).
     pub fn detect() -> Option<InitPaths> {
-        let config = crate::config::Config::path()?;
+        // the file the loader reads (`fleet.toml` on an older layout), never a second one beside it
+        let config = crate::config::Config::active_path()?;
         let base = config.parent()?.to_path_buf();
         let cache = std::env::var_os("OZBOX_PLUGIN_CACHE_DIR")
             .map(PathBuf::from)
@@ -1046,18 +1201,36 @@ impl Init<'_> {
         target.region = Some(region.clone());
         let target = &target;
         let mut probes = Vec::new();
-        for (id, label, dry, args) in probe_defs(&region) {
-            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        // The account names the state bucket. No answer, no bucket probe.
+        let who = self.exec(&self.aws(target, &["sts", "get-caller-identity"]))?;
+        if who.stderr.contains("ExpiredToken")
+            || who.stderr.contains("Unable to locate credentials")
+        {
+            return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
+        }
+        let account = parse_identity(&who.stdout)
+            .ok()
+            .map(|i| i.account)
+            .filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()));
+        for def in probe_defs(&region, account.as_deref()) {
+            let argv: Vec<&str> = def.args.iter().map(String::as_str).collect();
             let out = self.exec(&self.aws(target, &argv))?;
             if out.stderr.contains("ExpiredToken")
                 || out.stderr.contains("Unable to locate credentials")
             {
                 return Err(Finding::new("not_signed_in", t("init.not_signed_in", &[])));
             }
-            let (state, detail) = classify_probe(dry, &out);
+            let (mut state, mut detail) = classify_probe(def.dry, &out);
+            if state == ProbeState::Denied {
+                detail = Some(grant_hint(&def));
+                // a refusal on something the operator policy does not govern is reported, never a stop
+                if def.grant == Grant::SetupIdentity {
+                    state = ProbeState::Unknown;
+                }
+            }
             probes.push(Probe {
-                id: id.into(),
-                label: t(label, &[]),
+                id: def.id.into(),
+                label: t(def.label, &[]),
                 state,
                 detail,
             });
@@ -1500,6 +1673,50 @@ impl Init<'_> {
         Ok(dir)
     }
 
+    /// The private subnet the configuration already names (`[aws] subnet_id`), if it looks like one. When there is one, setup
+    /// uses it and plans no network: a second, empty network would cost a NAT gateway for nothing.
+    pub fn configured_subnet(&self) -> Option<String> {
+        self.recorded("aws")
+            .remove("subnet_id")
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("subnet-") && s.len() > "subnet-".len())
+    }
+
+    /// Whether the configured subnet exists and this identity can see it (a read-only `describe-subnets`).
+    pub fn check_subnet(&self, target: &Target, subnet: &str) -> Res<SubnetState> {
+        target.validate()?;
+        let out =
+            self.exec(&self.aws(target, &["ec2", "describe-subnets", "--subnet-ids", subnet]))?;
+        if out.status == Some(0) {
+            let listed = serde_json::from_str::<Value>(&out.stdout)
+                .ok()
+                .and_then(|v| {
+                    v.get("Subnets")
+                        .and_then(Value::as_array)
+                        .map(|a| !a.is_empty())
+                })
+                .unwrap_or(false);
+            return Ok(if listed {
+                SubnetState::Found
+            } else {
+                SubnetState::Missing
+            });
+        }
+        if out.stderr.contains("InvalidSubnetID.NotFound") {
+            return Ok(SubnetState::Missing);
+        }
+        let why: String = out
+            .stderr
+            .lines()
+            .find(|l| l.contains("rror"))
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
+        Ok(SubnetState::Unknown(why))
+    }
+
     /// What it takes to have the private network boxes live in. Needs the state bucket first (the state is kept there).
     pub fn plan_network(&self, target: &Target, account: &str) -> Res<Prepared> {
         target.validate()?;
@@ -1609,6 +1826,64 @@ impl Init<'_> {
             context: Vec::new(),
         };
         self.permission_for(target, identity, &[request])
+    }
+
+    /// The complete operator policy for this account, region and fleet, written next to the other plans for an administrator to
+    /// apply, and a read-only check of whether the daily sign-in already has the statements the adopt commands need.
+    ///
+    /// Setup never applies it: the setup identity has no right over the operator's permissions (it could otherwise widen
+    /// them), and the daily role is usually a permission set that only an administrator edits. So the file is written on EVERY
+    /// run, not only when the adopt step changed something, and a daily sign-in that lacks the statements is named.
+    pub fn operator_policy(&self, target: &Target, account: &str) -> Res<OperatorPolicyReport> {
+        let region = target.region_or_err()?.to_string();
+        let fleet = self.fleet_name();
+        let policy = operator_policy::render(account, &region, &fleet)
+            .map_err(|e| Finding::new("operator_policy", e))?;
+        let dir = self.paths.work.join("operator-policy").join(&region);
+        std::fs::create_dir_all(&dir).map_err(|e| Finding::new("command_failed", e.to_string()))?;
+        let file = dir.join("operator-policy.json");
+        let text = serde_json::to_string_pretty(&policy)
+            .map_err(|e| Finding::new("operator_policy", e.to_string()))?;
+        std::fs::write(&file, format!("{text}\n"))
+            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
+        let adopt = operator_policy::statements_named(&policy, &operator_policy::ADOPT_STATEMENTS);
+        let operator_check = match self.recorded("aws").get("profile") {
+            None => OperatorCheck::NotChecked,
+            Some(profile) => {
+                let as_operator = Target {
+                    provider: target.provider.clone(),
+                    profile: Some(profile.clone()),
+                    region: target.region.clone(),
+                };
+                // A read of a command that does not exist: the answer is "not found" when the sign-in may ask and a refusal
+                // when it may not, and nothing is sent or changed either way.
+                match self.exec(&self.aws(
+                    &as_operator,
+                    &[
+                        "ssm",
+                        "get-command-invocation",
+                        "--command-id",
+                        "00000000-0000-0000-0000-000000000000",
+                        "--instance-id",
+                        "i-00000000000000000",
+                    ],
+                )) {
+                    Ok(out) => classify_operator_check(&out),
+                    Err(_) => OperatorCheck::Unknown,
+                }
+            }
+        };
+        Ok(OperatorPolicyReport {
+            file: file.display().to_string(),
+            region,
+            fleet,
+            added_statements: operator_policy::ADOPT_STATEMENTS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            adopt_statements: adopt,
+            operator_check,
+        })
     }
 
     /// The fleet's name as recorded in the config (`ozbox` until one is chosen), the same way the plans read it.
@@ -1735,8 +2010,9 @@ impl Init<'_> {
         dir: PathBuf,
         state_key: &str,
         summary: String,
-        notes: Vec<String>,
+        mut notes: Vec<String>,
         after: After,
+        adoptables: Vec<adopt::Adoptable>,
     ) -> Res<Prepared> {
         let region = target.region_or_err()?.to_string();
         let bucket = Self::bucket_name(account, &region);
@@ -1761,6 +2037,14 @@ impl Init<'_> {
             "-backend-config=use_lockfile=true".into(),
         ]);
         self.init_with_retry(target, &init)?;
+        // What already exists in the account and is not in this step's state is adopted, not re-created (ADR 0053).
+        let adopted = if adoptables.is_empty() {
+            Vec::new()
+        } else {
+            let in_state = self.state_addresses(target, &chdir)?;
+            self.find_adoptions(target, account, &adoptables, &in_state)?
+        };
+        adopt::write_imports(&dir, &adopted)?;
         let plan_cmd = CommandSpec::new("tofu").args([
             chdir.clone(),
             "plan".into(),
@@ -1770,9 +2054,13 @@ impl Init<'_> {
             "-out=ozbox.tfplan".into(),
         ]);
         let out = self.exec(&self.tofu_env(target, plan_cmd))?;
-        let changes = match out.status {
-            Some(0) => Vec::new(),
-            Some(2) => parse_tofu_plan(&out.stdout),
+        let mut changes: Vec<Change> = adopted.iter().map(adopt::Adopted::change).collect();
+        match out.status {
+            Some(0) => {}
+            Some(2) => {
+                adopt::refuse_replacing(&adopted, &plan_entries(&out.stdout))?;
+                changes.extend(parse_tofu_plan(&out.stdout));
+            }
             _ => {
                 let why: String = out
                     .stderr
@@ -1788,7 +2076,11 @@ impl Init<'_> {
                     t("init.plan_failed", &[("why", &why)]),
                 ));
             }
-        };
+        }
+        if !adopted.is_empty() {
+            notes.push(t("init.note_adopted", &[]));
+        }
+        // an import is a change even when nothing else differs: applying is what records the resource in the state
         let noop = changes.is_empty();
         let apply = self.tofu_env(
             target,
@@ -1823,16 +2115,48 @@ impl Init<'_> {
         // policy for a key or a bucket that does not exist yet is not made; running `ozbox init` again adds it.
         let rec = self.recorded("aws");
         let mut extra = String::new();
+        // what the module makes for this configuration, so only those policies are looked for in the account
+        let mut adoptables = vec![
+            adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.session".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-session-manager".into(),
+                },
+            },
+            adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.parameters".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-parameters".into(),
+                },
+            },
+        ];
         let ok_word = |v: &str| !v.is_empty() && !v.contains(['"', '\\', '$', '%', '\n', '\r']);
         if let (Some(arn), Some(fleet)) = (rec.get("secrets_key_arn"), rec.get("fleet")) {
             if ok_word(arn) && ok_word(fleet) {
                 extra.push_str(&format!(
                     "  fleet_key_arn = \"{arn}\"\n  fleet         = \"{fleet}\"\n"
                 ));
+                // a counted resource: its address carries the index
+                adoptables.push(adopt::Adoptable {
+                    address: "module.policy.aws_iam_policy.fleet_key[0]".into(),
+                    what: "IAM policy",
+                    find: adopt::Find::IamPolicy {
+                        name: format!("ozbox-box-fleet-key-{fleet}"),
+                    },
+                });
             }
         }
         if let Some(b) = rec.get("session_log_bucket").filter(|b| ok_word(b)) {
             extra.push_str(&format!("  session_log_bucket = \"{b}\"\n"));
+            adoptables.push(adopt::Adoptable {
+                address: "module.policy.aws_iam_policy.session_logs[0]".into(),
+                what: "IAM policy",
+                find: adopt::Find::IamPolicy {
+                    name: "ozbox-box-session-logs".into(),
+                },
+            });
         }
         let dir = self.paths.work.join("box-policy").join(&region);
         self.module_root(
@@ -1852,6 +2176,7 @@ impl Init<'_> {
             t("init.sum_box_policy", &[]),
             vec![t("init.note_box_policy", &[])],
             After::Nothing,
+            adoptables,
         )?;
         p.estimate_usd_month = Some(0.0);
         Ok(p)
@@ -1868,6 +2193,7 @@ impl Init<'_> {
             .get("fleet")
             .cloned()
             .unwrap_or_else(|| "ozbox".into());
+        let alias = format!("alias/ozbox-{fleet}-secrets");
         let dir = self.paths.work.join("secrets-key").join(&region);
         self.module_root(
             &self.paths.key_dir(),
@@ -1885,6 +2211,21 @@ impl Init<'_> {
             t("init.sum_key", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_key", &[("fleet", &fleet)])],
             After::Key(self.paths.work.join("secrets-key").join(&region)),
+            vec![
+                adopt::Adoptable {
+                    address: "module.key.aws_kms_key.secrets".into(),
+                    what: "KMS key",
+                    find: adopt::Find::KmsKey {
+                        alias: alias.clone(),
+                        recorded_arn: self.recorded("aws").get("secrets_key_arn").cloned(),
+                    },
+                },
+                adopt::Adoptable {
+                    address: "module.key.aws_kms_alias.secrets".into(),
+                    what: "KMS alias",
+                    find: adopt::Find::KmsAlias { alias },
+                },
+            ],
         )
     }
 
@@ -1911,6 +2252,13 @@ impl Init<'_> {
             t("init.sum_adopt", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_adopt", &[("fleet", &fleet)])],
             After::Adopt(dir),
+            vec![adopt::Adoptable {
+                address: "module.adopt.aws_ssm_document.adopt".into(),
+                what: "Systems Manager document",
+                find: adopt::Find::SsmDocument {
+                    name: format!("ozbox-adopt-{fleet}"),
+                },
+            }],
         )
     }
 
@@ -1989,6 +2337,8 @@ impl Init<'_> {
             t("init.sum_issuer", &[("fleet", &fleet), ("region", &region)]),
             vec![t("init.note_issuer", &[])],
             After::Issuer(dir),
+            // the issuer is not adopted yet (ADR 0053: its roles live in the reserved namespace and need an administrator)
+            Vec::new(),
         )
     }
 
@@ -2391,56 +2741,43 @@ impl Init<'_> {
 
     // ----- the configuration file -----
 
-    /// Set the provider and the given keys under its section, keeping everything else in the file (a backup is made
-    /// the first time).
+    /// Set the provider and the given keys under its section, keeping everything else in the file: comments, order and keys
+    /// this program does not know (a backup is made the first time). It edits the file the loader reads, so a layout that
+    /// keeps its settings in `fleet.toml` is updated in place and no second file shadows it. The profile init was run with is
+    /// the SETUP identity: it is recorded as `setup_profile` and never written over `profile`, which daily commands use.
     pub fn persist(&self, target: &Target, extra: &[(&str, &str)]) -> Res<()> {
+        self.persist_keys_in(target, extra, &[])
+    }
+
+    fn persist_keys_in(&self, target: &Target, set: &[(&str, &str)], remove: &[&str]) -> Res<()> {
         let path = &self.paths.config;
-        let io = |e: std::io::Error| Finding::new("command_failed", e.to_string());
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(io(e)),
-        };
-        let mut table: toml::Table = text.parse().map_err(|_| {
-            Finding::new(
-                "bad_config",
-                t("init.bad_config", &[("path", &path.display().to_string())]),
-            )
-        })?;
-        table.insert(
-            "provider".into(),
-            toml::Value::String(target.provider.clone()),
-        );
+        let mut keys: Vec<(&str, &str)> = Vec::new();
         if target.provider != "fake" {
-            let section = table
-                .entry(target.provider.clone())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            if let toml::Value::Table(s) = section {
-                if let Some(r) = &target.region {
-                    s.insert("region".into(), toml::Value::String(r.clone()));
-                }
-                if let Some(p) = &target.profile {
-                    s.insert("profile".into(), toml::Value::String(p.clone()));
-                }
-                for (k, v) in extra {
-                    s.insert((*k).into(), toml::Value::String((*v).into()));
-                }
+            if let Some(r) = &target.region {
+                keys.push(("region", r));
+            }
+            if let Some(p) = &target.profile {
+                keys.push(("setup_profile", p));
             }
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
-        if !text.is_empty() {
-            let bak = path.with_extension("toml.bak");
-            if !bak.exists() {
-                std::fs::write(&bak, &text).map_err(io)?;
+        keys.extend_from_slice(set);
+        let section = (target.provider != "fake").then_some(target.provider.as_str());
+        crate::config::edit_config_file(
+            path,
+            &[("provider", target.provider.as_str())],
+            section,
+            &keys,
+            remove,
+        )
+        .map_err(|e| match e {
+            crate::config::EditError::Invalid | crate::config::EditError::NotTable(_) => {
+                Finding::new(
+                    "bad_config",
+                    t("init.bad_config", &[("path", &path.display().to_string())]),
+                )
             }
-        }
-        let out = toml::to_string_pretty(&table)
-            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, out).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)
+            crate::config::EditError::Io(e) => Finding::new("command_failed", e.to_string()),
+        })
     }
 
     /// Like [`persist`](Self::persist) for keys that may also be cleared: `None` removes the key.
@@ -2449,34 +2786,12 @@ impl Init<'_> {
             .iter()
             .filter_map(|(k, v)| v.map(|v| (*k, v)))
             .collect();
-        self.persist(target, &set)?;
         let removed: Vec<&str> = keys
             .iter()
             .filter(|(_, v)| v.is_none())
             .map(|(k, _)| *k)
             .collect();
-        if removed.is_empty() {
-            return Ok(());
-        }
-        let path = &self.paths.config;
-        let io = |e: std::io::Error| Finding::new("command_failed", e.to_string());
-        let text = std::fs::read_to_string(path).map_err(io)?;
-        let mut table: toml::Table = text.parse().map_err(|_| {
-            Finding::new(
-                "bad_config",
-                t("init.bad_config", &[("path", &path.display().to_string())]),
-            )
-        })?;
-        if let Some(toml::Value::Table(sec)) = table.get_mut(&target.provider) {
-            for k in removed {
-                sec.remove(k);
-            }
-        }
-        let out = toml::to_string_pretty(&table)
-            .map_err(|e| Finding::new("command_failed", e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, out).map_err(io)?;
-        std::fs::rename(&tmp, path).map_err(io)
+        self.persist_keys_in(target, &set, &removed)
     }
 
     /// The values setup has recorded for a provider (`state_bucket`, `subnet_id`, ...).
@@ -2540,8 +2855,9 @@ impl Init<'_> {
     }
 }
 
-/// The resources a `tofu plan` says it will create, change or destroy, in the order shown.
-pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
+/// The (address, verb) of every resource a `tofu plan` says it will create, change or destroy, in the order shown. The verb
+/// is one of `create`, `destroy`, `update`, `replace`.
+pub fn plan_entries(stdout: &str) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
     for line in stdout.lines() {
         let l = line.trim_start();
@@ -2554,31 +2870,43 @@ pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
             (a, "destroy")
         } else if let Some(a) = rest.strip_suffix(" will be updated in-place") {
             (a, "update")
-        } else if rest.ends_with(" must be replaced") {
-            (rest.trim_end_matches(" must be replaced"), "replace")
+        } else if let Some(a) = rest.strip_suffix(" must be replaced") {
+            (a, "replace")
+        } else if let Some(a) = rest.strip_suffix(" will be replaced, as requested") {
+            (a, "replace")
         } else {
             continue;
         };
-        let kind = addr
-            .rsplit('.')
-            .nth(1)
-            .unwrap_or("resource")
-            .trim_start_matches("aws_");
-        let risk = if verb == "destroy" || verb == "replace" {
-            Risk::High
-        } else {
-            Risk::Medium
-        };
-        out.push(Change::new(
-            format!("network.{verb}"),
-            t(
-                &format!("init.net_{verb}"),
-                &[("what", &kind.replace('_', " ")), ("address", addr)],
-            ),
-            risk,
-        ));
+        out.push((addr.to_string(), verb));
     }
     out
+}
+
+/// The resources a `tofu plan` says it will create, change or destroy, in the order shown.
+pub fn parse_tofu_plan(stdout: &str) -> Vec<Change> {
+    plan_entries(stdout)
+        .into_iter()
+        .map(|(addr, verb)| {
+            let kind = addr
+                .rsplit('.')
+                .nth(1)
+                .unwrap_or("resource")
+                .trim_start_matches("aws_");
+            let risk = if verb == "destroy" || verb == "replace" {
+                Risk::High
+            } else {
+                Risk::Medium
+            };
+            Change::new(
+                format!("network.{verb}"),
+                t(
+                    &format!("init.net_{verb}"),
+                    &[("what", &kind.replace('_', " ")), ("address", &addr)],
+                ),
+                risk,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2768,9 +3096,13 @@ mod tests {
         assert_eq!(init.sign_in(&target()).unwrap_err().code, "tool_missing");
     }
 
+    const ACCOUNT_REPLY: &str =
+        r#"{"Account":"123456789012","Arn":"arn:aws:iam::123456789012:role/ozbox-operator"}"#;
+
     #[test]
-    fn probes_classify_and_only_ever_use_dry_runs_or_listings() {
+    fn probes_classify_and_only_ever_use_dry_runs_or_reads() {
         let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
         e.runner.reply(out(
             254,
             "",
@@ -2798,15 +3130,312 @@ mod tests {
             ]
         );
         assert!(!r.ok);
+        // a refusal names the policy statement that grants it
+        let denied = r
+            .probes
+            .iter()
+            .find(|p| p.state == ProbeState::Denied)
+            .unwrap();
+        let hint = denied.detail.as_deref().unwrap();
+        assert!(
+            hint.contains("CreateTaggedResources") && hint.contains("ozbox-managed=true"),
+            "{hint}"
+        );
         for c in e.runner.calls() {
             let a = &c.args;
             let verb = a.get(1).map(String::as_str).unwrap_or("");
             let dry = a.iter().any(|x| x == "--dry-run");
             assert!(
-                dry || verb.starts_with("list") || verb.starts_with("describe"),
+                dry || verb.starts_with("describe")
+                    || verb == "head-bucket"
+                    || verb == "get-caller-identity",
                 "a probe must not mutate: {a:?}"
             );
+            assert_ne!(verb, "list-buckets", "never list every bucket: {a:?}");
         }
+    }
+
+    #[test]
+    fn the_state_bucket_probe_never_stops_setup_and_absent_is_not_denied() {
+        // absent: allowed
+        let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
+        for _ in 0..5 {
+            e.runner.reply(out(0, "{}", ""));
+        }
+        e.runner.reply(out(
+            254,
+            "",
+            "An error occurred (404) when calling the HeadBucket operation: Not Found",
+        ));
+        let r = e.init().permissions(&target()).unwrap();
+        assert!(r.ok);
+        assert_eq!(r.probes.last().unwrap().state, ProbeState::Allowed);
+        let last = e.runner.calls().last().unwrap().args.clone();
+        assert!(
+            last.contains(&"ozbox-state-123456789012-us-east-1".to_string()),
+            "{last:?}"
+        );
+        // refused: reported (as unknown, with who grants it), never a stop
+        let e = Env::new();
+        e.runner.reply(out(0, ACCOUNT_REPLY, ""));
+        for _ in 0..5 {
+            e.runner.reply(out(0, "{}", ""));
+        }
+        e.runner.reply(out(
+            254,
+            "",
+            "An error occurred (AccessDenied) when calling the HeadBucket operation",
+        ));
+        let r = e.init().permissions(&target()).unwrap();
+        assert!(r.ok);
+        let p = r.probes.last().unwrap();
+        assert_eq!(p.state, ProbeState::Unknown);
+        assert!(p.detail.as_deref().unwrap().contains("setup identity"));
+    }
+
+    /// The probes are held to the operator policy: each one asks for what `infra/aws/operator-policy.json` allows, in the
+    /// shape it allows it. Before this, the create probes carried no tag and the bucket probe listed every bucket, so a
+    /// correctly set-up operator role was refused by a check that tested permissions Oz Box never uses.
+    #[test]
+    fn every_probe_is_a_call_the_operator_policy_allows() {
+        let policy: serde_json::Value =
+            serde_json::from_str(include_str!("../../../infra/aws/operator-policy.json")).unwrap();
+        let stmts = policy["Statement"].as_array().unwrap();
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(x) => vec![x.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+                _ => vec![],
+            }
+        };
+        let action_matches = |pat: &str, action: &str| {
+            let (p, a) = (pat.to_ascii_lowercase(), action.to_ascii_lowercase());
+            match p.split_once('*') {
+                None => p == a,
+                Some((h, t)) => a.starts_with(h) && a.ends_with(t) && a.len() >= h.len() + t.len(),
+            }
+        };
+        // the tag a probe sends for its resource type, read back out of the argv like the CLI would
+        let sent_tag = |args: &[String], resource: &str| -> Option<(String, String)> {
+            let i = args.iter().position(|a| a == "--tag-specifications")?;
+            let spec = args.get(i + 1)?;
+            let rest = spec.strip_prefix(&format!("ResourceType={resource},Tags=[{{Key="))?;
+            let (k, rest) = rest.split_once(",Value=")?;
+            let v = rest.strip_suffix("}]")?;
+            Some((k.to_string(), v.to_string()))
+        };
+        let region = "us-east-1";
+        let defs = probe_defs(region, Some("123456789012"));
+        assert!(defs.len() >= 6);
+        for d in &defs {
+            assert!(
+                !d.args.iter().any(|a| a == "list-buckets"),
+                "{}: the operator may not list every bucket",
+                d.id
+            );
+            let allowing: Vec<&serde_json::Value> = stmts
+                .iter()
+                .filter(|s| {
+                    s["Effect"] == "Allow"
+                        && list(&s["Action"])
+                            .iter()
+                            .any(|p| action_matches(p, d.action))
+                })
+                .collect();
+            match d.grant {
+                Grant::Operator(sid) => {
+                    let named = allowing
+                        .iter()
+                        .find(|s| s["Sid"] == sid)
+                        .unwrap_or_else(|| {
+                            panic!("{}: statement {sid} does not allow {}", d.id, d.action)
+                        });
+                    // the hint names a statement that really grants it, with the tag the statement demands
+                    let cond = &named["Condition"]["StringEquals"];
+                    if let Some(want) = cond.get("aws:RequestTag/ozbox-managed") {
+                        let res = d.tag_resource.unwrap_or_else(|| {
+                            panic!("{}: the statement needs a request tag", d.id)
+                        });
+                        let got = sent_tag(&d.args, res)
+                            .unwrap_or_else(|| panic!("{}: sends no tag for {res}", d.id));
+                        assert_eq!(got.0, MANAGED_TAG, "{}", d.id);
+                        assert_eq!(&serde_json::Value::String(got.1), want, "{}", d.id);
+                        let frag = format!(":{res}/");
+                        let frag2 = format!("::{res}/");
+                        assert!(
+                            list(&named["Resource"])
+                                .iter()
+                                .any(|r| r.contains(&frag) || r.contains(&frag2)),
+                            "{}: {sid} does not cover a {res}",
+                            d.id
+                        );
+                    }
+                    // and no tag a statement forbids is invented: an unconditioned allow needs none
+                    let unconditioned = allowing.iter().any(|s| s.get("Condition").is_none());
+                    if !unconditioned && d.tag_resource.is_none() {
+                        assert!(
+                            cond.get("aws:RequestTag/ozbox-managed").is_none(),
+                            "{}: needs a tag the probe cannot send",
+                            d.id
+                        );
+                    }
+                }
+                Grant::SetupIdentity => {
+                    // never presented as an operator permission: the operator policy must not reach that bucket
+                    let bucket = Init::bucket_name("123456789012", region);
+                    let arn = format!("arn:aws:s3:::{bucket}");
+                    for s in &allowing {
+                        for r in list(&s["Resource"]) {
+                            assert!(
+                                !(r.ends_with('*') && arn.starts_with(r.trim_end_matches('*')))
+                                    && r != arn,
+                                "{} is the setup identity's, but {r} reaches it",
+                                d.id
+                            );
+                        }
+                    }
+                    assert!(
+                        d.args.iter().any(|a| a == &bucket),
+                        "{}: names the bucket",
+                        d.id
+                    );
+                }
+            }
+        }
+        // negative control: the probes as they were (no tag) are exactly what this test refuses
+        let untagged: Vec<String> = defs[1]
+            .args
+            .iter()
+            .take_while(|a| *a != "--tag-specifications")
+            .cloned()
+            .collect();
+        assert!(sent_tag(&untagged, "volume").is_none());
+    }
+
+    /// The probes are run by whoever runs `ozbox init`: the person signed in as the setup identity (`OzBoxSetup`,
+    /// `infra/aws/setup-policy.json`). So every probe, the operator ones too, must be a call that permission set allows, in the
+    /// shape it allows it: an Allow that names the action, reaches the resource the call acts on, and whose conditions the
+    /// probe meets (it sends the `ozbox-managed=true` tag), with no Deny on it. Without this a person set up exactly as the
+    /// guide says would be refused by init's own check.
+    #[test]
+    fn every_probe_is_a_call_the_setup_policy_allows() {
+        let text = include_str!("../../../infra/aws/setup-policy.json");
+        let policy: serde_json::Value = serde_json::from_str(text).unwrap();
+        let stmts = policy["Statement"].as_array().unwrap();
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            match v {
+                serde_json::Value::String(x) => vec![x.clone()],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+                _ => vec![],
+            }
+        };
+        let action_matches = |pat: &str, action: &str| {
+            let (p, a) = (pat.to_ascii_lowercase(), action.to_ascii_lowercase());
+            match p.split_once('*') {
+                None => p == a,
+                Some((h, t)) => a.starts_with(h) && a.ends_with(t) && a.len() >= h.len() + t.len(),
+            }
+        };
+        let glob = |pattern: &str, text: &str| -> bool {
+            let parts: Vec<&str> = pattern.split('*').collect();
+            let mut rest = text;
+            for (i, part) in parts.iter().enumerate() {
+                if i == 0 {
+                    if !rest.starts_with(part) {
+                        return false;
+                    }
+                    rest = &rest[part.len()..];
+                } else if i == parts.len() - 1 {
+                    return rest.ends_with(part);
+                } else {
+                    match rest.find(part) {
+                        Some(at) => rest = &rest[at + part.len()..],
+                        None => return false,
+                    }
+                }
+            }
+            rest.is_empty()
+        };
+        let account = "123456789012";
+        let region = "us-east-1";
+        // the resource each probe acts on
+        let arn_of = |d: &ProbeDef| -> String {
+            match (d.tag_resource, d.id) {
+                (Some("snapshot"), _) => format!("arn:aws:ec2:{region}::snapshot/snap-0"),
+                (Some(r), _) => format!("arn:aws:ec2:{region}:{account}:{r}/x-0"),
+                (None, "s3_state_bucket") => {
+                    format!("arn:aws:s3:::{}", Init::bucket_name(account, region))
+                }
+                (None, _) => "*".to_string(),
+            }
+        };
+        // a request-tag condition is met only because the probe sends the tag: the one condition shape these statements use
+        let condition_met = |s: &serde_json::Value, sends_tag: bool| -> bool {
+            let Some(c) = s.get("Condition").and_then(|c| c.as_object()) else {
+                return true;
+            };
+            c.iter().all(|(op, keys)| {
+                op == "StringEquals"
+                    && keys.as_object().is_some_and(|k| {
+                        k.keys()
+                            .all(|key| key == "aws:RequestTag/ozbox-managed" && sends_tag)
+                    })
+            })
+        };
+        let defs = probe_defs(region, Some(account));
+        assert!(defs.len() >= 6);
+        for d in &defs {
+            let arn = arn_of(d);
+            let reaches = |s: &serde_json::Value| {
+                list(&s["Resource"])
+                    .iter()
+                    .any(|r| glob(&r.replace("${account_id}", account), &arn))
+            };
+            let on_action = |s: &serde_json::Value| {
+                list(&s["Action"])
+                    .iter()
+                    .any(|p| action_matches(p, d.action))
+            };
+            assert!(
+                stmts.iter().any(|s| s["Effect"] == "Allow"
+                    && on_action(s)
+                    && reaches(s)
+                    && condition_met(s, d.tag_resource.is_some())),
+                "{}: no statement of setup-policy.json allows {} on {arn} (with the tag the probe sends)",
+                d.id,
+                d.action
+            );
+            assert!(
+                !stmts
+                    .iter()
+                    .any(|s| s["Effect"] == "Deny" && on_action(s) && reaches(s)),
+                "{}: setup-policy.json denies {}",
+                d.id,
+                d.action
+            );
+        }
+        // negative control: the bucket probe fails against a policy with the state-bucket statements removed, which is what
+        // this test exists to catch (the setup identity could not even reach the bucket it must make)
+        let bucket = defs.iter().find(|d| d.id == "s3_state_bucket").unwrap();
+        let arn = arn_of(bucket);
+        let without: Vec<&serde_json::Value> = stmts
+            .iter()
+            .filter(|s| !list(&s["Action"]).iter().any(|a| a.starts_with("s3:")))
+            .collect();
+        assert!(!without.iter().any(|s| s["Effect"] == "Allow"
+            && list(&s["Action"])
+                .iter()
+                .any(|p| action_matches(p, bucket.action))
+            && list(&s["Resource"])
+                .iter()
+                .any(|r| glob(&r.replace("${account_id}", account), &arn))));
     }
 
     #[test]
@@ -3134,8 +3763,106 @@ mod tests {
         assert_eq!(c.hcloud.unwrap().region.as_deref(), Some("fsn1"));
         let aws = c.aws.unwrap();
         assert_eq!(aws.subnet_id.as_deref(), Some("subnet-0abc"));
-        assert_eq!(aws.profile.as_deref(), Some("work"));
+        // the profile init was run with is the setup identity: recorded apart, never as the daily profile
+        assert_eq!(aws.setup_profile.as_deref(), Some("work"));
+        assert_eq!(aws.profile, None);
         assert!(e.dir.path().join("config.toml.bak").exists());
+    }
+
+    const OLD_FLEET: &str = "# my fleet\nprovider = \"aws\"\ndomain = \"boxes.example.org\"\n\n[aws]\nregion = \"us-east-1\" # home region\nprofile = \"ozbox-operator\"\nsubnet_id = \"subnet-0abc\"\nimage = \"ami-0abc\"\nsecrets_key_arn = \"arn:aws:kms:us-east-1:123456789012:key/abc\"\nfleet = \"ozbox\"\n";
+
+    #[test]
+    fn persisting_into_an_existing_fleet_toml_keeps_every_key_and_the_daily_profile() {
+        let e = Env::new();
+        let fleet = e.dir.path().join("fleet.toml");
+        std::fs::write(&fleet, OLD_FLEET).unwrap();
+        // what the loader reads, and so what init must write to
+        let cands = [e.dir.path().join("config.toml"), fleet.clone()];
+        assert_eq!(
+            crate::config::Config::active_in(&cands),
+            Some(fleet.clone())
+        );
+        let mut init = e.init();
+        init.paths.config = fleet.clone();
+        let mut t = target();
+        t.profile = Some("ozbox-setup".into());
+        init.persist(
+            &t,
+            &[("state_bucket", "ozbox-state-123456789012-us-east-1")],
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&fleet).unwrap();
+        assert!(
+            text.contains("# my fleet") && text.contains("# home region"),
+            "{text}"
+        );
+        let c = crate::config::Config::load_from(&fleet).unwrap();
+        let aws = c.aws.unwrap();
+        assert_eq!(
+            aws.profile.as_deref(),
+            Some("ozbox-operator"),
+            "daily profile untouched"
+        );
+        assert_eq!(aws.setup_profile.as_deref(), Some("ozbox-setup"));
+        assert_eq!(aws.subnet_id.as_deref(), Some("subnet-0abc"));
+        assert_eq!(aws.image.as_deref(), Some("ami-0abc"));
+        assert_eq!(aws.fleet.as_deref(), Some("ozbox"));
+        assert!(aws.secrets_key_arn.is_some());
+        assert_eq!(
+            aws.state_bucket.as_deref(),
+            Some("ozbox-state-123456789012-us-east-1")
+        );
+        assert_eq!(c.domain.as_deref(), Some("boxes.example.org"));
+        assert!(e.dir.path().join("fleet.toml.bak").exists());
+        assert!(
+            !e.dir.path().join("config.toml").exists(),
+            "no second file that would shadow the first"
+        );
+    }
+
+    #[test]
+    fn a_subnet_in_the_config_is_found_missing_or_unknown() {
+        let e = Env::new();
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nsubnet_id = \"subnet-0abc\"\n",
+        )
+        .unwrap();
+        let init = e.init();
+        assert_eq!(init.configured_subnet().as_deref(), Some("subnet-0abc"));
+        e.runner.reply(Output {
+            status: Some(0),
+            stdout: r#"{"Subnets":[{"SubnetId":"subnet-0abc"}]}"#.into(),
+            stderr: String::new(),
+        });
+        assert_eq!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Found
+        );
+        e.runner.reply(Output {
+            status: Some(254),
+            stdout: String::new(),
+            stderr: "An error occurred (InvalidSubnetID.NotFound)".into(),
+        });
+        assert_eq!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Missing
+        );
+        e.runner.reply(Output {
+            status: Some(254),
+            stdout: String::new(),
+            stderr: "An error occurred (UnauthorizedOperation)".into(),
+        });
+        assert!(matches!(
+            init.check_subnet(&target(), "subnet-0abc").unwrap(),
+            SubnetState::Unknown(_)
+        ));
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nsubnet_id = \"oops\"\n",
+        )
+        .unwrap();
+        assert_eq!(init.configured_subnet(), None);
     }
 
     #[test]
@@ -3660,6 +4387,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", "")); // init with backend
+        e.runner.reply(out(0, "", "")); // state list: nothing yet
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, "")); // no such alias in the account
         e.runner.reply(out(2, KEY_PLAN, "")); // plan
         let init = e.init();
         let p = init.plan_key(&target(), "123456789012").unwrap();
@@ -3698,10 +4427,18 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(
+            0,
+            "module.key.aws_kms_key.secrets\nmodule.key.aws_kms_alias.secrets\n",
+            "",
+        ));
         e.runner.reply(out(0, "", ""));
         let p = e.init().plan_key(&target(), "123456789012").unwrap();
         assert!(p.noop && p.run.is_empty());
     }
+
+    const NO_DOCUMENT: &str = "An error occurred (InvalidDocument) when calling the DescribeDocument operation: The specified document does not exist.";
+    const NO_POLICY: &str = "An error occurred (NoSuchEntity) when calling the GetPolicy operation: Policy was not found.";
 
     const ADOPT_PLAN: &str = "Plan: 1 to add, 0 to change, 0 to destroy.\n  # module.adopt.aws_ssm_document.adopt will be created\n";
 
@@ -3718,6 +4455,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", "")); // init with backend
+        e.runner.reply(out(0, "", "")); // state list: nothing yet
+        e.runner.reply(out(254, "", NO_DOCUMENT)); // no such document
         e.runner.reply(out(2, ADOPT_PLAN, "")); // plan
         let init = e.init();
         let p = init.plan_adopt(&target(), "123456789012").unwrap();
@@ -3749,6 +4488,86 @@ mod tests {
         assert!(std::fs::read_to_string(f)
             .unwrap()
             .contains("SendOnlyTheAdoptDocument"));
+    }
+
+    const NO_COMMAND: &str = "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation:";
+    const COMMAND_DENIED: &str = "An error occurred (AccessDeniedException) when calling the GetCommandInvocation operation: User is not authorized to perform: ssm:GetCommandInvocation";
+
+    #[test]
+    fn the_operator_policy_is_written_whole_on_every_run_and_names_the_adopt_statements() {
+        let e = Env::new();
+        let init = e.init();
+        // no daily profile recorded: nothing is asked of AWS, and the file is still written
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert_eq!(r.operator_check, OperatorCheck::NotChecked);
+        assert!(e.runner.calls().is_empty());
+        let text = std::fs::read_to_string(&r.file).unwrap();
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        for sid in operator_policy::ADOPT_STATEMENTS {
+            assert!(text.contains(sid), "{sid} is in the written policy");
+        }
+        // every older statement is still there, so applying the file drops nothing the operator had
+        assert!(text.contains("TagOnCreateOnly") && text.contains("AttachTheFleetKeyPolicy"));
+        assert!(text.contains("document/ozbox-adopt-ozbox"));
+        for left in ["${account_id}", "${region}", "${fleet}"] {
+            assert!(!text.contains(left), "{left} left unfilled");
+        }
+        assert_eq!(r.adopt_statements.len(), 3);
+        // a second run writes the same file: nothing is appended or duplicated
+        let again = init.operator_policy(&target(), "123456789012").unwrap();
+        let doc2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&again.file).unwrap()).unwrap();
+        assert_eq!(doc, doc2);
+        let sids: Vec<&str> = doc["Statement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["Sid"].as_str().unwrap())
+            .collect();
+        let unique: std::collections::BTreeSet<_> = sids.iter().collect();
+        assert_eq!(sids.len(), unique.len());
+        // a fleet in the config is the fleet in the policy
+        std::fs::write(
+            e.dir.path().join("config.toml"),
+            "[aws]\nfleet = \"acme\"\n",
+        )
+        .unwrap();
+        let r = init.operator_policy(&target(), "123456789012").unwrap();
+        assert!(std::fs::read_to_string(&r.file)
+            .unwrap()
+            .contains("document/ozbox-adopt-acme"));
+    }
+
+    #[test]
+    fn the_daily_sign_in_is_asked_with_a_read_of_a_command_that_does_not_exist() {
+        for (reply, want) in [
+            (out(254, "", NO_COMMAND), OperatorCheck::Allowed),
+            (out(254, "", COMMAND_DENIED), OperatorCheck::Denied),
+            (
+                out(255, "", "Error loading SSO Token"),
+                OperatorCheck::Unknown,
+            ),
+        ] {
+            let e = Env::new();
+            std::fs::write(
+                e.dir.path().join("config.toml"),
+                "[aws]\nprofile = \"ozbox-operator\"\n",
+            )
+            .unwrap();
+            e.runner.reply(reply);
+            let r = e.init().operator_policy(&target(), "123456789012").unwrap();
+            assert_eq!(r.operator_check, want);
+            let calls = e.runner.calls();
+            assert_eq!(calls.len(), 1);
+            let args = calls[0].args.join(" ");
+            // the operator's own profile, a read, and nothing sent
+            assert!(
+                args.contains("ssm get-command-invocation")
+                    && args.contains("--profile ozbox-operator"),
+                "{args}"
+            );
+            assert!(!args.contains("send-command"));
+        }
     }
 
     #[test]
@@ -4014,6 +4833,8 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "", "")); // state list
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, "")); // no alias
         e.runner.reply(out(2, KEY_PLAN, ""));
         let init = e.init();
         let p = init.plan_key(&target(), "123456789012").unwrap();
@@ -4136,6 +4957,9 @@ mod tests {
         e.runner
             .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
         e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "", "")); // state list
+        e.runner.reply(out(254, "", NO_POLICY)); // no session policy yet
+        e.runner.reply(out(254, "", NO_POLICY)); // no parameters policy yet
         e.runner.reply(out(2, "Plan: 1 to add, 0 to change, 0 to destroy.\n  # module.policy.aws_iam_policy.session will be created\n", ""));
         let init = e.init();
         let p = init.plan_box_policy(&target(), "123456789012").unwrap();
@@ -4152,5 +4976,382 @@ mod tests {
             .unwrap();
         assert!(main.contains("aws-box-policy") || main.contains("module \"policy\""));
         assert!(!main.contains("AmazonSSM"));
+    }
+
+    // ----- adopting what is already there (ADR 0053) -----
+
+    const KEY_ID: &str = "1234abcd-12ab-34cd-56ef-1234567890ab";
+    const KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+    const OTHER_KEY_ARN: &str =
+        "arn:aws:kms:us-east-1:123456789012:key/ffffffff-12ab-34cd-56ef-1234567890ab";
+
+    fn aliases_with(alias: &str) -> String {
+        format!(
+            r#"{{"Aliases":[{{"AliasName":"alias/aws/ebs","TargetKeyId":"aaaa"}},{{"AliasName":"{alias}","TargetKeyId":"{KEY_ID}"}}]}}"#
+        )
+    }
+
+    const TAGGED_KEY: &str = r#"{"Tags":[{"TagKey":"ozbox-managed","TagValue":"true"},{"TagKey":"ozbox-fleet","TagValue":"ozbox"}]}"#;
+    const OTHER_KEY: &str = r#"{"Tags":[{"TagKey":"team","TagValue":"data"}]}"#;
+    const TAGGED_DOCUMENT: &str = r#"{"Document":{"Name":"ozbox-adopt-ozbox","Tags":[{"Key":"ozbox-managed","Value":"true"}]}}"#;
+    const TAGGED_POLICY: &str =
+        r#"{"Policy":{"PolicyName":"x","Tags":[{"Key":"ozbox-managed","Value":"true"}]}}"#;
+    const DENIED: &str = "An error occurred (AccessDeniedException) when calling the ListResourceTags operation: not authorized";
+
+    /// Queue what every state-module plan reads first: the bucket, the OpenTofu version and the backend init.
+    fn queue_prologue(e: &Env) {
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, r#"{"terraform_version":"1.10.3"}"#, ""));
+        e.runner.reply(out(0, "", ""));
+    }
+
+    fn policy_env() -> Env {
+        let e = key_env();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-box-policy")).unwrap();
+        std::fs::create_dir_all(e.dir.path().join("modules/aws-adopt-command")).unwrap();
+        e
+    }
+
+    fn adopt_tf(e: &Env, dir: &str) -> String {
+        std::fs::read_to_string(
+            e.dir
+                .path()
+                .join("work")
+                .join(dir)
+                .join("us-east-1/adopt.tf"),
+        )
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn an_existing_key_and_alias_are_adopted_not_created_a_second_time() {
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", "")); // state list: this step has no state yet
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(0, TAGGED_KEY, "")); // the key carries the tag
+                                                // the key's policy differs from the module's: shown as an in-place change, never a replacement
+        e.runner.reply(out(2, "Plan: 2 to import, 0 to add, 1 to change, 0 to destroy.\n  # module.key.aws_kms_key.secrets will be updated in-place\n  # (imported from \"1234abcd\")\n", ""));
+        let p = e.init().plan_key(&target(), "123456789012").unwrap();
+        let said: Vec<&str> = p.changes.iter().map(|c| c.description.as_str()).collect();
+        assert!(
+            said.iter().any(|d| d.starts_with("Adopt existing KMS key")
+                && d.contains(KEY_ID)
+                && d.contains("module.key.aws_kms_key.secrets")),
+            "{said:?}"
+        );
+        assert!(said
+            .iter()
+            .any(|d| d.starts_with("Adopt existing KMS alias")
+                && d.contains("alias/ozbox-ozbox-secrets")));
+        // no create for either, and the remaining difference is listed honestly
+        assert!(
+            !p.changes.iter().any(|c| c.kind == "network.create"),
+            "{said:?}"
+        );
+        assert!(p.changes.iter().any(|c| c.kind == "network.update"));
+        assert!(!p.noop && !p.run.is_empty());
+        // the import blocks sit beside the generated root, one for each, by the ids found
+        let tf = adopt_tf(&e, "secrets-key");
+        assert!(
+            tf.contains("to = module.key.aws_kms_key.secrets")
+                && tf.contains(&format!("id = \"{KEY_ID}\""))
+        );
+        assert!(
+            tf.contains("to = module.key.aws_kms_alias.secrets")
+                && tf.contains("id = \"alias/ozbox-ozbox-secrets\"")
+        );
+        // lookups only read, and the plan is written before anything is applied
+        let calls = e.runner.calls();
+        assert!(calls
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "list-aliases")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "apply")));
+        assert!(p.notes.iter().any(|n| n.contains("Adopt existing")));
+    }
+
+    #[test]
+    fn a_key_the_config_already_records_is_adopted_when_the_alias_is_gone_and_a_disagreement_is_refused(
+    ) {
+        // recorded, no alias: the recorded key is adopted and only the alias is made
+        let e = key_env();
+        e.init()
+            .persist(
+                &target(),
+                &[("secrets_key_arn", KEY_ARN), ("fleet", "ozbox")],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, r#"{"Aliases":[]}"#, ""));
+        e.runner.reply(out(0, TAGGED_KEY, ""));
+        e.runner.reply(out(2, "Plan: 1 to import, 1 to add, 0 to change, 0 to destroy.\n  # module.key.aws_kms_alias.secrets will be created\n", ""));
+        let p = e.init().plan_key(&target(), "123456789012").unwrap();
+        assert!(p
+            .changes
+            .iter()
+            .any(|c| c.kind == "adopt.import" && c.description.contains(KEY_ID)));
+        assert!(!p
+            .changes
+            .iter()
+            .any(|c| c.description.starts_with("Create kms key")));
+        assert!(adopt_tf(&e, "secrets-key").contains("aws_kms_key.secrets"));
+        assert!(!adopt_tf(&e, "secrets-key").contains("aws_kms_alias"));
+        // recorded one key, the alias points at another: neither is picked
+        let e = key_env();
+        e.init()
+            .persist(
+                &target(),
+                &[("secrets_key_arn", OTHER_KEY_ARN), ("fleet", "ozbox")],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        let err = e.init().plan_key(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_mismatch");
+    }
+
+    #[test]
+    fn an_existing_adopt_document_is_imported() {
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, TAGGED_DOCUMENT, ""));
+        e.runner.reply(out(0, "", "")); // plan: nothing else differs
+        let p = e.init().plan_adopt(&target(), "123456789012").unwrap();
+        assert!(
+            !p.noop && !p.run.is_empty(),
+            "an import must still be applied to record it"
+        );
+        assert!(
+            p.changes.len() == 1
+                && p.changes[0]
+                    .description
+                    .contains("Adopt existing Systems Manager document ozbox-adopt-ozbox")
+        );
+        let tf = adopt_tf(&e, "adopt-command");
+        assert!(
+            tf.contains("to = module.adopt.aws_ssm_document.adopt")
+                && tf.contains("id = \"ozbox-adopt-ozbox\"")
+        );
+    }
+
+    #[test]
+    fn existing_box_policies_are_imported_and_the_next_plan_shows_no_change() {
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, TAGGED_POLICY, ""));
+        e.runner.reply(out(0, TAGGED_POLICY, ""));
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(
+            p.changes
+                .iter()
+                .filter(|c| c.kind == "adopt.import")
+                .count(),
+            2
+        );
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.session\n"));
+        assert!(tf.contains("id = \"arn:aws:iam::123456789012:policy/ozbox-box-session-manager\""));
+        assert!(tf.contains("id = \"arn:aws:iam::123456789012:policy/ozbox-box-parameters\""));
+        // once applied they are in the state: no lookup, no import file, nothing to do
+        let e2 = policy_env();
+        std::fs::create_dir_all(e2.dir.path().join("work/box-policy/us-east-1")).unwrap();
+        std::fs::write(
+            e2.dir.path().join("work/box-policy/us-east-1/adopt.tf"),
+            "stale",
+        )
+        .unwrap();
+        queue_prologue(&e2);
+        e2.runner.reply(out(
+            0,
+            "module.policy.aws_iam_policy.session\nmodule.policy.aws_iam_policy.parameters\n",
+            "",
+        ));
+        e2.runner.reply(out(0, "", ""));
+        let p = e2
+            .init()
+            .plan_box_policy(&target(), "123456789012")
+            .unwrap();
+        assert!(p.noop && p.run.is_empty());
+        assert!(!e2
+            .runner
+            .calls()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "get-policy")));
+        assert!(!e2
+            .dir
+            .path()
+            .join("work/box-policy/us-east-1/adopt.tf")
+            .exists());
+    }
+
+    #[test]
+    fn the_counted_policies_are_looked_for_only_when_the_module_makes_them() {
+        let e = policy_env();
+        e.init()
+            .persist(
+                &target(),
+                &[
+                    ("secrets_key_arn", KEY_ARN),
+                    ("fleet", "ozbox"),
+                    ("session_log_bucket", "logs-bucket"),
+                ],
+            )
+            .unwrap();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        for _ in 0..4 {
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+        }
+        e.runner.reply(out(0, "", ""));
+        let p = e.init().plan_box_policy(&target(), "123456789012").unwrap();
+        assert_eq!(p.changes.len(), 4);
+        let tf = adopt_tf(&e, "box-policy");
+        assert!(tf.contains("to = module.policy.aws_iam_policy.fleet_key[0]"));
+        assert!(tf.contains("to = module.policy.aws_iam_policy.session_logs[0]"));
+        assert!(tf.contains("policy/ozbox-box-fleet-key-ozbox"));
+    }
+
+    #[test]
+    fn a_look_alike_without_the_ozbox_tag_is_refused_and_says_why() {
+        // a document
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(
+            0,
+            r#"{"Document":{"Name":"ozbox-adopt-ozbox","Tags":[{"Key":"team","Value":"x"}]}}"#,
+            "",
+        ));
+        let err = e.init().plan_adopt(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(
+            err.message.contains("ozbox-adopt-ozbox")
+                && err.message.contains("not tagged ozbox-managed=true"),
+            "{err}"
+        );
+        assert!(err.fix.is_some());
+        assert!(!adopt_tf(&e, "adopt-command").contains("import"));
+        // a key whose tags are there but not ours
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(0, OTHER_KEY, ""));
+        assert_eq!(
+            e.init()
+                .plan_key(&target(), "123456789012")
+                .unwrap_err()
+                .code,
+            "adopt_untagged"
+        );
+        // a key whose tags the setup rights cannot read is the same refusal, with its own reason
+        let e = key_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner
+            .reply(out(0, &aliases_with("alias/ozbox-ozbox-secrets"), ""));
+        e.runner.reply(out(254, "", DENIED));
+        let err = e.init().plan_key(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(
+            err.message.contains("could not read it as one of its own"),
+            "{err}"
+        );
+        // a policy
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, r#"{"Policy":{"Tags":[]}}"#, ""));
+        let err = e
+            .init()
+            .plan_box_policy(&target(), "123456789012")
+            .unwrap_err();
+        assert_eq!(err.code, "adopt_untagged");
+        assert!(err.message.contains("ozbox-box-session-manager"));
+    }
+
+    #[test]
+    fn a_lookup_that_cannot_answer_stops_the_step_instead_of_planning_a_create() {
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(254, "", "An error occurred (AccessDeniedException) when calling the DescribeDocument operation: nope"));
+        let err = e.init().plan_adopt(&target(), "123456789012").unwrap_err();
+        assert_eq!(err.code, "adopt_lookup_failed");
+        // an answer that is not readable is not "absent" either
+        let e = adopt_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(0, "not json", ""));
+        assert_eq!(
+            e.init()
+                .plan_adopt(&target(), "123456789012")
+                .unwrap_err()
+                .code,
+            "adopt_lookup_failed"
+        );
+        // and the plan is never reached
+        assert!(!e
+            .runner
+            .calls()
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "plan")));
+    }
+
+    #[test]
+    fn a_plan_that_would_replace_or_remove_what_was_adopted_is_refused() {
+        for verb in ["must be replaced", "will be destroyed"] {
+            let e = policy_env();
+            queue_prologue(&e);
+            e.runner.reply(out(0, "", ""));
+            e.runner.reply(out(0, TAGGED_POLICY, ""));
+            e.runner.reply(out(254, "", NO_POLICY));
+            e.runner.reply(out(
+                2,
+                &format!("Plan: 1 to import, 1 to add, 0 to change, 1 to destroy.\n  # module.policy.aws_iam_policy.session {verb}\n  # module.policy.aws_iam_policy.parameters will be created\n"),
+                "",
+            ));
+            let err = e
+                .init()
+                .plan_box_policy(&target(), "123456789012")
+                .unwrap_err();
+            assert_eq!(err.code, "adopt_replace", "{verb}");
+            assert!(err.message.contains("module.policy.aws_iam_policy.session"));
+        }
+        // a replacement of something that was NOT adopted is not this refusal's business
+        let e = policy_env();
+        queue_prologue(&e);
+        e.runner.reply(out(0, "", ""));
+        e.runner.reply(out(254, "", NO_POLICY));
+        e.runner.reply(out(254, "", NO_POLICY));
+        e.runner.reply(out(2, "Plan: 1 to add, 1 to destroy.\n  # module.policy.aws_iam_policy.session must be replaced\n", ""));
+        assert!(e.init().plan_box_policy(&target(), "123456789012").is_ok());
+    }
+
+    #[test]
+    fn the_import_file_is_written_for_what_was_found_and_removed_when_nothing_is() {
+        let d = tempfile::tempdir().unwrap();
+        let one = adopt::Adopted {
+            address: "module.x.aws_thing.y[0]".into(),
+            what: "thing",
+            id: "abc-123".into(),
+        };
+        adopt::write_imports(d.path(), &[one]).unwrap();
+        let text = std::fs::read_to_string(d.path().join(adopt::ADOPT_FILE)).unwrap();
+        assert!(text.contains("import {\n  to = module.x.aws_thing.y[0]\n  id = \"abc-123\"\n}"));
+        adopt::write_imports(d.path(), &[]).unwrap();
+        assert!(!d.path().join(adopt::ADOPT_FILE).exists());
+        // removing what is not there is not an error
+        adopt::write_imports(d.path(), &[]).unwrap();
     }
 }

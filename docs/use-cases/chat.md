@@ -43,6 +43,12 @@ and it is a task on the board. Each message is one more turn of the same convers
 | `/budget +5` | add five dollars to its spend limit. **In the dashboard's Chat only**, like `/stop`: a chat app answers with a link and changes nothing |
 | `/tasks`, `/switch <task>` | your sessions; follow another one |
 | `/sessions`, `/attach <session>`, `/adopt <session>`, `/detach` | agents in your own terminals (see 5) |
+| `/fleet`, `/box list`, `/whoami`, `/help` | Telegram: the boxes and their state, who this link is and what it may do, and what a chat can do |
+| `/lock`, `/unlink` | Telegram: make this link read-only until a passkey lifts the lock, or cut it. Anyone linked may; they only make Telegram less able |
+
+**In Telegram, talking to an agent is something you allow in the dashboard first**, with a passkey, for each box and for a few days
+at a time: see [Control your boxes from Telegram](telegram-control.md). Reading (`/status`, `/fleet`, `/tasks`, `/log`) needs nothing
+beyond a link. In Slack and WhatsApp the rules are the ones described here.
 
 **Status:** Preview.
 
@@ -66,9 +72,11 @@ shown only to the person it belongs to, and gone when the dashboard restarts. Th
 
 ## 4. Only you are heard
 
-Only people you have linked can talk to your agents. Telegram uses the pairing you already have. For Slack and WhatsApp,
-**Chat → Other chats** gives a one-time code to send to the bot in a direct message. A message from anyone else gets no
-answer. A forwarded or quoted message is treated as someone else's words, not an instruction. Each person is held to twenty
+Only people you have linked can talk to your agents. **Telegram is linked from your Account page with a passkey**, the other way
+round from the other apps: you open a pairing window, the bot answers `/link` only while it is open, and you type its code back
+and confirm with a second passkey ([the steps](telegram-control.md)). A chat linked the old way keeps receiving alerts and may read,
+and must be linked again to do more. For Slack and WhatsApp, **Chat → Other chats** gives a one-time code to send to the bot in a
+direct message. A message from anyone else gets no answer. A forwarded or quoted message is treated as someone else's words, not an instruction. Each person is held to twenty
 messages a minute. No key or token is ever sent to a chat, and what an agent printed is shown to you, never obeyed.
 
 **Status:** Preview.

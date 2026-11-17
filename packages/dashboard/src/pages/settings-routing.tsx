@@ -22,7 +22,7 @@ import { CHANNEL_IDS, defaultPerson, preview } from '../lib/routing';
 import { t, type MessageKey } from '../lib/i18n';
 import { turnOnThisDevice } from '../lib/push';
 import { getTimezoneOptions } from '../lib/timezones';
-import { FieldError, PairingSheet } from './settings-apps';
+import { FieldError } from './settings-apps';
 
 interface Props {
   status: AppsStatus;
@@ -138,7 +138,6 @@ function PersonSheet({ open, onOpenChange, personId, status, settings, save, rel
   const existing = personId ? settings.routing.people[personId] : undefined;
   const [err, setErr] = useState<string | null>(null);
   const [busyDevice, setBusyDevice] = useState(false);
-  const [pairOpen, setPairOpen] = useState(false);
   const zones = useMemo(() => getTimezoneOptions(), []);
   const names = useChannelNames(status, settings);
   const form = useForm<Form>({ resolver: zodResolver(schema), defaultValues: toForm(personId ?? '', existing ?? defaultPerson()) });
@@ -339,10 +338,9 @@ function PersonSheet({ open, onOpenChange, personId, status, settings, save, rel
                   })}
                 </ul>
               )}
-              <Button type="button" variant="outline" size="sm" className="max-lg:h-11" disabled={isNew || !status.telegram.configured} onClick={() => setPairOpen(true)}>
-                {t('routing.chat_pair')}
+              <Button asChild variant="outline" size="sm" className="max-lg:h-11" disabled={isNew || !status.telegram.configured}>
+                <a href="/account" data-testid="routing-chat-link-account">{t('routing.chat_pair')}</a>
               </Button>
-              {personId ? <PairingSheet open={pairOpen} onOpenChange={setPairOpen} status={status} reload={reload} person={personId} /> : null}
             </section>
 
             <section className="space-y-1 rounded-md border bg-muted/40 p-3" aria-live="polite" data-testid="routing-preview">

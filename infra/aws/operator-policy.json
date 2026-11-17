@@ -295,6 +295,29 @@
       }
     },
     {
+      "Sid": "SendOnlyTheAdoptDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:${region}:${account_id}:document/ozbox-adopt-${fleet}"
+    },
+    {
+      "Sid": "ToBoxesOzBoxManages",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:${region}:${account_id}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/ozbox-managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "ReadACommandThatWasSent",
+      "Effect": "Allow",
+      "Action": "ssm:GetCommandInvocation",
+      "Resource": "*"
+    },
+    {
       "Sid": "PassOzboxRolesToEc2Only",
       "Effect": "Allow",
       "Action": "iam:PassRole",

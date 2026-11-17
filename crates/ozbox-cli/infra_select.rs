@@ -2,12 +2,15 @@
 // of this crate (which proves the rule), so the two cannot drift. The same rule is `ozbox_core::infra::is_bundle_path`
 // and `scripts/first-boot-hash.sh`; a test holds all three to the repository tree.
 //
-// Only what a module is made of is carried: OpenTofu files, the first-boot template and its scripts. Anything else on
+// Only what a module is made of is carried: OpenTofu files, the first-boot template and its scripts, and the YAML/JSON data
+// files a module reads with `file()` (a module that reads a file the program does not carry cannot be planned from an
+// installed program: `tests/` of this crate parse every such reference). Anything else on
 // disk is left out, and a state, variables or plan file (which a module folder held in versions before 2026-11-10, and
 // which can hold secrets) refuses the build instead of being carried into every binary.
 
-/// The kinds of file a box module is made of.
-const CARRIED_EXTENSIONS: &[&str] = &["tf", "tftpl", "sh"];
+/// The kinds of file a box module is made of. State, variables and plan files are refused before this is asked
+/// (`is_state_name`), so `json` cannot carry a `*.tfvars.json`.
+const CARRIED_EXTENSIONS: &[&str] = &["tf", "tftpl", "sh", "yaml", "yml", "json"];
 
 /// Is `name` a file the program carries?
 fn is_carried_name(name: &str) -> bool {

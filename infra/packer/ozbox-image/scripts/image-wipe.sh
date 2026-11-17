@@ -11,11 +11,16 @@ done
 for home in "$r/home/ubuntu" "$r/root"; do
   rm -f "$home/.ssh/authorized_keys"
 done
-# the build instance's journal (its Session Manager and login lines). journald is still running at this point, so ask it to
-# rotate and drop what it has, then remove what is left on disk. Skipped under a test root.
+# the build instance's journal (its Session Manager and login lines). journald is still running at this point, so flush
+# what it holds in memory, rotate and drop what it has, and then make it RELINQUISH /var: it keeps writing only to /run
+# (memory) from here on, so nothing it logs while the instance stops lands in /var/log/journal after the wipe below
+# (that is how a second boot, the build's, leaked into the image's journal). Only then remove what is left on disk.
+# Skipped under a test root.
 if [ -z "$r" ] && command -v journalctl >/dev/null 2>&1; then
+  journalctl --flush >/dev/null 2>&1
   journalctl --rotate >/dev/null 2>&1
   journalctl --vacuum-time=1s >/dev/null 2>&1
+  journalctl --relinquish-var >/dev/null 2>&1
 fi
 [ -d "$r/var/log/journal" ] && find "$r/var/log/journal" -mindepth 1 -delete
 exit 0

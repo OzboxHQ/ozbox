@@ -9,7 +9,7 @@ dials out to, never an open port. You can pause it, resize it, clone it, throw i
 Nothing is hosted by this project. There is no Oz Box cloud, account, relay or default domain: the boxes live in **your**
 cloud account, the dashboard runs on **your** computer or behind **your** domain, and the keys are **yours**.
 
-> **Status: Beta (0.2.0-beta.0).** The single box is real and has been used on a real cloud account. **Beta does not mean
+> **Status: Beta (0.2.0-beta.3).** The single box is real and has been used on a real cloud account. **Beta does not mean
 > every feature has been proven:** anything marked **Preview** is built and tested in CI but has not been run on a real box,
 > and the agent-side controls are mostly in that group. [What works and what does not](#status) says exactly what.
 
@@ -56,8 +56,8 @@ anything, and never uses `sudo`. Pre-releases are skipped when you ask for "the 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/OzboxHQ/ozbox/main/scripts/install.sh
 less install.sh                                   # read it first
-sh install.sh --version 0.2.0-beta.0              # puts ozbox in ~/.local/bin
-ozbox --version                                   # ozbox 0.2.0-beta.0
+sh install.sh --version 0.2.0-beta.3              # puts ozbox in ~/.local/bin
+ozbox --version                                   # ozbox 0.2.0-beta.3
 ```
 
 Nothing else is published for this release: no Homebrew formula, no crates.io or npm package. To build the program
@@ -109,7 +109,7 @@ Run `ozbox <command> --help` for every option. Every change takes `--dry-run`, `
 | `ozbox create <name> --size M` | Create a box (shows the plan first); `--tools`, `--profile`, `--label key=value`, `--disk` |
 | `ozbox list` · `show <name>` · `sizes` · `providers` | List boxes, show one, the size catalogue, what each provider can do |
 | `ozbox pause` · `resume` · `resize` · `snapshot` · `clone` · `destroy` | Change a box; each shows its plan and asks first. `destroy` asks you to type the name and keeps a final snapshot |
-| `ozbox upgrade <name>` | Replace the system disk from a newer signed image, keep `/work`, run the self-test. An image whose signature cannot be verified is refused unless `--allow-unverified-image` is given; an upgrade that would lose the box's secrets store is refused unless `--accept-new-secrets-store` is given. On AWS, a box already on the image whose machine was made with another first boot (or has no record of it) is replaced from the same image (`--reprovision` forces it); a signed AWS image built with another first-boot configuration is refused unless `--allow-first-boot-mismatch` is given |
+| `ozbox upgrade <name>` | Replace the system disk from a newer signed image, keep `/work`, run the self-test. An image whose signature cannot be verified is refused unless `--allow-unverified-image` is given; an upgrade that would lose the box's secrets store is refused unless `--accept-new-secrets-store` is given (on AWS the old system disk is first kept as an encrypted snapshot, so the old store's key can be read back; `--no-pre-upgrade-snapshot` turns that off). On AWS, a box already on the image whose machine was made with another first boot (or has no record of it) is replaced from the same image (`--reprovision` forces it); a signed AWS image built with another first-boot configuration is refused unless `--allow-first-boot-mismatch` is given |
 | `ozbox infra` | The box modules and first-boot configuration this program renders: its version, their hashes and the folder in use |
 | `ozbox adopt-fleet-key <name>` | Move an AWS box's secrets store from a key kept in a file to your fleet's KMS key, in place, so an upgrade keeps it (the box re-wraps its own store; nothing is entered again) |
 | `ozbox adopt <name>` | Rebuild a box's OpenTofu state from its cloud resources when the state is missing (AWS) |
@@ -208,7 +208,7 @@ upgraded; a machine outside the fleet is the better home ([ADR 0010](docs/adr/00
 | Tamper-evident log | A hash chain with sealed checkpoints; `ozbox audit verify` | [ADR 0022](docs/adr/0022-permission-engine-and-tamper-evident-audit-log.md) |
 | Agents never hold a model key | A credential broker and per-run tokens | [ADR 0017](docs/adr/0017-credential-broker-per-run-tokens.md) |
 | Secrets out of reach | Envelope encryption, a separate user, a runner user, a closed network for declared commands, a commit barrier | [ADR 0018](docs/adr/0018-secrets-are-encrypted-and-out-of-the-agents-reach.md), [ADR 0023](docs/adr/0023-the-supervisor-egress-approvals-and-the-commit-barrier.md), [ADR 0029](docs/adr/0029-production-secrets-have-no-standing-access.md) |
-| Reviewed memory and skills | Agents propose; a person approves the note or the skill's exact hash | [ADR 0024](docs/adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md), [ADR 0025](docs/adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md) |
+| Reviewed memory and skills | Agents propose; a person approves the note or the skill's exact hash | [ADR 0024](docs/adr/0024-agent-memory-markdown-in-git-reviewed-before-agents-read-it.md), [ADR 0025](docs/adr/0025-skills-are-folders-usable-only-after-a-person-approves-their-hash.md), [ADR 0051](docs/adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again.md) |
 | Signed images | An upgrade verifies the image's release signature first | [infra/README.md](infra/README.md), [ADR 0010](docs/adr/0010-bring-your-own-tunnels.md) |
 
 Each record also says what it does **not** cover. In short: egress limits apply to a project's declared commands, not to an
@@ -221,7 +221,7 @@ claim of certification or compliance.
 
 ## Status
 
-Oz Box is in **Beta**, version 0.2.0-beta.0. The latest 0.2.x release is the supported one (see [SECURITY.md](SECURITY.md)),
+Oz Box is in **Beta**, version 0.2.0-beta.3. The latest 0.2.x release is the supported one (see [SECURITY.md](SECURITY.md)),
 and the signed program is published on GitHub Releases only (no package-manager packages yet). A Beta may still break between
 releases (see [docs/releases.md](docs/releases.md)). We mark every worked example with one of three words, and update them as things are proven:
 
@@ -235,7 +235,7 @@ destroy, upgrading a box onto a newer image, and the `ozbox admin` repair path.
 
 **Built and tested, not yet proven on a real box:** supervised agent runs, the permission engine and Production grants, the tool
 host, the audit log, the credential broker and encrypted secret store, the runner user and egress proxy, memory and skills,
-orchestration, schedules and triggers, chat, local models, repository backups, bill reconciliation, the dashboard running as a
+orchestration, schedules and triggers, chat, linking Telegram with a passkey (phase P1 of [ADR 0050](docs/adr/0050-telegram-is-a-control-surface-a-closed-table-of-acts-delegated-in-advance-by-passkey-and-never-an-approver.md); box power and `/run` are not built), local models, repository backups, bill reconciliation, the dashboard running as a
 service behind your own domain, and the box memory guard (compressed swap, protected services, capped jobs; its real-box proof is
 `scripts/real-box-memory-proof.sh`). Hetzner Cloud support is covered by simulated tests and has no clone.
 

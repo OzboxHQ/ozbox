@@ -23,12 +23,11 @@ use crate::pricing::{self, box_cost, PriceSource, HOURS_PER_MONTH};
 use crate::secrets;
 use crate::settings::{valid_id, WebhookConfig};
 use crate::state::{Observed, TelegramChat};
-use crate::telegram;
 
 const ALERT_EVERY_MS: u64 = 60_000;
 const PRICE_CHECK_EVERY_MS: u64 = 5 * 60_000;
-const TELEGRAM_IDLE_EVERY_MS: u64 = 30_000;
-const TELEGRAM_PAIRING_EVERY_MS: u64 = 4_000;
+/// How soon the next poll is considered after one ends (or when there was nothing to poll for).
+const TELEGRAM_RETRY_EVERY_MS: u64 = 1_000;
 const ROUTING_EVERY_MS: u64 = 30_000;
 const TEST_SEND_BOUND: std::time::Duration = std::time::Duration::from_secs(12);
 
@@ -106,14 +105,11 @@ impl App {
             self.start_prices(now_ms);
         }
         if now_ms >= self.schedule.next_telegram_ms && !self.schedule.telegram_busy {
-            self.schedule.next_telegram_ms = now_ms
-                + if self.pairing.is_some() {
-                    TELEGRAM_PAIRING_EVERY_MS
-                } else {
-                    TELEGRAM_IDLE_EVERY_MS
-                };
+            // a poll waits up to thirty seconds at the vendor on a thread of its own, so the next one may start at once
+            self.schedule.next_telegram_ms = now_ms + TELEGRAM_RETRY_EVERY_MS;
             self.start_telegram();
         }
+        self.tg_sweep(now_ms);
         if now_ms >= self.schedule.next_alerts_ms && !self.schedule.alerts_busy {
             self.schedule.next_alerts_ms = now_ms + ALERT_EVERY_MS;
             self.start_alerts(now_ms);
@@ -181,12 +177,12 @@ impl App {
                         self.current_actor = actor;
                         self.orphans_deleted(at, &plan_id, &results, rescan);
                     }
-                    Done::TelegramUpdates { token, result } => {
-                        self.schedule.telegram_busy = false;
-                        if let Ok((updates, next)) = result {
-                            self.react_telegram(&token, &updates, next, now_ms);
-                        }
-                    }
+                    Done::TelegramPoll(p) => self.tg_polled(*p, now_ms),
+                    Done::TelegramSent {
+                        chat_id,
+                        message_id,
+                        expires_ms,
+                    } => self.tg_note_sent(chat_id, message_id, expires_ms),
                     Done::Observed {
                         now_ms: at,
                         budget,
@@ -234,7 +230,7 @@ impl App {
     }
 
     fn start_prices(&mut self, now_ms: u64) {
-        let Ok(recs) = self.provider.list() else {
+        let Some(recs) = self.boxes_quietly() else {
             return;
         };
         let wanted = pricing::wanted_types(&recs);
@@ -261,7 +257,7 @@ impl App {
 
     /// Fetch public prices when the cache says so (or `force`). A failure keeps the old prices and says why.
     fn refresh_prices(&mut self, now_ms: u64, force: bool) -> Option<Result<(), String>> {
-        let recs = self.provider.list().ok()?;
+        let recs = self.boxes_quietly()?;
         let wanted = pricing::wanted_types(&recs);
         if !force && !self.prices.refresh_due(now_ms, &wanted) {
             return None;
@@ -288,7 +284,7 @@ impl App {
     /// Start an alert round: account the cost (cheap, here), then ask every running box how it is doing (slow, on the
     /// worker). The result comes back as [`Done::Observed`].
     fn start_alerts(&mut self, now_ms: u64) {
-        let Ok(recs) = self.provider.list() else {
+        let Some(recs) = self.boxes_quietly() else {
             return;
         };
         // Cost first: the budget alert needs this month's total.
@@ -553,108 +549,9 @@ impl App {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Ask Telegram for new messages on the worker, when the bot is on and someone is (or is being) paired.
-    fn start_telegram(&mut self) {
-        if !self.settings.apps.telegram.enabled {
-            return;
-        }
-        if self.pairing.is_none() && self.state.telegram.chats.is_empty() {
-            return;
-        }
-        let Ok(Some(token)) = self.secrets.get("telegram-bot-token") else {
-            return;
-        };
-        let http = Arc::clone(&self.http);
-        let offset = self.state.telegram.offset;
-        let job: Job = Box::new(move || Done::TelegramUpdates {
-            result: telegram::fetch_updates(http.as_ref(), &token, offset),
-            token,
-        });
-        if self.submit(job) {
-            self.schedule.telegram_busy = true;
-        }
-    }
-
-    /// New Telegram messages arrived: update pairing state here, and send the replies from the worker.
-    fn react_telegram(&mut self, token: &str, updates: &[Value], next: i64, now_ms: u64) {
-        let mut changed = next != self.state.telegram.offset;
-        self.state.telegram.offset = next;
-        let mut outgoing: Vec<(i64, String)> = Vec::new();
-        let mut chat_msgs: Vec<(i64, String, bool)> = Vec::new();
-        for u in updates {
-            match telegram::react(u, &self.state.telegram.chats, &mut self.pairing, now_ms) {
-                telegram::Reaction::Ignore => {}
-                telegram::Reaction::Paired { chat } => {
-                    let id = chat.id;
-                    let mut chat = chat;
-                    if chat.person.is_none() {
-                        // Pairing again from the same chat keeps whom it was linked to.
-                        chat.person = self
-                            .state
-                            .telegram
-                            .chats
-                            .iter()
-                            .find(|c| c.id == id)
-                            .and_then(|c| c.person.clone());
-                    }
-                    self.state.telegram.chats.retain(|c| c.id != id);
-                    self.state.telegram.chats.push(chat);
-                    self.log_activity("pair telegram chat", "-", None, "paired");
-                    outgoing.push((
-                        id,
-                        "Paired. Oz Box alerts will arrive in this chat. Send /status for the fleet.".into(),
-                    ));
-                    changed = true;
-                }
-                telegram::Reaction::Status { chat_id } => {
-                    // the fleet summary, unless this chat follows a session: then /status is about the session
-                    if self
-                        .state
-                        .chat
-                        .binds
-                        .contains_key(&crate::chat::gateway::conv_key(
-                            crate::chat::gateway::Channel::Telegram,
-                            &chat_id.to_string(),
-                        ))
-                    {
-                        chat_msgs.push((chat_id, "/status".to_string(), false));
-                    } else {
-                        outgoing.push((chat_id, self.fleet_summary()))
-                    }
-                }
-                telegram::Reaction::Chat {
-                    chat_id,
-                    text,
-                    forwarded,
-                } => chat_msgs.push((chat_id, text, forwarded)),
-                // a button decides nothing: a chat only notifies
-                telegram::Reaction::Button { .. } => {}
-            }
-        }
-        if !outgoing.is_empty() {
-            let http = Arc::clone(&self.http);
-            let token = token.to_string();
-            let job: Job = Box::new(move || {
-                for (chat, text) in outgoing {
-                    let _ = telegram::send_text(http.as_ref(), &token, chat, &text);
-                }
-                Done::Nothing
-            });
-            let _ = self.submit(job);
-        }
-        for (chat_id, text, forwarded) in chat_msgs {
-            self.chat_telegram_message(chat_id, &text, forwarded, now_ms);
-        }
-        if changed {
-            self.save_state();
-            self.version
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     /// Names and states only.
     pub(super) fn fleet_summary(&self) -> String {
-        match self.provider.list() {
+        match self.boxes_for_loop() {
             Ok(recs) if recs.is_empty() => "No boxes yet.".into(),
             Ok(recs) => {
                 let running = recs.iter().filter(|r| r.state == BoxState::Running).count();
@@ -676,9 +573,9 @@ impl App {
     // ---------- cost ----------
 
     pub(super) fn cost(&self) -> Resp {
-        let recs = match self.provider.list() {
+        let recs = match self.boxes_for_loop() {
             Ok(r) => r,
-            Err(e) => return Resp::from_core(&e),
+            Err(r) => return r,
         };
         let now = unix_ms();
         let book = self.prices.book.as_ref();
@@ -888,9 +785,6 @@ impl App {
     pub(super) fn apps(&self) -> Resp {
         let a = &self.settings.apps;
         let tg_token = self.configured("telegram-bot-token");
-        let pairing = self.pairing.as_ref().map(|p| {
-            json!({ "active": true, "expires_in_s": p.expires_ms.saturating_sub(unix_ms()) / 1000 })
-        });
         let webhooks: Vec<Value> = a
             .webhooks
             .iter()
@@ -930,11 +824,13 @@ impl App {
                 "telegram": {
                     "enabled": a.telegram.enabled,
                     "configured": tg_token,
-                    "bot": self.bot_name,
+                    "bot": self.tg.store.data.bot.as_ref().map(|b| format!("@{}", b.username)),
                     // true when "Telegram" is this server's local stand-in bot, not a real chat: the page says so
                     "demo": self.demo_telegram.is_some(),
                     "chats": self.state.telegram.chats,
-                    "pairing": pairing,
+                    // linking is a passkey flow of its own: see `GET /v1/telegram`
+                    "links": self.tg.store.data.links.iter().filter(|l| l.state != crate::telegram_store::LinkState::Revoked).count(),
+                    "halted": self.tg.store.data.halted.as_ref().map(|h| json!({ "code": h.code, "message": super::telegram_link::halt_message(h) })),
                 },
                 "slack": { "enabled": a.slack.enabled, "configured": self.configured("slack-webhook-url") },
                 "webhooks": webhooks,
@@ -1458,45 +1354,6 @@ impl App {
         Resp::json(200, &json!({ "removed": id }))
     }
 
-    pub(super) fn start_pairing(&mut self, body: &[u8]) -> Resp {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(default)]
-        struct B {
-            person: Option<String>,
-        }
-        let b: B = if body.iter().all(u8::is_ascii_whitespace) {
-            B::default()
-        } else {
-            serde_json::from_slice(body).unwrap_or_default()
-        };
-        if let Some(p) = &b.person {
-            if !self.settings.routing.people.contains_key(p) {
-                return Resp::error(404, "not_found", "that person has no routing yet");
-            }
-        }
-        let Ok(Some(token)) = self.secrets.get("telegram-bot-token") else {
-            return Resp::error(409, "no_token", "save the bot token first");
-        };
-        let bot = match telegram::bot_username(self.http.as_ref(), &token) {
-            Ok(b) => b,
-            Err(e) => return Resp::error(502, "telegram_unavailable", &e),
-        };
-        let now = unix_ms();
-        let p = match telegram::new_pairing(now) {
-            Ok(p) => p,
-            Err(m) => return Resp::error(500, "internal", &m),
-        };
-        let mut p = p;
-        p.person = b.person;
-        let body =
-            json!({ "code": p.code, "expires_in_s": telegram::CODE_TTL_MS / 1000, "bot": bot });
-        self.bot_name = Some(bot);
-        self.pairing = Some(p);
-        self.schedule.next_telegram_ms = 0;
-        self.log_activity("start telegram pairing", "-", None, "code issued");
-        Resp::json(200, &body)
-    }
-
     /// Link a paired chat to a person (or, with `null`, to nobody).
     pub(super) fn link_chat(&mut self, id: &str, body: &[u8]) -> Resp {
         #[derive(serde::Deserialize)]
@@ -1515,6 +1372,17 @@ impl App {
                 return Resp::error(404, "not_found", "that person has no routing yet");
             }
         }
+        // a link made with a passkey belongs to the person who made it, and that is not something to reassign
+        if self
+            .tg
+            .store
+            .data
+            .links
+            .iter()
+            .any(|l| l.record.chat_id == id && l.state != crate::telegram_store::LinkState::Revoked)
+        {
+            return Resp::error(409, "passkey_link", "that chat was linked with a passkey by its person: unlink it and link it again to change whose it is");
+        }
         let Some(chat) = self.state.telegram.chats.iter_mut().find(|c| c.id == id) else {
             return Resp::error(404, "not_found", "that chat is not paired");
         };
@@ -1529,6 +1397,19 @@ impl App {
             return Resp::error(400, "bad_request", "a chat id is a number");
         };
         let before = self.state.telegram.chats.len();
+        let link = self
+            .tg
+            .store
+            .data
+            .links
+            .iter()
+            .find(|l| {
+                l.record.chat_id == id && l.state != crate::telegram_store::LinkState::Revoked
+            })
+            .map(|l| l.record.id.clone());
+        if let Some(lid) = link {
+            self.tg_do_revoke(&lid, "revoked_by_owner", unix_ms());
+        }
         self.state.telegram.chats.retain(|c| c.id != id);
         if self.state.telegram.chats.len() == before {
             return Resp::error(404, "not_found", "that chat is not paired");
@@ -1990,7 +1871,6 @@ mod tests {
                 "/v1/models/main/test",
                 json!({ "confirm": true, "model": "m" }),
             ),
-            ("POST", "/v1/apps/telegram/pairing", Value::Null),
         ] {
             let resp = a.handle(&req(method, path, body));
             seen.push((
@@ -2159,65 +2039,22 @@ mod tests {
     }
 
     #[test]
-    fn telegram_pairs_with_a_one_time_code_and_then_answers_status_only_to_the_paired_chat(
+    fn the_old_telegram_pairing_is_gone_and_a_chat_on_the_list_is_linked_to_a_person_and_removed(
     ) -> TestResult {
         let mut r = rig()?;
         create(&mut r.app, "dev", None)?;
         let a = &mut r.app;
+        // a code the dashboard makes and a chat sends is the design that bound whoever sent it first: it is not a route any more
         assert_eq!(
             call(a, "POST", "/v1/apps/telegram/pairing", Value::Null).0,
-            409,
-            "no token yet"
+            404
         );
-        r.secrets.set("telegram-bot-token", "123:abc")?;
-        set_settings(a, |s| s.apps.telegram.enabled = true)?;
-        r.http.reply(
-            200,
-            &json!({ "ok": true, "result": { "username": "oz_bot" } }).to_string(),
-        );
-        let (st, v) = call(a, "POST", "/v1/apps/telegram/pairing", Value::Null);
-        assert_eq!(st, 200);
-        assert_eq!(v["bot"], "@oz_bot");
-        let code = v["code"].as_str().unwrap_or_default().to_string();
-        if let Some(p) = a.pairing.as_mut() {
-            p.expires_ms = NOON + 600_000; // the test's clock is fixed, the code's expiry was set from the real one
-        }
-        let msg = |chat: i64, text: &str, id: i64| json!({ "update_id": id, "message": { "chat": { "id": chat, "type": "private" }, "from": { "first_name": "Ada" }, "text": text } });
-        // a stranger's wrong guess gets no reply; the right code pairs
-        r.http.reply(
-            200,
-            &json!({ "ok": true, "result": [ msg(9, "nope", 1), msg(7, &code, 2) ] }).to_string(),
-        );
-        r.http.sent.lock().map_err(|_| "lock")?.clear();
-        a.tick(NOON);
-        let (_, apps) = call(a, "GET", "/v1/apps", Value::Null);
-        assert_eq!(apps["telegram"]["chats"][0]["id"], 7);
-        assert!(apps["telegram"]["pairing"].is_null());
-        let sent: Vec<String> = r.http.requests().iter().map(|q| q.url.clone()).collect();
-        assert_eq!(
-            sent.iter().filter(|u| u.ends_with("sendMessage")).count(),
-            1,
-            "only the paired chat was answered: {sent:?}"
-        );
-        // status from the paired chat and from a stranger
-        r.http.reply(
-            200,
-            &json!({ "ok": true, "result": [ msg(7, "/status", 3), msg(9, "/status", 4) ] })
-                .to_string(),
-        );
-        r.http.sent.lock().map_err(|_| "lock")?.clear();
-        a.schedule.next_telegram_ms = 0;
-        a.tick(NOON + 40_000);
-        let replies: Vec<String> = r
-            .http
-            .requests()
-            .iter()
-            .filter(|q| q.url.ends_with("sendMessage"))
-            .map(|q| String::from_utf8_lossy(q.body.as_deref().unwrap_or_default()).into_owned())
-            .collect();
-        assert_eq!(replies.len(), 1);
-        assert!(replies[0].contains("\"chat_id\":7") && replies[0].contains("dev"));
-        // A chat is linked to a person afterwards, and only to someone who has routing.
+        // a chat linked the old way is on the list that receives alerts
+        a.state.telegram.chats.push(crate::state::TelegramChat {
+            id: 7,
+            name: "Ada".into(),
+            person: None,
+        });
         assert_eq!(
             call(
                 a,
@@ -2250,50 +2087,6 @@ mod tests {
             )
             .0,
             404
-        );
-        let (_, apps) = call(a, "GET", "/v1/apps", Value::Null);
-        assert_eq!(apps["telegram"]["chats"][0]["person"], "ada");
-        // A code asked for from a person's row pairs the next chat to that person.
-        assert_eq!(
-            call(
-                a,
-                "POST",
-                "/v1/apps/telegram/pairing",
-                json!({ "person": "nobody" })
-            )
-            .0,
-            404
-        );
-        r.http.reply(
-            200,
-            &json!({ "ok": true, "result": { "username": "oz_bot" } }).to_string(),
-        );
-        let (st, v) = call(
-            a,
-            "POST",
-            "/v1/apps/telegram/pairing",
-            json!({ "person": "ada" }),
-        );
-        assert_eq!(st, 200);
-        let code2 = v["code"].as_str().unwrap_or_default().to_string();
-        if let Some(p) = a.pairing.as_mut() {
-            p.expires_ms = NOON + 600_000;
-        }
-        r.http.reply(
-            200,
-            &json!({ "ok": true, "result": [ msg(11, &code2, 5) ] }).to_string(),
-        );
-        a.schedule.next_telegram_ms = 0;
-        a.tick(NOON + 80_000);
-        let (_, apps) = call(a, "GET", "/v1/apps", Value::Null);
-        let linked = apps["telegram"]["chats"]
-            .as_array()
-            .and_then(|l| l.iter().find(|c| c["id"] == 11))
-            .map(|c| c["person"].clone());
-        assert_eq!(linked, Some(json!("ada")));
-        assert_eq!(
-            call(a, "DELETE", "/v1/apps/telegram/chats/11", Value::Null).0,
-            200
         );
         assert_eq!(
             call(a, "DELETE", "/v1/apps/telegram/chats/7", Value::Null).0,
@@ -3207,8 +3000,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn the_demo_telegram_pairs_a_chat_for_a_person_through_the_real_pairing_code_and_is_off_otherwise(
-    ) -> TestResult {
+    fn the_demo_telegram_puts_a_chat_on_the_list_for_a_person_and_is_off_otherwise() -> TestResult {
         let dir = tempfile::tempdir()?;
         let secrets = Arc::new(MemorySecrets::default());
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7878);
@@ -3243,50 +3035,24 @@ mod tests {
                 .people
                 .insert("ada".into(), crate::notify_config::PersonRouting::default());
         })?;
-        let (st, v) = call(
+        // linking a real account is a passkey flow; the demo bot's route puts a chat on the list the way an old link was
+        let (st, _) = call(
             a,
             "POST",
-            "/v1/apps/telegram/pairing",
-            json!({ "person": "ada" }),
+            "/v1/demo/telegram/legacy-chat",
+            json!({ "chat_id": 41, "name": "Ada phone", "person": "ada" }),
         );
-        assert_eq!((st, v["bot"].as_str()), (200, Some("@oz_demo_bot")), "{v}");
+        assert_eq!(st, 200);
         let (_, apps) = call(a, "GET", "/v1/apps", Value::Null);
         assert_eq!(
             apps["telegram"]["demo"], true,
             "the stand-in bot is labelled a demo"
         );
-        let code = v["code"].as_str().ok_or("code")?.to_string();
-        if let Some(p) = a.pairing.as_mut() {
-            p.expires_ms = NOON + 600_000;
-        }
-        // A wrong guess pairs nobody; the right code, said by a person to the bot, pairs that chat to Ada.
-        assert_eq!(
-            call(
-                a,
-                "POST",
-                "/v1/demo/telegram/message",
-                json!({ "chat_id": 9, "text": "nope" })
-            )
-            .0,
-            202
-        );
-        let say = json!({ "chat_id": 41, "text": code, "name": "Ada phone" });
-        assert_eq!(call(a, "POST", "/v1/demo/telegram/message", say).0, 202);
-        a.tick(NOON);
-        let (_, apps) = call(a, "GET", "/v1/apps", Value::Null);
         let chats = apps["telegram"]["chats"].as_array().ok_or("chats")?;
         assert_eq!(chats.len(), 1, "{apps}");
         assert_eq!(
             (chats[0]["id"].clone(), chats[0]["person"].clone()),
             (json!(41), json!("ada"))
-        );
-        assert_eq!(chats[0]["name"], "Ada phone");
-        let (_, sent) = call(a, "GET", "/v1/demo/telegram/sent", Value::Null);
-        assert!(
-            sent["sent"][0]["text"]
-                .as_str()
-                .is_some_and(|t| t.starts_with("Paired")),
-            "{sent}"
         );
         // A test send to that person reaches the demo chat, through the same send code.
         let (_, d) = call(
@@ -3297,8 +3063,8 @@ mod tests {
         );
         assert_eq!(d["delivery"]["ok"], true, "{d}");
         let (_, sent) = call(a, "GET", "/v1/demo/telegram/sent", Value::Null);
-        assert_eq!(sent["sent"].as_array().map(Vec::len), Some(2));
-        assert_eq!(sent["sent"][1]["chat_id"], 41);
+        assert_eq!(sent["sent"].as_array().map(Vec::len), Some(1));
+        assert_eq!(sent["sent"][0]["chat_id"], 41);
         // A demo alert goes through the real routing, and the recorded alert says what became of it for Ada.
         assert_eq!(
             call(

@@ -23,6 +23,10 @@ pub struct CommandSpec {
     /// Bytes written to the program's standard input, then closed. May hold a secret: never logged or serialized.
     #[serde(skip)]
     pub stdin: Option<Vec<u8>>,
+    /// A runner that can (the box's secrets service) kills the program when it runs longer than this. `None`: no limit. A
+    /// runner that cannot ignores it, so a caller never relies on it for anything but not waiting forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl CommandSpec {
@@ -33,6 +37,7 @@ impl CommandSpec {
             cwd: None,
             env: BTreeMap::new(),
             stdin: None,
+            timeout_secs: None,
         }
     }
 
@@ -57,6 +62,12 @@ impl CommandSpec {
 
     pub fn env(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.env.insert(k.into(), v.into());
+        self
+    }
+
+    /// Stop the program after this long (see [`CommandSpec::timeout_secs`]).
+    pub fn timeout(mut self, d: std::time::Duration) -> Self {
+        self.timeout_secs = Some(d.as_secs().max(1));
         self
     }
 

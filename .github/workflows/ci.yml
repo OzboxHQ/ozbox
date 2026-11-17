@@ -173,6 +173,27 @@ jobs:
             packer validate -syntax-only "$dir"
             echo "::endgroup::"
           done
+      - name: packer validate (image template, with and without an instance profile)
+        env:
+          PACKER_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dir=infra/packer/ozbox-image
+          packer init "$dir"
+          # Full validation (not -syntax-only) for the AWS source, because the fallback policy document is only
+          # checked against the plugin's schema there. Profile unset: Packer builds a temporary profile from the
+          # policy block. Profile set: the block is not rendered.
+          # the file provisioners check that their source exists, so stand-in binaries are enough for validation
+          tmp="$(mktemp -d)"
+          : >"$tmp/ozboxd"
+          : >"$tmp/ozbox"
+          common=(-only=ozbox.amazon-ebs.ozbox -var aws_subnet_id=subnet-00000000 -var aws_security_group_id=sg-00000000 -var "ozboxd_binary=$tmp/ozboxd" -var "ozbox_binary=$tmp/ozbox")
+          echo "::group::profile unset"
+          packer validate "${common[@]}" -var aws_instance_profile= "$dir"
+          echo "::endgroup::"
+          echo "::group::profile set"
+          packer validate "${common[@]}" -var aws_instance_profile=ozbox-build "$dir"
+          echo "::endgroup::"
 
   deny:
     name: Dependency policy (cargo deny)

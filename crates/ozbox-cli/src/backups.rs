@@ -277,6 +277,20 @@ impl Backups {
             .unwrap_or_else(|| self.schedule.clone())
     }
 
+    /// Switch one box's backups off whatever the fleet says (what Settings -> Backups' per-box "Off" does). Its own schedule is
+    /// kept, so turning it back on finds it.
+    pub fn turn_off_box(&mut self, box_name: &str) {
+        self.overrides
+            .entry(box_name.to_string())
+            .or_default()
+            .enabled = Some(false);
+    }
+
+    /// Whether this box's backups were switched off for it.
+    pub fn is_off_for(&self, box_name: &str) -> bool {
+        self.overrides.get(box_name).and_then(|o| o.enabled) == Some(false)
+    }
+
     /// Whether anything would be backed up at all.
     pub fn has_destination(&self) -> bool {
         self.provider_snapshots || self.restic.is_some()

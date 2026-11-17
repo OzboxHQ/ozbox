@@ -64,6 +64,8 @@ export interface StackOptions {
   signIn?: boolean;
   /** The id of the one person on the sign-in list (`signIn`); default `owner`. A spec that is about who is named uses another. */
   person?: string;
+  /** Give the daemon a dashboard socket of its own (a debug-build hook) and point the server at it, so a skill push, which only that socket carries, reaches the real daemon. */
+  dashboardSocket?: boolean;
   extraEnv?: Record<string, string>;
   /** Boxes made through the CLI before the server starts (only meaningful with the demo provider in `config`). */
   seedBoxes?: string[];
@@ -77,6 +79,7 @@ export async function startRealThisBox(opts: StackOptions): Promise<RealStack> {
   const dir = mkdtempSync(join(tmpdir(), 'ozg7-'));
   const work = join(dir, 'work');
   const sock = join(dir, 'd.sock');
+  const dashSock = join(dir, 'dash.sock');
   const box = 'main-box';
   mkdirSync(join(work, 'projects'), { recursive: true });
   writeFileSync(join(work, 'projects', 'hello-g7.txt'), 'written on the box before the dashboard looked\n');
@@ -103,8 +106,8 @@ export async function startRealThisBox(opts: StackOptions): Promise<RealStack> {
 
   let daemon: ChildProcess | undefined;
   if (!opts.noDaemon) {
-    daemon = spawn(OZBOXD_BIN(), ['--config', daemonCfg], { env: { ...process.env, HOME: dir }, stdio: ['ignore', 'ignore', 'inherit'] });
-    await until('ozboxd socket', () => existsSync(sock));
+    daemon = spawn(OZBOXD_BIN(), ['--config', daemonCfg], { env: { ...process.env, HOME: dir, ...(opts.dashboardSocket ? { OZBOXD_TEST_DASHBOARD_SOCKET: dashSock } : {}) }, stdio: ['ignore', 'ignore', 'inherit'] });
+    await until('ozboxd socket', () => existsSync(sock) && (!opts.dashboardSocket || existsSync(dashSock)));
   }
 
   const config = join(dir, 'config.toml');
@@ -119,6 +122,7 @@ export async function startRealThisBox(opts: StackOptions): Promise<RealStack> {
     OZBOX_FORCE_BOX: '1',
     OZBOX_BOX_NAME: box,
     OZBOX_DAEMON_SOCKET: sock,
+    ...(opts.dashboardSocket ? { OZBOX_DAEMON_SUPERVISOR_SOCKET: dashSock } : {}),
     ...opts.extraEnv,
   };
   for (const b of opts.seedBoxes ?? []) execFileSync(OZBOX_BIN(), ['create', b, '--size', 'M', '--yes'], { env, stdio: 'ignore' });

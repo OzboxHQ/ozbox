@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { BackupItem, BackupsSettings } from '../api/backups';
-import { backupsSchema, canRestore, destinationsText, estimateText, fmtWhen, formToSettings, itemLabels, missingSecret, restoreTargets, scheduleText, settingsToForm } from './backups';
+import type { BackupItem, BackupsSettings, BoxBackups } from '../api/backups';
+import { backupsSchema, canRestore, destinationsText, estimateText, fmtWhen, formToSettings, itemLabels, listedBackups, missingSecret, restoreTargets, scheduleText, settingsToForm } from './backups';
 
 const settings: BackupsSettings = {
   schedule: { kind: 'daily', time: '02:30', weekday: 6 },
@@ -94,5 +94,41 @@ describe('the policy form', () => {
     const f = { ...settingsToForm(settings), password: 'correct-horse-battery', accessKey: 'AKIAEXAMPLE', secretKey: 'sekrit' };
     const sent = JSON.stringify(formToSettings(f, settings));
     for (const s of ['correct-horse-battery', 'AKIAEXAMPLE', 'sekrit']) expect(sent).not.toContain(s);
+  });
+});
+
+describe('the list while a prune holds the repository', () => {
+  const box = (items: BackupItem[], restic: Partial<BoxBackups['restic']> = {}): BoxBackups => ({
+    box: 'dev',
+    state: 'running',
+    items,
+    provider: { supported: true, includes_work: true, error: null },
+    restic: { target_set: true, configured_on_box: true, error: null, running: null, ...restic },
+    schedule: { kind: 'daily', time: '02:00', weekday: 0 },
+    zone: 'UTC',
+    next_run_ms: null,
+    last: null,
+    running: false,
+  });
+  const repo = (id: string, at: string) => snap({ id, kind: 'restic', created_at: at, scheduled: false });
+
+  it('shows what the box sent when it is not busy', () => {
+    const next = box([repo('r1', '2026-11-09T01:00:00Z')]);
+    expect(listedBackups(undefined, next)).toEqual(next.items);
+  });
+
+  it('keeps the last repository list when the box says busy, instead of showing none', () => {
+    const before = box([repo('r1', '2026-11-09T01:00:00Z'), snap({ id: 's1', created_at: '2026-11-08T01:00:00Z' })]);
+    const busy = box([snap({ id: 's1', created_at: '2026-11-08T01:00:00Z' }), snap({ id: 's2', created_at: '2026-11-10T01:00:00Z' })], { busy: true });
+    const listed = listedBackups(before, busy).map((i) => i.id);
+    expect(listed).toEqual(['s2', 'r1', 's1']);
+  });
+
+  it('has nothing to keep on a first busy answer, and never duplicates', () => {
+    const busy = box([snap({ id: 's1' })], { busy: true });
+    expect(listedBackups(undefined, busy).map((i) => i.id)).toEqual(['s1']);
+    const before = box([snap({ id: 's1' }), repo('r1', '2026-11-09T01:00:00Z')]);
+    expect(listedBackups(before, busy).map((i) => i.id).sort()).toEqual(['r1', 's1']);
+    expect(listedBackups(before, busy).filter((i) => i.id === 's1')).toHaveLength(1);
   });
 });

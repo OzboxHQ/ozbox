@@ -62,7 +62,7 @@ could do with a key, or to a key, either impossible or loud.
    prevented, so `post-commit` (which it does not skip) takes such a commit back with `reset --soft` and says so. The only
    way past is a spent-once `guard-override` approval, which the service records. A determined agent can still point git
    elsewhere; the closed network and the record are what stand behind the hook.
-5. **The box's own secrets, in memory.** AWS Parameter Store (by `aws ssm get-parameters-by-path`, no SDK) or OpenBao (by
+5. **The box's own secrets, in memory.** AWS Parameter Store (called natively, no SDK and no `aws` command: ADR 0029 Amendment 14) or OpenBao (by
    `bao`), behind one `Backend` trait, scoped by path to the box's role (`<prefix>/<role>/<project>/<env>/<NAME>`), only
    non-production environments, nothing production-looking. A unit pulls them at boot and every fifteen minutes as the
    secrets user and gives them to the service, which keeps them in a second store on tmpfs sealed under the same key, so

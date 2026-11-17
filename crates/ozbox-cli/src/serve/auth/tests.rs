@@ -1934,6 +1934,56 @@ fn three_people() -> Rig {
     )
 }
 
+/// A skill's files reach a box's disk and the library only for an owner or a member who may change settings: a viewer and a
+/// member are refused at the HTTP layer, and the refusal comes before a large body is read (the guard the server loop runs
+/// on a skill upload before it reads one byte of it).
+#[test]
+fn skills_are_changed_only_by_whoever_may_change_settings_and_the_refusal_comes_before_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = three_people();
+    let mut app = app_over(&r, dir.path());
+    let owner = r.auth.test_session("owner", true);
+    let member = r.auth.test_session("friend", true);
+    let viewer = r.auth.test_session("watcher", true);
+    let writes = [
+        ("POST", "/v1/skills"),
+        ("DELETE", "/v1/skills/demo"),
+        ("POST", "/v1/skills/demo/approve"),
+        ("POST", "/v1/skills/demo/restore"),
+        ("PUT", "/v1/boxes/dev/skills/demo"),
+        ("DELETE", "/v1/boxes/dev/skills/demo"),
+    ];
+    for (who, label) in [(&viewer, "viewer"), (&member, "member")] {
+        for (m, p) in writes {
+            let got = call(&mut app, who, m, p, json!({}));
+            assert!(forbidden(&got), "{label} {m} {p}: {got:?}");
+        }
+        // reading what the library and the boxes hold is not refused
+        for p in ["/v1/skills", "/v1/skills/holdings", "/v1/boxes/dev/skills"] {
+            let got = call(&mut app, who, "GET", p, Value::Null);
+            assert!(!forbidden(&got), "{label} GET {p}: {got:?}");
+        }
+        // the 3 MB-capable upload: the guard says no with an empty body, so a body bigger than the usual limit is never read
+        let cookie = format!("__Host-ozbox_session={}", who.0);
+        let req = request(
+            "POST",
+            "/v1/skills",
+            "",
+            &Value::Null,
+            Some(&cookie),
+            &who.1,
+            HOST,
+            Some(ORIGIN),
+        );
+        let refusal = app.guard(&req, true).unwrap();
+        assert_eq!(refusal.status, 403, "{label}");
+    }
+    for (m, p) in writes {
+        let got = call(&mut app, &owner, m, p, json!({}));
+        assert!(!forbidden(&got), "owner {m} {p}: {got:?}");
+    }
+}
+
 /// What each role may do, judged on every request before the route is reached.
 #[test]
 fn a_viewer_looks_a_member_works_and_only_an_owner_changes_what_governs_the_dashboard() {

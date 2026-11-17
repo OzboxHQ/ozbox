@@ -31,7 +31,8 @@ use serde_json::{json, Value};
 use super::runs_routes::{approval_json, state_name, task_json};
 use super::worker::{Done, Job};
 use super::{parse_query, unix_ms, App, Req, Resp};
-use crate::chat::command::{self, Command};
+use crate::chat::code;
+use crate::chat::command;
 use crate::chat::gateway::{
     self, conv_key, Bind, Channel, ChatLink, Effect, TaskInfo, Verb, World,
 };
@@ -78,8 +79,8 @@ pub struct Out {
 
 #[derive(Default)]
 pub struct ChatRt {
-    links: Option<Links>,
-    rate: RateLimit,
+    pub(super) links: Option<Links>,
+    pub(super) rate: RateLimit,
     throttle: BTreeMap<String, Throttle>,
     /// `<conv>|<task>` -> the answers already sent.
     seen_turns: BTreeMap<String, u32>,
@@ -91,7 +92,7 @@ pub struct ChatRt {
     next_seq: u64,
     wa_seen: whatsapp::Seen,
     /// A pairing code for Slack or WhatsApp, and which one.
-    pairing: Option<(Channel, telegram::Pairing)>,
+    pairing: Option<(Channel, code::Pairing)>,
     slack_rx: Option<Receiver<slack::Event>>,
     slack_stop: Option<Arc<AtomicBool>>,
     /// The last screen read from each attached terminal session.
@@ -104,9 +105,9 @@ pub struct ChatRt {
     pub sent: Vec<(String, String)>,
 }
 
-struct BookWorld<'a> {
-    book: &'a Book,
-    boxes: Vec<String>,
+pub(super) struct BookWorld<'a> {
+    pub(super) book: &'a Book,
+    pub(super) boxes: Vec<String>,
 }
 
 fn dollars(cents: u64) -> String {
@@ -244,7 +245,7 @@ impl App {
         }
     }
 
-    fn chat_boxes(&self) -> Vec<String> {
+    pub(super) fn chat_boxes(&self) -> Vec<String> {
         self.provider
             .list()
             .map(|r| {
@@ -256,7 +257,7 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn chat_book(&self) -> Option<Book> {
+    pub(super) fn chat_book(&self) -> Option<Book> {
         self.runs.store.as_ref().and_then(|s| s.load().ok())
     }
 
@@ -289,7 +290,7 @@ impl App {
 
     /// Words from the server into a conversation. The dashboard keeps a transcript; the other channels are delivered by the
     /// worker. Returns what to deliver on a channel (the dashboard's is already kept).
-    fn chat_say(&mut self, outs: Vec<Out>, now: u64) {
+    pub(super) fn chat_say(&mut self, outs: Vec<Out>, now: u64) {
         let secrets = self.chat_secrets();
         let mut deliver: Vec<Out> = Vec::new();
         for mut o in outs {
@@ -347,6 +348,10 @@ impl App {
         let (to, job): (&'static str, Option<Job>) = match o.channel {
             Channel::Dashboard => return,
             Channel::Telegram => {
+                // what the bridge says to a person is kept in that link's sealed transcript
+                if let Ok(chat) = o.id.parse::<i64>() {
+                    self.tg_record_out(chat, &o.text, now);
+                }
                 let (Ok(Some(token)), Ok(chat_id)) =
                     (self.secrets.get("telegram-bot-token"), o.id.parse::<i64>())
                 else {
@@ -357,14 +362,9 @@ impl App {
                 (
                     "Telegram",
                     Some(Box::new(move || {
-                        let ok = telegram::send_message(
-                            http.as_ref(),
-                            &token,
-                            chat_id,
-                            &o.text,
-                            &o.buttons,
-                        )
-                        .is_ok();
+                        // a Telegram message never carries a button: nothing is decided there
+                        let ok =
+                            telegram::send_text(http.as_ref(), &token, chat_id, &o.text).is_ok();
                         Done::ChatSent {
                             flag: f,
                             to: "Telegram",
@@ -1599,7 +1599,7 @@ impl App {
             return;
         }
         p.tries += 1;
-        if p.tries >= telegram::MAX_TRIES {
+        if p.tries >= code::MAX_TRIES {
             self.chat.pairing = None;
         }
     }
@@ -1779,7 +1779,7 @@ impl App {
                         )
                     }
                 };
-                match telegram::new_pairing(now) {
+                match code::new_pairing(now) {
                     Ok(mut p) => {
                         p.person = Some(who.clone());
                         let code = p.code.clone();
@@ -1812,6 +1812,28 @@ impl App {
                 self.state.chat.unlink(channel, id);
                 self.save_state();
                 Resp::json(200, &json!({ "removed": true }))
+            }
+            ("POST", ["links", "open"]) => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct B {
+                    token: String,
+                }
+                let b: B = match serde_json::from_slice(&req.body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return Resp::error(400, "bad_request", &format!("invalid request: {e}"))
+                    }
+                };
+                // opening a pointer link changes nothing and spends nothing; a wrong person or a lapsed link is one answer
+                match self.tg_open_pointer(&b.token, &who, now) {
+                    Some(path) => Resp::json(200, &json!({ "path": path })),
+                    None => Resp::error(
+                        404,
+                        "not_found",
+                        "that link did not work (it lapses after ten minutes)",
+                    ),
+                }
             }
             ("POST", ["links", "redeem"]) => {
                 #[derive(Deserialize)]
@@ -1939,55 +1961,6 @@ impl App {
             }),
         )
     }
-
-    // ---------- Telegram ----------
-
-    /// A paired Telegram chat said something for the gateway.
-    pub(super) fn chat_telegram_message(
-        &mut self,
-        chat_id: i64,
-        text_in: &str,
-        forwarded: bool,
-        now: u64,
-    ) {
-        let person = self
-            .state
-            .telegram
-            .chats
-            .iter()
-            .find(|c| c.id == chat_id)
-            .map(|c| c.person.clone().unwrap_or_else(|| "owner".into()));
-        let Some(person) = person else { return };
-        // the fleet summary stays what it was when the chat follows nothing
-        if matches!(command::parse(text_in), Command::Status)
-            && !self
-                .state
-                .chat
-                .binds
-                .contains_key(&conv_key(Channel::Telegram, &chat_id.to_string()))
-        {
-            let s = self.fleet_summary();
-            self.chat_say(
-                vec![Out {
-                    announce: None,
-                    channel: Channel::Telegram,
-                    id: chat_id.to_string(),
-                    text: s,
-                    buttons: Vec::new(),
-                }],
-                now,
-            );
-            return;
-        }
-        self.chat_inbound(
-            Channel::Telegram,
-            &chat_id.to_string(),
-            &person,
-            text_in,
-            forwarded,
-            now,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2107,15 +2080,30 @@ mod tests {
                 self.step();
             }
         }
-        /// A person writes to the demo bot, and the server notices.
+        /// A person writes to the chat gateway as a Telegram chat. These tests are about the gateway's own rules (sessions, turns,
+        /// the refusals of stop and budget, the typing rules), so they enter at `chat_inbound`, the code the Telegram bridge calls
+        /// once the policy has allowed an act. How a message gets there (link, delegation, replay, freshness) is
+        /// `telegram_tests.rs`. A chat that is not on the list is not heard, as the bridge does not hear it.
         fn say(&mut self, chat: i64, text: &str) {
-            let r = self.a.demo_telegram_say(
-                json!({ "chat_id": chat, "text": text })
-                    .to_string()
-                    .as_bytes(),
-            );
-            assert_eq!(r.status, 202);
             self.now += 5_000;
+            let person = self
+                .a
+                .state
+                .telegram
+                .chats
+                .iter()
+                .find(|c| c.id == chat)
+                .map(|c| c.person.clone().unwrap_or_else(|| "owner".into()));
+            if let Some(p) = person {
+                self.a.chat_inbound(
+                    Channel::Telegram,
+                    &chat.to_string(),
+                    &p,
+                    text,
+                    false,
+                    self.now,
+                );
+            }
             self.a.tick(self.now);
         }
         fn press(&mut self, chat: i64, data: &str) {
@@ -3689,12 +3677,20 @@ mod tests {
     impl crate::netguard::HttpClient for Flaky {
         fn send(
             &self,
-            _: &crate::netguard::HttpRequest,
+            req: &crate::netguard::HttpRequest,
         ) -> Result<crate::netguard::HttpResponse, crate::netguard::HttpError> {
+            // only the sends are counted: the Telegram bridge's own polling is not what this test is about
+            if !req.url.ends_with("/sendMessage") {
+                return Ok(crate::netguard::HttpResponse {
+                    status: 200,
+                    body: String::new(),
+                });
+            }
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // a taken message is answered the way the Bot API answers one
             Ok(crate::netguard::HttpResponse {
                 status: if n < self.fail { 500 } else { 200 },
-                body: String::new(),
+                body: r#"{"ok":true,"result":{"message_id":1}}"#.into(),
             })
         }
     }

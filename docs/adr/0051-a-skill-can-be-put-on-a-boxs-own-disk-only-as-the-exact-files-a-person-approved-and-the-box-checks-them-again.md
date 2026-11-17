@@ -1,0 +1,109 @@
+# 0051 — A skill can be put on a box's own disk only as the exact files a person approved, and the box checks them again
+
+**Decision.** Coding agents on a box (Claude Code, and the programs that read the shared agents folder) read skills from
+folders in the box user's home. Until now Oz Box installed a skill only into the dashboard's own store, for the agents Oz Box
+itself starts through the tool host (ADR 0025). A person can now also **put an approved skill on a box's disk**, and add
+skills of their own from the page.
+
+1. **A separate act, not a new install scope.** The `box:<name>` install scope keeps meaning "the orchestration agents on that
+   box are offered it through the tool host". Putting files on the disk is its own request
+   (`PUT /v1/boxes/<box>/skills/<name>`, removal by `DELETE`), so what a scope means never changes under anyone.
+2. **Only what was approved, and only the current version.** The request names the hash the person was looking at. The server
+   refuses unless that hash is the library's current one and a person approved exactly it (ADR 0025, point 3), then sends the
+   files. An owner makes the request, as for every other skill act.
+3. **The box checks again.** The box daemon (`/v1/skills`) applies the same file rules as the library (one shared module, so
+   the two cannot drift: text only, size limits, no path escapes, no links, the secret screen, no hidden or format
+   characters, a front matter that is valid YAML), recomputes the hash, and writes nothing unless it equals the hash it was
+   sent. It stages the files in a new folder beside the target and swaps it in by rename, so an agent reading the folder never
+   sees half a skill, and if what is on disk afterwards is not what was sent, or the box cannot record the push, the old copy
+   is put back. Files are mode 0644, with no executable bit. That does not stop an agent running a file by name
+   (`bash run.sh`), so a script is text to read as code, and the review marks it so.
+4. **Only the dashboard's own socket may write, and it never overwrites what it cannot account for.** `PUT` and `DELETE` on
+   `/v1/skills/*` are on the dashboard's scoped socket (ADR 0040) and nowhere else. The box user's socket, which every process
+   of that user can open, including the coding agents, answers `GET` and refuses both with 403 (it would otherwise take any
+   files with a hash the caller computed itself, with no approval and no audit line). The daemon takes no name or claim of who
+   pushed from a request. A dashboard that is not running on the box therefore sees what a box holds but cannot change it.
+   A folder that is already there is replaced or removed only when the dashboard names, in the same request, the hash it
+   recorded putting there, and the box's own record agrees or the folder's files hash to exactly that. A folder a person made
+   by hand, or one an agent added a record for, has no such claim and is refused (`not_ours`, `not_claimed`), never touched.
+   It never writes through a symbolic link when it looks.
+5. **The box's disk is the truth, and it is the box user's.** What a box holds is read from the box on every look and
+   re-hashed with a bound on how much it reads (the limits a skill is accepted under, one file at a time, outside the write
+   lock), never from a record kept on the dashboard. The page says `matches the library`, `different from the library`,
+   `changed on the box` or `missing`. A box that is stopped or cannot be reached is shown as not known, never as holding
+   nothing. **Who put a skill there is the dashboard's own push record**, kept where the box user cannot reach it: a skill
+   is shown as pushed from this dashboard only when that record names the same hash, and anything else is shown as put there
+   on the box and noted once in the activity record. The box's own record (who, which version) is text the box user can edit,
+   so it is never shown as attribution. A copy the dashboard recorded that the box does not report (the box user deleted its
+   record, or the folder) still shows, as changed or missing, so the box cannot make a copy disappear by leaving it out, and
+   the dashboard forgets a record only for a folder the box confirms it took away. Removal asks about the hash the dashboard
+   recorded and is allowed when the box's record or the folder's own files agree with it. How many places one look follows and
+   how many bytes it reads are capped, and the page says up front when a box is read-only for this dashboard.
+6. **Skills of your own** are added from the page as JSON text files (no archive is unpacked, so there is no path-escape to
+   guard). They go through the same checks as every other skill, are versioned in the library (the last twenty versions are
+   kept and readable), show who added them and how, and need the same review and approval before any agent sees them. A
+   **restored version is always a new, unapproved addition**, even when a box or an install still holds the same files and
+   its approval is still on record: the approval is dropped, and the copy already on the box stays where it is. Adding the
+   identical bytes of a past version again is the same act and comes back unapproved too. Names are the
+   Agent Skills format (lower-case letters and digits with single dashes, up to 64), so that on a disk that does not tell `Demo`
+   from `demo` two skills can never be one folder; adding never deletes a folder it cannot account for.
+7. **Some of what a `SKILL.md` says is acted on, not only read.** Claude Code runs commands a skill declares: `hooks`
+   (registered for the rest of the session), `` !`command` `` and ```` ```! ```` blocks in the body (run before the agent
+   reads the page), `shell` (which shell they use), `allowed-tools` (tools used without asking) and `agent` (the subagent whose
+   tools apply). The front matter is read as real YAML (anchors and aliases refused, bounded in size and depth, no duplicate
+   keys), so an indented `command:` under `hooks:` cannot pass as something else. A skill that asks for any of these cannot be
+   approved, pushed or used until the person has acknowledged each one separately; the acknowledgement is part of the
+   approval, of exactly those files. The review shows them first, with the commands, and shows `model`, `context`, `paths` and
+   the other documented fields. How Codex, Gemini CLI and OpenCode treat these fields has not been checked, and nothing here
+   says what they do.
+   The one overwrite this allows: a folder the dashboard recorded putting there is replaced, even when it was edited on the box
+   (that is how pushing again repairs it), because the claim names the hash it recorded and the record or the files agree.
+8. **What the box's own Claude Code will run.** The box image ships `/etc/claude-code/managed-settings.json` with
+   `"disableSkillShellExecution": true` (Claude Code's managed setting: each `` !`command` `` and ```` ```! ```` block in a skill is
+   replaced by a notice instead of run; it does not touch `hooks` or `allowed-tools`, which the acknowledgement covers). It is on
+   by default for every box made, or upgraded with `ozbox upgrade`, from this release (user data is not re-applied to a box
+   that already exists); to opt out of it on one box, delete or edit that root-owned file as root on the box. A second layer
+   is written to the box user's own `~/.claude/settings.json` when a disk is first set up (first-boot setup, which runs when a new instance meets a disk, finds no `.profile` in the home folder, and the file does not exist), **by the box user, never by root**: no-clobber, no link followed (a link a box user planted is skipped, not written through), and skipped if `.claude` is a link. An agent
+   running as the box user can edit that file, so only the root-owned one counts as a guard. **Condition:** Claude Code uses the
+   highest-ranked managed source, so server-managed settings from an organisation's claude.ai console rank above the file and,
+   when they exist, the file is not read; the key is not on Claude Code's list of keys honoured across sources. An
+   organisation that uses server-managed settings should set `disableSkillShellExecution` there too. Only the
+   root-owned file carries it: a skill cannot switch it off. The scan for what a skill runs treats a bare carriage return as a
+   refusal, reads a line end as `\n`, `\r\n` or `\r`, and flags a fence introduced after a list marker, a quote or text, so a
+   command cannot hide in a line break or a fence style. Only the top `SKILL.md` counts, since Claude Code also loads a
+   `SKILL.md` found anywhere under its skills folder (`synced/<x>/SKILL.md`); a skill has one, and the names `synced` and
+   `trash` (Claude Code's own folders) are reserved.
+9. **Hidden characters** are refused from a table generated from the Unicode Character Database (every format, separator,
+   control, private-use and unassigned code point, every default-ignorable code point, and a few blank-looking ones), shared by
+   the server, the box and the page and checked against each other in a test.
+
+**What is not covered.**
+- **Drift is detected, not prevented.** An agent running as the box user can edit its own skills folder, and the daemon runs as
+  that user, so its record of what it put there can be edited too. Nothing here stops that; the next look says the copy changed
+  and the dashboard's own record decides what it will touch. Pushing again puts the approved files back.
+- **A compromised dashboard is not stopped by the box.** The files and hash arrive together with nothing signed, so whoever
+  controls the dashboard's socket can put any files on a box. The box's re-check guards against corruption in transit and a
+  stale page, not against that. Signing by a publisher is future work.
+- A push is recorded by the hash that was sent, even when the library has moved on or the approval was withdrawn while it was in
+  flight; the answer is then 409 `recorded_unapproved` (the copy is on the box and recorded, approve again before pushing
+  again), and only a copy that could not be recorded is 500 `not_recorded`. If the answer to a push is lost, the page reads
+  the box and records a copy that hashes to what was sent, or says it is not known. "Seen on a box" notes are budgeted per box
+  per day (64, and 256 across all boxes), then one summary line, written at the next sighting after the day rolls over. Staging and set-aside folders live in a work folder beside the agents' folders, never inside
+  one, and are swept at start. The box's own record is read as a plain file of at most 1 MiB, and what a look reads is opened
+  without following a link or waiting on a pipe. A library folder that cannot be read, and a copy a box holds under a name from
+  before the format, are listed and can be removed. The list of other folders in an agent's folder is a best-effort look.
+- **A skill is guidance, not security** (ADR 0025). Approval means a person read the files and acknowledged what they run, not
+  that they are safe to follow. Oz Box's own rules apply to what Oz Box does, not to what an agent program does with a skill.
+- The folders are those each program documents for user-level skills; they were checked against the programs' own
+  documentation, and are not yet proven on a real box for every program.
+- No way to push to several boxes in one request, and a push from a dashboard on another computer.
+
+**Why.** Skills only reached the agents Oz Box starts. The coding agents people run themselves on a box read their own
+folders, so the same instructions had to be copied there by hand, unreviewed. Doing it through the dashboard keeps one review
+gate in front of both, and the box's own re-check, with the write routes closed to the box user's socket, keeps a stale page
+and any process on the box from putting unreviewed bytes on a disk through this service.
+
+**Cost.** The daemon gains a route and the dashboard's table gains three (ADR 0040), each audited by name only. A push body can
+be up to about 3 MB, so that one request is allowed above the usual 64 KiB limit on the dashboard's socket only, with the
+sign-in and role checks done before any of it is read. A new dependency, a YAML parser (`yaml-rust2`, used for its event
+stream so nothing is expanded), joins `ozbox-core`.

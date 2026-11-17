@@ -302,9 +302,21 @@ pub struct Gates {
     pub presence_keys: std::sync::OnceLock<bool>,
 }
 
-/// What a call says when the service did not answer at all (not there, restarting, or an answer that is not one): the only
-/// failure worth waiting out. An answer that says no is a refusal, and fails at once.
+/// What a call says when the connection itself failed: the socket is missing or nothing is listening on it (the service is not
+/// there, or restarting). This is the one failure the commit hooks treat as an outage and degrade for (ADR 0029 Amendment 15).
+/// It is worth waiting out. An answer that says no is a refusal, and fails at once.
 pub const SERVICE_DOWN: &str = "the box's secrets service is not reachable";
+
+/// What a call says when it could not get an answer although it may well be there: a socket that refuses this user, a service too
+/// busy to accept, a read that timed out, a write that failed, or a reply that is not one. Worth waiting out like
+/// [`SERVICE_DOWN`], but NOT an outage: the hooks hold the change for it, as they did before the outage rule, because a service
+/// that is up and slow or confused must not be a way to commit unscanned.
+pub const SERVICE_NO_ANSWER: &str = "the box's secrets service did not answer";
+
+/// Whether a call's error is one of the two "no answer" kinds (the ones a poll waits out).
+pub fn is_no_answer(e: &str) -> bool {
+    e == SERVICE_DOWN || e == SERVICE_NO_ANSWER
+}
 
 /// What a refused code is told: this box takes approvals as requests.
 pub const CODES_REFUSED: &str = "this box takes approvals as requests, not as codes: ask for the change so it is filed, then approve that request on the Approvals page or from your computer (a code that is not tied to a request is not made or accepted here)";
@@ -441,6 +453,98 @@ impl Gates {
         true
     }
 
+    /// The audit record of one gate decision: `allowed`, `refused`, or `kept` (the approval was good, the write it was for was
+    /// refused, and the approval is still usable).
+    #[allow(clippy::too_many_arguments)]
+    fn gate_line(
+        &self,
+        store: &EncryptedSecrets,
+        what: &str,
+        scope: &str,
+        project: &str,
+        env: &str,
+        via: &str,
+        now_ms: u64,
+    ) {
+        crate::workload::audit(
+            store.path(),
+            &format!("approval {what} scope={scope} project={project} env={env} via={via}"),
+        );
+        let action = match (what, via) {
+            ("refused", _) => "secrets.approval.refused",
+            ("kept", _) => "secrets.approval.kept",
+            (_, crate::secrets_approval::VIA_BOOTSTRAP) => "secrets.approval.bootstrap",
+            _ => "secrets.approval.spent",
+        };
+        let detail = format!("project={project} env={env} via={via}");
+        if what == "refused" {
+            // a wrong code can be sent as often as a process likes: bounded, never a lockout
+            self.audit_event_bounded(store, action, scope, &detail, now_ms);
+        } else {
+            self.audit_event(store, action, scope, &detail);
+        }
+    }
+
+    /// [`Gates::require`] for a write: `effect` runs once the approval is known good and the approval is spent only if it
+    /// succeeds. A write the box refuses (storage, a limit) leaves the person's single-use code usable; a write that happened
+    /// can never be repeated with the same code, because the approval is taken under the lock before the write and put back only
+    /// if the write fails ([`crate::secrets_approval::ApprovalGate::consume_then`]), the lock not held across the write. Check everything that does not depend on the approval BEFORE
+    /// calling this, so a doomed request is refused without even looking at the code. On a box with no second factor the rules
+    /// of [`crate::secrets_approval::SCOPE_RULES`] apply exactly as for `require`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn require_then<T>(
+        &self,
+        store: &EncryptedSecrets,
+        scope: &str,
+        project: &str,
+        env: &str,
+        approval: &str,
+        now_ms: u64,
+        effect: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        use crate::secrets_approval::ConsumeThen;
+        let line =
+            |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
+        if !store
+            .exists(crate::secrets_approval::ENROLLED_MARKER)
+            .map_err(|e| e.0)?
+        {
+            use crate::secrets_approval::{in_bootstrap, InBootstrap};
+            if in_bootstrap(scope) == InBootstrap::Refused {
+                line("refused", "none why=no-approver");
+                return Err(crate::secrets_approval::bootstrap_refusal(scope));
+            }
+            let out = effect(crate::secrets_approval::VIA_BOOTSTRAP)?;
+            line("allowed", crate::secrets_approval::VIA_BOOTSTRAP);
+            return Ok(out);
+        }
+        if !self.codes_allowed() {
+            line("refused", "none why=codes-off");
+            return Err(CODES_REFUSED.to_string());
+        }
+        match self
+            .approvals
+            .consume_then(approval, scope, project, env, now_ms, |via| {
+                let out = effect(via)?;
+                line("allowed", via);
+                Ok(out)
+            }) {
+            Ok(out) => Ok(out),
+            Err(ConsumeThen::Effect(e)) => {
+                line("kept", "none");
+                Err(e)
+            }
+            Err(ConsumeThen::Approval(e)) => {
+                line("refused", "none");
+                Err(if approval.is_empty() {
+                    "this change needs a fresh approval from the dashboard (your passkey or authenticator code): ask for one there and run the command again with --approval CODE".to_string()
+                } else {
+                    e
+                })
+            }
+        }
+    }
+
     /// Whether a change to the box's secrets is allowed by a fresh second factor. Returns how it was allowed, for the
     /// audit line. Never a value in what it records.
     pub fn require(
@@ -469,24 +573,8 @@ impl Gates {
         approval: &str,
         now_ms: u64,
     ) -> Result<String, Refusal> {
-        let line = |what: &str, via: &str| {
-            crate::workload::audit(
-                store.path(),
-                &format!("approval {what} scope={scope} project={project} env={env} via={via}"),
-            );
-            let action = match (what, via) {
-                ("refused", _) => "secrets.approval.refused",
-                (_, crate::secrets_approval::VIA_BOOTSTRAP) => "secrets.approval.bootstrap",
-                _ => "secrets.approval.spent",
-            };
-            let detail = format!("project={project} env={env} via={via}");
-            if what == "refused" {
-                // a wrong code can be sent as often as a process likes: bounded, never a lockout
-                self.audit_event_bounded(store, action, scope, &detail, now_ms);
-            } else {
-                self.audit_event(store, action, scope, &detail);
-            }
-        };
+        let line =
+            |what: &str, via: &str| self.gate_line(store, what, scope, project, env, via, now_ms);
         if !store
             .exists(crate::secrets_approval::ENROLLED_MARKER)
             .map_err(|e| Refusal::Approval(e.0))?
@@ -863,7 +951,7 @@ pub fn handle_from(
         // answers "not allowed" to this op, and the laptop sends it plain values only. It comes sealed, like the import it
         // comes before (ADR 0029 Amendment 9).
         (Policy::Unsealed, "capabilities") => Resp {
-            result: Some(json!({"encoded_values": true, "declaration_v2": true, "runner_uids": true, "public_values": true})),
+            result: Some(json!({"encoded_values": true, "declaration_v2": true, "declaration_records": true, "runner_uids": true, "public_values": true})),
             ..Resp::ok()
         },
         (Policy::Unsealed, "import") => {
@@ -960,32 +1048,41 @@ pub fn handle_from(
             }
         }
         (Policy::Unsealed, "policy") => {
-            let parsed = crate::workload_policy::Policy::parse(&r.text);
-            match parsed {
-                Err(e) => Resp::fail(&e.0),
-                Ok(p) => match p
-                    .secret_rules(None)
-                    .map_err(|e| e.0)
-                    .and_then(|()| policy_bootstrap_gate(store, &r.project, &p))
-                    .and_then(|()| gates.require(store, "policy", &r.project, "", &r.approval, now))
-                {
-                    Err(e) => Resp::fail(&e),
-                    Ok(via) => match crate::workload_policy::save(store, &r.project, &p) {
-                        Ok(()) => {
-                            crate::workload::audit(
-                                store.path(),
-                                &format!("policy project={} via={via}", r.project),
-                            );
-                            gates.audit_event(
-                                store,
-                                "secrets.policy.write",
-                                &r.project,
-                                &format!("via={via}"),
-                            );
-                            Resp::ok()
-                        }
-                        Err(e) => Resp::fail(&e.0),
+            // Everything that can be decided without the approval is decided first, so a declaration the box would refuse (its
+            // shape, its secret rules, its size once written out) never touches the person's single-use code. The approval is then
+            // spent together with the write ([`Gates::require_then`]): a write that fails leaves the code usable.
+            match crate::workload_policy::Policy::parse(&r.text)
+                .and_then(|p| p.check_before_write().map(|_| p))
+                .map_err(|e| e.0)
+                .and_then(|p| policy_bootstrap_gate(store, &r.project, &p).map(|()| p))
+            {
+                Err(e) => Resp::fail(&e),
+                Ok(p) => match gates.require_then(
+                    store,
+                    "policy",
+                    &r.project,
+                    "",
+                    &r.approval,
+                    now,
+                    |via| {
+                        crate::workload_policy::save(store, &r.project, &p).map_err(|e| e.0)?;
+                        Ok(via.to_string())
                     },
+                ) {
+                    Err(e) => Resp::fail(&e),
+                    Ok(via) => {
+                        crate::workload::audit(
+                            store.path(),
+                            &format!("policy project={} via={via}", r.project),
+                        );
+                        gates.audit_event(
+                            store,
+                            "secrets.policy.write",
+                            &r.project,
+                            &format!("via={via}"),
+                        );
+                        Resp::ok()
+                    }
                 },
             }
         }
@@ -1804,7 +1901,17 @@ fn handle_broker_inner(
             let bin = std::env::var("OZBOX_RESTIC_BIN").unwrap_or_else(|_| "restic".into());
             let cache = std::env::var("OZBOX_RESTIC_CACHE")
                 .unwrap_or_else(|_| "/var/lib/ozbox-secrets/restic-cache".into());
-            match crate::secrets_restic::run(broker.secrets().as_ref(), &bin, &cache, &args) {
+            // an optional bound on how long restic may run (the daemon's repository check sets one; a backup does not)
+            let timeout = v["timeout_secs"]
+                .as_u64()
+                .map(|s| std::time::Duration::from_secs(s.clamp(1, 900)));
+            match crate::secrets_restic::run(
+                broker.secrets().as_ref(),
+                &bin,
+                &cache,
+                &args,
+                timeout,
+            ) {
                 Ok(o) => json!({"ok": true, "status": o.status, "stdout": o.stdout}).to_string(),
                 Err(e) => fail(&e),
             }
@@ -2066,17 +2173,25 @@ impl SocketSecrets {
     }
 
     pub(crate) fn call(&self, req: Value) -> Result<Value, SecretError> {
-        let down = || SecretError(SERVICE_DOWN.into());
-        let mut s = UnixStream::connect(&self.path).map_err(|_| down())?;
+        // only a connection that could not be made at all (no socket, nothing listening) is "down"; everything after it, and a
+        // connect that fails for any other reason, is a service that did not answer
+        let silent = || SecretError(SERVICE_NO_ANSWER.into());
+        let mut s = UnixStream::connect(&self.path).map_err(|e| {
+            if connect_means_down(e.kind()) {
+                SecretError(SERVICE_DOWN.into())
+            } else {
+                silent()
+            }
+        })?;
         s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
             .ok();
         s.write_all(format!("{req}\n").as_bytes())
-            .map_err(|_| down())?;
+            .map_err(|_| silent())?;
         let mut line = String::new();
         BufReader::new(&s)
             .read_line(&mut line)
-            .map_err(|_| down())?;
-        let v: Value = serde_json::from_str(&line).map_err(|_| down())?;
+            .map_err(|_| silent())?;
+        let v: Value = serde_json::from_str(&line).map_err(|_| silent())?;
         if v["ok"].as_bool() == Some(true) {
             Ok(v)
         } else {
@@ -2088,6 +2203,15 @@ impl SocketSecrets {
             ))
         }
     }
+}
+
+/// Whether a failed `connect` means nobody is there: the socket file is missing (`ENOENT`) or nothing is listening on it
+/// (`ECONNREFUSED`). A refusal of this user (`EACCES`), a full backlog and the rest are not an outage.
+pub(crate) fn connect_means_down(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 /// An approval code a person brought for the next tunnel-token change (`ozbox tunnel setup --approval`, or the dashboard
@@ -2559,6 +2683,71 @@ mod tests {
             .is_err());
     }
 
+    /// Only a connection that could not be made at all is "down" (the one failure the commit hooks degrade for); a service that
+    /// accepts and then says nothing useful, or a socket that refuses this user, "did not answer" and holds the change.
+    #[test]
+    fn only_a_failed_connection_is_down_everything_after_it_did_not_answer() {
+        use std::os::unix::net::UnixListener;
+        let d = tempfile::tempdir().unwrap();
+        // no socket file: down
+        let none = SocketSecrets::new(d.path().join("none.sock"));
+        assert_eq!(none.call(json!({"op": "x"})).unwrap_err().0, SERVICE_DOWN);
+        // a socket file nothing listens on (ECONNREFUSED): down
+        let stale = d.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert_eq!(
+            SocketSecrets::new(stale)
+                .call(json!({"op": "x"}))
+                .unwrap_err()
+                .0,
+            SERVICE_DOWN
+        );
+        // a service that accepts and hangs up, and one that answers with something that is not a reply: did not answer
+        for reply in [None, Some("this is not json\n")] {
+            let sock = d.path().join(format!("r{}.sock", reply.is_some()));
+            let l = UnixListener::bind(&sock).unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut c, _)) = l.accept() {
+                    let mut line = String::new();
+                    let _ = BufReader::new(&c).read_line(&mut line);
+                    if let Some(r) = reply {
+                        let _ = c.write_all(r.as_bytes());
+                    }
+                }
+            });
+            assert_eq!(
+                SocketSecrets::new(sock)
+                    .call(json!({"op": "x"}))
+                    .unwrap_err()
+                    .0,
+                SERVICE_NO_ANSWER
+            );
+        }
+        // a socket that refuses this user (EACCES): not an outage either
+        use std::os::unix::fs::PermissionsExt;
+        let locked = d.path().join("locked.sock");
+        let _l = UnixListener::bind(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(&locked).is_ok()
+            && UnixStream::connect(&locked)
+                .err()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            assert_eq!(
+                SocketSecrets::new(locked)
+                    .call(json!({"op": "x"}))
+                    .unwrap_err()
+                    .0,
+                SERVICE_NO_ANSWER
+            );
+        }
+        assert!(connect_means_down(std::io::ErrorKind::NotFound));
+        assert!(connect_means_down(std::io::ErrorKind::ConnectionRefused));
+        assert!(!connect_means_down(std::io::ErrorKind::PermissionDenied));
+        assert!(!connect_means_down(std::io::ErrorKind::WouldBlock));
+        assert!(!connect_means_down(std::io::ErrorKind::TimedOut));
+    }
+
     /// The box socket store with every hostile value: stored through the admin socket as base64 and read back exactly;
     /// the box's own socket keeps the plain rule; an import carries `value_b64`; a runner resolves an environment value
     /// exactly and a command-line reference only when it is plain.
@@ -2639,6 +2828,8 @@ mod tests {
             &json!({"op":"capabilities"}).to_string(),
         );
         assert!(out.contains("\"encoded_values\":true"));
+        // a declaration over about 2 KB needs this: the laptop refuses it for a box that does not say so
+        assert!(out.contains("\"declaration_records\":true"));
         // the box user's import socket takes neither now: both come sealed through the ingress account (ADR 0029 A9)
         for op in ["capabilities", "import"] {
             let out = handle(&s, &m, Policy::Import, &json!({"op": op}).to_string());
@@ -3010,6 +3201,67 @@ mod tests {
             !ok(&declare(&text("t"), &code)),
             "an approval is spent by use"
         );
+    }
+
+    /// A person's approval code is made by hand for one use. A declaration the box refuses (its shape, its size) never touches it, so
+    /// the same code then saves a valid one; a save that happened spends it.
+    #[test]
+    fn a_declaration_the_box_refuses_leaves_the_approval_unused_and_a_saved_one_spends_it() {
+        use crate::workload_policy::realistic_declaration;
+        let d = tempfile::tempdir().unwrap();
+        let (s, m) = svc_enrolled(d.path());
+        let g = Gates::default();
+        let mint = || {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Supervisor,
+                json!({"op":"approve_mint","scope":"policy","project":"app"}),
+            )["value"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let declare = |t: &str, approval: &str| {
+            ask_with(
+                &s,
+                &m,
+                &g,
+                Policy::Unsealed,
+                json!({"op":"policy","project":"app","text":t,"approval":approval}),
+            )
+        };
+        let code = mint();
+        // too big once written out: refused with the size and the limit
+        let big = realistic_declaration(64, 64, 16);
+        let r = declare(&big, &code);
+        assert!(
+            !ok(&r) && r["error"].as_str().unwrap().contains("256 KB"),
+            "{r}"
+        );
+        // a declaration that breaks a rule of its shape, and one that breaks a rule of a secret command
+        let no_pin = secret_decl("x").replace("\"pin\"", "\"pins\"");
+        let bad_var = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":[],"vars":{"NODE_OPTIONS":"--x"}}}}"#;
+        let renamed =
+            r#"{"dir":"/work/projects/app","commands":{"a":{"allow":["K"],"env":["K"]}}}"#;
+        for bad in [no_pin.as_str(), bad_var, "not json", renamed] {
+            assert!(!ok(&declare(bad, &code)), "{bad}");
+        }
+        assert!(crate::workload_policy::load(&*s, "app").unwrap().is_none());
+        // the same code still works for a declaration the box keeps: a realistic one, about 7 KB
+        let good = realistic_declaration(1, 45, 11);
+        assert!(good.len() > 6000);
+        let r = declare(&good, &code);
+        assert!(ok(&r), "{r}");
+        let want = crate::workload_policy::Policy::parse(&good).unwrap();
+        assert_eq!(
+            crate::workload_policy::load(&*s, "app").unwrap().unwrap(),
+            want
+        );
+        // that save spent it
+        let again = declare(&good, &code);
+        assert!(!ok(&again), "{again}");
     }
 
     /// G5 second review, N-C1: on a box with no second factor the agent could declare first (or squat before the owner), then receive

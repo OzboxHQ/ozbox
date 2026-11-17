@@ -2,7 +2,7 @@ import { applyPlan } from './apply';
 
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
-import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open, axeScan } from './fixtures';
+import { WIDTHS, expectNoSidewaysScroll, expectTouchTargets, open, axeScan, settled } from './fixtures';
 
 // Backups on the demo provider: the fleet policy in Settings (the repository credentials are write-only), then a box's
 // Backups tab: back up now to the provider and to the repository, restore (to a new box, over /work, into a folder),
@@ -207,6 +207,69 @@ for (const width of WIDTHS) {
     } finally {
       await removeBox(request, fromRepo);
       await removeBox(request, clone);
+      await removeBox(request, name);
+      await resetPolicy(request);
+    }
+  });
+}
+
+for (const width of WIDTHS) {
+  test(`turning a box's backups off at ${width}px: the dialog says what stops, then the box holds no credentials and its schedule is off`, async ({ page, request }, testInfo) => {
+    const tag = testInfo.retry === 0 ? '' : `r${testInfo.retry}-`;
+    const name = `bk-off-${tag}${width}`;
+    await resetPolicy(request);
+    await makeBox(request, name);
+    try {
+      await page.setViewportSize({ width, height: 900 });
+      for (const [secret, value] of [['restic-password', PASSWORD], ['restic-access-key', ACCESS], ['restic-secret-key', SECRET]] as const) {
+        expect((await request.put(`${origin()}/v1/secrets/${secret}`, { headers: headers(), data: { value } })).ok()).toBe(true);
+      }
+      const policy = {
+        schedule: { kind: 'daily', time: '03:30', weekday: 6 },
+        retention: { keep_daily: 7, keep_weekly: 4, keep_monthly: 6 },
+        provider_snapshots: true,
+        restic: { kind: 's3', location: 'https://objects.example.com/bucket' },
+        catch_up_hours: 12,
+        overrides: {},
+      };
+      expect((await request.put(`${origin()}/v1/backups/settings`, { headers: headers(), data: policy })).ok()).toBe(true);
+      expect((await request.post(`${origin()}/v1/boxes/${name}/backups/credentials`, { headers: headers() })).ok()).toBe(true);
+
+      await open(page, `/boxes/${name}`);
+      await page.getByRole('tab', { name: 'Backups' }).click();
+      const tab = page.getByTestId('backups-tab');
+      await expect(page.getByTestId('backups-next')).toContainText('Every day at 03:30');
+      await expectNoSidewaysScroll(page);
+
+      // cancelling changes nothing
+      await page.getByTestId('turn-off-backups').click();
+      const dialog = page.getByRole('alertdialog');
+      await expect(dialog).toContainText(`Turn off backups on ${name}?`);
+      await expect(dialog).toContainText('repository credentials are removed from the box');
+      await expect(dialog).toContainText('Backups already made stay where they are');
+      // the dialog zooms in (95% to 100%): measure it at rest, or a 44px button reads 43
+      await settled(page);
+      if (width < 1024) await expectTouchTargets(page, dialog);
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('backups-turned-off')).toHaveCount(0);
+
+      // confirming does it, and the page says so after a reload (the record, not the still-mounted state)
+      await page.getByTestId('turn-off-backups').click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Turn off' }).click();
+      await expect(page.getByTestId('backups-turned-off')).toBeVisible({ timeout: 15_000 });
+      await open(page, `/boxes/${name}`);
+      await page.getByRole('tab', { name: 'Backups' }).click();
+      await expect(page.getByTestId('backups-turned-off')).toBeVisible();
+      await expect(page.getByTestId('backups-next')).toContainText('No schedule for this box');
+      await expect(page.getByTestId('turn-off-backups')).toHaveCount(0);
+      await expect(tab.getByTestId('send-credentials')).toBeVisible();
+      await expectNoSidewaysScroll(page);
+      await axeClean(page, 'backups-tab');
+      const list = (await (await request.get(`${origin()}/v1/boxes/${name}/backups`, { headers: headers() })).json()) as { restic: { configured_on_box: boolean }; turned_off: boolean };
+      expect(list.restic.configured_on_box).toBe(false);
+      expect(list.turned_off).toBe(true);
+    } finally {
       await removeBox(request, name);
       await resetPolicy(request);
     }

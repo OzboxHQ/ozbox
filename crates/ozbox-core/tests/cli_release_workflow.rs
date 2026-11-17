@@ -107,3 +107,61 @@ fn the_workflow_never_publishes_on_its_own_and_holds_no_more_power_than_it_needs
         }
     }
 }
+
+/// The dashboard check asks the PROGRAM what it embedded. A byte-search for the content hash is not sound: the compiler may
+/// store the 64-character constant in pieces (an optimized x86_64 macOS build kept only 8 characters of it contiguous), so a
+/// workflow that searches for it fails on a correct build and passes on a wrong one by luck of code generation.
+#[test]
+fn the_dashboard_check_runs_the_program_and_never_searches_it_for_the_hash() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../");
+    let script = std::fs::read_to_string(root.join("scripts/release/check-embedded-dashboard.sh"))
+        .unwrap_or_default();
+    for needle in [
+        "build-info --json",
+        ".dashboard.sha256",
+        ".placeholder_page",
+    ] {
+        assert!(script.contains(needle), "the check script lost {needle:?}");
+    }
+    let image =
+        std::fs::read_to_string(root.join(".github/workflows/image.yml")).unwrap_or_default();
+    let release = build_workflow();
+    for (name, w) in [("image.yml", &image), ("release-build.yml", &release)] {
+        assert!(
+            w.contains("scripts/release/check-embedded-dashboard.sh \"$DASH\""),
+            "{name} does not ask the program which dashboard it embedded"
+        );
+        // no search for the hash, in any form
+        for line in w.lines().filter(|l| l.contains("grep")) {
+            assert!(
+                !line.contains("$DASH"),
+                "{name} searches a binary for the dashboard hash: {line}"
+            );
+        }
+        // the placeholder literal is still searched for, with a search macOS's grep does not miss in a large binary
+        assert!(
+            w.contains("LC_ALL=C grep -aqF \"The dashboard is not built\""),
+            "{name} lost the placeholder search"
+        );
+    }
+    // darwin: both processors are asked, x86_64 under Rosetta, installed when the runner lacks it
+    for needle in [
+        "arch -x86_64",
+        "softwareupdate --install-rosetta --agree-to-license",
+    ] {
+        assert!(
+            release.contains(needle),
+            "release-build.yml lost {needle:?}"
+        );
+    }
+    // and every program of the release is asked, not only the ones that happen to run natively
+    let linux = release
+        .split("build-macos:")
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        linux.contains("qemu-aarch64"),
+        "the arm64 Linux program is not asked"
+    );
+}

@@ -151,6 +151,21 @@ run "labels_on_every_taggable_resource" {
   }
 }
 
+# The operator's AWS role may put a first tag on a disk only when the disk is created, so a system disk that is not tagged
+# ozbox-managed from its first moment could never be tagged later by anything the daily role runs (an old box's was not).
+run "the_system_disk_is_ours_from_the_moment_it_is_created" {
+  command = apply
+
+  assert {
+    condition = (
+      aws_instance.box.root_block_device[0].tags["ozbox-managed"] == "true" &&
+      aws_instance.box.root_block_device[0].tags["ozbox-box"] == "dev-1" &&
+      aws_instance.box.root_block_device[0].tags["ozbox-role"] == "root"
+    )
+    error_message = "the system disk must carry ozbox-managed, ozbox-box and its role in the tags it is created with"
+  }
+}
+
 run "caller_cannot_override_reserved_labels" {
   command = apply
 
@@ -334,6 +349,26 @@ run "user_data_installs_the_backup_credentials_helper_with_a_narrow_hand_off" {
   assert {
     condition     = strcontains(output.cloud_init, "ReadWritePaths=/etc/ozbox /run/ozbox-backup") && strcontains(output.cloud_init, "ReadWritePaths=-/run/ozbox-backup/requests")
     error_message = "the helper may write only /etc/ozbox and its spool, and the daemon only the request directory"
+  }
+
+  # The helper's sandbox is ProtectSystem=strict, so a folder it is not listed for cannot be written even by root: the record
+  # that backups were set up lives in /work/ozbox-backup, and without this line every credentials request stored the
+  # credentials and then failed to keep the record.
+  assert {
+    condition     = strcontains(output.cloud_init, "ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets -/work/ozbox-backup") && strcontains(output.cloud_init, "ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup")
+    error_message = "the credentials helper must be allowed to write the record's folder on /work, and that folder is made before its sandbox starts"
+  }
+
+  assert {
+    condition     = strcontains(output.cloud_init, "RequiresMountsFor=/work") && strcontains(output.cloud_init, "systemctl, enable, ozbox-backup.service")
+    error_message = "the helper runs at every boot, after /work is mounted, so the record is brought up to date without new credentials"
+  }
+
+  # The helper waits (a bounded time) for the secrets service at a boot, so its start has a limit above that wait, and its
+  # unit says what really happens without /work: it is held back until /work is mounted (it does not "still take credentials").
+  assert {
+    condition     = strcontains(output.cloud_init, "TimeoutStartSec=300") && strcontains(output.cloud_init, "RequiresMountsFor=/work") && !strcontains(output.cloud_init, "still takes credentials")
+    error_message = "the credentials helper needs a start limit above its wait for the secrets service, and its unit must not claim to run without /work"
   }
 }
 

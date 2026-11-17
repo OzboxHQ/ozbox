@@ -76,6 +76,8 @@ are labelled simulated; a figure with no data behind it is shown as a dash, neve
 The dashboard also lists runs, pending plans (approvals) and an activity trail, refreshes live over a server-sent event
 stream, installs as an app (its service worker never stores API data), and offers an "Open in" menu that shows how to
 connect a desktop coding app to a box over SSH through its tunnel.
+A slow cloud or box never holds the rest of the dashboard: the box list is shown from the last read, with its age, while a new read
+runs, and a box that does not answer is reported as not reached.
 
 ### Reaching it from elsewhere
 
@@ -87,7 +89,7 @@ start a public address that has neither. The address is the single source of the
 and Origin, and the session cookie's scope. Settings, Dashboard access shows the tunnel's state and has a guide for each
 provider; `ozbox tunnel status --json` says the same on the command line. `ozbox dashboard install <box>` runs the dashboard
 and its tunnel as a service on a box: it stages the settings, and the root helper runs the box's own program as the
-supervisor user from a system unit (ADR 0023, Amendment 1); the dashboard then goes down whenever that box is upgraded or paused.
+supervisor user from a system unit (ADR 0023, Amendment 1). The helper installs the settings only after checking they are the ones the person's computer sent, and only when the dashboard has none to read (a box whose system disk an upgrade replaced keeps its folder on `/work`); settings it already has are kept, because the box user can make the same request. It reports success only once the dashboard stays up and answers on its port. The dashboard then goes down whenever that box is upgraded or paused.
 
 ### Who may do what at the dashboard
 
@@ -99,6 +101,21 @@ reads the role and the list of what it may do from the sign-in status and shows 
 owner; an owner changes a role with a passkey, and it is audited ([ADR 0039](adr/0039-dashboard-roles-owner-member-viewer-and-one-rule-for-a-dashboard-with-no-sign-in-on-a-box.md)).
 One function also decides whether a request counts as a person's second factor, so a dashboard with no sign-in on a box is
 refused everywhere one is asked for.
+
+### Telegram (Preview)
+
+The dashboard server hosts one **Telegram bridge** (ADR 0050, phase P1): an outbound long poll of the Bot API on a thread of its own
+(no inbound port, no webhook), reading `message` updates only. The bot token is a secret in the secret store, read for each call and
+never kept. What a message may do is decided by one pure function in `ozbox_core::chat_policy`: a closed table of acts, one parser
+that turns a message into exactly one of them, and `decide`, which returns `Allow`, `Handoff` (a link to the dashboard, nothing
+done) or `Refuse`. An `Allow` can only be made by `decide`, and the executor asks again with fresh facts just before it acts.
+Identity is a **link**: a Telegram numeric user id bound to a person by a passkey assertion made in the dashboard, and what a link
+may do beyond reading is a **delegation**, a signed record whose digest is the WebAuthn challenge. The server keeps the evidence and
+checks it again every time it is used, so a hand-edited row grants nothing. Links, delegations, the replay set of `(bot id,
+update_id)` and the poll offset live in a file of their own, written with a sync before the act they allow; every act and refusal
+is an audit entry, and what was said is kept in a sealed, 30-day, per-link transcript. In P1 only reading and talking to an agent
+exist; talking goes through the chat gateway's own code, unchanged. Box power, `/run` and the chat profile on the box are later
+phases.
 
 ## Supervised agent runs
 

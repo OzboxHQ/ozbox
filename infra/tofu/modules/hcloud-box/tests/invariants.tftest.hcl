@@ -145,6 +145,7 @@ run "comments_are_dropped_from_the_template_text_not_from_what_is_put_into_it" {
     error_message = "what the template puts in is still there after the comments are dropped"
   }
 
+  # The Hetzner render has only about 1 to 2 KB of headroom under 32,768 bytes: measure the next template addition here.
   assert {
     condition     = length(hcloud_server.box.user_data) < 32768
     error_message = "Hetzner takes at most 32 KB of user data"
@@ -299,6 +300,26 @@ run "user_data_installs_the_backup_credentials_helper_with_a_narrow_hand_off" {
   assert {
     condition     = strcontains(hcloud_server.box.user_data, "ReadWritePaths=/etc/ozbox /run/ozbox-backup") && strcontains(hcloud_server.box.user_data, "ReadWritePaths=-/run/ozbox-backup/requests")
     error_message = "the helper may write only /etc/ozbox and its spool, and the daemon only the request directory"
+  }
+
+  # The helper's sandbox is ProtectSystem=strict, so a folder it is not listed for cannot be written even by root: the record
+  # that backups were set up lives in /work/ozbox-backup, and without this line every credentials request stored the
+  # credentials and then failed to keep the record.
+  assert {
+    condition     = strcontains(hcloud_server.box.user_data, "ReadWritePaths=/etc/ozbox /run/ozbox-backup /run/ozbox-secrets -/work/ozbox-backup") && strcontains(hcloud_server.box.user_data, "ExecStartPre=-+/usr/bin/install -d -m 0755 -o root -g root /work/ozbox-backup")
+    error_message = "the credentials helper must be allowed to write the record's folder on /work, and that folder is made before its sandbox starts"
+  }
+
+  assert {
+    condition     = strcontains(hcloud_server.box.user_data, "RequiresMountsFor=/work") && strcontains(hcloud_server.box.user_data, "systemctl, enable, ozbox-backup.service")
+    error_message = "the helper runs at every boot, after /work is mounted, so the record is brought up to date without new credentials"
+  }
+
+  # The helper waits (a bounded time) for the secrets service at a boot, so its start has a limit above that wait, and its
+  # unit says what really happens without /work: it is held back until /work is mounted (it does not "still take credentials").
+  assert {
+    condition     = strcontains(hcloud_server.box.user_data, "TimeoutStartSec=300") && strcontains(hcloud_server.box.user_data, "RequiresMountsFor=/work") && !strcontains(hcloud_server.box.user_data, "still takes credentials")
+    error_message = "the credentials helper needs a start limit above its wait for the secrets service, and its unit must not claim to run without /work"
   }
 }
 

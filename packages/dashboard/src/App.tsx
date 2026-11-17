@@ -32,6 +32,7 @@ import { TriggersPage } from './pages/triggers-page';
 import { BoxesPage } from './pages/boxes-page';
 import { FleetPage } from './pages/fleet-page';
 import { AccountPage } from './pages/account-page';
+import { GoPage } from './pages/go-page';
 import { SettingsPage } from './pages/settings-page';
 import { TerminalPage } from './pages/terminal-page';
 import { UsagePage } from './pages/usage-page';
@@ -45,12 +46,24 @@ export function useApp() {
 }
 
 const TOKEN_KEY = 'ozbox.token';
+/** How often a page that could not ask the server what it is asks again, in ms. */
+const INFO_RECOVER_MS = 5000;
 
 export function App({ client, onSignOut }: { client: ApiClient | null; onSignOut?: () => void }) {
   const route = useRoute();
   const [ended, setEnded] = useState(false);
   const info = useAsync((s) => (client ? client.info(s) : Promise.reject(new Error('no client'))), [client], undefined, REQUIRED_LOAD_RETRY);
   const value = useMemo(() => (client ? { client, info: info.data } : null), [client, info.data]);
+
+  // With no answer after the tries, the page says so and keeps asking, so a server that was only busy brings the page back
+  // by itself instead of leaving it on the error until someone presses Try again.
+  const infoFailed = info.data === null && info.error !== null;
+  const reloadInfo = info.reload;
+  useEffect(() => {
+    if (!infoFailed) return;
+    const id = setInterval(reloadInfo, INFO_RECOVER_MS);
+    return () => clearInterval(id);
+  }, [infoFailed, reloadInfo]);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pending, setPending] = useState<{ box: BoxRecord; kind: ActionKind } | null>(null);
@@ -135,6 +148,7 @@ export function App({ client, onSignOut }: { client: ApiClient | null; onSignOut
             {route.page === 'tools' && <ToolsPage key={route.name} name={route.name} />}
             {route.page === 'terminal' && <TerminalPage key={route.name} name={route.name} />}
             {route.page === 'account' && <AccountPage />}
+            {route.page === 'go' && <GoPage />}
             {route.page === 'tasks' && <TasksPage />}
             {route.page === 'orchestrations' && <OrchestrationsPage />}
             {route.page === 'memory' && <MemoryPage />}

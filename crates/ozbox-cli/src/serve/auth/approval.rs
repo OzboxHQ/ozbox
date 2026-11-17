@@ -6,6 +6,7 @@
 //! verification (`webauthn::verify_assertion`), keeps the signature counter moving, and hands back the evidence the service
 //! stores and checks again (its own challenge, flags, counter and relying party).
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::b64::decode_url;
@@ -32,7 +33,67 @@ pub struct SignedApproval {
     pub origin: String,
 }
 
+/// The evidence of one passkey assertion, kept with what it signed so it can be checked again later (a delegation's
+/// signature is checked every time the delegation is used). Hex, as the approval service stores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedEvidence {
+    pub person: String,
+    pub credential_id: String,
+    pub authenticator_data_hex: String,
+    pub client_data_hex: String,
+    pub signature_hex: String,
+    pub rp_id: String,
+    pub origin: String,
+    pub at_ms: u64,
+}
+
+impl SignedApproval {
+    pub fn evidence(&self, at_ms: u64) -> SignedEvidence {
+        SignedEvidence {
+            person: self.person.clone(),
+            credential_id: self.credential_id.clone(),
+            authenticator_data_hex: self.authenticator_data_hex.clone(),
+            client_data_hex: self.client_data_hex.clone(),
+            signature_hex: self.signature_hex.clone(),
+            rp_id: self.rp_id.clone(),
+            origin: self.origin.clone(),
+            at_ms,
+        }
+    }
+}
+
 impl Auth {
+    /// Whether `ev` is a valid assertion over `challenge` by a passkey this person **still has**, for this dashboard's own
+    /// relying party. The signature, the relying party, the origin, user presence and verification and the challenge are all
+    /// checked again; the counter is not (it moved on when the evidence was made). A passkey that was removed, another
+    /// dashboard's origin or a challenge that is not this record's is `false`.
+    pub fn verify_evidence(&self, ev: &SignedEvidence, challenge: &[u8; 32]) -> bool {
+        if ev.rp_id != self.cfg.rp.id || ev.origin != self.cfg.rp.origin {
+            return false;
+        }
+        let inner = self.lock();
+        let Some(pk) = inner
+            .state
+            .users
+            .get(&ev.person)
+            .and_then(|u| u.passkeys.iter().find(|p| p.id == ev.credential_id))
+            .cloned()
+        else {
+            return false;
+        };
+        drop(inner);
+        let b64 =
+            |h: &str| ozbox_core::approval_subject::from_hex(h).map(|b| super::b64::encode_url(&b));
+        let (Some(cd), Some(ad), Some(sig)) = (
+            b64(&ev.client_data_hex),
+            b64(&ev.authenticator_data_hex),
+            b64(&ev.signature_hex),
+        ) else {
+            return false;
+        };
+        webauthn::verify_stored_assertion(&self.cfg.rp, challenge, &pk, &cd, &ad, &sig).is_ok()
+    }
+
     /// Options for a passkey check over `challenge`, offering only the signed-in person's own passkeys.
     pub fn approval_options(&self, req: &Req, challenge: &[u8; 32]) -> Result<Value, Refusal> {
         let (person, _) = self.who_and_role(req).ok_or((

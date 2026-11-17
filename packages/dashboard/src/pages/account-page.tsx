@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ApiError } from '../api/error';
 import type { Account, PasskeyInfo } from '../api/session';
 import { PeopleCard } from '../components/auth/people-card';
+import { TelegramLinksCard } from '../components/telegram/links-card';
 import { TotpSetup } from '../components/auth/totp-setup';
 import { AppPage, EmptyState, PageHeader } from '../components/page';
 import { signInMessage } from '../lib/auth-errors';
@@ -337,6 +338,8 @@ export function AccountPage() {
           </Card>
 
           <PeopleCard people={a.people} meId={a.user.id} onChanged={reload} />
+
+          <TelegramLinksCard ownerView={a.people.find((p) => p.id === a.user.id)?.role === 'owner'} />
 
           <ConfirmDialog
             open={!!removing}

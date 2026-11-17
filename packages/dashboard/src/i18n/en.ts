@@ -20,6 +20,7 @@ import { enOrch } from './en-orch';
 import { enBrowser } from './en-browser';
 import { enMemory } from './en-memory';
 import { enChat, enChatApps } from './en-chat';
+import { enTelegram } from './en-telegram';
 import { enPerm } from './en-perm';
 import { enApprovalRequests } from './en-approval-requests';
 import { enSecrets } from './en-secrets';
@@ -47,6 +48,7 @@ export const en = {
   ...enMemory,
   ...enChat,
   ...enChatApps,
+  ...enTelegram,
   ...enPerm,
   ...enSecrets,
   ...enApprovalRequests,
@@ -124,7 +126,7 @@ export const en = {
   'apps.tg_step1': 'In Telegram, open the chat with BotFather and send /newbot.',
   'apps.tg_step2': 'Choose a name and a username for the bot, then copy the token BotFather sends back.',
   'apps.tg_step3': 'Choose Add bot token here and paste it. It is saved write-only.',
-  'apps.tg_step4': 'Choose Pair a chat, then send the one-time code to your bot in a private chat. Only paired chats receive alerts or can ask for /status.',
+  'apps.tg_step4': 'In BotFather turn group joining off and privacy mode on (/setjoingroups, /setprivacy), then choose Link an account and follow the steps: a passkey opens a pairing window, you send /link to the bot, and a second passkey confirms.',
   'apps.add_token': 'Add bot token',
   'apps.replace_token': 'Replace bot token',
   'apps.remove_token': 'Remove token',
@@ -133,7 +135,7 @@ export const en = {
   'apps.token_hint': 'From BotFather. It looks like 123456:ABC and is never shown again.',
   'apps.remove_token_title': 'Remove the Telegram bot token',
   'apps.remove_token_body': 'Telegram alerts stop. Paired chats stay in the list until you remove them.',
-  'apps.pair_chat': 'Pair a chat',
+  'apps.pair_chat': 'Link an account',
   'apps.pair_title': 'Pair a Telegram chat',
   'apps.pair_help': 'Pairing proves that you hold this one-time code. Anyone else who messages the bot gets no reply.',
   'apps.pair_send': 'Send this code to {bot} in a private chat.',
@@ -145,8 +147,8 @@ export const en = {
   'apps.chat_unlinked': 'Not linked to a person',
   'apps.no_paired_chats': 'No chat is paired yet.',
   'apps.unpair': 'Unpair',
-  'apps.unpair_title': 'Unpair this chat',
-  'apps.unpair_body': 'It stops receiving alerts and can no longer ask for /status.',
+  'apps.unpair_title': 'Unlink this chat',
+  'apps.unpair_body': 'It stops receiving alerts and is not answered any more. Anything delegated to it ends.',
 
   'apps.slack_title': 'Slack',
   'apps.slack_help': 'Alerts are posted to a channel through a Slack incoming webhook.',

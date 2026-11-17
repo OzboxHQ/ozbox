@@ -10,6 +10,8 @@ pub mod api;
 pub mod backup;
 pub mod backup_root;
 pub mod backup_service;
+#[cfg(unix)]
+pub mod backup_state;
 pub mod checkpoint;
 pub mod config;
 pub mod files;
@@ -38,6 +40,7 @@ pub mod secrets_link;
 pub mod selftest;
 #[cfg(unix)]
 pub mod session_resume;
+pub mod skills;
 pub mod store;
 #[cfg(unix)]
 pub mod terminal;

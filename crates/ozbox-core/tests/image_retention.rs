@@ -491,8 +491,8 @@ fn publish(dir: &Path, manifest: &Value, extra: &[&str]) -> (bool, String, Strin
     std::fs::write(
         &aws,
         format!(
-            "#!/bin/sh\necho \"$@\" >>'{}'\ncase \"$2\" in\n  describe-images) case \"$*\" in *Public*) echo True ;; *) echo snap-0000000a ;; esac ;;\nesac\n",
-            log.display()
+            "#!/bin/sh\necho \"$@\" >>'{log}'\ncase \"$2\" in\n  describe-images) case \"$*\" in *Public*) i=$(echo \"$*\" | sed 's/.*--image-ids \\([^ ]*\\).*/\\1/'); if grep -q -- \"--image-id $i --launch-permission Add\" '{log}'; then echo True; else echo False; fi ;; *) echo snap-0000000a ;; esac ;;\nesac\n",
+            log = log.display()
         ),
     )
     .unwrap();
@@ -538,7 +538,10 @@ fn publishing_lists_by_default_and_with_apply_tags_then_makes_each_manifest_imag
         ok && out.contains("dry run") && out.contains("eu-west-1 ami-0000000d"),
         "{out}"
     );
-    assert!(calls.is_empty(), "a dry run calls nothing: {calls}");
+    assert!(
+        !calls.contains("create-tags") && !calls.contains("modify-image-attribute"),
+        "a dry run changes nothing: {calls}"
+    );
 
     let d = tempfile::tempdir().unwrap();
     let (ok, _, err, calls) = publish(d.path(), &manifest(), &["--apply"]);
@@ -724,4 +727,48 @@ fn the_wipe_runs_at_shutdown_after_the_agent_stops_and_leaves_nothing_in_the_ima
             "{persistent} would persist into the image"
         );
     }
+}
+
+#[test]
+fn the_wipe_stops_journald_writing_to_var_before_it_deletes_the_journal() {
+    let w = packer_file("scripts/image-wipe.sh");
+    let flush = w.find("journalctl --flush").expect("flush");
+    let rotate = w.find("journalctl --rotate").expect("rotate");
+    let relinquish = w
+        .find("journalctl --relinquish-var")
+        .expect("relinquish-var");
+    let delete = w
+        .find("find \"$r/var/log/journal\"")
+        .expect("journal delete");
+    assert!(
+        flush < rotate && rotate < relinquish,
+        "flush, rotate, then relinquish /var"
+    );
+    assert!(
+        relinquish < delete,
+        "journald must stop writing to /var BEFORE the files are removed, or the build boot lands in the image"
+    );
+}
+
+#[test]
+fn the_image_workflow_marks_a_pre_release_version_as_a_github_pre_release() {
+    let w = std::fs::read_to_string(root().join(".github/workflows/image.yml")).unwrap();
+    assert!(w.contains("case \"$VERSION\" in *-*) flags+=(--prerelease) ;; esac"));
+    assert!(w.contains("gh release create \"$tag\" \"${flags[@]}\""));
+}
+
+#[test]
+fn the_packer_fallback_policy_has_a_statement_and_ci_validates_both_profile_paths() {
+    let hcl = packer_file("ozbox-image.pkr.hcl");
+    let at = hcl
+        .find("temporary_iam_instance_profile_policy_document")
+        .unwrap();
+    let block = &hcl[at..at + 700];
+    assert!(
+        block.contains("Statement {"),
+        "the policy document needs a Statement block"
+    );
+    let ci = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+    assert!(ci.contains("-var aws_instance_profile= "));
+    assert!(ci.contains("-var aws_instance_profile=ozbox-build"));
 }

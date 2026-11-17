@@ -50,4 +50,10 @@ pub const EN: &[(&str, &str)] = &[
     ("guard.plan_patch_read", "On {box}: read the restart rule and whether the box is in use. Nothing is changed."),
     ("guard.log_first", "The box is not in log mode yet. Run it in log mode first (`--mode log`), look at `ozbox box-egress {box}`, then enforce. Pass --skip-log-first only if you are sure."),
     ("guard.no_aws_region", "this box has no region recorded, which the list needs for its AWS names; nothing was changed"),
+    ("commit_guard.reason_no_socket", "its socket is missing"),
+    ("commit_guard.reason_not_listening", "nothing is listening on its socket"),
+    ("commit_guard.fix", "To see why it stopped and bring it back, ask whoever runs this box to run, from their computer, `ozbox admin <box> -- collect-logs` and then `ozbox admin <box> -- restart-services`. If the log says the store can no longer be opened, `ozbox admin <box> -- recover-secrets` sets the old store aside and starts a new one (the secrets that were entered by hand are entered again)."),
+    ("commit_guard.commit_stopped", "ozbox: this box's secrets service is not running ({why}), so a person's approval cannot be recorded right now and nothing can be let through with one. Nothing was lost: your files are untouched and still staged. Remove the key and commit again. If it is a public value (a web address, a key meant for the browser), say so with `ozbox secrets import --public NAME` once the service is back.\n{fix}\n"),
+    ("commit_guard.commit_passed", "ozbox: this box's secrets service is not running ({why}), so this commit was checked for the shapes of keys but NOT against the secrets stored on this box. Nothing was lost: your work is committed here. A push is held until the service is back and has checked everything again.\n{fix}\n"),
+    ("commit_guard.push_stopped", "ozbox: this push was stopped because this box's secrets service is not running ({why}), so the commits could not be checked against the secrets stored on this box. Nothing was lost and nothing left the box: your commits are safe here. Push again once the service is back; the push then checks everything.\n{fix}\n"),
 ];

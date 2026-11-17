@@ -9,10 +9,11 @@ use ozbox_core::CommandRunner;
 use serde_json::{json, Value};
 
 use crate::cli::{EnvCommand, PolicyCommand};
+use crate::import_report::{Outcome, Report};
 use crate::messages::t;
 use crate::run::CliError;
 use crate::secrets_file::open_from_env;
-use crate::workload::{parse_env, plan, Status};
+use crate::workload::{invalid_name_reason, parse_env_report, plan, Row, Status};
 use crate::workload_policy::Policy;
 
 fn fail(e: crate::secrets::SecretError) -> CliError {
@@ -30,6 +31,9 @@ pub struct ImportArgs<'a> {
     pub project: &'a str,
     pub env: &'a str,
     pub allow_live: &'a [String],
+    /// `--allow-live-all`: every production-looking key in the file, behind the same typed confirmation. Never combined with
+    /// `allow_live` (the command line refuses it).
+    pub allow_live_all: bool,
     /// Names the person marked PUBLIC (`--public NAME`).
     pub public: &'a [String],
     pub on_box: Option<&'a str>,
@@ -39,9 +43,18 @@ pub struct ImportArgs<'a> {
 
 /// Making a production-looking key available to a box needs a person typing a word that cannot be pasted in by a script
 /// that has no terminal. The dashboard's equivalent is a fresh passkey.
-pub fn typed_confirmation(input: &mut dyn BufRead, tty: bool, word: &str) -> Result<(), CliError> {
+/// `rerun` is the exact command a person runs in a terminal; the refusal from a script says so.
+pub fn typed_confirmation(
+    input: &mut dyn BufRead,
+    tty: bool,
+    word: &str,
+    rerun: &str,
+) -> Result<(), CliError> {
     if !tty {
-        return Err(CliError::Msg(t("secrets.confirm_need_terminal", &[])));
+        return Err(CliError::Msg(t(
+            "secrets.confirm_need_terminal",
+            &[("command", rerun)],
+        )));
     }
     eprint!("{}", t("secrets.confirm_live", &[("word", word)]));
     let mut line = String::new();
@@ -73,13 +86,57 @@ pub fn ssh_receive(
 }
 
 /// A row that is skipped (never sent, never stored) with the words that say why. Names and reasons only, never a value.
-fn skippable(s: &Status) -> Option<String> {
-    match s {
-        Status::Invalid => Some("not a valid variable name".into()),
+fn skippable(r: &Row) -> Option<String> {
+    match &r.status {
+        Status::Invalid => Some(format!(
+            "not a valid variable name: {}",
+            invalid_name_reason(&r.name)
+        )),
         Status::Blank => Some("skipped: the value is blank".into()),
         Status::Unstorable(why) => Some(format!("cannot be stored: {why}")),
         _ => None,
     }
+}
+
+/// A word safe to paste into a shell as it stands: quoted only when it has to be.
+fn shell_word(w: &str) -> String {
+    let plain = !w.is_empty()
+        && w.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-./:@%+=,".contains(&b));
+    if plain {
+        w.to_string()
+    } else {
+        format!("'{}'", w.replace('\'', "'\\''"))
+    }
+}
+
+/// The command a person runs in a terminal to do this same import with the confirmation. Names and paths only.
+fn rerun_command(a: &ImportArgs<'_>, allow: &[String]) -> String {
+    let mut c = vec![
+        "ozbox".to_string(),
+        "secrets".into(),
+        "import".into(),
+        shell_word(&a.file.to_string_lossy()),
+        "--project".into(),
+        shell_word(a.project),
+        "--env".into(),
+        shell_word(a.env),
+    ];
+    if let Some(b) = a.on_box {
+        c.extend(["--box".to_string(), shell_word(b)]);
+    }
+    if a.allow_live_all {
+        c.push("--allow-live-all".into());
+    } else {
+        for n in allow {
+            c.extend(["--allow-live".to_string(), shell_word(n)]);
+        }
+    }
+    for n in a.public {
+        c.extend(["--public".to_string(), shell_word(n)]);
+    }
+    c.push("--yes".into());
+    c.join(" ")
 }
 
 /// `ozbox secrets import`: preview, then (with --yes) store here, or send to the box with --box. Values are never printed.
@@ -110,11 +167,24 @@ pub fn import(
             fname, a.env
         )));
     }
-    let lines = parse_env(&text);
-    if lines.is_empty() {
+    let parsed = parse_env_report(&text);
+    if parsed.entries() == 0 {
         return Err(CliError::Msg(t("secrets.import_empty", &[])));
     }
+    let (lines, duplicates, rejected) = (parsed.lines, parsed.duplicates, parsed.rejected);
     let rows = plan(&lines, a.project, a.env);
+    // The names allowed to be stored although they look like production. `--allow-live-all` allows exactly the names this file's
+    // production-looking rows carry, which the person sees listed before typing the confirmation. A value the store already
+    // holds as production under another name is judged by the store and still held back, and the report says so.
+    let allow: Vec<String> = if a.allow_live_all {
+        rows.iter()
+            .filter(|r| matches!(r.status, Status::Live(_)))
+            .map(|r| r.name.clone())
+            .collect()
+    } else {
+        a.allow_live.to_vec()
+    };
+    let allow_live = &allow[..];
     // A public mark is the person's explicit word, and is refused as a whole before anything is sent or stored, so a mark that
     // cannot be honoured never leaves the value stored as a secret the person believes is public (ADR 0029 Amendment 12).
     for n in a.public {
@@ -139,14 +209,38 @@ pub fn import(
         }
     }
     let held = |name: &str, s: &Status| {
-        matches!(s, Status::Live(_)) && !a.allow_live.iter().any(|x| x == name)
+        matches!(s, Status::Live(_)) && !allow_live.iter().any(|x| x == name)
     };
     let mut stored: Option<Vec<String>> = None;
     let mut held_back: Option<usize> = None;
     let mut needs_newer: Vec<String> = Vec::new();
+    let mut unchanged: Vec<String> = Vec::new();
+    // names the box or the store itself held back (it knows a value as production that the file does not show)
+    let mut held_by_service: Vec<String> = Vec::new();
     if yes {
-        if !a.allow_live.is_empty() {
-            typed_confirmation(input, tty, a.project)?;
+        if a.allow_live_all || !a.allow_live.is_empty() {
+            // the person sees exactly which production-looking keys they are agreeing to, before being asked to type anything
+            let named: Vec<&Row> = rows
+                .iter()
+                .filter(|r| matches!(r.status, Status::Live(_)) && allow_live.contains(&r.name))
+                .collect();
+            let mut listing = t(
+                "secrets.confirm_list",
+                &[
+                    ("count", &named.len().to_string()),
+                    ("project", a.project),
+                    ("env", a.env),
+                ],
+            );
+            for r in &named {
+                listing.push_str(&format!("\n  {}  {}", r.name, r.fingerprint));
+            }
+            if json {
+                eprintln!("{listing}");
+            } else {
+                let _ = writeln!(out, "{listing}");
+            }
+            typed_confirmation(input, tty, a.project, &rerun_command(a, a.allow_live))?;
         }
         match a.on_box {
             Some(b) => {
@@ -154,7 +248,7 @@ pub fn import(
                 let going: Vec<(&crate::workload::EnvLine, &crate::workload::Row)> = lines
                     .iter()
                     .zip(&rows)
-                    .filter(|(_, r)| !held(&r.name, &r.status) && skippable(&r.status).is_none())
+                    .filter(|(_, r)| !held(&r.name, &r.status) && skippable(r).is_none())
                     .collect();
                 // A value the plain rule does not hold goes as base64, and only to a box that says it can read that: a
                 // box from before encoded values would fail on the missing `value` (storing nothing wrongly), but it is
@@ -210,7 +304,7 @@ pub fn import(
                     }));
                 }
                 let req = json!({"op": "import", "project": a.project, "env": a.env,
-                    "allowed": a.allow_live, "text": std::env::var("USER").unwrap_or_default(),
+                    "allowed": allow_live, "text": std::env::var("USER").unwrap_or_default(),
                     "approval": a.approval.unwrap_or(""), "lines": send});
                 let v = ssh_receive(runner, b, &req)?;
                 let names = |k: &str| -> Vec<String> {
@@ -223,34 +317,77 @@ pub fn import(
                         .unwrap_or_default()
                 };
                 stored = Some(names("names"));
+                held_by_service = names("held");
                 held_back = Some(rows.iter().filter(|r| held(&r.name, &r.status)).count());
             }
             None => {
                 let store = open_from_env().map_err(fail)?;
                 let owner = std::env::var("USER").unwrap_or_default();
-                let done = crate::workload::apply_marked(
+                // a name stored exactly so already is not written again, and is reported as unchanged
+                unchanged = crate::workload::unchanged_names(
                     &store,
                     a.project,
                     a.env,
                     &lines,
-                    a.allow_live,
+                    &rows,
+                    &|n| allow_live.iter().any(|x| x == n),
                     a.public,
-                    &owner,
+                )
+                .map_err(fail)?;
+                let to_write: Vec<crate::workload::EnvLine> = lines
+                    .iter()
+                    .filter(|l| !unchanged.contains(&l.name))
+                    .map(|l| crate::workload::EnvLine {
+                        name: l.name.clone(),
+                        value: l.value.clone(),
+                        line: l.line,
+                        malformed: l.malformed,
+                    })
+                    .collect();
+                let done = crate::workload::apply_marked(
+                    &store, a.project, a.env, &to_write, allow_live, a.public, &owner,
                 )
                 .map_err(fail)?;
                 held_back = Some(done.held_back.len());
+                held_by_service = done.held_back;
                 stored = Some(done.stored);
             }
         }
     }
+    // Where every kept entry ended up. A name the box or the store did not report as stored, and that nothing else explains, is
+    // reported as skipped rather than dropped, so the buckets always add up to the entries of the file.
+    let applied = stored.is_some();
+    let outcomes: Vec<Outcome> = rows
+        .iter()
+        .map(|r| {
+            if let Some(why) = skippable(r) {
+                Outcome::Skipped(why)
+            } else if unchanged.contains(&r.name) {
+                Outcome::Unchanged
+            } else if held(&r.name, &r.status) || held_by_service.contains(&r.name) {
+                Outcome::HeldBack
+            } else if !applied {
+                Outcome::Ready
+            } else if stored.as_ref().is_some_and(|s| s.contains(&r.name)) {
+                Outcome::Stored
+            } else if needs_newer.contains(&r.name) {
+                Outcome::Skipped("only a newer box can store it (see above)".into())
+            } else {
+                Outcome::Skipped("it was not stored".into())
+            }
+        })
+        .collect();
+    let report = Report::new(&outcomes, &duplicates, &rejected, applied);
     if json {
         let r: Vec<_> = rows
             .iter()
-            .map(|r| {
+            .zip(&outcomes)
+            .map(|(r, o)| {
                 json!({"name": (r.status != Status::Invalid).then(|| r.name.clone()), "line": r.line,
                     "fingerprint": r.fingerprint,
                     "status": match &r.status { Status::Ready => "ready", Status::Live(_) => "production_looking", Status::Invalid => "invalid", Status::Blank => "blank", Status::Unstorable(_) => "cannot_be_stored" },
-                    "reason": skippable(&r.status),
+                    "reason": skippable(r),
+                    "outcome": o.word(),
                     "encoded": r.encoded,
                     "public": a.public.contains(&r.name),
                     "held_back": held(&r.name, &r.status)})
@@ -260,7 +397,11 @@ pub fn import(
             out,
             "{}",
             json!({"project": a.project, "env": a.env, "keys": r, "stored": stored, "box": a.on_box,
-                "needs_newer_box": needs_newer})
+                "needs_newer_box": needs_newer,
+                "summary": report.json(),
+                "duplicates": crate::import_report::duplicates_json(&duplicates),
+                "rejected_lines": crate::import_report::rejected_json(&rejected),
+                "unchanged": unchanged})
         );
     } else {
         for r in &rows {
@@ -273,7 +414,7 @@ pub fn import(
             let note = match &r.status {
                 Status::Ready => enc.clone(),
                 Status::Live(why) => format!("  production-looking ({why}){enc}"),
-                other => format!("  {}", skippable(other).unwrap_or_default()),
+                _ => format!("  {}", skippable(r).unwrap_or_default()),
             };
             let _ = writeln!(
                 out,
@@ -288,10 +429,30 @@ pub fn import(
                 )
             );
         }
-        let skipped = rows
-            .iter()
-            .filter(|r| skippable(&r.status).is_some())
-            .count();
+        for x in &rejected {
+            let _ = writeln!(
+                out,
+                "{}",
+                t(
+                    "secrets.report_rejected_line",
+                    &[("line", &x.line.to_string()), ("reason", x.reason)]
+                )
+            );
+        }
+        for d in &duplicates {
+            let _ = writeln!(
+                out,
+                "{}",
+                t(
+                    "secrets.report_dup_line",
+                    &[
+                        ("name", &d.name),
+                        ("detail", &crate::import_report::duplicate_detail(d))
+                    ]
+                )
+            );
+        }
+        let skipped = rows.iter().filter(|r| skippable(r).is_some()).count() + rejected.len();
         if skipped > 0 {
             let _ = writeln!(
                 out,
@@ -320,6 +481,7 @@ pub fn import(
             ),
             _ => writeln!(out, "{}", t("secrets.import_preview", &[])),
         };
+        let _ = writeln!(out, "{}", report.line(&duplicates));
     }
     Ok(())
 }
@@ -544,19 +706,36 @@ fn policy(c: &PolicyCommand, runner: &dyn CommandRunner, json: bool) -> Result<(
         } => {
             let text = std::fs::read_to_string(file)
                 .map_err(|_| CliError::Msg(t("secrets.import_unreadable", &[])))?;
+            // Every check that needs no answer from the box runs HERE, before anything is sent: the declaration's shape and its
+            // variable rules (a reserved name such as NODE_ENV), the rules of a command that receives a secret, and the size the
+            // box keeps. The box repeats them, but a request the box would refuse should never reach it: a person's approval code is
+            // made by hand, for one use.
             let p = Policy::parse(&text).map_err(fail)?;
-            let compact = serde_json::to_string(&p).unwrap_or_default();
+            let compact = p.check_before_write().map_err(fail)?;
             match on_box {
                 Some(b) => {
                     // A box from before this format would read the declaration, drop what it does not know and store the
                     // rest, with the owner's approval covering a declaration that is not the one written. So ask first.
-                    if p.needs_v2() || p.needs_runner_uids() || p.needs_public_values() {
+                    // A box from before declaration records keeps a declaration as one short value, so it would spend the approval and
+                    // then refuse anything over about 2 KB. The size the box would hold it at is twice the JSON (hex).
+                    let needs_records = compact.len() * 2 > crate::secrets::MAX_VALUE;
+                    if p.needs_v2()
+                        || p.needs_runner_uids()
+                        || p.needs_public_values()
+                        || needs_records
+                    {
                         let caps = ssh_receive(runner, b.as_str(), &json!({"op": "capabilities"}));
                         let has = |k: &str| {
                             caps.as_ref()
                                 .map(|v| v["result"][k] == json!(true))
                                 .unwrap_or(false)
                         };
+                        if needs_records && !has("declaration_records") {
+                            return Err(CliError::Msg(t(
+                                "secrets.policy_needs_newer_box_size",
+                                &[],
+                            )));
+                        }
                         if p.needs_v2() && !has("declaration_v2") {
                             return Err(CliError::Msg(t("secrets.policy_needs_newer_box", &[])));
                         }
@@ -945,6 +1124,7 @@ fn print_and_exit(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::workload::parse_env;
     use ozbox_core::{Output, RecordingRunner};
 
     const SENTINEL: &str = "SENTINEL-import-0123456789abcdef";
@@ -971,6 +1151,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1084,6 +1265,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1198,6 +1380,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1238,7 +1421,7 @@ mod tests {
         let notes: Vec<String> = lines
             .iter()
             .zip(plan(&lines, "app", "staging"))
-            .filter_map(|(l, r)| skippable(&r.status).map(|w| format!("{} {w}", l.name)))
+            .filter_map(|(l, r)| skippable(&r).map(|w| format!("{} {w}", l.name)))
             .collect();
         assert_eq!(notes.len(), 3);
         assert!(notes[0].starts_with("EMPTY_A skipped: the value is blank"));
@@ -1260,6 +1443,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: None,
             approval: None,
@@ -1314,6 +1498,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1468,6 +1653,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &named,
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1530,6 +1716,7 @@ mod tests {
             project: "app",
             env: "staging",
             allow_live: &[],
+            allow_live_all: false,
             public: &[],
             on_box: Some("dev"),
             approval: None,
@@ -1675,6 +1862,99 @@ mod tests {
         assert!(parse_pass(&["A".into()]).is_err() && parse_pass(&["=x".into()]).is_err());
     }
 
+    /// A declaration the box would refuse is refused on this computer, before anything is sent: the box's approval code is made by
+    /// hand for one use, so a doomed request must never reach it.
+    #[test]
+    fn a_declaration_the_box_would_refuse_is_refused_here_and_nothing_is_sent() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let set = |text: &str| {
+            let f = d.path().join("p.json");
+            std::fs::write(&f, text).unwrap();
+            let r = RecordingRunner::new();
+            let out = policy(
+                &PolicyCommand::Set {
+                    file: f,
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                &r,
+                true,
+            );
+            (out, r.calls().len())
+        };
+        let too_big = crate::workload_policy::realistic_declaration(64, 64, 16);
+        let reserved_secret = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":["K"],"env":["NODE_OPTIONS"],"envs":["staging"],"argv":["node","t.mjs"],"pin":[{"file":"t.mjs","sha256":"%"}]}}}"#
+            .replace('%', &"a".repeat(64));
+        let reserved_var = r#"{"dir":"/work/projects/app","commands":{"a":{"allow":[],"vars":{"NODE_ENV":"production"}}}}"#;
+        for (what, text) in [
+            ("too large", too_big.as_str()),
+            ("a reserved variable", reserved_var),
+            ("a reserved name for a secret", reserved_secret.as_str()),
+            ("not a declaration", "{"),
+        ] {
+            let (out, sent) = set(text);
+            assert!(out.is_err(), "{what} was accepted");
+            assert_eq!(sent, 0, "{what} reached the box");
+        }
+    }
+
+    /// A declaration whose stored form is over what an older box keeps (about 2 KB) is refused on this computer for a box that does
+    /// not say it keeps declarations as records: the older box would spend the approval code and then refuse it. A box that says so
+    /// is sent it.
+    #[test]
+    fn a_big_declaration_is_not_sent_to_a_box_from_before_declaration_records() {
+        crate::ingress_client::testing::install("dev");
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("p.json");
+        let text = crate::workload_policy::realistic_declaration(3, 3, 8);
+        assert!(
+            text.len() * 2 > crate::secrets::MAX_VALUE
+                && text.len() < crate::secrets::MAX_RECORD_VALUE,
+            "{}",
+            text.len()
+        );
+        std::fs::write(&f, &text).unwrap();
+        let set = |r: &RecordingRunner| {
+            policy(
+                &PolicyCommand::Set {
+                    file: f.clone(),
+                    project: "app".into(),
+                    on_box: Some("dev".parse().unwrap()),
+                    approval: Some("CODE".into()),
+                },
+                r,
+                true,
+            )
+        };
+        let reply = |r: &RecordingRunner, body: &str| {
+            r.reply(Output {
+                status: Some(0),
+                stdout: body.into(),
+                stderr: String::new(),
+            })
+        };
+        // a box that has every earlier capability but not records: refused here, only the question went
+        let old = RecordingRunner::new();
+        reply(
+            &old,
+            "{\"ok\":true,\"result\":{\"encoded_values\":true,\"declaration_v2\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        let e = set(&old).unwrap_err().to_string();
+        assert!(e.contains("Nothing was sent"), "{e}");
+        assert_eq!(old.calls().len(), 1, "only the capabilities question went");
+        // a box that keeps records gets it
+        let new = RecordingRunner::new();
+        reply(
+            &new,
+            "{\"ok\":true,\"result\":{\"declaration_v2\":true,\"declaration_records\":true,\"runner_uids\":true,\"public_values\":true}}\n",
+        );
+        reply(&new, "{\"ok\":true}\n");
+        assert!(set(&new).is_ok());
+        assert_eq!(new.calls().len(), 2);
+    }
+
     #[test]
     fn a_new_format_declaration_is_not_sent_to_a_box_that_cannot_read_it() {
         crate::ingress_client::testing::install("dev");
@@ -1759,6 +2039,7 @@ mod tests {
                 project: "app",
                 env: "staging",
                 allow_live: &[],
+                allow_live_all: false,
                 public,
                 on_box: Some("dev"),
                 approval: None,
@@ -1844,5 +2125,259 @@ mod tests {
             rows[1].get("public").is_none(),
             "an unmarked line carries no mark"
         );
+    }
+
+    /// A file of `n` keys, all production-looking when imported under `production`.
+    fn many_keys(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("KEY_{i:02}=value-{i:02}-0123456789\n"))
+            .collect()
+    }
+
+    fn args<'a>(f: &'a Path, env: &'a str, all: bool) -> ImportArgs<'a> {
+        ImportArgs {
+            file: f,
+            project: "app",
+            env,
+            allow_live: &[],
+            allow_live_all: all,
+            public: &[],
+            on_box: Some("dev"),
+            approval: None,
+        }
+    }
+
+    fn box_says(r: &RecordingRunner, names: &[&str], held: &[&str]) {
+        r.reply(Output {
+            status: Some(0),
+            stdout: format!(
+                "{{\"ok\":true,\"names\":{},\"held\":{},\"invalid\":[]}}\n",
+                serde_json::json!(names),
+                serde_json::json!(held)
+            ),
+            stderr: String::new(),
+        });
+    }
+
+    #[test]
+    fn allow_live_all_stores_every_production_looking_key_after_one_typed_confirmation_and_lists_them_first(
+    ) {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), &many_keys(73));
+        crate::ingress_client::testing::install("dev");
+        let r = RecordingRunner::new();
+        let names: Vec<String> = (0..73).map(|i| format!("KEY_{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        box_says(&r, &refs, &[]);
+        let mut out = Vec::new();
+        import(
+            &args(&f, "production", true),
+            &r,
+            &mut "app\n".as_bytes(),
+            true,
+            false,
+            true,
+            &mut out,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        // every name is sent as allowed (one flag, not 73)
+        let sent =
+            crate::ingress_client::testing::open_sent("dev", r.calls()[0].stdin.as_ref().unwrap())
+                .to_string();
+        assert!(sent.contains("\"KEY_00\"") && sent.contains("\"KEY_72\""));
+        assert_eq!(sent.matches("\"allowed\":[").count(), 1);
+        // the names are listed before anything else is said, and the count is the file's
+        let listed = out.find("73 production-looking key(s)").unwrap();
+        assert!(out[listed..].contains("KEY_00") && out[listed..].contains("KEY_72"));
+        assert!(listed < out.find("Stored 73 keys").unwrap());
+        assert!(out.contains("73 entries: 73 stored"), "{out}");
+    }
+
+    #[test]
+    fn allow_live_all_from_a_script_is_refused_and_says_the_exact_command_to_run_in_a_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), &many_keys(3));
+        crate::ingress_client::testing::install("dev");
+        let r = RecordingRunner::new();
+        let mut out = Vec::new();
+        let e = import(
+            &args(&f, "production", true),
+            &r,
+            &mut std::io::empty(),
+            false,
+            false,
+            true,
+            &mut out,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(r.calls().is_empty(), "nothing was sent");
+        assert!(
+            e.contains("ozbox secrets import")
+                && e.contains("--project app")
+                && e.contains("--env production")
+                && e.contains("--box dev")
+                && e.contains("--allow-live-all")
+                && e.contains("--yes"),
+            "{e}"
+        );
+        // the person still learns which keys the confirmation would cover
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("KEY_00") && out.contains("KEY_02"), "{out}");
+        // the wrong word at a terminal sends nothing either
+        let mut out2 = Vec::new();
+        assert!(import(
+            &args(&f, "production", true),
+            &r,
+            &mut "yes\n".as_bytes(),
+            true,
+            false,
+            true,
+            &mut out2
+        )
+        .is_err());
+        assert!(r.calls().is_empty());
+    }
+
+    #[test]
+    fn a_named_key_refused_from_a_script_also_names_the_command_to_run() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), &format!("STRIPE_KEY={}\n", live()));
+        let named = ["STRIPE_KEY".to_string()];
+        let a = ImportArgs {
+            allow_live: &named,
+            ..args(&f, "staging", false)
+        };
+        let e = import(
+            &a,
+            &RecordingRunner::new(),
+            &mut std::io::empty(),
+            false,
+            false,
+            true,
+            &mut std::io::sink(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("--allow-live STRIPE_KEY") && e.contains("--yes"),
+            "{e}"
+        );
+    }
+
+    /// Seven entries: a duplicate (A_KEY twice), a blank, a quoted value with a comment, a name with a space, a line that is not
+    /// NAME=value, and a production-looking key.
+    fn messy() -> String {
+        format!(
+            "A_KEY=one-0123456789\nBLANK=\nexport Q1=\"quoted-0123456789\" # note\nA_KEY=three-0123456789\nbad name={SENTINEL}\nJUSTAWORD\nSTRIPE_KEY={}\n",
+            live()
+        )
+    }
+
+    #[test]
+    fn the_preview_accounts_for_every_entry_and_the_counts_add_up() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), &messy());
+        let mut out = Vec::new();
+        import(
+            &args(&f, "staging", false),
+            &RecordingRunner::new(),
+            &mut std::io::empty(),
+            false,
+            false,
+            false,
+            &mut out,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("A_KEY  appears more than once: line 4 kept, line 1 ignored"),
+            "{out}"
+        );
+        assert!(out.contains("line 6  not NAME=value"), "{out}");
+        assert!(
+            out.contains("line 5  ")
+                && out.contains("not a valid variable name: the name contains a space"),
+            "{out}"
+        );
+        assert!(out.contains("skipped: the value is blank"), "{out}");
+        assert!(
+            out.contains("7 entries: 2 ready to store, 1 held back (production-looking, not allowed), 3 skipped (reasons above), 1 duplicate (line 4 kept, line 1 ignored)"),
+            "{out}"
+        );
+        // never a value, never the text of a line that is not a name
+        assert!(
+            !out.contains("SENTINEL") && !out.contains("one-0123") && !out.contains("three-0123")
+        );
+        assert!(!out.contains("bad name") && !out.contains("JUSTAWORD"));
+    }
+
+    #[test]
+    fn the_json_result_carries_the_same_account() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), &messy());
+        crate::ingress_client::testing::install("dev");
+        let r = RecordingRunner::new();
+        box_says(&r, &["A_KEY", "Q1"], &[]);
+        let mut out = Vec::new();
+        import(
+            &args(&f, "staging", false),
+            &r,
+            &mut std::io::empty(),
+            false,
+            true,
+            true,
+            &mut out,
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("SENTINEL") && !text.contains("three-0123"));
+        let v: Value = serde_json::from_str(text.trim()).unwrap();
+        let s = &v["summary"];
+        assert_eq!(s["entries"], 7);
+        assert_eq!(s["stored"], 2);
+        assert_eq!(s["held_back"], 1);
+        assert_eq!(s["skipped"], 3);
+        assert_eq!(s["duplicates"], 1);
+        assert_eq!(s["unchanged"], 0);
+        assert_eq!(s["adds_up"], true);
+        assert_eq!(v["duplicates"][0]["name"], "A_KEY");
+        assert_eq!(v["duplicates"][0]["kept_line"], 4);
+        assert_eq!(v["duplicates"][0]["ignored_lines"], json!([1]));
+        assert_eq!(v["rejected_lines"][0]["line"], 6);
+        let outcomes: Vec<&str> = v["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k["outcome"].as_str().unwrap())
+            .collect();
+        // file order, the kept line of a duplicated name where its LAST line was
+        assert_eq!(
+            outcomes,
+            ["skipped", "stored", "stored", "skipped", "held_back"]
+        );
+    }
+
+    #[test]
+    fn a_key_the_box_did_not_report_stored_is_still_accounted_for() {
+        let d = tempfile::tempdir().unwrap();
+        let f = env_file(d.path(), "ONE_KEY=one-0123456789\nTWO_KEY=two-0123456789\n");
+        crate::ingress_client::testing::install("dev");
+        let r = RecordingRunner::new();
+        box_says(&r, &["ONE_KEY"], &["TWO_KEY"]);
+        let mut out = Vec::new();
+        import(
+            &args(&f, "staging", false),
+            &r,
+            &mut std::io::empty(),
+            false,
+            false,
+            true,
+            &mut out,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("2 entries: 1 stored, 1 held back"), "{out}");
     }
 }

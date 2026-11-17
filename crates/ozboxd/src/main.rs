@@ -209,6 +209,16 @@ mod daemon {
         log(&format!(
             "backup credentials helper: {n} request(s) handled"
         ));
+        // every start: a box that held credentials before the record existed gets one, and a [backup] edit is kept
+        match br::refresh_record(&t) {
+            Ok((outcome, skipped)) => {
+                log(&format!("backup record: {outcome}"));
+                for why in skipped {
+                    log(&format!("backup record: {why}"));
+                }
+            }
+            Err(e) => log(&format!("backup record: {e}")),
+        }
         Ok(())
     }
 
@@ -268,7 +278,15 @@ mod daemon {
             Some("interruption-watch") => return interruption_watch(),
             _ => {}
         }
-        let cfg = load_config()?;
+        let mut cfg = load_config()?;
+        // What an upgrade must not lose (see `backup_state`): settings root's /etc no longer holds because the system disk
+        // was replaced. A record that cannot be trusted is ignored and said, never obeyed.
+        let backup_state_dir = ozboxd::backup_state::dir_for(&cfg.work_dir);
+        match ozboxd::backup_state::read(&backup_state_dir, 0) {
+            Ok(Some(c)) => cfg.backup = ozboxd::backup_state::effective(cfg.backup, Some(&c)),
+            Ok(None) => {}
+            Err(why) => log(&why),
+        }
         if std::env::args().nth(1).as_deref() == Some("growfs") {
             return growfs_once(&cfg);
         }
@@ -289,7 +307,8 @@ mod daemon {
                 },
                 runner.clone(),
                 clock.clone(),
-            ),
+            )
+            .with_state_dir(backup_state_dir.clone()),
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -517,6 +536,13 @@ mod daemon {
                 .collect();
         }
         if cfg.selftest.require_mount {
+            stcfg.secrets_state_file = Some(std::path::PathBuf::from(selftest::SECRETS_STATE_FILE));
+        }
+        if cfg.selftest.require_mount {
+            stcfg.box_secrets_declaration =
+                Some(std::path::PathBuf::from(selftest::BOX_SECRETS_DECLARATION));
+        }
+        if cfg.selftest.require_mount {
             stcfg.approval_flag_files = selftest::APPROVAL_FLAG_FILES
                 .iter()
                 .map(std::path::PathBuf::from)
@@ -540,6 +566,21 @@ mod daemon {
         }
         if cfg.backup.enabled {
             stcfg.tools.push("restic".into());
+        }
+        // backups that were set up on this box must still work after a boot, an upgrade or a restore: the check exists only
+        // for a box that has the record, and fails when the credentials are gone or the repository does not answer
+        if let Some(svc) = ozboxd::backup_service::global() {
+            // the repository is asked in the background (one check at a time), never inside the self-test: a slow network
+            // must not make the self-test, and the upgrade waiting on it, time out. Start the first check now.
+            let first = svc.clone();
+            std::thread::spawn(move || {
+                let _ = first.health();
+            });
+            let svc = svc.clone();
+            stcfg.backups = Some(selftest::BackupsProbe {
+                box_name: name.to_string(),
+                health: Arc::new(move || svc.health()),
+            });
         }
         let selftest_fn: Arc<dyn Fn() -> SelfTestResult + Send + Sync> = {
             let (host, runs, clock, runner) =
@@ -680,6 +721,14 @@ mod daemon {
                 Arc::new(ozboxd::local_ai::RealHost {
                     home: PathBuf::from(home),
                 }),
+                clock.clone(),
+            )));
+        }
+        // Skills on the box's disk: the folders its coding agents read, under the box user's home.
+        if let Some(home) = std::env::var_os("HOME") {
+            ozboxd::skills::install_global(Arc::new(ozboxd::skills::SkillsService::new(
+                PathBuf::from(home),
+                cfg.state_dir.clone(),
                 clock.clone(),
             )));
         }
@@ -1207,6 +1256,20 @@ mod daemon {
         sd: Arc<AtomicBool>,
     ) {
         use ozbox_core::daemon_scope::passwd_ids;
+        // A DEBUG build only: the browser tests of this repository have no systemd and no `ozbox-supervisor` user, so with
+        // `OZBOXD_TEST_DASHBOARD_SOCKET=<path>` the daemon binds that path itself and serves it as the dashboard's socket (every
+        // peer admitted). A release build has no such code. The transport's own debug hook (`OZBOX_DAEMON_SUPERVISOR_SOCKET`)
+        // is the dashboard's half of the same arrangement.
+        #[cfg(debug_assertions)]
+        let (inherited, test_peer) = match std::env::var_os("OZBOXD_TEST_DASHBOARD_SOCKET") {
+            Some(p) if inherited.is_none() => {
+                let _ = std::fs::remove_file(&p);
+                (Some(std::os::unix::net::UnixListener::bind(&p)), true)
+            }
+            _ => (inherited, false),
+        };
+        #[cfg(not(debug_assertions))]
+        let test_peer = false;
         let listener = match inherited {
             Some(Ok(l)) => l,
             Some(Err(e)) => {
@@ -1230,9 +1293,15 @@ mod daemon {
                     .map(|(uid, _)| uid)
             }
         };
-        let gate = Arc::new(api::SupervisorGate::new(api::peer_uid, ids, |line| {
-            eprintln!("ozboxd: audit {line}")
-        }));
+        let gate = Arc::new(if test_peer {
+            api::SupervisorGate::new(
+                |_| Some(1),
+                || Some(1),
+                |line| eprintln!("ozboxd: audit {line}"),
+            )
+        } else {
+            api::SupervisorGate::new(api::peer_uid, ids, |line| eprintln!("ozboxd: audit {line}"))
+        });
         log(&format!(
             "the dashboard user's socket is up (from systemd, {})",
             ozbox_listenfd::DAEMON_MARKER

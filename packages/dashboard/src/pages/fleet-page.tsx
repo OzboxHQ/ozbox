@@ -12,6 +12,7 @@ import { t } from '../lib/i18n';
 import { hrefs } from '../lib/router';
 import { costFor, fmtEstimate } from '../lib/cost';
 import type { SelfTest } from '../api/types';
+import { ListNote, WarmingNote } from '../components/list-note';
 import { UnreachableNote } from '../components/unreachable-note';
 import { useFleet } from '../lib/use-fleet';
 import { useAsync } from '../lib/use-async';
@@ -124,6 +125,7 @@ export function FleetPage() {
           {t('fleet.cost_error', { why: cost.error.message })}
         </p>
       )}
+      <ListNote list={fleet.data?.list} />
       <UnreachableNote items={[...unreachable, ...(selftests.data?.unreachable ?? []).filter((u) => !unreachable.some((x) => x.name === u.name))]} />
 
       {fleet.error && !fleet.data && (
@@ -134,6 +136,7 @@ export function FleetPage() {
           </Button>
         </div>
       )}
+      {!fleet.data && !fleet.error && <WarmingNote />}
       {!fleet.data && !fleet.error && (
         <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label={t('fleet.loading')}>
           {[0, 1, 2].map((i) => (
