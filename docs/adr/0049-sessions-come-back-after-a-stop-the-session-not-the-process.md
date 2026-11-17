@@ -234,10 +234,13 @@ branch alone) but **never pushes it** unless `push_wip_on_stop` is on (owner dec
 dashboard change that does **not** stop the machine no longer asks for any checkpoint (nothing is at risk, so nothing is
 saved or pushed). `scripts/real-quiesce-proof.sh` checks that no `refs/heads/wip/` branch appears and nothing reaches a remote.
 
-**What is not saved, by design**. A repository whose top level is the box user's home folder, or that has
-`.ssh`, `.aws`, `.gnupg`, `.config/gcloud` or a similar credentials folder at its top, is **not snapshotted**: in a home folder
-everything is untracked, and the snapshot would copy keys and history into a git directory. It is reported as "not saved:
-home/dotfiles repo" (told, not an error, so a strict stop is not refused for it). An untracked file over **50 MB** is left out and
+**What is not saved, by design**. A repository whose top level is the box user's home folder is **not snapshotted**: in a
+home folder everything is untracked, and the snapshot would copy keys and history into a git directory. It is reported as "not
+saved: home/dotfiles repo". Neither is a repository with `.ssh`, `.aws`, `.gnupg`, `.config/gcloud`, `.npmrc`, `.docker` or a
+similar credentials path directly at its top that `git status` shows as untracked or edited, since that is what a snapshot would
+copy. It is reported as "not saved: holds an untracked or edited credentials path (<path>)". If git cannot answer, the repository
+is left alone and the report says so. A credentials path the repository already tracks unchanged, or ignores, is no reason to skip
+it, so an ordinary project with a committed `.npmrc` is saved. Both are told, not errors, so a strict stop is not refused for them. An untracked file over **50 MB** is left out and
 counted in the report (never named). Snapshots older than **14 days** are removed, in our own namespace only, besides keeping the
 newest 20.
 

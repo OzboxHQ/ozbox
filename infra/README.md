@@ -69,7 +69,8 @@ Hetzner volumes cannot be created from a snapshot, so the Hetzner module rejects
   Tagging follows from that: the role can put the `ozbox-managed` tag on a resource only as the resource is created, so a disk made
   before the module tagged it (a `0.1.x` box's system disk) can be given its first tag only by an account administrator, never by
   this role or the setup identity (IAM cannot tell "a disk of one of our machines" from any other volume). The module never asks
-  for it (the system disk is tagged at creation and its tags are ignored afterwards), and a plan that would is refused before
+  for it (the system disk is tagged by the launch itself, through the machine's `volume_tags`, and those tags are ignored
+  afterwards: a block's own tags would be applied after the disk exists, which the role cannot do; ADR 0053, amendment 3), and a plan that would is refused before
   anything is applied, with the command to run: see ADR 0053, amendment 1.
 
 - **The real bill** (`ozbox cost bill`, the dashboard's Bill page): read from Cost Explorer, filtered to spend tagged
