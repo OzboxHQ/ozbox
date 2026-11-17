@@ -27,6 +27,7 @@ pub mod engine;
 pub mod engine_turn;
 pub mod error;
 pub mod exec;
+pub mod fabric;
 pub mod fence;
 pub mod filelock;
 pub mod gemini_cli;

@@ -470,6 +470,7 @@ mod tests {
             terminal: None,
             projects: vec![],
             box_name: Some("main".into()),
+            origin: None,
         });
         let scope = Scope::parse("box:main").unwrap();
         let p = host

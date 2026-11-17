@@ -28,3 +28,7 @@ file) is not part of this decision.
 **Amended by [0051](0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again.md).**
 A person can also put an approved skill on a box's own disk, where its coding agents read it, and add skills of their own from the
 page. Points 1 to 5 still hold; the file rules now also refuse hidden and direction-changing characters.
+
+**Amended by [0057](0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data.md) (2026-11-17, Preview).** A skill a person approved for a box or a project on `main` is usable by that
+box's or project's agents on any worker: the hub sends its `SKILL.md` with the approved hash and the text's own digest, and the worker
+serves it only when the digest matches. Its other files stay on the hub. Approval stays with a person on the hub.

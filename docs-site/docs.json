@@ -45,6 +45,7 @@
               "use-cases/fleets",
               "use-cases/agentic-fleet",
               "use-cases/task-channel",
+              "use-cases/agents-talk",
               "use-cases/skills",
               "use-cases/orchestrating-a-fleet",
               "use-cases/secure-agent-workspace",
@@ -148,7 +149,8 @@
               "adr/0051-a-skill-can-be-put-on-a-boxs-own-disk-only-as-the-exact-files-a-person-approved-and-the-box-checks-them-again",
               "adr/0052-public-images-from-one-account-trusted-by-owner-and-signed-manifest",
               "adr/0053-init-adopts-what-already-exists-only-what-oz-box-made-never-replaced",
-              "adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge"
+              "adr/0056-agents-on-different-engines-and-providers-share-one-neutral-turn-model-and-each-engine-is-an-adapter-at-the-edge",
+              "adr/0057-one-conversation-fabric-agents-people-groups-and-fleets-post-to-mailboxes-on-the-hub-and-a-message-is-data"
             ]
           },
           {

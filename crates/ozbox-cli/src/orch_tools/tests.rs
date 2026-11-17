@@ -111,15 +111,15 @@ fn worker(id: &str, f: &str) -> Session {
 
 #[test]
 fn the_tool_lists_are_exactly_the_named_sets_and_none_runs_a_command_or_returns_a_key() {
-    assert_eq!(tool_names(&Role::Person).len(), 23);
-    assert_eq!(tool_names(&Role::Conductor { orch: "o1".into() }).len(), 22);
+    assert_eq!(tool_names(&Role::Person).len(), 28);
+    assert_eq!(tool_names(&Role::Conductor { orch: "o1".into() }).len(), 27);
     assert_eq!(
         tool_names(&Role::Worker {
             orch: "o".into(),
             feature: "f".into()
         })
         .len(),
-        11
+        16
     );
     for role in [
         Role::Person,

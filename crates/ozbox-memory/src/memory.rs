@@ -157,6 +157,9 @@ pub struct Provenance {
     /// so it has its own field: nothing that links a run to its page may read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// The box an agent wrote it on, when that was not this box (a proposal over the fabric, ADR 0057).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +265,17 @@ pub struct AgentCtx {
     pub terminal: Option<String>,
     pub projects: Vec<String>,
     pub box_name: Option<String>,
+    /// An agent on another box whose proposal came over the fabric (ADR 0057): its address, `agent:<box>/<session>`, which is
+    /// what the note is credited to, and the box its provenance names.
+    pub origin: Option<String>,
+}
+
+impl AgentCtx {
+    /// The box an `origin` address names.
+    pub fn origin_box(&self) -> Option<String> {
+        let a = self.origin.as_deref()?.strip_prefix("agent:")?;
+        a.split_once('/').map(|(b, _)| b.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,13 +288,16 @@ impl Caller {
     pub fn actor(&self) -> String {
         match self {
             Caller::Person(p) => p.clone(),
-            Caller::Agent(a) => format!(
-                "agent:{}",
-                a.terminal
-                    .as_deref()
-                    .or(a.run.as_deref())
-                    .unwrap_or("session")
-            ),
+            Caller::Agent(a) => match &a.origin {
+                Some(o) => o.clone(),
+                None => format!(
+                    "agent:{}",
+                    a.terminal
+                        .as_deref()
+                        .or(a.run.as_deref())
+                        .unwrap_or("session")
+                ),
+            },
         }
     }
 
@@ -670,9 +687,14 @@ impl Memory {
                 "{scope} has {MAX_PENDING_PER_SCOPE} proposals waiting for review; a person must review them first"
             )));
         }
-        let (kind, run, session) = match caller {
-            Caller::Person(_) => (ActorKind::Person, None, None),
-            Caller::Agent(a) => (ActorKind::Agent, a.run.clone(), a.terminal.clone()),
+        let (kind, run, session, box_name) = match caller {
+            Caller::Person(_) => (ActorKind::Person, None, None, None),
+            Caller::Agent(a) => (
+                ActorKind::Agent,
+                a.run.clone(),
+                a.terminal.clone(),
+                a.origin_box(),
+            ),
         };
         let person = caller.is_person();
         let e = Entry {
@@ -695,6 +717,7 @@ impl Memory {
                 kind,
                 run,
                 session,
+                box_name,
                 reviewed_by: person.then(|| caller.actor()),
                 reviewed_ms: person.then_some(now),
             },
@@ -1025,6 +1048,7 @@ mod tests {
             terminal: None,
             projects: vec!["acme".into()],
             box_name: Some("main".into()),
+            origin: None,
         })
     }
 
