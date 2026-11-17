@@ -142,21 +142,115 @@ pub fn take_requests(dir: &Path) -> Vec<Request> {
     out
 }
 
+/// The value a sealed request carries: `lock:<link>`, `unlink:*`.
+pub fn ingress_value(act: RequestAct, link: Option<&str>) -> String {
+    let verb = match act {
+        RequestAct::Lock => "lock",
+        RequestAct::Unlink => "unlink",
+    };
+    format!("{verb}:{}", link.unwrap_or("*"))
+}
+
+fn confirm(yes: bool) -> Result<bool, CliError> {
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(fail(
+            "this needs a person's yes: run it in a terminal, or pass --yes",
+        ));
+    }
+    print!("Go ahead? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut a = String::new();
+    std::io::stdin().lock().read_line(&mut a).map_err(fail)?;
+    Ok(matches!(a.trim(), "y" | "Y" | "yes"))
+}
+
+/// From this computer, for a dashboard on a box: the plan names the request, and once confirmed it goes over the sealed
+/// ingress route; the box's dashboard applies it within a few seconds.
+pub fn run_remote(
+    runner: &dyn ozbox_core::CommandRunner,
+    on_box: &ozbox_core::BoxName,
+    act: RequestAct,
+    link: Option<&str>,
+    yes: bool,
+    dry_run: bool,
+    json_out: bool,
+) -> Result<(), CliError> {
+    let value = ingress_value(act, link);
+    let what = match link {
+        Some(l) => format!("link {l}"),
+        None => "every link".to_string(),
+    };
+    let verb = value.split(':').next().unwrap_or("");
+    if json_out {
+        println!(
+            "{}",
+            json!({ "box": on_box.as_str(), "act": verb, "link": link, "applied": false, "dry_run": dry_run })
+        );
+    } else {
+        println!(
+            "Plan: ask the dashboard on {} to {verb} {what}, over the sealed route.",
+            on_box.as_str()
+        );
+    }
+    if dry_run || !confirm(yes)? {
+        if !dry_run && !json_out {
+            println!("Nothing changed.");
+        }
+        return Ok(());
+    }
+    crate::ingress_client::call(
+        runner,
+        on_box.as_str(),
+        &json!({ "op": "chat_link_request", "value": value }),
+    )?;
+    if json_out {
+        println!(
+            "{}",
+            json!({ "box": on_box.as_str(), "act": verb, "link": link, "applied": true })
+        );
+    } else {
+        println!("Sent. The dashboard applies it within a few seconds and records it in the audit chain.");
+    }
+    Ok(())
+}
+
 pub fn run(c: &ChatCommand, yes: bool, dry_run: bool, json_out: bool) -> Result<(), CliError> {
-    let (act, link, all, dir) = match c {
+    let (act, link, all, dir, on_box) = match c {
         ChatCommand::Lock {
             link,
             all,
             state_dir: d,
-        } => (RequestAct::Lock, link.as_deref(), *all, d.as_ref()),
+            on_box,
+        } => (RequestAct::Lock, link.as_deref(), *all, d.as_ref(), on_box),
         ChatCommand::Unlink {
             link,
             all,
             state_dir: d,
-        } => (RequestAct::Unlink, link.as_deref(), *all, d.as_ref()),
+            on_box,
+        } => (
+            RequestAct::Unlink,
+            link.as_deref(),
+            *all,
+            d.as_ref(),
+            on_box,
+        ),
     };
     if link.is_none() && !all {
         return Err(fail("name a link with --link <id>, or pass --all"));
+    }
+    if let Some(b) = on_box {
+        return run_remote(
+            &ozbox_core::SystemRunner,
+            b,
+            act,
+            link,
+            yes,
+            dry_run,
+            json_out,
+        );
     }
     let dir = state_dir(dir)?;
     let store = TgStore::open(dir.join("telegram.json")).map_err(fail)?;
@@ -188,20 +282,9 @@ pub fn run(c: &ChatCommand, yes: bool, dry_run: bool, json_out: bool) -> Result<
     if planned.is_empty() || dry_run {
         return Ok(());
     }
-    if !yes {
-        if !std::io::stdin().is_terminal() {
-            return Err(fail(
-                "this needs a person's yes: run it in a terminal, or pass --yes",
-            ));
-        }
-        print!("Go ahead? [y/N] ");
-        let _ = std::io::stdout().flush();
-        let mut a = String::new();
-        std::io::stdin().lock().read_line(&mut a).map_err(fail)?;
-        if !matches!(a.trim(), "y" | "Y" | "yes") {
-            println!("Nothing changed.");
-            return Ok(());
-        }
+    if !confirm(yes)? {
+        println!("Nothing changed.");
+        return Ok(());
     }
     write_requests(&dir, act, &planned).map_err(fail)?;
     if json_out {
@@ -219,6 +302,51 @@ pub fn run(c: &ChatCommand, yes: bool, dry_run: bool, json_out: bool) -> Result<
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_a_laptop_the_request_goes_sealed_to_the_box_and_only_after_the_plan() {
+        use crate::ingress_client::testing;
+        use ozbox_core::{BoxName, Output, RecordingRunner};
+        let b = BoxName::new("chat-box").unwrap();
+        testing::install("chat-box");
+        // a dry run sends nothing
+        let r = RecordingRunner::new();
+        run_remote(&r, &b, RequestAct::Lock, Some("l1"), true, true, true).unwrap();
+        assert!(r.calls().is_empty());
+        let r = RecordingRunner::new();
+        r.reply(Output {
+            status: Some(0),
+            stdout: json!({"ok": true}).to_string(),
+            stderr: String::new(),
+        });
+        run_remote(&r, &b, RequestAct::Unlink, None, true, false, true).unwrap();
+        let sent = testing::open_sent("chat-box", r.calls()[0].stdin.as_ref().unwrap());
+        assert_eq!(sent["op"], "chat_link_request");
+        assert_eq!(sent["value"], "unlink:*");
+        assert_eq!(ingress_value(RequestAct::Lock, Some("l1")), "lock:l1");
+    }
+
+    #[test]
+    fn the_service_holds_only_lock_and_unlink_and_hands_each_over_once() {
+        let q = crate::secrets_ingress::ChatLinkRequests::default();
+        assert!(q.put("lock:l1", 1).is_ok());
+        assert!(q.put("unlink:*", 1).is_ok());
+        for bad in [
+            "unlock:l1",
+            "delegate:l1",
+            "lock:",
+            "lock:a b",
+            "lock",
+            "lock:$(id)",
+        ] {
+            assert!(q.put(bad, 1).is_err(), "{bad}");
+        }
+        assert_eq!(
+            q.take(),
+            vec!["lock:l1".to_string(), "unlink:*".to_string()]
+        );
+        assert!(q.take().is_empty());
+    }
 
     #[test]
     fn requests_round_trip_once_and_only_lock_and_unlink_are_read() {

@@ -575,6 +575,14 @@ impl App {
         self
     }
 
+    /// Worker boxes reached over this computer's task channel, when it runs here.
+    fn with_chat_mesh(mut self, m: Option<crate::chat::mesh_agents::MeshAgents>) -> Self {
+        if let Some(m) = m {
+            self.remote_agents = Arc::new(m);
+        }
+        self
+    }
+
     #[cfg(test)]
     fn set_remote_agents(&mut self, r: Arc<dyn crate::chat::remote::RemoteAgents>) {
         self.remote_agents = r;
@@ -2500,6 +2508,7 @@ pub fn serve(
                 .or_else(|| dirs::home_dir().map(|h| h.join(".ssh"))),
         )
         .with_secrets(Arc::clone(&secrets))
+        .with_chat_mesh(crate::tasks_cli::chat_route())
         .with_code_settings(crate::code::settings_path())
         .with_files(prices_path, state_path)
         .with_bill_file(bill_path)

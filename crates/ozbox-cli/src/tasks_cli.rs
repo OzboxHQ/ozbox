@@ -401,6 +401,53 @@ pub fn run(cmd: &TasksCommand, f: &Flags) -> Result<()> {
 }
 
 /// Where an endpoint run in this process keeps its private keys: the secret store this run uses (the keychain on a laptop).
+/// Reaches each peer through the command recorded for it when it was pinned (its `via`), owned, so the dashboard can keep it.
+pub(crate) struct ViaTransport {
+    pub me: String,
+    pub vias: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Transport for ViaTransport {
+    fn exchange(
+        &self,
+        peer: &str,
+        outbound: &[Sealed],
+    ) -> std::result::Result<Vec<Sealed>, String> {
+        let via = self
+            .vias
+            .get(peer)
+            .cloned()
+            .ok_or("no way to reach that box is set")?;
+        CommandTransport {
+            runner: &SystemRunner,
+            via,
+            me: self.me.clone(),
+        }
+        .exchange(peer, outbound)
+    }
+}
+
+/// The chat route to worker boxes over this computer's own task channel: only where the channel runs in this process (a
+/// laptop). On a box the channel belongs to the router's own user, and the dashboard reaches workers through the hub instead
+/// (not built in this release).
+pub(crate) fn chat_route() -> Option<crate::chat::mesh_agents::MeshAgents> {
+    if ozbox_core::audit_remote::on_a_box() {
+        return None;
+    }
+    let d = dir().ok()?;
+    let keys = local_keys();
+    let ends = Ends::open(&d, KeyHome::Store(keys.as_ref())).ok()?;
+    let st = ends.state().ok()?;
+    Some(crate::chat::mesh_agents::MeshAgents::new(
+        d,
+        crate::chat::mesh_agents::Keys::Store(keys),
+        Box::new(ViaTransport {
+            me: st.core.me.clone(),
+            vias: st.vias.clone(),
+        }),
+    ))
+}
+
 fn local_keys() -> std::sync::Arc<dyn crate::secrets::SecretStore> {
     crate::secrets_file::select()
 }

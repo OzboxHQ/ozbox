@@ -30,6 +30,7 @@ pub mod code;
 pub mod command;
 pub mod gateway;
 pub mod links;
+pub mod mesh_agents;
 pub mod remote;
 pub mod slack;
 pub mod text;

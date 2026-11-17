@@ -1142,8 +1142,11 @@ pub enum ChatCommand {
         #[arg(long)]
         all: bool,
         /// The folder the dashboard keeps its state in. Default: beside the settings file.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "on_box")]
         state_dir: Option<std::path::PathBuf>,
+        /// The box whose dashboard holds the link, reached from this computer over the sealed ingress route.
+        #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
+        on_box: Option<BoxName>,
     },
     /// Cut a Telegram link (or every one): the chat is not answered any more and everything delegated to it ends.
     Unlink {
@@ -1154,8 +1157,11 @@ pub enum ChatCommand {
         #[arg(long)]
         all: bool,
         /// The folder the dashboard keeps its state in. Default: beside the settings file.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "on_box")]
         state_dir: Option<std::path::PathBuf>,
+        /// The box whose dashboard holds the link, reached from this computer over the sealed ingress route.
+        #[arg(long = "box", value_name = "BOX", value_parser = parse_name)]
+        on_box: Option<BoxName>,
     },
 }
 

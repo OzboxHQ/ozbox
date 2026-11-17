@@ -534,6 +534,7 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
         "t1",
         None,
         &format!("here https://dash.example.com/approve and {secret} \u{1b}[31mred"),
+        false,
         t0,
     );
     assert!(!shown.contains("https://dash.example.com"), "{shown}");
@@ -548,7 +549,7 @@ fn an_agents_reply_is_redacted_capped_and_at_metadata_says_only_that_it_answered
         .insert("alpha".into(), "metadata".into());
     let meta = r
         .app
-        .tg_agent_reply(&conv, "alpha", "t1", None, "anything at all", t0);
+        .tg_agent_reply(&conv, "alpha", "t1", None, "anything at all", false, t0);
     assert!(!meta.contains("anything at all"));
     assert_eq!(
         r.last_said("tg.reply_metadata").unwrap().arg("box"),
@@ -800,4 +801,63 @@ fn whatsapp_goes_through_the_same_decide() {
         "{:?}",
         r.said_keys()
     );
+}
+
+#[test]
+fn a_session_on_a_worker_box_is_reached_over_the_agent_mesh_with_real_signing_and_sealing() {
+    use crate::chat::mesh_agents::{testkit, Keys, MeshAgents};
+    let mut r = Rig::new();
+    let main_dir = r.dir.path().join("mesh-main");
+    let w_dir = r.dir.path().join("mesh-w9");
+    testkit::endpoint(&main_dir, "main");
+    testkit::endpoint(&w_dir, "w9");
+    testkit::pin(&main_dir, &w_dir, super::unix_ms());
+    let worker = Arc::new(testkit::Worker {
+        dir: w_dir,
+        caller: "main".into(),
+        answer: "checked: ".into(),
+        down: std::sync::Mutex::new(false),
+        got: std::sync::Mutex::new(Vec::new()),
+    });
+    let mesh = MeshAgents::new(
+        main_dir,
+        Keys::RouterFile,
+        Box::new(testkit::Shared(worker.clone())),
+    );
+    r.app.set_remote_agents(Arc::new(mesh));
+    r.link("owner", PHONE, Some(&["w9"]));
+    let t0 = super::unix_ms();
+    r.say_at_ms("@w9/s4 run the checks", t0);
+    let sent = r.last_said("tg.address_sent").expect("sent over the mesh");
+    assert!(
+        sent.arg("states").unwrap().contains("1 delivered"),
+        "{sent:?}"
+    );
+    let msg = sent.arg("msg").unwrap().to_string();
+    {
+        let got = worker.got.lock().unwrap();
+        assert_eq!(got.len(), 1, "the worker received one signed, sealed task");
+        assert_eq!(got[0].1, "run the checks");
+        assert_eq!(got[0].2["msg"], msg.as_str());
+        assert_eq!(got[0].2["session"], "s4");
+        assert!(got[0].2["delegation"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()));
+    }
+    r.tick_at(t0 + 1_000);
+    let reply = r
+        .last_said("tg.reply_to")
+        .expect("the worker's answer came back");
+    assert_eq!(reply.arg("box"), Some("w9"));
+    assert_eq!(reply.arg("msg"), Some(msg.as_str()));
+    assert!(reply
+        .arg("text")
+        .unwrap()
+        .contains("checked: run the checks"));
+    // the worker stops answering: the next message is unreachable, said plainly
+    *worker.down.lock().unwrap() = true;
+    r.say_at_ms("@w9 are you there", t0 + 2_000);
+    let un = r.last_said("tg.address_unreachable").expect("unreachable");
+    assert_eq!(un.arg("box"), Some("w9"));
+    assert_eq!(un.arg("why"), Some("worker_unreachable"));
 }

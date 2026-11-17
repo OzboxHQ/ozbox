@@ -117,6 +117,8 @@ pub(super) struct TgRt {
     pub deliveries: Vec<super::telegram_acts::Tracked>,
     /// The folder `ozbox chat lock` and `ozbox chat unlink` leave their requests in (the state's own folder).
     pub requests_dir: Option<std::path::PathBuf>,
+    /// When the secrets service is next asked for lock and unlink requests from the owner's computer.
+    pub next_ingress_ms: u64,
 }
 
 impl TgRt {
@@ -139,6 +141,7 @@ impl TgRt {
             power_jobs: Vec::new(),
             deliveries: Vec::new(),
             requests_dir: None,
+            next_ingress_ms: 0,
         }
     }
 

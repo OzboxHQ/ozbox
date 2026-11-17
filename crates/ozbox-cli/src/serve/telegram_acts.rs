@@ -1220,7 +1220,7 @@ impl App {
     }
 
     /// The detail level of a box for a chat.
-    fn tg_detail(&self, box_name: &str) -> Detail {
+    fn tg_detail(&self, box_name: &str, untrusted: bool) -> Detail {
         let set = self
             .tg
             .store
@@ -1230,7 +1230,7 @@ impl App {
             .get(box_name)
             .and_then(|d| Detail::from_name(d))
             .unwrap_or_default();
-        Detail::effective(set, self.tg_is_production(box_name), false)
+        Detail::effective(set, self.tg_is_production(box_name), untrusted)
     }
 
     /// An agent's reply for a Telegram chat: attributed to its box and session, redacted and cut to the box's detail level.
@@ -1242,10 +1242,11 @@ impl App {
         session: &str,
         msg_id: Option<&str>,
         reply: &str,
+        untrusted: bool,
         now: u64,
     ) -> String {
         let secrets = self.chat_secrets();
-        let detail = self.tg_detail(box_name);
+        let detail = self.tg_detail(box_name, untrusted);
         let shown = agent_output(reply, &secrets, detail);
         let mut args = vec![
             ("box", box_name.to_string()),
@@ -1311,7 +1312,8 @@ impl App {
                 continue;
             };
             let text =
-                self.tg_agent_reply(&to, &r.box_name, &r.session, Some(&r.msg_id), &r.text, now);
+                // a worker's answer came over the mesh from another machine: untrusted, so summary at most (ADR 0050 §5)
+                self.tg_agent_reply(&to, &r.box_name, &r.session, Some(&r.msg_id), &r.text, true, now);
             let who = self.tg_sender_of_conv(&to, "", thread.clone());
             self.tg_reply_notice(
                 &who,

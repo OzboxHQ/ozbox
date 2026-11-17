@@ -163,6 +163,18 @@ impl Screen for MemScreen {
     }
 }
 
+/// The channel's audit log: beside its store (on a box, through the box's audit service). Tests keep a file of their own, so a
+/// test run on a box neither writes to that box's real chain nor fails because it cannot read it.
+#[cfg(not(test))]
+fn audit_for(dir: &Path) -> AuditLog {
+    AuditLog::beside(&dir.join("mesh.json"))
+}
+
+#[cfg(test)]
+fn audit_for(dir: &Path) -> AuditLog {
+    AuditLog::at(dir.join("mesh.audit.jsonl"), dir.join("mesh.audit.anchor"))
+}
+
 pub struct Ends {
     store: Store<State>,
     signer: RingSigner,
@@ -250,7 +262,7 @@ impl Ends {
             signer,
             verifier: RingVerifier,
             sealer: SealCrypto { key },
-            audit: AuditLog::beside(&dir.join("mesh.json")),
+            audit: audit_for(dir),
             clock: Box::new(now_ms),
         })
     }

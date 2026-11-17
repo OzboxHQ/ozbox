@@ -980,16 +980,50 @@ impl App {
     /// Apply what `ozbox chat lock` and `ozbox chat unlink` asked for. Only those two acts are read: a request can make a link
     /// less able, never more.
     fn tg_cli_requests(&mut self, now: u64) {
-        let Some(dir) = self.tg.requests_dir.clone() else {
-            return;
-        };
-        for r in crate::chat_cli::take_requests(&dir) {
-            match r.act {
-                crate::chat_cli::RequestAct::Lock => {
-                    self.tg_do_lock(&r.link, "the command line", now);
+        use crate::chat_cli::RequestAct;
+        let mut asked: Vec<(RequestAct, String)> = Vec::new();
+        if let Some(dir) = self.tg.requests_dir.clone() {
+            asked.extend(
+                crate::chat_cli::take_requests(&dir)
+                    .into_iter()
+                    .map(|r| (r.act, r.link)),
+            );
+        }
+        // from the owner's computer over the sealed ingress route, through the secrets service (at most every five seconds)
+        if now >= self.tg.next_ingress_ms {
+            self.tg.next_ingress_ms = now + 5_000;
+            for v in crate::secrets_ingress::take_chat_link_requests() {
+                if let Some((act, link)) = v.split_once(':') {
+                    let act = if act == "lock" {
+                        RequestAct::Lock
+                    } else {
+                        RequestAct::Unlink
+                    };
+                    asked.push((act, link.to_string()));
                 }
-                crate::chat_cli::RequestAct::Unlink => {
-                    self.tg_do_revoke(&r.link, "revoked_from_cli", now);
+            }
+        }
+        for (act, link) in asked {
+            let ids: Vec<String> = if link == "*" {
+                self.tg
+                    .store
+                    .data
+                    .links
+                    .iter()
+                    .filter(|l| l.state != LinkState::Revoked)
+                    .map(|l| l.record.id.clone())
+                    .collect()
+            } else {
+                vec![link]
+            };
+            for id in ids {
+                match act {
+                    RequestAct::Lock => {
+                        self.tg_do_lock(&id, "the command line", now);
+                    }
+                    RequestAct::Unlink => {
+                        self.tg_do_revoke(&id, "revoked_from_cli", now);
+                    }
                 }
             }
         }

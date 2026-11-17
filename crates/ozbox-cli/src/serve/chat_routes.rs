@@ -1367,6 +1367,7 @@ impl App {
                         tid,
                         msg.as_ref().map(|(m, _)| m.as_str()),
                         reply,
+                        false,
                         now,
                     );
                     let mut o = mk(text.clone(), Vec::new());
