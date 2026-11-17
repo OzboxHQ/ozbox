@@ -190,7 +190,9 @@ pub fn run(c: &ChatCommand, yes: bool, dry_run: bool, json_out: bool) -> Result<
     }
     if !yes {
         if !std::io::stdin().is_terminal() {
-            return Err(fail("this needs a person's yes: run it in a terminal, or pass --yes"));
+            return Err(fail(
+                "this needs a person's yes: run it in a terminal, or pass --yes",
+            ));
         }
         print!("Go ahead? [y/N] ");
         let _ = std::io::stdout().flush();
@@ -203,7 +205,10 @@ pub fn run(c: &ChatCommand, yes: bool, dry_run: bool, json_out: bool) -> Result<
     }
     write_requests(&dir, act, &planned).map_err(fail)?;
     if json_out {
-        println!("{}", json!({ "act": verb, "links": planned, "applied": true }));
+        println!(
+            "{}",
+            json!({ "act": verb, "links": planned, "applied": true })
+        );
     } else {
         println!("Sent to the dashboard, which applies it within a few seconds and records it in the audit chain.");
     }
@@ -227,9 +232,16 @@ mod tests {
         write_requests(dir.path(), RequestAct::Lock, std::slice::from_ref(&p)).unwrap();
         // a hand-written line that tries to do more is not a request
         let path = dir.path().join(REQUESTS_FILE);
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(f, r#"{{"act":"unlock","link":"l1","at_ms":1}}"#).unwrap();
-        writeln!(f, r#"{{"act":"lock","link":"l1","at_ms":1,"delegate":"power"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"act":"lock","link":"l1","at_ms":1,"delegate":"power"}}"#
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

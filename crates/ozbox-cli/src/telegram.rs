@@ -321,6 +321,8 @@ pub fn send_notice(
 }
 
 /// A plain message, for the places that only need "did it go". The error never carries the token.
+// Only its own test uses it since every send goes through the notice model; kept for that test until the notice branch removes it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn send_text(
     http: &dyn HttpClient,
     token: &str,

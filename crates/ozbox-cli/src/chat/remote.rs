@@ -116,7 +116,10 @@ pub struct FakeMeshState {
 #[cfg(test)]
 impl RemoteAgents for FakeMesh {
     fn workers(&self) -> Vec<Worker> {
-        self.inner.lock().map(|s| s.workers.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|s| s.workers.clone())
+            .unwrap_or_default()
     }
     fn send(
         &self,

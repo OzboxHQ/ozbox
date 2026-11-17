@@ -606,9 +606,7 @@ impl App {
             ChatAct::Boxes => self.tg_boxes(who, link, now),
             ChatAct::Fleets => self.tg_fleets(who, link, now),
             ChatAct::To(to) => self.tg_set_to(who, to, now),
-            ChatAct::Address { to, text } => {
-                self.tg_address(who, link, to, text, delegation, now)
-            }
+            ChatAct::Address { to, text } => self.tg_address(who, link, to, text, delegation, now),
             // a plain message goes to the address set with /to, when one is set and no session is followed
             ChatAct::Converse(text)
                 if self.tg_sticky(who.chat_id).is_some()

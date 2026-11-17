@@ -785,7 +785,8 @@ mod tests {
     }
 
     #[test]
-    fn power_is_allowed_inside_a_delegation_and_run_and_when_idle_stay_a_handoff_until_their_executors_exist() {
+    fn power_is_allowed_inside_a_delegation_and_run_and_when_idle_stay_a_handoff_until_their_executors_exist(
+    ) {
         let f = Fixture::new();
         for id in [
             ActId::BoxResume,

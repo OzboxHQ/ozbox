@@ -273,7 +273,9 @@ impl DelegationRecord {
                 }
             }
             if !(1..=500).contains(&c.daily_usd) {
-                return Err(RecordError("the daily money cap: between 1 and 500 dollars"));
+                return Err(RecordError(
+                    "the daily money cap: between 1 and 500 dollars",
+                ));
             }
             if c.creates_per_day > 10 {
                 return Err(RecordError("creates a day: at most 10"));
@@ -458,7 +460,11 @@ mod tests {
         let mut d = deleg();
         d.caps.daily_usd = 99;
         d.caps.max_size = Some("L".into());
-        assert_eq!(d.digest().unwrap(), base, "power caps are not part of a converse digest");
+        assert_eq!(
+            d.digest().unwrap(),
+            base,
+            "power caps are not part of a converse digest"
+        );
         let mut p = deleg();
         p.acts = vec![DelegatedAct::Power];
         p.with_link = false;
@@ -472,7 +478,11 @@ mod tests {
         ] {
             let mut q = p.clone();
             edit(&mut q.caps);
-            assert_ne!(q.digest().unwrap(), pd, "every power cap is covered by the passkey");
+            assert_ne!(
+                q.digest().unwrap(),
+                pd,
+                "every power cap is covered by the passkey"
+            );
         }
         for bad in [
             |c: &mut Caps| c.daily_usd = 0,

@@ -849,7 +849,11 @@ impl App {
         let known: Vec<String> = self
             .provider
             .list()
-            .map(|r| r.iter().map(|b| b.spec.name.to_string()).collect::<Vec<_>>())
+            .map(|r| {
+                r.iter()
+                    .map(|b| b.spec.name.to_string())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
             .into_iter()
             // a worker box of a hub, reached over the hub's channel, may be delegated too

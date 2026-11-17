@@ -788,16 +788,14 @@ fn run_cannot_be_delegated_in_this_release_and_a_later_delegation_is_its_own_pas
     let mut r = Rig::new();
     let lid = r.link("owner", PHONE, None);
     // box power can be delegated now (see e2e.rs); /run cannot yet
-    for act in ["run"] {
-        let (st, v) = r.call(
-            "owner",
-            "POST",
-            &format!("/v1/telegram/links/{lid}/delegations/challenge"),
-            json!({ "acts": [act], "boxes": ["alpha"] }),
-        );
-        assert_eq!(st, 409, "{v}");
-        assert_eq!(v["code"], "not_available");
-    }
+    let (st, v) = r.call(
+        "owner",
+        "POST",
+        &format!("/v1/telegram/links/{lid}/delegations/challenge"),
+        json!({ "acts": ["run"], "boxes": ["alpha"] }),
+    );
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["code"], "not_available");
     // converse later, on a link that is under a day old: allowed to make, and it waits out the first day
     let (st, v) = r.passkey_step(
         "owner",

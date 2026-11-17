@@ -688,7 +688,12 @@ impl BoxAgent for SimulatedAgent {
         ];
         if path == "/v1/agent-sessions" && method == "GET" {
             // a demo box labelled `sim_sessions=none` has no coding agent in a terminal (an idle box)
-            if rec.spec.labels.get("sim_sessions").is_some_and(|v| v == "none") {
+            if rec
+                .spec
+                .labels
+                .get("sim_sessions")
+                .is_some_and(|v| v == "none")
+            {
                 return Ok((200, json!({ "tmux": true, "sessions": [] })));
             }
             let rows: Vec<_> = demo

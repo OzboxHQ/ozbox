@@ -246,7 +246,13 @@ mod tests {
             Err(PowerRefusal::AboveSizeCap)
         );
         assert_eq!(
-            check(PowerAct::Create { size: Size::M }, &Caps::default(), &f, false, NOW),
+            check(
+                PowerAct::Create { size: Size::M },
+                &Caps::default(),
+                &f,
+                false,
+                NOW
+            ),
             Err(PowerRefusal::NoSizeCap)
         );
         let gpu = Size::Gpu(crate::size::GpuKind::Small);

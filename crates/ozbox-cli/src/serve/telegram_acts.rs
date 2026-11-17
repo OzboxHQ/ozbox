@@ -190,7 +190,15 @@ impl App {
 
     /// Whether the box record says Production (a label), as well as the owner's mark.
     fn tg_is_production(&self, name: &str) -> bool {
-        if self.tg.store.data.marks.production.iter().any(|p| p == name) {
+        if self
+            .tg
+            .store
+            .data
+            .marks
+            .production
+            .iter()
+            .any(|p| p == name)
+        {
             return true;
         }
         BoxName::new(name)
@@ -212,7 +220,10 @@ impl App {
         let cat = ozbox_catalog::embedded().ok()?;
         let p = crate::profiles::Store::new(dir).load(word, &cat).ok()?;
         let size = p.defaults.size.as_deref()?.parse::<Size>().ok()?;
-        Some((size, Some(crate::profiles::clean_labels(&p.defaults.labels))))
+        Some((
+            size,
+            Some(crate::profiles::clean_labels(&p.defaults.labels)),
+        ))
     }
 
     /// `/box resume|pause|extend|create|resize`: plan, show, and apply only inside the delegation's caps.
@@ -243,7 +254,10 @@ impl App {
         let rec = self.provider.get(&bn).ok().flatten();
         // the operation, and the act the caps judge
         let (op, pact): (Option<Operation>, PowerAct) = match act {
-            ChatAct::BoxResume(_) => (Some(Operation::Resume { name: bn.clone() }), PowerAct::Resume),
+            ChatAct::BoxResume(_) => (
+                Some(Operation::Resume { name: bn.clone() }),
+                PowerAct::Resume,
+            ),
             ChatAct::BoxPause(_) => (Some(Operation::Pause { name: bn.clone() }), PowerAct::Pause),
             ChatAct::BoxExtend { hours, .. } => (None, PowerAct::Extend { hours: *hours }),
             ChatAct::BoxResize { size, .. } => match size.parse::<Size>() {
@@ -268,7 +282,10 @@ impl App {
                         spec.labels = l;
                     }
                     spec.labels.insert("ozbox-chat".into(), "created".into());
-                    (Some(Operation::Create { spec }), PowerAct::Create { size: s })
+                    (
+                        Some(Operation::Create { spec }),
+                        PowerAct::Create { size: s },
+                    )
                 }
                 None => {
                     self.tg_tell(who, "tg.power_no_profile", &[("what", size.clone())], now);
@@ -284,7 +301,8 @@ impl App {
         // the provider's plan, through the same fleet caps as the dashboard; plan never changes anything
         let plan = match &op {
             Some(op) => {
-                if let Err(e) = crate::settings::enforce(&self.settings, self.provider.as_ref(), op) {
+                if let Err(e) = crate::settings::enforce(&self.settings, self.provider.as_ref(), op)
+                {
                     let why = crate::chat::text::outgoing(&e.to_string(), &[], 200);
                     self.tg_tell_where(who, "tg.power_fleet_cap", &[("why", why)], &box_path, now);
                     return;
@@ -338,10 +356,12 @@ impl App {
             _ => rec.as_ref().map(|r| r.spec.size),
         };
         let would_end = if pact == PowerAct::Pause && !noop {
-            rec.as_ref().map(|r| {
+            rec.as_ref().and_then(|r| {
                 let p = crate::quiesce::preview(self.agent.as_ref(), r);
                 match (&p.service, &p.runs, &p.sessions) {
-                    (crate::quiesce::Service::Unknown(_), _, _) | (_, Err(_), _) | (_, _, Err(_)) => None,
+                    (crate::quiesce::Service::Unknown(_), _, _)
+                    | (_, Err(_), _)
+                    | (_, _, Err(_)) => None,
                     (_, Ok(runs), Ok(sessions)) => Some(
                         runs.iter()
                             .map(|r| format!("run {r}"))
@@ -350,7 +370,6 @@ impl App {
                     ),
                 }
             })
-            .flatten()
         } else {
             Some(Vec::new())
         };
@@ -384,11 +403,18 @@ impl App {
                     PowerAct::Extend { hours } => hours,
                     _ => 0,
                 };
-                t("tg.power_plan_extend", &[("box", &name), ("hours", &h.to_string())])
+                t(
+                    "tg.power_plan_extend",
+                    &[("box", &name), ("hours", &h.to_string())],
+                )
             });
         let summary = crate::chat::text::outgoing(&summary, &[], 400);
         if let Err(r) = power::check(pact, &caps, &facts, noop, now) {
-            let mut args = vec![("verb", verb.to_string()), ("box", name.clone()), ("plan", summary)];
+            let mut args = vec![
+                ("verb", verb.to_string()),
+                ("box", name.clone()),
+                ("plan", summary),
+            ];
             if let PowerRefusal::NotIdle(v) = &r {
                 args.push(("ends", v.join(", ")));
             }
@@ -412,13 +438,25 @@ impl App {
                 PowerAct::Extend { hours } => hours,
                 _ => 0,
             };
-            let b = self.tg.store.data.power.boxes.entry(name.clone()).or_default();
-            b.deadline_ms = b
-                .deadline_ms
-                .map(|d| d + u64::from(hours) * 3_600_000);
+            let b = self
+                .tg
+                .store
+                .data
+                .power
+                .boxes
+                .entry(name.clone())
+                .or_default();
+            b.deadline_ms = b.deadline_ms.map(|d| d + u64::from(hours) * 3_600_000);
             b.extended = true;
             b.last_ms = now;
-            self.tg.store.data.power.used.entry(who.person.clone()).or_default().spent_cents += cost;
+            self.tg
+                .store
+                .data
+                .power
+                .used
+                .entry(who.person.clone())
+                .or_default()
+                .spent_cents += cost;
             let _ = self.tg.store.save();
             self.tg_chain(
                 &who.person,
@@ -435,7 +473,10 @@ impl App {
             return;
         };
         // the permission engine has the last word, as for the dashboard, under the person's own name
-        let was = std::mem::replace(&mut self.current_actor, super::Actor::Person(who.person.clone()));
+        let was = std::mem::replace(
+            &mut self.current_actor,
+            super::Actor::Person(who.person.clone()),
+        );
         let refused = self
             .box_permission(&plan)
             .or_else(|| self.apply_job_refusal(&plan));
@@ -448,7 +489,11 @@ impl App {
             self.tg_tell_where(
                 who,
                 "tg.power_refused_by_engine",
-                &[("verb", verb.to_string()), ("box", name.clone()), ("why", code)],
+                &[
+                    ("verb", verb.to_string()),
+                    ("box", name.clone()),
+                    ("why", code),
+                ],
                 &box_path,
                 now,
             );
@@ -462,7 +507,12 @@ impl App {
             .and_then(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
             .and_then(|v| v["job_id"].as_str().map(str::to_string));
         let Some(job_id) = job_id else {
-            self.tg_tell(who, "tg.power_plan_failed", &[("why", "the change could not be started".into())], now);
+            self.tg_tell(
+                who,
+                "tg.power_plan_failed",
+                &[("why", "the change could not be started".into())],
+                now,
+            );
             return;
         };
         // the ledger: counts, money and the deadline, written before the chat is told
@@ -535,7 +585,11 @@ impl App {
                 None => keep.push(j),
                 Some(ok) => {
                     let who = self.tg_sender_for(j.chat_id, &j.person);
-                    let key = if ok { "tg.power_done" } else { "tg.power_failed" };
+                    let key = if ok {
+                        "tg.power_done"
+                    } else {
+                        "tg.power_failed"
+                    };
                     if !ok {
                         // a change that did not happen does not keep a deadline
                         if let Some(b) = self.tg.store.data.power.boxes.get_mut(&j.box_name) {
@@ -576,9 +630,13 @@ impl App {
                 b.extended = false;
             }
             let _ = self.tg.store.save();
-            let Ok(bn) = BoxName::new(&name) else { continue };
+            let Ok(bn) = BoxName::new(&name) else {
+                continue;
+            };
             let op = Operation::Pause { name: bn };
-            let Ok(plan) = self.provider.plan(&op) else { continue };
+            let Ok(plan) = self.provider.plan(&op) else {
+                continue;
+            };
             if plan.is_noop() {
                 continue;
             }
@@ -658,10 +716,12 @@ impl App {
         // a session address follows that session; anything else starts from no session
         if let Address::Session { session, .. } = to {
             if self.chat_book().is_some_and(|b| b.task(session).is_some()) {
-                self.state
-                    .chat
-                    .binds
-                    .insert(key, Bind::Task { id: session.clone() });
+                self.state.chat.binds.insert(
+                    key,
+                    Bind::Task {
+                        id: session.clone(),
+                    },
+                );
             }
         } else {
             self.state.chat.binds.remove(&key);
@@ -678,7 +738,9 @@ impl App {
             Some(Bind::Task { id }) => self
                 .chat_book()
                 .and_then(|b| b.task(id).map(|t| format!("@{}/{}", t.spec.box_name, id))),
-            Some(Bind::Terminal { box_name, session, .. }) => Some(format!("@{box_name}/{session}")),
+            Some(Bind::Terminal {
+                box_name, session, ..
+            }) => Some(format!("@{box_name}/{session}")),
             None => None,
         };
         match (to, bound) {
@@ -707,8 +769,15 @@ impl App {
             .iter()
             .map(|b| {
                 t(
-                    if b.online { "tg.boxes_line_up" } else { "tg.boxes_line_down" },
-                    &[("box", &b.name), ("where", if b.remote { "worker" } else { "fleet" })],
+                    if b.online {
+                        "tg.boxes_line_up"
+                    } else {
+                        "tg.boxes_line_down"
+                    },
+                    &[
+                        ("box", &b.name),
+                        ("where", if b.remote { "worker" } else { "fleet" }),
+                    ],
                 )
             })
             .collect();
@@ -757,7 +826,13 @@ impl App {
         if self.state.chat.binds.contains_key(conv) {
             return None;
         }
-        match self.state.chat.to.get(conv).and_then(|a| Address::parse(a))? {
+        match self
+            .state
+            .chat
+            .to
+            .get(conv)
+            .and_then(|a| Address::parse(a))?
+        {
             Address::Session { box_name, .. } => Some(box_name),
             Address::Name(n) if !self.tg.store.data.marks.groups.contains_key(&n) => Some(n),
             _ => None,
@@ -822,7 +897,9 @@ impl App {
                     }
                     Err(e) => {
                         let st = match e {
-                            crate::chat::remote::RemoteError::Refused => DeliveryState::Failed(e.code()),
+                            crate::chat::remote::RemoteError::Refused => {
+                                DeliveryState::Failed(e.code())
+                            }
                             _ => DeliveryState::Unreachable(e.code()),
                         };
                         d.advance(&b, st);
@@ -836,7 +913,10 @@ impl App {
                 match self.state.chat.binds.get(&conv) {
                     Some(Bind::Task { id: tid }) => self
                         .chat_book()
-                        .and_then(|bk| bk.task(tid).map(|t| (t.spec.box_name.to_string(), tid.clone())))
+                        .and_then(|bk| {
+                            bk.task(tid)
+                                .map(|t| (t.spec.box_name.to_string(), tid.clone()))
+                        })
                         .filter(|(bx, _)| *bx == b)
                         .map(|(_, tid)| tid),
                     _ => None,
@@ -853,7 +933,14 @@ impl App {
                     prompt: text.to_string(),
                 },
             };
-            let outs = self.chat_exec(Channel::Telegram, &id, &who.person, &mut bind, vec![effect], now);
+            let outs = self.chat_exec(
+                Channel::Telegram,
+                &id,
+                &who.person,
+                &mut bind,
+                vec![effect],
+                now,
+            );
             let started = match (&session, &bind) {
                 (None, Some(Bind::Task { id: tid })) => Some(tid.clone()),
                 _ => None,
@@ -879,11 +966,17 @@ impl App {
                             box_name: b.clone(),
                             msg_id: msg_id.clone(),
                         });
-                        let seen = self.chat_book().and_then(|bk| bk.task(&tid).map(|t| t.turns)).unwrap_or(0);
+                        let seen = self
+                            .chat_book()
+                            .and_then(|bk| bk.task(&tid).map(|t| t.turns))
+                            .unwrap_or(0);
                         self.chat.seen_turns.insert(format!("{conv}|{tid}"), seen);
                     } else {
                         // one box: this conversation follows that session from now on
-                        self.state.chat.binds.insert(conv.clone(), Bind::Task { id: tid.clone() });
+                        self.state
+                            .chat
+                            .binds
+                            .insert(conv.clone(), Bind::Task { id: tid.clone() });
                         let w = self.state.chat.watch.entry(conv.clone()).or_default();
                         w.retain(|x| x.task != tid);
                         w.push(Watch {
@@ -907,16 +1000,8 @@ impl App {
             self.tg_mark_used(dg, now);
         }
         let s = d.summary();
-        let states: Vec<String> = s
-            .states
-            .iter()
-            .map(|(k, n)| format!("{n} {k}"))
-            .collect();
-        let skipped: Vec<String> = s
-            .skipped
-            .iter()
-            .map(|(k, n)| format!("{n} {k}"))
-            .collect();
+        let states: Vec<String> = s.states.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        let skipped: Vec<String> = s.skipped.iter().map(|(k, n)| format!("{n} {k}")).collect();
         self.tg_chain(
             &who.person,
             "telegram.address",
@@ -930,14 +1015,22 @@ impl App {
         );
         self.tg_tell(
             who,
-            if e.fanout { "tg.address_fanout" } else { "tg.address_sent" },
+            if e.fanout {
+                "tg.address_fanout"
+            } else {
+                "tg.address_sent"
+            },
             &[
                 ("msg", msg_id.clone()),
                 ("to", to.render()),
                 ("states", states.join(", ")),
                 (
                     "skipped",
-                    if skipped.is_empty() { "-".into() } else { skipped.join(", ") },
+                    if skipped.is_empty() {
+                        "-".into()
+                    } else {
+                        skipped.join(", ")
+                    },
                 ),
             ],
             now,
@@ -948,7 +1041,11 @@ impl App {
                 self.tg_tell(
                     who,
                     "tg.address_unreachable",
-                    &[("msg", msg_id.clone()), ("box", tdl.box_name.clone()), ("why", (*why).to_string())],
+                    &[
+                        ("msg", msg_id.clone()),
+                        ("box", tdl.box_name.clone()),
+                        ("why", (*why).to_string()),
+                    ],
                     now,
                 );
             }
@@ -1000,11 +1097,25 @@ impl App {
         ];
         let tagged = msg_id.is_some();
         let (key, rest) = if detail == Detail::Metadata {
-            (if tagged { "tg.reply_to_metadata" } else { "tg.reply_metadata" }, true)
+            (
+                if tagged {
+                    "tg.reply_to_metadata"
+                } else {
+                    "tg.reply_metadata"
+                },
+                true,
+            )
         } else if shown.left_out > 0 {
             args.push(("text", shown.text));
             args.push(("more", shown.left_out.to_string()));
-            (if tagged { "tg.reply_to_more" } else { "tg.reply_more" }, true)
+            (
+                if tagged {
+                    "tg.reply_to_more"
+                } else {
+                    "tg.reply_more"
+                },
+                true,
+            )
         } else {
             args.push(("text", shown.text));
             (if tagged { "tg.reply_to" } else { "tg.reply" }, false)
@@ -1021,7 +1132,12 @@ impl App {
             args.push(("where", String::new()));
         }
         if let Some(m) = msg_id {
-            for tr in self.tg.deliveries.iter_mut().filter(|x| x.chat_id == chat_id) {
+            for tr in self
+                .tg
+                .deliveries
+                .iter_mut()
+                .filter(|x| x.chat_id == chat_id)
+            {
                 if tr.delivery.msg_id == m {
                     tr.delivery.advance(box_name, DeliveryState::Replied);
                 }
@@ -1042,7 +1158,14 @@ impl App {
             else {
                 continue;
             };
-            let text = self.tg_agent_reply(chat_id, &r.box_name, &r.session, Some(&r.msg_id), &r.text, now);
+            let text = self.tg_agent_reply(
+                chat_id,
+                &r.box_name,
+                &r.session,
+                Some(&r.msg_id),
+                &r.text,
+                now,
+            );
             self.tg_say(chat_id, text, now);
         }
         self.tg_deliveries_done(now);
@@ -1065,7 +1188,11 @@ impl App {
             let text = self.tg_note_said(
                 chat,
                 "tg.address_done",
-                &[("msg", s.msg_id.clone()), ("to", s.address.clone()), ("states", states.join(", "))],
+                &[
+                    ("msg", s.msg_id.clone()),
+                    ("to", s.address.clone()),
+                    ("states", states.join(", ")),
+                ],
             );
             self.tg_say(chat, text, now);
         }
@@ -1087,7 +1214,10 @@ mod tests {
 
     #[test]
     fn only_the_power_acts_have_a_verb() {
-        assert_eq!(act_of(&ChatAct::BoxResume("a".into())), Some(("resume", "a")));
+        assert_eq!(
+            act_of(&ChatAct::BoxResume("a".into())),
+            Some(("resume", "a"))
+        );
         assert_eq!(act_of(&ChatAct::Status), None);
     }
 }

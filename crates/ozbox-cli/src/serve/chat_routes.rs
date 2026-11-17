@@ -1304,7 +1304,9 @@ impl App {
             .collect();
         let mut outs: Vec<(String, Out)> = Vec::new();
         // what each conversation hears from: the session it follows, and the sessions a message was addressed to
-        let mut heard: Vec<(String, Bind, Option<(String, String)>)> = binds
+        // (conversation, session, the message id and box a watched session answers for)
+        type Heard = (String, Bind, Option<(String, String)>);
+        let mut heard: Vec<Heard> = binds
             .iter()
             .map(|(k, b)| (k.clone(), b.clone(), None))
             .collect();

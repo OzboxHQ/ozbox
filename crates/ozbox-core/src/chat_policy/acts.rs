@@ -503,7 +503,8 @@ pub fn parse_act(text: &str, own_bot: Option<&str>) -> ChatAct {
         "boxes" => ChatAct::Boxes,
         "fleets" | "groups" => ChatAct::Fleets,
         "to" => match args.as_slice() {
-            [a] => super::address::Address::parse(a).map_or(ChatAct::Usage("chat.usage_to"), ChatAct::To),
+            [a] => super::address::Address::parse(a)
+                .map_or(ChatAct::Usage("chat.usage_to"), ChatAct::To),
             _ => ChatAct::Usage("chat.usage_to"),
         },
         "lock" => ChatAct::Lock,
@@ -606,10 +607,12 @@ fn parse_box(args: &[&str]) -> ChatAct {
             _ => ChatAct::Usage("chat.usage_box_extend"),
         },
         "create" | "new" => match rest {
-            [n, sz] if box_name_ok(n) && word_ok(sz) && !sz.starts_with('-') => ChatAct::BoxCreate {
-                box_name: (*n).to_string(),
-                size: (*sz).to_string(),
-            },
+            [n, sz] if box_name_ok(n) && word_ok(sz) && !sz.starts_with('-') => {
+                ChatAct::BoxCreate {
+                    box_name: (*n).to_string(),
+                    size: (*sz).to_string(),
+                }
+            }
             _ => ChatAct::Usage("chat.usage_box_create"),
         },
         "resize" => match rest {
@@ -744,8 +747,14 @@ mod tests {
             parse_act("@fleet git status please", own).id(),
             ActId::Address
         );
-        assert_eq!(parse_act("@alpha", own), ChatAct::Usage("chat.usage_address"));
-        assert_eq!(parse_act("@$(id) hi", own), ChatAct::Usage("chat.usage_address"));
+        assert_eq!(
+            parse_act("@alpha", own),
+            ChatAct::Usage("chat.usage_address")
+        );
+        assert_eq!(
+            parse_act("@$(id) hi", own),
+            ChatAct::Usage("chat.usage_address")
+        );
         assert_eq!(
             parse_act("/to @web", own),
             ChatAct::To(Address::Name("web".into()))

@@ -285,7 +285,8 @@ fn entropy(w: &str) -> f64 {
 fn hide_entropy(line: &str) -> String {
     line.split(' ')
         .map(|w| {
-            let core = w.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "+/=_-".contains(c)));
+            let core =
+                w.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "+/=_-".contains(c)));
             let keyish = core.len() >= ENTROPY_MIN_LEN
                 && core
                     .bytes()
@@ -357,7 +358,11 @@ pub fn strip_markup(s: &str) -> String {
                 continue;
             }
         }
-        if c == '<' && chars.get(i + 1).is_some_and(|n| n.is_ascii_alphabetic() || *n == '/') {
+        if c == '<'
+            && chars
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/')
+        {
             in_tag = true;
         } else if in_tag && c == '>' {
             in_tag = false;
@@ -396,7 +401,11 @@ mod tests {
         let pad = "a ".repeat((FULL_CHARS - 10) / 2);
         let raw = format!("{pad}{SENTINEL} and more words after it");
         let out = agent_output(&raw, &secrets(), Detail::Full);
-        assert!(!out.text.contains("SENTINEL"), "{}", &out.text[out.text.len() - 40..]);
+        assert!(
+            !out.text.contains("SENTINEL"),
+            "{}",
+            &out.text[out.text.len() - 40..]
+        );
         assert!(!out.text.contains("7f3a9c2e"));
     }
 
@@ -411,7 +420,11 @@ mod tests {
         assert!(!out.text.contains("ghp_abcdef"));
         assert!(!out.text.contains("Zx8Qp2Lm9Rt4"));
         // ordinary long words stay
-        let out = agent_output("internationalisation-of-the-documentation is fine", &[], Detail::Full);
+        let out = agent_output(
+            "internationalisation-of-the-documentation is fine",
+            &[],
+            Detail::Full,
+        );
         assert!(out.text.contains("internationalisation"));
     }
 
@@ -419,7 +432,13 @@ mod tests {
     fn every_url_is_removed_the_dashboards_own_too() {
         let raw = "open https://dash.example.com/approve#t=abc or www.example.com or javascript:alert(1) or ftp://x.example.com/a";
         let out = agent_output(raw, &[], Detail::Full);
-        for bad in ["https://", "dash.example.com", "www.example", "javascript:", "ftp://"] {
+        for bad in [
+            "https://",
+            "dash.example.com",
+            "www.example",
+            "javascript:",
+            "ftp://",
+        ] {
             assert!(!out.text.contains(bad), "{bad} in {}", out.text);
         }
         assert!(out.text.contains("[link removed]"));
@@ -447,9 +466,18 @@ mod tests {
         assert!(sum.text.chars().count() <= SUMMARY_CHARS);
         let meta = agent_output(&long, &[], Detail::Metadata);
         assert!(meta.text.is_empty());
-        assert_eq!(Detail::effective(Detail::Full, true, false), Detail::Metadata);
-        assert_eq!(Detail::effective(Detail::Full, false, true), Detail::Summary);
-        assert_eq!(Detail::effective(Detail::Metadata, false, true), Detail::Metadata);
+        assert_eq!(
+            Detail::effective(Detail::Full, true, false),
+            Detail::Metadata
+        );
+        assert_eq!(
+            Detail::effective(Detail::Full, false, true),
+            Detail::Summary
+        );
+        assert_eq!(
+            Detail::effective(Detail::Metadata, false, true),
+            Detail::Metadata
+        );
     }
 
     #[test]

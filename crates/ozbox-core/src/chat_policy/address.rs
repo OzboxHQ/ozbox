@@ -25,7 +25,10 @@ pub const FLEET: &str = "fleet";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Address {
-    Session { box_name: String, session: String },
+    Session {
+        box_name: String,
+        session: String,
+    },
     /// A box or a group: which one is settled by [`expand`].
     Name(String),
     Fleet,
@@ -193,7 +196,11 @@ pub fn reachable_groups<'a>(
         .map(|(g, members)| {
             let reach = members
                 .iter()
-                .filter(|m| boxes.iter().any(|b| &&b.name == m && !b.production && b.delegated))
+                .filter(|m| {
+                    boxes
+                        .iter()
+                        .any(|b| &&b.name == m && !b.production && b.delegated)
+                })
                 .count();
             (g.as_str(), reach, members.len())
         })
@@ -369,7 +376,10 @@ mod tests {
                 session: "t1a2".into()
             })
         );
-        assert_eq!(Address::parse("@alpha"), Some(Address::Name("alpha".into())));
+        assert_eq!(
+            Address::parse("@alpha"),
+            Some(Address::Name("alpha".into()))
+        );
         assert_eq!(Address::parse("@FLEET"), Some(Address::Fleet));
         for bad in ["@", "@Alpha!", "@a/b c", "@a/", "@/x", "@alpha/$(id)"] {
             assert_eq!(Address::parse(bad), None, "{bad}");
@@ -383,7 +393,10 @@ mod tests {
         assert!(e.fanout);
         let names: Vec<_> = e.targets.iter().map(|t| t.box_name.as_str()).collect();
         assert_eq!(names, ["alpha", "bravo"]);
-        assert!(!e.targets[1].online, "an offline box is a target with an honest state");
+        assert!(
+            !e.targets[1].online,
+            "an offline box is a target with an honest state"
+        );
         assert!(e.skipped.contains(&("charlie".into(), Skip::NotDelegated)));
         assert!(e.skipped.contains(&("prod".into(), Skip::Production)));
     }
@@ -405,7 +418,9 @@ mod tests {
 
     #[test]
     fn a_fan_out_is_bounded() {
-        let many: Vec<BoxReach> = (0..30).map(|i| b(&format!("b{i:02}"), false, true, true)).collect();
+        let many: Vec<BoxReach> = (0..30)
+            .map(|i| b(&format!("b{i:02}"), false, true, true))
+            .collect();
         let e = expand(&Address::Fleet, &many, &BTreeMap::new());
         assert_eq!(e.targets.len(), MAX_FANOUT);
         assert_eq!(e.skipped.len(), 10);
@@ -427,7 +442,10 @@ mod tests {
         assert!(d.advance("alpha", DeliveryState::Replied));
         assert!(!d.advance("alpha", DeliveryState::Queued), "never back");
         assert!(d.advance("bravo", DeliveryState::Unreachable("offline")));
-        assert!(!d.advance("bravo", DeliveryState::Replied), "a final state stays");
+        assert!(
+            !d.advance("bravo", DeliveryState::Replied),
+            "a final state stays"
+        );
         assert!(d.done());
         let s = d.summary();
         assert_eq!(s.states.get("replied"), Some(&1));
