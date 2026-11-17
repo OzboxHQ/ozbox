@@ -1514,7 +1514,11 @@ mod tests {
             "a Production value was read for a box that is not classified main"
         );
         assert!(
-            !w.log.lines.borrow().iter().any(|l| l.starts_with("release ")),
+            !w.log
+                .lines
+                .borrow()
+                .iter()
+                .any(|l| l.starts_with("release ")),
             "a Production value was released to a box that is not classified main"
         );
         assert!(got.is_err(), "the request itself is refused");
