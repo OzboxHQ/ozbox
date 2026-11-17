@@ -258,7 +258,14 @@ impl ApprovalGate {
         env: &str,
         signer: &crate::secrets_signer::Signer,
     ) -> Result<String, String> {
-        let code = self.mint(scope, project, env, &crate::secrets_signer::Signer::Dashboard, 0, MAX_TTL_MS)?;
+        let code = self.mint(
+            scope,
+            project,
+            env,
+            &crate::secrets_signer::Signer::Dashboard,
+            0,
+            MAX_TTL_MS,
+        )?;
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(a) = st.live.get_mut(&self.tag(&code)) {
             a.signer = signer.clone();
@@ -271,6 +278,8 @@ impl ApprovalGate {
     /// §2): the code is 80 bits and lives five minutes, so a guess cannot be repeated into success,
     /// and a counter shared by every caller was a lever for the box user to lock the owner out of the codes (the old
     /// five-a-minute lock was global). The service writes a refused line for each wrong code instead.
+    /// (Tests only: the service always says what it knows of the act, through the `_tiered` form.)
+    #[cfg(test)]
     pub fn consume(
         &self,
         code: &str,
@@ -335,6 +344,8 @@ impl ApprovalGate {
     /// slow effect must not stall every other mint and consume on the box. Taking it first is what keeps a code single use: a second
     /// request with the same code, arriving while the effect runs, finds nothing. If the effect fails the approval is put back with its own expiry, so a refused write leaves the person's code usable; if the effect panics the code stays spent,
     /// which is the safe side. The effect may take this gate's lock (it can mint another code).
+    /// (Tests only: the service always says what it knows of the act, through the `_tiered` form.)
+    #[cfg(test)]
     pub fn consume_then<T>(
         &self,
         code: &str,
@@ -494,7 +505,16 @@ mod tests {
         // spent
         assert!(g.consume(&c, "import", "app", "staging", 4000).is_err());
         // expired
-        let c2 = g.mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 10_000, 5_000).unwrap();
+        let c2 = g
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                10_000,
+                5_000,
+            )
+            .unwrap();
         assert!(g.consume(&c2, "policy", "app", "", 15_001).is_err());
     }
 
@@ -503,7 +523,16 @@ mod tests {
     #[test]
     fn wrong_guesses_never_lock_the_gate_and_a_right_code_still_works_straight_after() {
         let g = ApprovalGate::new();
-        let c = g.mint("import", "a", "b", &crate::secrets_signer::Signer::Dashboard, 0, DEFAULT_TTL_MS).unwrap();
+        let c = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS,
+            )
+            .unwrap();
         for i in 0..1000 {
             assert!(g
                 .consume("AAAA-AAAA-AAAA-AAAA", "import", "a", "b", i as u64)
@@ -515,19 +544,72 @@ mod tests {
     #[test]
     fn a_bad_scope_or_name_is_never_minted_and_the_queue_is_bounded() {
         let g = ApprovalGate::new();
-        assert!(g.mint("root", "", "", &crate::secrets_signer::Signer::Dashboard, 0, 1000).is_err());
-        assert!(g.mint("import", "Bad Name", "", &crate::secrets_signer::Signer::Dashboard, 0, 1000).is_err());
+        assert!(g
+            .mint(
+                "root",
+                "",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                1000
+            )
+            .is_err());
+        assert!(g
+            .mint(
+                "import",
+                "Bad Name",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                1000
+            )
+            .is_err());
         for _ in 0..MAX_LIVE {
-            g.mint("import", "a", "b", &crate::secrets_signer::Signer::Dashboard, 0, DEFAULT_TTL_MS).unwrap();
+            g.mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS,
+            )
+            .unwrap();
         }
-        assert!(g.mint("import", "a", "b", &crate::secrets_signer::Signer::Dashboard, 0, DEFAULT_TTL_MS).is_err());
+        assert!(g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                DEFAULT_TTL_MS
+            )
+            .is_err());
     }
 
     #[test]
     fn codes_differ_and_are_made_of_the_readable_alphabet() {
         let g = ApprovalGate::new();
-        let a = g.mint("import", "a", "b", &crate::secrets_signer::Signer::Dashboard, 0, 9000).unwrap();
-        let b = g.mint("import", "a", "b", &crate::secrets_signer::Signer::Dashboard, 0, 9000).unwrap();
+        let a = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                9000,
+            )
+            .unwrap();
+        let b = g
+            .mint(
+                "import",
+                "a",
+                "b",
+                &crate::secrets_signer::Signer::Dashboard,
+                0,
+                9000,
+            )
+            .unwrap();
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c == '-' || ALPHABET.contains(&(c as u8))));
         assert!(is_code_shape(&a));
@@ -555,7 +637,14 @@ mod tests {
     fn a_code_is_spent_only_when_the_write_it_was_for_succeeded() {
         let a = ApprovalGate::new();
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         // the wrong scope never runs the effect
         let mut ran = false;
@@ -591,7 +680,14 @@ mod tests {
     fn a_code_put_back_after_a_failed_write_still_expires_at_its_own_time() {
         let a = ApprovalGate::new();
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 1000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                1000,
+            )
             .unwrap();
         assert!(a
             .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
@@ -601,7 +697,14 @@ mod tests {
         // put back, but the code was only ever good until 2000
         assert!(a.consume(&code, "policy", "app", "", 2000).is_err());
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 1000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                1000,
+            )
             .unwrap();
         assert!(a
             .consume_then(&code, "policy", "app", "", 1500, |_| Err::<(), _>(
@@ -616,7 +719,14 @@ mod tests {
     fn two_requests_with_one_code_make_exactly_one_write() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -652,14 +762,28 @@ mod tests {
     fn the_gate_is_not_held_while_the_write_runs() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let a2 = a.clone();
         std::thread::spawn(move || {
             let r = a2.consume_then(&code, "policy", "app", "", 1001, |_| {
                 let other = a2
-                    .mint("import", "app", "dev", &crate::secrets_signer::Signer::Dashboard, 1001, 60_000)
+                    .mint(
+                        "import",
+                        "app",
+                        "dev",
+                        &crate::secrets_signer::Signer::Dashboard,
+                        1001,
+                        60_000,
+                    )
                     .unwrap();
                 a2.consume(&other, "import", "app", "dev", 1002).map(|_| ())
             });
@@ -677,7 +801,14 @@ mod tests {
     fn a_panicking_write_leaves_the_code_spent_and_the_gate_usable() {
         let a = std::sync::Arc::new(ApprovalGate::new());
         let code = a
-            .mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1000, 60_000)
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1000,
+                60_000,
+            )
             .unwrap();
         let (a2, c2) = (a.clone(), code.clone());
         let r = std::thread::spawn(move || {
@@ -688,6 +819,15 @@ mod tests {
         .join();
         assert!(r.is_err());
         assert!(a.consume(&code, "policy", "app", "", 1002).is_err());
-        assert!(a.mint("policy", "app", "", &crate::secrets_signer::Signer::Dashboard, 1003, 60_000).is_ok());
+        assert!(a
+            .mint(
+                "policy",
+                "app",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                1003,
+                60_000
+            )
+            .is_ok());
     }
 }

@@ -989,7 +989,14 @@ mod enrol {
     fn mint_enroll_code(r: &Rig, id: &str) -> String {
         r.gates
             .approvals
-            .mint("signer-enroll", id, "", &crate::secrets_signer::Signer::Dashboard, T, 60_000)
+            .mint(
+                "signer-enroll",
+                id,
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                T,
+                60_000,
+            )
             .unwrap()
     }
 
@@ -1191,7 +1198,14 @@ mod enrol {
         // the dashboard's socket enrols by a request only, and there is no journal to hold one
         let code = gates
             .approvals
-            .mint("signer-enroll", "evil", "", &crate::secrets_signer::Signer::Dashboard, T, 60_000)
+            .mint(
+                "signer-enroll",
+                "evil",
+                "",
+                &crate::secrets_signer::Signer::Dashboard,
+                T,
+                60_000,
+            )
             .unwrap();
         let e = handle(&store, &gates, Policy::Supervisor, &json!({"op":"approval_key_enroll","key_id":"evil","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap_err();
@@ -1199,7 +1213,14 @@ mod enrol {
         // a code enrolment through the laptop's route serves the wait, read from the store alone
         let code = gates
             .approvals
-            .mint("signer-enroll", "second", "", &crate::secrets_signer::Signer::SoftwareKey("first".into()), T, 60_000)
+            .mint(
+                "signer-enroll",
+                "second",
+                "",
+                &crate::secrets_signer::Signer::SoftwareKey("first".into()),
+                T,
+                60_000,
+            )
             .unwrap();
         handle(&store, &gates, Policy::Unsealed, &json!({"op":"approval_key_enroll","key_id":"second","public_key":"cd".repeat(32),"approval":code}), T)
             .unwrap();

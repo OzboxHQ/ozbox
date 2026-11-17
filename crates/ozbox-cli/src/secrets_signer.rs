@@ -88,7 +88,9 @@ pub fn is_production(scope: &str, env: &str, declared: bool) -> bool {
         None => true,
         Some(Tier::ByEnvironment) => is_production_environment(env),
         Some(Tier::ByDeclaration) => !env.is_empty() && is_production_environment(env),
-        Some(Tier::ChangeDigest) => !(env.len() == 16 && env.bytes().all(|b| b.is_ascii_hexdigit())),
+        Some(Tier::ChangeDigest) => {
+            !(env.len() == 16 && env.bytes().all(|b| b.is_ascii_hexdigit()))
+        }
         Some(Tier::BoxOwn) => false,
     }
 }
@@ -161,7 +163,12 @@ mod tests {
             ("policy", "", false, true),
             ("policy", "", true, false),
             ("policy", "production", false, false),
-            ("tunnel-token", "0123456789abcdef0123456789abcdef", false, true),
+            (
+                "tunnel-token",
+                "0123456789abcdef0123456789abcdef",
+                false,
+                true,
+            ),
             ("guard-override", digest, false, true),
             ("guard-override", "production", false, false),
             ("guard-override", digest, true, false),
