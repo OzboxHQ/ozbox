@@ -186,6 +186,11 @@ pub enum Command {
         /// remote. Runs are not asked to end. Not with --strict-checkpoint.
         #[arg(long, conflicts_with = "strict_checkpoint")]
         legacy_checkpoint: bool,
+        /// On a box whose agent is older than this program, go on with no checkpoint at all: uncommitted work is not
+        /// snapshotted and runs are not asked to end (/work itself is kept). On such a box the command is refused until
+        /// --legacy-checkpoint or --no-checkpoint is given; neither is assumed, not even with --yes.
+        #[arg(long, conflicts_with_all = ["strict_checkpoint", "legacy_checkpoint"])]
+        no_checkpoint: bool,
     },
     /// Move an AWS box's secrets store from a key kept in a file on its system disk to the fleet's KMS key, in place, so an
     /// upgrade keeps the store. Needs secrets_key_arn and fleet under [aws]. The box's role is allowed to use the key (for the
@@ -389,6 +394,11 @@ pub enum Command {
         /// remote. Runs are not asked to end. Not with --strict-checkpoint.
         #[arg(long, conflicts_with = "strict_checkpoint")]
         legacy_checkpoint: bool,
+        /// On a box whose agent is older than this program, go on with no checkpoint at all: uncommitted work is not
+        /// snapshotted and runs are not asked to end (/work itself is kept). On such a box the command is refused until
+        /// --legacy-checkpoint or --no-checkpoint is given; neither is assumed, not even with --yes.
+        #[arg(long, conflicts_with_all = ["strict_checkpoint", "legacy_checkpoint"])]
+        no_checkpoint: bool,
     },
     /// Snapshot a box's /work disk.
     Snapshot {
