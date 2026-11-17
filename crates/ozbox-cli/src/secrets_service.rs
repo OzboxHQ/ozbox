@@ -946,6 +946,8 @@ pub fn declaration_subject(
     };
     let none = GuardedSettings::default();
     Ok(Subject::Policy(PolicyChange {
+        // bound: an approval for one project's declaration is never spent on another's (review M2)
+        project: project.to_string(),
         policy_sha256: digest(new)?,
         predecessor_sha256: predecessor,
         sensitivity: policy_sensitivity(&none, &none),

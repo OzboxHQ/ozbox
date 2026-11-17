@@ -167,6 +167,41 @@ fn a_declaration_is_filed_approved_in_the_dashboard_and_the_waiting_command_save
     assert_eq!(r.raw(Policy::Unsealed, &v)["ok"], false);
 }
 
+/// Review M2, B4-27: an approved declaration request is bound to its project. A new project's predecessor is the digest of
+/// nothing, the same for every project, so without the project in the subject an approval for `demo` could be spent on `app`
+/// with the same text. The spend for another project is refused and the approval kept; the card names the project, as a field
+/// derived from the bound subject.
+#[test]
+fn an_approved_declaration_for_one_project_is_never_spent_on_another() {
+    let r = rig();
+    let text = declaration("t");
+    let filing = json!({"op": "areq_file", "subject": {"scope": "policy"}, "project": "demo", "policy_text": text});
+    let (a, _, _, _) = approve_while_waiting(&r, &filing, "policy");
+    // the same declaration, sent for another project with this approval: refused, nothing declared
+    let mut v = json!({"op":"policy","project":"app","text":text,"request_id":a.id});
+    let out = r.raw(Policy::Unsealed, &v);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(crate::workload_policy::load(r.store.as_ref(), "app")
+        .unwrap()
+        .is_none());
+    let list = r.raw(
+        Policy::Supervisor,
+        &json!({"op":"areq_list","role":"owner"}),
+    );
+    let card = &list["result"]["requests"][0];
+    let shown = card.to_string();
+    assert!(
+        shown.contains(r#""label":"Project""#) && shown.contains(r#""value":"demo""#),
+        "the card shows the bound project: {shown}"
+    );
+    // the approval is kept for the project it was filed for
+    v["project"] = json!("demo");
+    assert_eq!(r.raw(Policy::Unsealed, &v)["ok"], true);
+    assert!(crate::workload_policy::load(r.store.as_ref(), "demo")
+        .unwrap()
+        .is_some());
+}
+
 /// The box never takes a filer's own fields for a declaration: a subject with digests and a label of the filer's making, or no
 /// declaration text, is refused.
 #[test]

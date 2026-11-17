@@ -336,12 +336,14 @@ pub fn policy_sensitivity(old: &GuardedSettings, new: &GuardedSettings) -> Polic
 impl PolicyChange {
     /// The change as the service builds it: the digests of the two canonical policies and the sensitivity it computes.
     pub fn derive(
+        project: String,
         policy_sha256: String,
         predecessor_sha256: String,
         old: &GuardedSettings,
         new: &GuardedSettings,
     ) -> PolicyChange {
         PolicyChange {
+            project,
             policy_sha256,
             predecessor_sha256,
             sensitivity: policy_sensitivity(old, new),
@@ -351,6 +353,11 @@ impl PolicyChange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyChange {
+    /// The project the declaration is for. In the digest, so an approval for one project's declaration is never spent on
+    /// another's (a new project's predecessor is the digest of nothing, the same for every project). An older filer that sends
+    /// none files for the empty project, which no spend ever matches.
+    #[serde(default)]
+    pub project: String,
     /// sha256 of the canonical serialisation of the parsed policy (made by one function both sides use).
     pub policy_sha256: String,
     /// and of the one it replaces.
@@ -578,6 +585,9 @@ impl Subject {
                 Ok(())
             }
             Subject::Policy(p) => {
+                if !word_ok(&p.project) {
+                    return bad("the project is lowercase letters, digits and - only");
+                }
                 need_hex(&p.policy_sha256, 32, "the policy's digest")?;
                 need_hex(&p.predecessor_sha256, 32, "the replaced policy's digest")
             }
@@ -734,7 +744,8 @@ impl Subject {
             Subject::Policy(p) => {
                 e.text(&p.policy_sha256)
                     .text(&p.predecessor_sha256)
-                    .text(p.sensitivity.word());
+                    .text(p.sensitivity.word())
+                    .text(&p.project);
             }
             Subject::TunnelToken(t) => {
                 e.text(&t.kind)
@@ -936,6 +947,7 @@ impl Subject {
                 d("store generation", a.store_generation == b.store_generation);
             }
             (Subject::Policy(a), Subject::Policy(b)) => {
+                d("project", a.project == b.project);
                 d("policy", a.policy_sha256 == b.policy_sha256);
                 d(
                     "replaced policy",
@@ -1261,6 +1273,7 @@ impl Subject {
             }
             Subject::Policy(p) => vec![
                 f("Change", "policy".into()),
+                f("Project", p.project.clone()),
                 f("New policy", short(&p.policy_sha256)),
                 f("Replaces", short(&p.predecessor_sha256)),
                 f("Effect", p.sensitivity.word().into()),

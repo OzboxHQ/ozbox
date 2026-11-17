@@ -71,7 +71,7 @@ def encode(s, box=BOX, store=STORE):
             b += lp(n["name"]) + lp(n["classification"]) + lp(n["value_digest"])
         b += u64(s["store_generation"])
     elif sc == "policy":
-        b += lp(s["policy_sha256"]) + lp(s["predecessor_sha256"]) + lp(s["sensitivity"])
+        b += lp(s["policy_sha256"]) + lp(s["predecessor_sha256"]) + lp(s["sensitivity"]) + lp(s["project"])
     elif sc == "tunnel-token":
         b += lp(s["kind"]) + lp(s["token_sha256"]) + lp(s.get("account_tag", "")) + lp(s.get("tunnel_id", ""))
     elif sc == "box-secrets":
@@ -136,8 +136,8 @@ VECTORS = [
     ("tunnel-token: the same characters the other way (account a, tunnel bc)", tun(tag="a", tid="bc")),
     ("tunnel-token: empty account tag", tun(tag="", tid="tun1")),
     ("tunnel-token: empty tunnel id", tun(tag="acct1", tid="")),
-    ("policy", {"scope": "policy", "policy_sha256": h("d"), "predecessor_sha256": h("e"), "sensitivity": "ordinary"}),
-    ("policy: widens a guarded scope", {"scope": "policy", "policy_sha256": h("d"), "predecessor_sha256": h("e"), "sensitivity": "widens-guarded"}),
+    ("policy", {"scope": "policy", "project": "app", "policy_sha256": h("d"), "predecessor_sha256": h("e"), "sensitivity": "ordinary"}),
+    ("policy: widens a guarded scope", {"scope": "policy", "project": "app", "policy_sha256": h("d"), "predecessor_sha256": h("e"), "sensitivity": "widens-guarded"}),
     ("guard-override commit: one match", commit(ms=[M2[1]])),
     ("guard-override commit: two matches out of order", commit(ms=M2)),
     ("guard-override commit: the same two in order (the same digest)", commit(ms=[M2[1], M2[0]])),

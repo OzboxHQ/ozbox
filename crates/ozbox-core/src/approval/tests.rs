@@ -68,6 +68,7 @@ fn import(env: &str, class: Classification) -> Subject {
 
 fn policy(s: PolicySensitivity) -> Subject {
     Subject::Policy(PolicyChange {
+        project: "app".into(),
         policy_sha256: hex64('d'),
         predecessor_sha256: hex64('e'),
         sensitivity: s,
@@ -2014,7 +2015,13 @@ fn a_policy_sensitivity_is_the_services_reading_never_the_filers_label() {
         policy_sensitivity(&old, &set(&["a"], &["t", "u"])),
         PolicySensitivity::WidensGuarded
     );
-    let honest = PolicyChange::derive(hex64('d'), hex64('e'), &old, &set(&["a", "b"], &["t"]));
+    let honest = PolicyChange::derive(
+        "app".into(),
+        hex64('d'),
+        hex64('e'),
+        &old,
+        &set(&["a", "b"], &["t"]),
+    );
     assert_eq!(honest.sensitivity, PolicySensitivity::WidensGuarded);
     // a compromised supervisor labels a widening "ordinary": nothing the filer can say makes the service agree
     let mut lie = honest.clone();
