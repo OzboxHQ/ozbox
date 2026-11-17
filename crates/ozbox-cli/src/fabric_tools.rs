@@ -38,8 +38,6 @@ pub struct FabricHost {
 }
 
 impl FabricHost {
-    // the server attaches the fabric once the hub's daemon runs it (H2); until then only the tests do
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(api: Arc<dyn FabricApi>, box_name: &str) -> FabricHost {
         FabricHost {
             api,

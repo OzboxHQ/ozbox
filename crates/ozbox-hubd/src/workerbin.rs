@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ozbox_core::agent_engine::AgentEngine;
+use ozbox_core::fabric::node::{BoxFabric, Seams as FabricSeams};
+use ozbox_core::fabric::CoreScreen;
 use ozbox_core::hub::net::{enrol_over_net, NetWorker, TcpDialer, WorkerNetConfig};
 use ozbox_core::hub::worker::WorkerState;
 use ozbox_core::run::TaskStore;
@@ -204,6 +206,20 @@ fn agent(argv: &[String]) -> Result<(), String> {
     let state = WorkerState::new(&name, &seams.my_fp, &hub_name, &hub_fp, 1);
     let reach = net.clone();
     let sup2 = sup.clone();
+    let fabric = Some(Arc::new(BoxFabric::new(
+        &name,
+        &seams.my_fp,
+        &hub_name,
+        &hub_fp,
+        FabricSeams {
+            signer: seams.signer.clone(),
+            verifier: seams.verifier.clone(),
+            sealer: seams.sealer.clone(),
+            net: net.clone(),
+            screen: Arc::new(CoreScreen),
+            audit: None,
+        },
+    )));
     // the run path: the box's own supervisor, through its task store. Without a store the agent still connects and keeps keys, and
     // every task is refused by name.
     let engines: Box<dyn EngineFactory> = match tasks_path(argv) {
@@ -232,6 +248,7 @@ fn agent(argv: &[String]) -> Result<(), String> {
             }),
             approvals: Some(Arc::new(Mutex::new(ServiceApprovals { ops: sup2 }))),
             engines,
+            fabric: fabric.clone(),
             workspace: Box::new(GitWorkspace {
                 root: PathBuf::from("/work/repos"),
             }),
@@ -239,7 +256,15 @@ fn agent(argv: &[String]) -> Result<(), String> {
         },
         state,
     );
-    eprintln!("ozbox-hubd: agent running (dials out; nothing listens)");
+    // the box's tool host reaches the fabric through the agent, on a local socket (its directory's mode says who)
+    let _serving = match (flag(argv, "--fabric-socket"), fabric) {
+        (Ok(path), Some(f)) => Some(
+            crate::fabricsock::serve(f, Path::new(&path), 0o750)
+                .map_err(|_| "the fabric socket could not be made".to_string())?,
+        ),
+        _ => None,
+    };
+    eprintln!("ozbox-hubd: agent running (dials out; only a local socket is served)");
     loop {
         agent.tick(now_ms());
         std::thread::sleep(Duration::from_millis(200));

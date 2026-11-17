@@ -3369,6 +3369,12 @@ fn the_workers_hub_agent_dials_out_only_to_a_private_address_and_its_unit_binds_
     // with no task store the unit names none (every task is refused by name); with one, the agent queues its tasks there and may
     // write only that folder
     assert!(!unit.contains("--tasks") && !unit.contains("ReadWritePaths"));
+    // the fabric is the agent's and is served on a local socket in a folder of the agent's group; still no network listener
+    assert!(
+        unit.contains("--fabric-socket /run/ozbox-hub-agent/fabric.sock")
+            && unit.contains("RuntimeDirectory=ozbox-hub-agent\n")
+            && unit.contains("RuntimeDirectoryMode=0750\n")
+    );
     for bad in [
         "relative/tasks.json",
         "/a/../b.json",

@@ -203,6 +203,8 @@ impl HubAttachment {
     /// worker whose enrolment offered none, and what tests use to pin a deliberately different key. The normal route is the owner's
     /// enrolment, applied by [`HubAttachment::sync_roster`], which also replaces a pin set here for a worker that offered one and
     /// drops the pin of a worker that left the roster. Until a worker is pinned, nothing it files is shown as a request.
+    // no server route sets it yet (the roster does); the tests pin a deliberately different key through it
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pin_service(&self, worker: &str, pin: ServicePin, now: u64) -> bool {
         self.svc
             .with(now, |_, st| st.pin_service(worker, pin))

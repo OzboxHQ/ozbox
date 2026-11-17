@@ -12,7 +12,8 @@
 //!   looks like a key is not sent; an approval an agent wants is the box's own ADR 0041 flow's, never a message;
 //! * **asks for keys by name** for a task that declared some (never Production, never a value in the ask);
 //! * **deletes every key it holds at once** when the hub cannot be reached for [`HUB_LOST_AFTER_MS`] (ADR 0042 section 5.3);
-//! * **announces its pending approval requests** and applies each decision its own service verified.
+//! * **announces its pending approval requests** and applies each decision its own service verified;
+//! * **runs the worker's end of the conversation fabric** (messages, shared memory and skills): it pumps the replica every tick.
 //!
 //! It stores no secret: a key delivery is sealed to a key only the worker's secrets service holds ([`crate::fleet::ServiceDeliveryStore`]).
 //! Its state is disposable: losing it loses only messages the hub has not acknowledged, and the hub resends them.
@@ -25,6 +26,7 @@ use ozbox_core::channel::wire::{Sealer, Signer, Verifier};
 use ozbox_core::engine_turn::{
     task_of, to_hub, EngineSession, HubOut, Reply, RunState, SessionStart, Turn,
 };
+use ozbox_core::fabric::node::BoxFabric;
 use ozbox_core::hub::approvals::ApprovalService;
 use ozbox_core::hub::engine::Assign;
 use ozbox_core::hub::keys::DeliveryStore;
@@ -66,6 +68,10 @@ pub struct TickReport {
     pub withheld: Vec<String>,
     /// Actions an agent wants to take that the box's own approval flow decides (ADR 0041). Never a message.
     pub approval_asks: Vec<(String, ozbox_core::approvals::AgentAction)>,
+    /// Tasks refused this tick, and why (a Production declaration, an engine this box cannot run): nothing was queued for them.
+    pub refused: Vec<(String, String)>,
+    /// Tasks whose run was stopped this tick because the hub ended them or their lease ran out.
+    pub stopped: Vec<String>,
     /// Whether every key was deleted this tick because the hub was out of reach too long.
     pub keys_deleted: bool,
 }
@@ -87,6 +93,9 @@ pub struct AgentSeams {
     pub approvals: Option<Arc<Mutex<dyn ApprovalService + Send>>>,
     pub engines: Box<dyn EngineFactory>,
     pub workspace: Box<dyn Workspace>,
+    /// This worker's end of the conversation fabric (ADR 0057): the agent pumps it every tick, so messages and shared memory and skills
+    /// move over the channel it dialed out, and serves it to the box's tool host ([`crate::fabricsock`]). `None` carries none.
+    pub fabric: Option<Arc<BoxFabric>>,
     /// How long the hub may be out of reach before every key is deleted ([`HUB_LOST_AFTER_MS`] on a real box).
     pub lost_after_ms: u64,
 }
@@ -222,6 +231,11 @@ impl WorkerAgent {
                 }
             }
         }
+        // 1b. the conversation fabric: flush what the box's agents posted, take what the hub delivered (messages and the walls of shared
+        // memory and skills). Its own endpoint on the same connection; a failure is the fabric's to retry, never the task's.
+        if let Some(f) = &self.s.fabric {
+            let _ = f.pump(now);
+        }
         // 2. the hub's messages (keys go to this box's own service)
         if now.saturating_sub(self.said_hello) >= 1_000 || self.said_hello == 0 {
             end_of(&self.s).hello(&mut self.state, now);
@@ -248,7 +262,10 @@ impl WorkerAgent {
             self.started.insert(id.clone());
             match self.start(&a) {
                 Ok(()) => rep.started.push(id.clone()),
-                Err(why) => self.say_status(now, &a, "refused", &why),
+                Err(why) => {
+                    rep.refused.push((id.clone(), why.clone()));
+                    self.say_status(now, &a, "refused", &why);
+                }
             }
             if !a.keys.names.is_empty() {
                 let r = end_of(&self.s).ask_keys(
@@ -262,6 +279,28 @@ impl WorkerAgent {
                     self.say_status(now, &a, "refused", e.code);
                 }
             }
+        }
+        // 4b. a task the hub ended (`task.end` takes it off this worker) or whose lease ran out stops its run: the run is asked to
+        // stop cleanly (the box's supervisor checkpoints and cancels it) and nothing more is reported for it
+        let live: BTreeSet<String> = self
+            .state
+            .tasks
+            .iter()
+            .filter(|a| a.lease_expiry_ms > now)
+            .map(task_id)
+            .collect();
+        let gone: Vec<String> = self
+            .sessions
+            .keys()
+            .filter(|id| !live.contains(*id))
+            .cloned()
+            .collect();
+        for id in gone {
+            if let Some(mut sess) = self.sessions.remove(&id) {
+                let _ = sess.stop();
+            }
+            self.done.insert(id.clone());
+            rep.stopped.push(id);
         }
         // 5. answers the hub gave about these tasks go to the agent that asked
         for ans in std::mem::take(&mut self.state.answers) {

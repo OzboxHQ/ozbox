@@ -2528,6 +2528,15 @@ pub fn serve(
                 }
                 Err(e) => eprintln!("ozbox: the hub was not attached: {e}"),
             }
+        } else if let (Some(sock), Ok(worker)) = (
+            std::env::var_os("OZBOX_HUB_AGENT_FABRIC"),
+            std::env::var("OZBOX_HUB_WORKER_NAME"),
+        ) {
+            // a worker of a hub: the conversation fabric is the hub agent's, reached on its local socket
+            let api = Arc::new(ozbox_hubd::fabricsock::SocketFabric::new(sock));
+            if let Err(e) = app.attach_worker_fabric(api, &worker) {
+                eprintln!("ozbox: the fabric was not attached: {e}");
+            }
         }
     }
     app.use_demo_telegram(demo_telegram::enabled(

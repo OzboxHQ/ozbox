@@ -56,8 +56,12 @@ Type=simple
 User=ozbox-hub
 Group=ozbox-hub
 SupplementaryGroups=ozbox-supervisor
-ExecStart=/usr/local/bin/ozbox-hubd agent --name ${name} --hub-addr ${addr} --hub-identity /etc/ozbox/hub-identity.json --hub-identity-fp ${fp} --secrets-socket /run/ozbox-secrets/supervisor/secrets.sock --hub-secrets-socket /run/ozbox-secrets/hub/hub.sock${tasks_args}
+ExecStart=/usr/local/bin/ozbox-hubd agent --name ${name} --hub-addr ${addr} --hub-identity /etc/ozbox/hub-identity.json --hub-identity-fp ${fp} --secrets-socket /run/ozbox-secrets/supervisor/secrets.sock --hub-secrets-socket /run/ozbox-secrets/hub/hub.sock --fabric-socket /run/ozbox-hub-agent/fabric.sock${tasks_args}
 ${tasks_rw}
+# The conversation fabric (messages, shared memory and skills) is this agent's: it serves it to the box's tool host on a local socket
+# in a folder only the agent's group may enter. It still listens on no network port.
+RuntimeDirectory=ozbox-hub-agent
+RuntimeDirectoryMode=0750
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

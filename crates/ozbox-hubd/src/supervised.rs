@@ -271,7 +271,11 @@ impl AgentEngine for SupervisedEngine {
         self.store
             .update(|b| {
                 if let Some(t) = b.task_mut(&id) {
-                    if !t.state.is_terminal() {
+                    // only a run that is still going is cancelled: one that finished (and waits for a person to look at it) is left as it is
+                    if matches!(
+                        t.state,
+                        TaskState::Queued | TaskState::Running | TaskState::NeedsYou
+                    ) {
                         t.cancel_requested = true;
                     }
                 }
@@ -508,6 +512,15 @@ mod tests {
         let h = e.start(&req(None)).unwrap();
         e.stop(&h).unwrap();
         assert!(s.load().unwrap().task(&h).unwrap().cancel_requested);
+        // a run that finished is not cancelled by a stop after the fact
+        let mut e2 = engine(&s);
+        let mut r = req(None);
+        r.task_id = "orch-1/fin".into();
+        let f = e2.start(&r).unwrap();
+        s.update(|b| b.task_mut(&f).unwrap().state = TaskState::Review)
+            .unwrap();
+        e2.stop(&f).unwrap();
+        assert!(!s.load().unwrap().task(&f).unwrap().cancel_requested);
         // a decision is the box's own request flow's: the engine has no way to take one
         assert_eq!(e.resolve(&h, true), Err(EngineError::Unavailable));
     }

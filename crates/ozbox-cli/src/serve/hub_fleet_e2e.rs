@@ -14,29 +14,35 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ozbox_core::agent_engine::AgentEngine;
-use ozbox_core::approval::{Requester, RequesterKind, Role as ApprovalRole};
-use ozbox_core::approval_subject::{from_hex, GuardHook, Ids, Subject};
+use ozbox_core::approval::Role as ApprovalRole;
+use ozbox_core::approval_subject::from_hex;
 use ozbox_core::channel::wire::hex;
 use ozbox_core::claude_code::{ClaudeCodeEngine, Launch, LogChunk, RunTransport};
 use ozbox_core::fabric::node::{BoxFabric, Seams as FabricSeams};
 use ozbox_core::fabric::{CoreScreen, FabricApi};
-use ozbox_core::hub::approvals::{Approver, ApproverSet, MemApprovals};
+use ozbox_core::hub::approvals::{Approver, ApproverSet};
 use ozbox_core::hub::net::{enrol_over_net, HubNetConfig, NetWorker, TcpDialer, WorkerNetConfig};
 use ozbox_core::hub::testkit::{test_rp, Passkey};
 use ozbox_core::hub::worker::WorkerState;
 use ozbox_core::permissions::ActorKind;
 use ozbox_core::run::{ModelRef, RunSpec, TaskStore};
-use ozbox_hubd::agent::{AgentSeams, EngineFactory, WorkerAgent, Workspace};
+use ozbox_core::supervisor::{AgentHost, BoxInfo, Supervisor};
+use ozbox_hubd::agent::{AgentSeams, WorkerAgent, Workspace};
 use ozbox_hubd::crypto::{HandshakeSigner, HandshakeVerifier};
 use ozbox_hubd::daemon::{ask, bind, now_ms, Config, Hubd};
-use ozbox_hubd::enrol::{make_request, InviteSpec, Provider, Registrar, Registrars, WORKER_CLASS};
+use ozbox_hubd::enrol::{
+    make_request, make_request_with_pin, InviteSpec, Provider, Registrar, Registrars, WORKER_CLASS,
+};
+use ozbox_hubd::fabricsock::{serve as serve_fabric, Serving, SocketFabric};
 use ozbox_hubd::fleet::ServiceDeliveryStore;
+use ozbox_hubd::fleet::{service_pin, ServiceApprovals};
 use ozbox_hubd::keys::{Caller, HubKeys, KeyStore};
 use ozbox_hubd::nethost::NetHost;
 use ozbox_hubd::ops::{KeyOps, LocalServiceOps};
 use ozbox_hubd::registrar::laptop::{apply, plan, LaptopRequest, Site};
 use ozbox_hubd::registrar::{AttestSigner, SeedSigner};
 use ozbox_hubd::seams::worker_seams;
+use ozbox_hubd::supervised::SupervisedFactory;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
@@ -147,6 +153,10 @@ fn transcript(p: Program, text: &str) -> String {
 struct CliState {
     launches: Vec<Launch>,
     logs: Vec<Vec<u8>>,
+    /// The program never exits (a long task), so the run stays running until it is stopped.
+    hang: bool,
+    /// The runs the box was asked to stop.
+    stopped: Vec<String>,
 }
 
 /// The transport the adapters fill on a box, playing the program: every launch is answered with that program's own format.
@@ -167,6 +177,13 @@ impl RunTransport for FakeCli {
     }
     fn read_log(&mut self, _: &str, run_id: &str, from: u64) -> Result<LogChunk, String> {
         let s = self.st.lock().unwrap();
+        if s.hang {
+            return Ok(LogChunk {
+                bytes: Vec::new(),
+                next: from,
+                exited: None,
+            });
+        }
         let i: usize = run_id.trim_start_matches("run-").parse().unwrap();
         let log = &s.logs[i];
         Ok(LogChunk {
@@ -175,7 +192,8 @@ impl RunTransport for FakeCli {
             exited: Some(0),
         })
     }
-    fn stop(&mut self, _: &str, _: &str) -> Result<(), String> {
+    fn stop(&mut self, _: &str, run_id: &str) -> Result<(), String> {
+        self.st.lock().unwrap().stopped.push(run_id.to_string());
         Ok(())
     }
     fn send(&mut self, _: &str, _: &str, _: &str, _: bool) -> Result<(), String> {
@@ -183,23 +201,155 @@ impl RunTransport for FakeCli {
     }
 }
 
-struct Programs {
-    cli: FakeCli,
+/// The box's own supervisor host: the engines the box can run (the adapters over the fake program), and nothing else. The supervisor
+/// admits a queued run onto it exactly as `ozbox serve` does on a real box: Models routing and the broker are the host's, and there is
+/// no model choice here, so the engine "uses its own login" like a box with none configured.
+struct ProgHost {
+    engines: BTreeMap<String, Box<dyn AgentEngine>>,
 }
 
-impl EngineFactory for Programs {
-    fn make(&mut self, engine: &str) -> Result<Box<dyn AgentEngine>, String> {
-        let want = match self.cli.program {
-            Program::Claude => "claude-code",
-            Program::Codex => ozbox_core::codex_cli::ENGINE,
-        };
-        if !engine.is_empty() && engine != want {
-            return Err(format!("this box runs {want}, not {engine}"));
+impl ProgHost {
+    fn new(program: Program, cli: FakeCli) -> ProgHost {
+        let mut engines: BTreeMap<String, Box<dyn AgentEngine>> = BTreeMap::new();
+        match program {
+            Program::Claude => {
+                engines.insert("claude-code".into(), Box::new(ClaudeCodeEngine::new(cli)));
+            }
+            Program::Codex => {
+                engines.insert(
+                    ozbox_core::codex_cli::ENGINE.into(),
+                    Box::new(ozbox_core::codex_cli::engine(cli)),
+                );
+            }
         }
-        Ok(match self.cli.program {
-            Program::Claude => Box::new(ClaudeCodeEngine::new(self.cli.clone())),
-            Program::Codex => Box::new(ozbox_core::codex_cli::engine(self.cli.clone())),
+        ProgHost { engines }
+    }
+}
+
+impl AgentHost for ProgHost {
+    fn box_info(&self, _: &str) -> Option<BoxInfo> {
+        Some(BoxInfo {
+            size: ozbox_core::Size::M,
+            running: true,
+            production: false,
         })
+    }
+    fn has_room(&mut self, _: &str) -> bool {
+        true
+    }
+    fn engine(&mut self, id: &str) -> Option<&mut dyn AgentEngine> {
+        self.engines
+            .get_mut(id)
+            .map(|e| e.as_mut() as &mut dyn AgentEngine)
+    }
+    fn checkpoint(&mut self, _: &str, _: Option<&str>) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+}
+
+/// One box's secrets service, as far as the request journal goes: the real service (`secrets_service` over an encrypted store, with the
+/// approval requests turned on), reached on its supervisor socket's operations by the hub agent and on its box and admin sockets' by
+/// the test. Nothing here is a stand-in for the verification: the service checks every relayed decision itself.
+struct BoxSvc {
+    _dir: tempfile::TempDir,
+    store: Arc<crate::secrets_enc::EncryptedSecrets>,
+    mac: crate::tokenmac::TokenMac,
+    gates: crate::secrets_service::Gates,
+}
+
+impl BoxSvc {
+    fn new(box_id: &str) -> Arc<BoxSvc> {
+        use crate::secrets::SecretStore;
+        let dir = tempfile::tempdir().unwrap();
+        let p: Arc<dyn crate::secrets_enc::KeyProvider> =
+            Arc::new(crate::secrets_enc::LocalKekProvider::random("local").unwrap());
+        let store = Arc::new(
+            crate::secrets_enc::EncryptedSecrets::new(dir.path().join("s.json"), box_id, p)
+                .unwrap(),
+        );
+        let mac = crate::tokenmac::TokenMac::new(store.clone() as Arc<dyn SecretStore>);
+        let gates = crate::secrets_service::Gates::default();
+        // a box with a second factor enrolled (a guard override has nothing to decide it on a box without one)
+        store
+            .set(crate::secrets_approval::ENROLLED_MARKER, "1")
+            .unwrap();
+        gates
+            .enable_requests(
+                &store,
+                &dir.path().join("req"),
+                &dir.path().join("state"),
+                box_id,
+                now_ms(),
+            )
+            .unwrap();
+        Arc::new(BoxSvc {
+            _dir: dir,
+            store,
+            mac,
+            gates,
+        })
+    }
+
+    /// One request on a socket's policy, answered by the real service.
+    fn on(
+        &self,
+        policy: crate::secrets_service::Policy,
+        uid: Option<u32>,
+        req: Value,
+    ) -> Result<Value, String> {
+        let out = crate::secrets_service::handle_from(
+            &self.store,
+            &self.mac,
+            &self.gates,
+            policy,
+            uid,
+            &req.to_string(),
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        if v["ok"] == true {
+            Ok(v["result"].clone())
+        } else {
+            Err(v["error"].as_str().unwrap_or("refused").to_string())
+        }
+    }
+}
+
+/// What the hub agent holds of its box's service: the channel's key operations on one side, the request journal's on the other.
+struct WorkerOps {
+    keys: Arc<dyn KeyOps>,
+    svc: Arc<BoxSvc>,
+}
+
+impl KeyOps for WorkerOps {
+    fn identity(&self) -> Result<ozbox_hubd::identity::Identity, ozbox_hubd::ops::OpsError> {
+        self.keys.identity()
+    }
+    fn sign(
+        &self,
+        purpose: ozbox_hubd::keys::SignPurpose,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, ozbox_hubd::ops::OpsError> {
+        self.keys.sign(purpose, bytes)
+    }
+    fn open(
+        &self,
+        aad: &[u8],
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, ozbox_hubd::ops::OpsError> {
+        self.keys.open(aad, sealed)
+    }
+    fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, ozbox_hubd::ops::OpsError> {
+        self.keys.mac(bytes)
+    }
+    fn call(&self, req: Value) -> Result<Value, ozbox_hubd::ops::OpsError> {
+        if req["op"].as_str().is_some_and(|o| o.starts_with("areq_")) {
+            // the agent's socket is the supervisor's
+            return self
+                .svc
+                .on(crate::secrets_service::Policy::Supervisor, None, req)
+                .map_err(ozbox_hubd::ops::OpsError);
+        }
+        self.keys.call(req)
     }
 }
 
@@ -268,10 +418,16 @@ struct Worker {
     net: Arc<NetWorker>,
     fabric: Arc<BoxFabric>,
     tools: Tools,
-    approvals: Arc<Mutex<MemApprovals>>,
+    /// The box's own secrets service (the real request journal) and the owner's passkey it was given as an approver.
+    svc: Arc<BoxSvc>,
     owner: Passkey,
     cli: FakeCli,
     cable: Cable,
+    /// The box's task store, its supervisor and the host it runs engines on: the run path a task from the hub takes.
+    store: TaskStore,
+    sup: Supervisor,
+    host: ProgHost,
+    serving: Option<Serving>,
 }
 
 struct Fleet {
@@ -369,7 +525,24 @@ impl Fleet {
     /// The owner invites a worker, the worker (a box with its own secrets service) is registered by the laptop, sends its first
     /// contact over the network, and the owner confirms the plan: the whole of "a box joins a hub", with no copy by hand.
     fn enrol(&mut self, name: &str, program: Program, text: &str, sha: &str) -> usize {
+        self.enrol_with(name, program, text, sha, true)
+    }
+
+    /// [`Fleet::enrol`], the worker offering its approval service for the owner to pin or not.
+    fn enrol_with(
+        &mut self,
+        name: &str,
+        program: Program,
+        text: &str,
+        sha: &str,
+        offer_pin: bool,
+    ) -> usize {
         let wend = end();
+        let svc = BoxSvc::new(name);
+        let wops = Arc::new(WorkerOps {
+            keys: wend.ops(Caller::Supervisor),
+            svc: svc.clone(),
+        });
         let now = now_ms();
         let token = {
             let spec = InviteSpec {
@@ -409,13 +582,18 @@ impl Fleet {
             now,
         )
         .unwrap();
-        let req = make_request(
-            wend.ops(Caller::Supervisor).as_ref(),
+        let req = make_request_with_pin(
+            wops.as_ref(),
             name,
             &token,
             attestation,
             &hub_fp,
             now,
+            if offer_pin {
+                service_pin(wops.as_ref())
+            } else {
+                None
+            },
         )
         .unwrap();
         // first contact: over the hub's own listener, authenticated by the token, the attestation and the worker's proof
@@ -424,10 +602,20 @@ impl Fleet {
         self.hubd.apply_enrol(&eplan, now_ms()).unwrap();
         self.host.sync_roster().unwrap();
         self.att.sync_roster().unwrap();
-        self.connect(name, wend, program, text, sha)
+        self.connect(name, wend, svc, wops, program, text, sha)
     }
 
-    fn connect(&mut self, name: &str, wend: End, program: Program, text: &str, sha: &str) -> usize {
+    #[allow(clippy::too_many_arguments)]
+    fn connect(
+        &mut self,
+        name: &str,
+        wend: End,
+        svc: Arc<BoxSvc>,
+        wops: Arc<WorkerOps>,
+        program: Program,
+        text: &str,
+        sha: &str,
+    ) -> usize {
         let hub_identity = self.hubd.identity().clone();
         let (seams, hub_fp) = worker_seams(wend.ops(Caller::Supervisor), &hub_identity).unwrap();
         let cable = Cable {
@@ -455,24 +643,41 @@ impl Fleet {
             text: text.into(),
             st: Arc::new(Mutex::new(CliState::default())),
         };
-        let ids = Ids {
-            box_id: name.into(),
-            store_id: format!("store-{name}"),
-        };
-        let mut svc = MemApprovals::new(ids).unwrap();
         let owner = Passkey::new(&format!("cred-owner-{name}")).unwrap();
-        svc.approvers = Some(ApproverSet {
-            seq: 1,
-            expires_ms: u64::MAX,
-            rp: test_rp(),
-            approvers: vec![Approver {
-                credential_id: owner.id.clone(),
-                public_key_hex: owner.public_hex(),
-                person: "owner".into(),
-                role: ApprovalRole::Owner,
-            }],
-        });
-        let approvals = Arc::new(Mutex::new(svc));
+        // the approver set is the owner's, written on this box by root's route (the admin socket), never by the hub
+        svc.on(
+            crate::secrets_service::Policy::Admin,
+            None,
+            json!({"op": "areq_hub_set_approvers", "approvers": ApproverSet {
+                seq: 1,
+                expires_ms: u64::MAX,
+                rp: test_rp(),
+                approvers: vec![Approver {
+                    credential_id: owner.id.clone(),
+                    public_key_hex: owner.public_hex(),
+                    person: "owner".into(),
+                    role: ApprovalRole::Owner,
+                }],
+            }}),
+        )
+        .unwrap();
+        let tasks = self.tmp.path().join(format!("tasks-{name}"));
+        std::fs::create_dir_all(&tasks).unwrap();
+        let store = TaskStore::new(tasks.join("tasks.json"));
+        let fabric = Arc::new(BoxFabric::new(
+            name,
+            &seams.my_fp,
+            HUB,
+            &hub_fp,
+            FabricSeams {
+                signer: seams.signer.clone(),
+                verifier: seams.verifier.clone(),
+                sealer: seams.sealer.clone(),
+                net: net.clone(),
+                screen: Arc::new(CoreScreen),
+                audit: None,
+            },
+        ));
         let state = WorkerState::new(name, &seams.my_fp, HUB, &hub_fp, 1);
         let agent = WorkerAgent::new(
             AgentSeams {
@@ -491,30 +696,24 @@ impl Fleet {
                     ops: wend.ops(Caller::Supervisor),
                     worker: name.into(),
                 }),
-                approvals: Some(approvals.clone()),
-                engines: Box::new(Programs { cli: cli.clone() }),
+                approvals: Some(Arc::new(Mutex::new(ServiceApprovals { ops: wops.clone() }))),
+                // the real run path: a task is a supervised run of this box, queued in its store
+                engines: Box::new(SupervisedFactory::new(store.clone(), HUB)),
                 workspace: Box::new(FixedCommit(sha.into())),
+                fabric: Some(fabric.clone()),
                 lost_after_ms: self.lost_after_ms,
             },
             state,
         );
-        let fabric = Arc::new(BoxFabric::new(
-            name,
-            &seams.my_fp,
-            HUB,
-            &hub_fp,
-            FabricSeams {
-                signer: seams.signer.clone(),
-                verifier: seams.verifier.clone(),
-                sealer: seams.sealer.clone(),
-                net: net.clone(),
-                screen: Arc::new(CoreScreen),
-                audit: None,
-            },
-        ));
+        // the box's tool host reaches the fabric only through the agent's local socket
         let dir = self.tmp.path().join(format!("tools-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let tools = tools(&dir, fabric.clone(), name);
+        let serving = serve_fabric(fabric.clone(), &dir.join("fabric.sock"), 0o750).unwrap();
+        let tools = tools(
+            &dir,
+            Arc::new(SocketFabric::new(dir.join("fabric.sock"))),
+            name,
+        );
         self.workers.push(Worker {
             name: name.into(),
             end: wend,
@@ -522,10 +721,14 @@ impl Fleet {
             net,
             fabric,
             tools,
-            approvals,
+            svc,
             owner,
+            host: ProgHost::new(program, cli.clone()),
             cli,
             cable,
+            store,
+            sup: Supervisor::new(),
+            serving: Some(serving),
         });
         self.workers.len() - 1
     }
@@ -536,8 +739,11 @@ impl Fleet {
         self.host.pump(now);
         self.att.tick(now);
         for w in &mut self.workers {
+            // the agent runs the worker's fabric end (it pumps the replica), and the box's supervisor runs what the agent queued
             w.agent.tick(now);
-            let _ = w.fabric.pump(now);
+            let _ = w
+                .store
+                .update(|b| w.sup.tick(b, &mut w.host, now, "2026-11"));
         }
     }
 
@@ -619,8 +825,11 @@ impl Fleet {
 
 impl Drop for Fleet {
     fn drop(&mut self) {
-        for w in &self.workers {
+        for w in &mut self.workers {
             w.net.stop();
+            if let Some(s) = w.serving.take() {
+                s.stop();
+            }
         }
         self.host.stop();
         if let Some(r) = self.running.take() {
@@ -749,6 +958,25 @@ fn two_workers_enrol_over_the_network_and_a_mixed_pair_runs_their_tasks_to_a_res
             .as_deref()
             .is_some_and(|i| i.contains("TASK-MARKER")));
         assert!(!s.launches[0].argv.iter().any(|a| a.contains("TASK-MARKER")));
+    }
+    // the run was the box's own supervised run: queued through the one door by the hub agent, admitted by the box's supervisor,
+    // attributed to the hub, bounded by the task's lease, with the box's own routing choosing the provider (none named here)
+    for (w, engine) in f.workers.iter().zip(["claude-code", "codex"]) {
+        let b = w.store.load().unwrap();
+        assert_eq!(b.tasks.len(), 1, "{}", w.name);
+        let t = &b.tasks[0];
+        assert_eq!(t.spec.engine, engine);
+        assert_eq!(t.spec.requested_by, "hub:main");
+        assert!(matches!(
+            &t.spec.origin,
+            ozbox_core::run::RunOrigin::Orchestration { id, .. } if id == "orch-1"
+        ));
+        assert!(t.spec.caps.max_runtime_s.is_some_and(|s| s <= 3600));
+        assert!(t.spec.model.is_none(), "the hub chose no provider");
+        assert_eq!(t.state, ozbox_core::run::TaskState::Review);
+        assert!(t.summary.is_some());
+        // no credential in the run's environment from this path: the broker's token is the supervisor host's to add
+        assert!(w.cli.st.lock().unwrap().launches[0].env.is_empty());
     }
     // nothing of either engine, provider or program crossed: the hub's own record names none of them
     let crossed = format!(
@@ -928,6 +1156,9 @@ fn a_workers_request_reaches_the_fleet_inbox_and_the_owners_passkey_is_verified_
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     let mut f = pair();
+    // a third box that offers no approval service at enrolment
+    f.enrol_with("box-c", Program::Codex, "Docs written.", SHA_B, false);
+    f.until("all three workers connected", |f| f.all_connected());
     let dir = tempfile::tempdir().unwrap();
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7878);
     let p = ozbox_provider_fake::open(dir.path());
@@ -955,63 +1186,105 @@ fn a_workers_request_reaches_the_fleet_inbox_and_the_owners_passkey_is_verified_
             serde_json::from_slice(&r.body).unwrap_or(Value::Null),
         )
     };
-    // the worker's service is pinned by a route its own box cannot write; until it is, a card from it is not shown
-    let subject = Subject::GuardOverride(GuardHook::Commit {
-        repo_path_hash: "1".repeat(64),
-        hook_kind: "pre-commit".into(),
-        tree_id: "a".repeat(40),
-        matches: Vec::new(),
-        scanned_text_hash: "2".repeat(64),
-    });
-    let digest = f.workers[0]
-        .approvals
-        .lock()
-        .unwrap()
-        .file(
-            now_ms(),
-            "r1",
-            subject,
-            Requester::new(RequesterKind::BoxUser, Some(1000)),
+    // box-a offered its approval service at enrolment and the owner's apply pinned it; box-c offered none. Each box files a request in
+    // its own service as the box user does.
+    let file = |w: &Worker, tree: char| -> (String, String) {
+        let r = w
+            .svc
+            .on(
+                crate::secrets_service::Policy::Box,
+                Some(1000),
+                json!({"op": "areq_file", "reason": "public url",
+                    "scanned_text": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n hello\n+a public url\n",
+                    "subject": {"scope": "guard-override", "hook": "commit", "repo_path_hash": "1".repeat(64),
+                        "hook_kind": "pre-commit", "tree_id": tree.to_string().repeat(40)}}),
+            )
+            .unwrap();
+        (
+            r["request"]["id"].as_str().unwrap().to_string(),
+            r["request"]["subject_digest"].as_str().unwrap().to_string(),
         )
-        .unwrap()
-        .subject_digest;
-    for _ in 0..30 {
-        f.round();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        http(&mut a, "GET", "/v1/approvals/fleet", Value::Null).1["cards"]
+    };
+    let (rid, digest) = file(&f.workers[0], 'a');
+    let (cid, _) = file(&f.workers[2], 'c');
+    let cards = |a: &mut super::App| -> Vec<Value> {
+        http(a, "GET", "/v1/approvals/fleet", Value::Null).1["cards"]
             .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    let pin = f.workers[0].approvals.lock().unwrap().pin();
-    assert!(f.att.pin_service("box-a", pin, now_ms()));
+            .cloned()
+            .unwrap_or_default()
+    };
     let mut card = Value::Null;
-    f.until("the card is in the fleet inbox", |f| {
-        let _ = f;
-        let (_, v) = http(&mut a, "GET", "/v1/approvals/fleet", Value::Null);
-        match v["cards"].as_array().and_then(|c| c.first()) {
+    f.until(
+        "box-a's card is in the fleet inbox, pinned by enrolment alone",
+        |_| match cards(&mut a).iter().find(|c| c["worker"] == "box-a") {
             Some(c) => {
                 card = c.clone();
                 true
             }
             None => false,
-        }
+        },
+    );
+    // box-c's service was never pinned: what it files is not shown, however long it is announced
+    for _ in 0..40 {
+        f.round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        cards(&mut a).iter().all(|c| c["worker"] != "box-c"),
+        "an unpinned service's request was shown"
+    );
+    // a pin for another key (a swapped service) shows nothing either: its envelope is not signed by that key
+    let real_pin: ozbox_core::hub::approvals::ServicePin = serde_json::from_value(
+        f.workers[2]
+            .svc
+            .on(
+                crate::secrets_service::Policy::Supervisor,
+                None,
+                json!({"op": "areq_hub_pin"}),
+            )
+            .unwrap()["pin"]
+            .clone(),
+    )
+    .unwrap();
+    let swapped = ozbox_core::hub::approvals::ServicePin {
+        ids: real_pin.ids.clone(),
+        envelope_key_hex: "f".repeat(64),
+    };
+    assert!(f.att.pin_service("box-c", swapped, now_ms()));
+    for _ in 0..40 {
+        f.round();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        cards(&mut a).iter().all(|c| c["worker"] != "box-c"),
+        "a swapped service's request was shown"
+    );
+    assert!(f
+        .hub_state()
+        .core
+        .audit
+        .iter()
+        .any(|e| e.action == "hub.approval.rejected"));
+    // the owner pins the service's real key by her own route: only then is its card shown
+    assert!(f.att.pin_service("box-c", real_pin, now_ms()));
+    f.until("box-c's card appears once its real key is pinned", |_| {
+        cards(&mut a).iter().any(|c| c["worker"] == "box-c")
     });
+    let _ = cid;
     assert_eq!(
         (
             card["worker"].as_str(),
             card["request_id"].as_str(),
             card["subject_digest"].as_str()
         ),
-        (Some("box-a"), Some("r1"), Some(digest.as_str()))
+        (Some("box-a"), Some(rid.as_str()), Some(digest.as_str()))
     );
+    let url = format!("/v1/approvals/fleet/box-a/{rid}/decide");
     // an approval without the person's assertion is refused on main, and nothing reaches the worker as an approval
     let (s, _) = http(
         &mut a,
         "POST",
-        "/v1/approvals/fleet/box-a/r1/decide",
+        &url,
         json!({"outcome":"approve","subject_digest": card["subject_digest"]}),
     );
     assert_eq!(s, 409);
@@ -1024,13 +1297,19 @@ fn a_workers_request_reaches_the_fleet_inbox_and_the_owners_passkey_is_verified_
     let (s, _) = http(
         &mut a,
         "POST",
-        "/v1/approvals/fleet/box-a/r1/decide",
+        &url,
         json!({"outcome":"approve","subject_digest": card["subject_digest"], "passkey": ev}),
     );
     assert_eq!(s, 202);
     f.until("the worker's own service approved it", |f| {
-        f.workers[0].approvals.lock().unwrap().state_of("r1")
-            == Some(ozbox_core::approval::State::Approved)
+        f.workers[0]
+            .svc
+            .on(
+                crate::secrets_service::Policy::Supervisor,
+                None,
+                json!({"op": "areq_get", "id": rid}),
+            )
+            .is_ok_and(|v| v["request"]["state"] == "approved")
     });
     // the worker's answer comes back as its own status
     f.until("the worker said so", |f| {
@@ -1603,6 +1882,9 @@ struct GitOnMain {
     log: Vec<String>,
     /// Where the conductor's side sees every branch right now (`None`: it cannot say).
     head: Option<String>,
+    /// How many reads of the remote answer "still reading" before the head is known (the conductor's box reads it a step at a time).
+    pending_reads: u32,
+    reads: u32,
 }
 
 impl ozbox_core::orch_merge::Merger for GitOnMain {
@@ -1633,8 +1915,17 @@ impl ozbox_core::orch_merge::Merger for GitOnMain {
         self.log.push(format!("merge {branch}"));
         Ok(ozbox_core::orch_merge::MergeOutcome::Done)
     }
-    fn head(&mut self, _: Option<&str>, _: &str) -> Result<Option<String>, String> {
-        Ok(self.head.clone())
+    fn head_step(
+        &mut self,
+        _: Option<&str>,
+        _: &str,
+    ) -> Result<ozbox_core::orch_merge::HeadRead, String> {
+        self.reads += 1;
+        if self.pending_reads > 0 {
+            self.pending_reads -= 1;
+            return Ok(ozbox_core::orch_merge::HeadRead::Pending);
+        }
+        Ok(ozbox_core::orch_merge::HeadRead::Known(self.head.clone()))
     }
 }
 
@@ -1784,6 +2075,8 @@ fn both_results_go_through_the_merge_queue_and_lanes_and_a_moved_branch_is_not_m
     let mut git = GitOnMain {
         log: Vec::new(),
         head: None,
+        pending_reads: 0,
+        reads: 0,
     };
     let step = |f: &mut Fleet, book: &mut Book, git: &mut GitOnMain| {
         let now = now_ms();
@@ -1841,6 +2134,8 @@ fn both_results_go_through_the_merge_queue_and_lanes_and_a_moved_branch_is_not_m
         .unwrap()
         .state = ApprovalState::Approved;
     git.head = Some("c".repeat(40));
+    // the conductor's side is still reading the remote for the first rounds: nothing is merged on a guess, and the merge waits
+    git.pending_reads = 3;
     let mut last = None;
     for _ in 0..10 {
         f.round();
@@ -1865,6 +2160,8 @@ fn both_results_go_through_the_merge_queue_and_lanes_and_a_moved_branch_is_not_m
         git.log
     );
     assert!(f.hub_state().tested.is_empty());
+    // the check read the actual head (after waiting for it), not only the reported commit
+    assert!(git.reads > 3, "{}", git.reads);
     // the branch is where the lane tested it again: queued again, the lane's verdict for that very commit stands, and it merges
     git.head = None;
     book.orchestration_mut(&id)
@@ -1902,4 +2199,129 @@ fn both_results_go_through_the_merge_queue_and_lanes_and_a_moved_branch_is_not_m
         h.iter().any(|x| x == &format!("{first}:merged"))
             && h.iter().any(|x| x == &format!("{first}:not-approved"))
     });
+}
+
+// ---- the worker's real run path --------------------------------------------------------------------------------------------
+
+fn hub_status(f: &Fleet, worker: &str, feature: &str) -> Option<(String, String)> {
+    f.hub_state()
+        .peers
+        .get(worker)
+        .and_then(|p| p.report.status.get("orch-1"))
+        .and_then(|m| m.get(feature))
+        .map(|s| (s.state.clone(), s.text.clone()))
+}
+
+/// A task the hub ends stops its run cleanly: the agent asks the box's supervisor, which cancels the run and stops the program; nothing
+/// more is reported for it afterwards.
+#[test]
+fn a_task_the_hub_ends_stops_its_supervised_run_cleanly() {
+    let mut f = Fleet::new();
+    f.enrol("box-a", Program::Claude, "Parser built.", SHA_A);
+    f.until("connected", |f| f.all_connected());
+    f.workers[0].cli.st.lock().unwrap().hang = true;
+    assign_to(&f, "box-a", "slow", "claude-code", ("staging", &[]));
+    f.until("the run is running on the box's supervisor", |f| {
+        f.workers[0]
+            .store
+            .load()
+            .unwrap()
+            .tasks
+            .first()
+            .is_some_and(|t| t.state == ozbox_core::run::TaskState::Running)
+    });
+    let now = now_ms();
+    let body = serde_json::to_vec(&ozbox_core::hub::keys::KeyRevoke {
+        orchestration: "orch-1".into(),
+        feature: "slow".into(),
+    })
+    .unwrap();
+    f.att
+        .svc
+        .with(now, |_, st| {
+            st.core
+                .enqueue(
+                    &ozbox_core::hub::wire::PROFILE,
+                    "box-a",
+                    ozbox_core::hub::wire::Kind::TaskEnd.name(),
+                    ozbox_core::hub::wire::Ext::at(0).encode(),
+                    body,
+                )
+                .unwrap()
+        })
+        .unwrap();
+    f.until("the run was stopped and cancelled on the box", |f| {
+        let w = &f.workers[0];
+        w.agent.running().is_empty()
+            && !w.cli.st.lock().unwrap().stopped.is_empty()
+            && w.store
+                .load()
+                .unwrap()
+                .tasks
+                .first()
+                .is_some_and(|t| t.state == ozbox_core::run::TaskState::Cancelled)
+    });
+    // a stopped task reports no result and no failure: the hub holds nothing for it but what it was told while it ran
+    assert!(f
+        .hub_state()
+        .peers
+        .get("box-a")
+        .and_then(|p| p.report.results.get("orch-1"))
+        .is_none_or(|m| !m.contains_key("slow")));
+}
+
+/// A worker never runs Production, and an engine it cannot run is refused by name: nothing is queued on the box for either, and the hub
+/// is told.
+#[test]
+fn the_agent_refuses_production_and_an_engine_the_box_cannot_run_and_queues_nothing() {
+    use ozbox_core::hub::refusal::KeyDeclaration;
+    let mut f = Fleet::new();
+    f.enrol("box-a", Program::Claude, "Parser built.", SHA_A);
+    f.until("connected", |f| f.all_connected());
+    let task = |feature: &str, engine: &str, env: &str, names: &[&str]| {
+        let mut a = ozbox_core::engine_turn::assign_of(
+            &ozbox_core::engine_turn::Task {
+                id: format!("orch-1/{feature}"),
+                title: "t".into(),
+                instruction: "x".into(),
+                repo: Some("billing".into()),
+                branch: Some(format!("feat/{feature}")),
+            },
+            KeyDeclaration {
+                env: env.into(),
+                names: names.iter().map(|s| s.to_string()).collect(),
+            },
+            now_ms() + 3_600_000,
+        );
+        a.engine = Some(engine.into());
+        a
+    };
+    // a Production declaration that got past every other gate (here, put straight in the worker's state) is refused at the agent: nothing
+    // is queued, no engine is made
+    let prod = task("prod", "claude-code", "production", &["db"]);
+    f.workers[0].agent.state.tasks.push(prod);
+    let rep = f.workers[0].agent.tick(now_ms());
+    assert!(rep.started.is_empty());
+    assert!(
+        rep.refused
+            .iter()
+            .any(|(t, why)| t == "orch-1/prod" && why.to_ascii_lowercase().contains("production")),
+        "{:?}",
+        rep.refused
+    );
+    // an engine with no headless adapter is refused by name before anything is queued, and the hub is told
+    assign_to(&f, "box-a", "oc", "opencode", ("staging", &[]));
+    f.until("the hub was told it was refused", |f| {
+        hub_status(f, "box-a", "oc").is_some_and(|s| s.0 == "refused")
+    });
+    let (_, why) = hub_status(&f, "box-a", "oc").unwrap();
+    assert!(why.contains("cannot run headless"), "{why}");
+    assert!(f.workers[0].store.load().unwrap().tasks.is_empty());
+    assert!(f.workers[0].cli.st.lock().unwrap().launches.is_empty());
+    // an engine the box's supervisor has not set up is queued, fails on the box, and the hub is told it failed
+    assign_to(&f, "box-a", "cx", "codex", ("staging", &[]));
+    f.until("the hub was told the run failed", |f| {
+        hub_status(f, "box-a", "cx").is_some_and(|s| s.0 == "failed")
+    });
+    assert!(f.workers[0].cli.st.lock().unwrap().launches.is_empty());
 }

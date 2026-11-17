@@ -270,6 +270,23 @@ impl App {
         Ok(())
     }
 
+    /// Attach a worker's conversation fabric: this box's tool host answers an agent's `messages_*`, `memory_*` and `skills_*` tools
+    /// through the hub agent's fabric (served on a local socket, [`ozbox_hubd::fabricsock`]), so a worker's messages and shared
+    /// memory go through the agent and nothing else. Called when the server starts, before the tools do.
+    pub fn attach_worker_fabric(
+        &mut self,
+        api: Arc<dyn ozbox_core::fabric::FabricApi>,
+        box_name: &str,
+    ) -> Result<(), &'static str> {
+        if self.orch.mcp.is_some() || self.orch.tools.is_some() {
+            return Err("the orchestration tools are already running: restart the server to attach the fabric");
+        }
+        self.orch.fabric = Some(Arc::new(crate::fabric_tools::FabricHost::new(
+            api, box_name,
+        )));
+        Ok(())
+    }
+
     fn orch_boxes(&self) -> Vec<Value> {
         self.provider
             .list()
